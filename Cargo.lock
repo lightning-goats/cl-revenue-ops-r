@@ -647,6 +647,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "revops-fees"
+version = "0.1.0"
+dependencies = [
+ "revops-core",
+ "revops-econ",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "revops-rpc"
 version = "0.1.0"
 dependencies = [
