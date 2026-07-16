@@ -34,9 +34,25 @@ unloaded.
 2. **lnnode is the test node.** There is no staging node. Therefore: the Rust
    plugin never writes the production DB and never holds action authority
    until an explicit per-subsystem flag cutover.
-3. **Expedited comparison window ends 2026-07-19.** Scope honestly: what fits
-   is Phase 1 read-only parity (observer plugin + diff harness). Later phases
-   get their own short shadow windows using the same harness.
+3. **HARD DEADLINE (operator ruling 2026-07-16 evening): the port is
+   FINISHED — all subsystems cut over, Python unloaded — by 2026-07-19.**
+   Supersedes the original phased schedule. Consequences:
+   - Phases 2–6 build as PARALLEL workstreams (isolated worktrees, one crate
+     each) instead of sequential phases; integration is continuous.
+   - Live multi-day shadow windows are replaced by (a) offline replay parity
+     against recorded production data (deterministic, hours), (b) compressed
+     live shadow (hours per subsystem) on lnnode, (c) staggered cutovers
+     with instant-rollback flags, money-committing subsystems last.
+   - NOT compressed: the 40-scenario conformance corpus byte-parity gate
+     (econ core), money-path golden fixtures (htlcmax, close_protection),
+     v2_state_json lossless round-trip before fee cutover, and the
+     reservation no-double-spend tests. These run in minutes; they are the
+     floor.
+   - Risk accepted by operator: compressed live-shadow raises the chance of
+     undetected behavioral divergence post-cutover. Bounded by: shared
+     capital-controls ledger (daily budget caps worst-case spend), per-
+     subsystem rollback flags, Python main deployable as full fallback at
+     every instant through the window.
 
 ## Strategy: strangler-fig with shadow cutovers
 
