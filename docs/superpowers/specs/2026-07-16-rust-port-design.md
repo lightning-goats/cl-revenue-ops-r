@@ -59,6 +59,17 @@ ledger, so capital controls hold across both plugins during the transition.
 During pre-cutover phases the Rust plugin opens the production DB read-only
 (or a snapshot copy) and writes only to its own parallel DB file.
 
+**db-path option (Task 8 ruling, 2026-07-16):** Python's
+`revenue-ops-db-path` shadow-maps to the same `revops-r-db-path` name the
+Rust observer uses for its DB probe, so the Python fixture entry is skipped
+at registration and the two are deliberately the SAME conceptual option.
+Cutover hazard on record: in shadow mode the Rust default is `""` (observer
+opt-in, no DB), but Python's default is its standard db path — at canonical
+cutover the Rust plugin MUST register `revenue-ops-db-path` with Python's
+fixture default, not `""`, or an operator relying on the default would
+silently lose DB access. Owned by Phase 1b (canonical-mode registration
+pulls the default from fixtures/options.json for this key).
+
 **Name collisions during coexistence:** CLN rejects a plugin that registers
 an option or RPC method name another loaded plugin already owns. While both
 plugins are loaded, the Rust plugin therefore registers namespaced names —
