@@ -6,7 +6,23 @@
 
 pub mod config_types;
 pub mod options_table;
+pub mod rpc_dashboard;
+pub mod rpc_history;
+pub mod rpc_report;
 pub mod rpc_status;
+
+/// Current Unix time in whole seconds, matching Python's
+/// `int(time.time())` as used throughout `database.py`/
+/// `profitability_analyzer.py`'s windowed queries. A thin wrapper so the
+/// read-RPC handlers in `main.rs` don't each repeat the
+/// `SystemTime`/`UNIX_EPOCH` dance; returns `0` on a pre-epoch clock rather
+/// than panicking mid-request.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// `serde_json::Value` -> `String`, for `opt_type == "string"` defaults.
 pub fn as_string_default(v: &serde_json::Value) -> Option<String> {
