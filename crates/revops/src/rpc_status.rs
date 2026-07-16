@@ -58,68 +58,8 @@ pub fn build_config_response(key: &str, known: bool, value: Option<&options::Val
     json!({"key": key, "value": option_value_to_json(value)})
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_shape() {
-        let v = build_status(&StatusInputs {
-            version: "0.1.0".into(),
-            observer: true,
-            db_path: Some("/tmp/x.db".into()),
-            db_tables: Some(35),
-        });
-        assert_eq!(v["status"], "running");
-        assert_eq!(v["version"], "0.1.0");
-        assert_eq!(v["mode"], "observer");
-        assert_eq!(v["db"]["tables"], 35);
-    }
-
-    #[test]
-    fn status_enforcing_mode_when_not_observer() {
-        let v = build_status(&StatusInputs {
-            version: "0.1.0".into(),
-            observer: false,
-            db_path: None,
-            db_tables: None,
-        });
-        assert_eq!(v["mode"], "enforcing");
-        assert!(v["db"]["path"].is_null());
-        assert!(v["db"]["tables"].is_null());
-    }
-
-    #[test]
-    fn config_response_known_key_with_value() {
-        let v = build_config_response("observer", true, Some(&options::Value::Boolean(true)));
-        assert_eq!(v["key"], "observer");
-        assert_eq!(v["value"], true);
-    }
-
-    #[test]
-    fn config_response_known_key_without_value_is_null() {
-        let v = build_config_response("some-optional", true, None);
-        assert_eq!(v["key"], "some-optional");
-        assert!(v["value"].is_null());
-    }
-
-    #[test]
-    fn config_response_unknown_key_is_stable_error_string() {
-        let v = build_config_response("nope", false, None);
-        assert_eq!(v["error"], "unknown config key: nope");
-        assert!(v.get("key").is_none());
-    }
-
-    #[test]
-    fn option_value_to_json_converts_variants() {
-        assert_eq!(
-            option_value_to_json(Some(&options::Value::String("x".into()))),
-            json!("x")
-        );
-        assert_eq!(
-            option_value_to_json(Some(&options::Value::Integer(7))),
-            json!(7)
-        );
-        assert_eq!(option_value_to_json(None), Value::Null);
-    }
-}
+// Unit-test coverage for `build_status`, `build_config_response`, and
+// `option_value_to_json` lives in the integration tests
+// `crates/revops/tests/status.rs` and `crates/revops/tests/config.rs` --
+// those duplicated this module's former inline `#[cfg(test)]` bodies
+// verbatim, so the inline copies were removed.

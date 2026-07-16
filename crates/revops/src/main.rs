@@ -297,14 +297,24 @@ async fn main() -> Result<()> {
         Some(raw) => {
             let path = PathBuf::from(&raw);
             match revops_db::open_read_only(&path) {
-                Ok(conn) => {
-                    let tables = revops_db::table_names(&conn).len();
-                    drop(conn);
-                    (Some(raw), Some(tables))
-                }
+                Ok(conn) => match revops_db::table_names(&conn) {
+                    Ok(tables) => {
+                        let count = tables.len();
+                        drop(conn);
+                        (Some(raw), Some(count))
+                    }
+                    Err(e) => {
+                        configured
+                            .disable(&format!(
+                                "{db_path_name} set but listing tables failed: {e}"
+                            ))
+                            .await?;
+                        return Ok(());
+                    }
+                },
                 Err(e) => {
                     configured
-                        .disable(&format!("revops-r-db-path set but DB open failed: {e}"))
+                        .disable(&format!("{db_path_name} set but DB open failed: {e}"))
                         .await?;
                     return Ok(());
                 }

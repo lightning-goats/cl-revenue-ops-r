@@ -20,6 +20,20 @@ resolves keys via getattr() on a dataclass whose fields are underscored,
 so the Python-side call must use py_key = suffix.replace("-", "_") --
 the hyphenated suffix would raise/return an error envelope instead of a
 value. Two distinct key namespaces, one fixture.
+
+Type normalization: Phase 1a's Rust shadow plugin's `revenue-r-config`
+response can carry a resolved value that is already stringified (e.g.
+the string `"3600"`), while the Python plugin's `revenue-config get`
+returns a typed JSON scalar (the int `3600`, the bool `true`, a float).
+By default `diff_key()` normalizes both sides to a canonical string
+before comparing: everything goes through `str()`, except Python bools,
+which are mapped explicitly to the lowercase JSON spelling
+("true"/"false") rather than `str()`'s "True"/"False" -- this is the ONE
+canonical form both sides are normalized to, so a bool on either side
+compares equal to the matching lowercase string on the other. Pass
+--strict to disable this normalization and compare raw values as-is --
+intended for Phase 1b, once the Rust port returns properly typed values
+and a real type mismatch should once again fail the diff.
 """
 import argparse, json, subprocess, sys, pathlib
 
@@ -46,7 +60,28 @@ def _one_line(exc_or_text):
     return text.splitlines()[0] if text else repr(exc_or_text)
 
 
-def diff_key(cli_fn, node, suffix):
+def normalize(value):
+    """Canonicalize a value for cross-language comparison.
+
+    `str()` for everything except Python bools, which map explicitly to
+    the lowercase JSON/Rust spelling ("true"/"false") instead of str()'s
+    "True"/"False" -- this is the one canonical form both sides normalize
+    to. `None` (a JSON null, e.g. an unset no-default option) stays `None`
+    rather than becoming the string "None", so it only ever compares equal
+    to the other side's actual absence of a value, never to a literal
+    string.
+
+    NOTE: check bool before int -- in Python `bool` is an `int` subclass,
+    so an `isinstance(value, int)` check would also match booleans.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def diff_key(cli_fn, node, suffix, strict=False):
     """Fetch python/rust values for one key and classify the result.
 
     Returns one of:
@@ -59,6 +94,10 @@ def diff_key(cli_fn, node, suffix):
     that is never treated as a value mismatch. "transport" means the CLI
     call itself failed (ssh/RPC exit code or bad JSON), which is a harder
     failure than either of the above.
+
+    By default, values are compared after `normalize()` (see above), so
+    Python's typed `3600` matches Rust's stringified `"3600"`. Pass
+    `strict=True` to compare raw values with no normalization.
     """
     # Python dataclass fields are underscored (revenue-config get resolves via
     # getattr); the Rust RPC keeps the hyphenated fixture suffix as-is. Same
@@ -81,7 +120,8 @@ def diff_key(cli_fn, node, suffix):
         return {"key": suffix, "status": "error", "side": "rust", "cause": _one_line(rs["error"])}
 
     py_val, rs_val = py.get("value"), rs.get("value")
-    if py_val != rs_val:
+    cmp_py, cmp_rs = (py_val, rs_val) if strict else (normalize(py_val), normalize(rs_val))
+    if cmp_py != cmp_rs:
         return {"key": suffix, "status": "mismatch", "py": py_val, "rs": rs_val}
     return {"key": suffix, "status": "ok", "py": py_val, "rs": rs_val}
 
@@ -91,7 +131,7 @@ def load_fixtures(path):
         return json.load(f)
 
 
-def run_diff(cli_fn, node, table):
+def run_diff(cli_fn, node, table, strict=False):
     """Diff every non-skipped key in `table`. Never raises -- per-key
     failures are captured in the returned result dicts (see diff_key)."""
     results = []
@@ -99,7 +139,7 @@ def run_diff(cli_fn, node, table):
         suffix = opt["name"].removeprefix("revenue-ops-")
         if suffix in SKIP_KEYS:
             continue
-        results.append(diff_key(cli_fn, node, suffix))
+        results.append(diff_key(cli_fn, node, suffix, strict=strict))
     return results, len(table) - len(SKIP_KEYS)
 
 
@@ -172,6 +212,37 @@ def self_test():
     print(f"[self-test] transport-failure case: exit={rc} (expect 2)")
     ok = ok and rc == 2
 
+    # Phase 1a's real-world shape: Python returns a typed scalar, Rust
+    # returns the same value stringified. Default (normalized) comparison
+    # must treat these as parity; --strict must catch it as a mismatch.
+    def cli_typed_vs_string(node, *a):
+        return {"value": 3600} if a[0] == "revenue-config" else {"value": "3600"}
+
+    results, total = run_diff(cli_typed_vs_string, "node", table)
+    rc = report(results, total)
+    print(f"[self-test] typed-vs-string (int 3600 vs \"3600\") normalized: exit={rc} (expect 0)")
+    ok = ok and rc == 0
+
+    results, total = run_diff(cli_typed_vs_string, "node", table, strict=True)
+    rc = report(results, total)
+    print(f"[self-test] typed-vs-string (int 3600 vs \"3600\") --strict: exit={rc} (expect 1)")
+    ok = ok and rc == 1
+
+    # Same shape for bools: Python's True must normalize to "true", not
+    # str()'s "True", to match Rust's lowercase string.
+    def cli_bool_vs_string(node, *a):
+        return {"value": True} if a[0] == "revenue-config" else {"value": "true"}
+
+    results, total = run_diff(cli_bool_vs_string, "node", table)
+    rc = report(results, total)
+    print(f"[self-test] typed-vs-string (bool True vs \"true\") normalized: exit={rc} (expect 0)")
+    ok = ok and rc == 0
+
+    results, total = run_diff(cli_bool_vs_string, "node", table, strict=True)
+    rc = report(results, total)
+    print(f"[self-test] typed-vs-string (bool True vs \"true\") --strict: exit={rc} (expect 1)")
+    ok = ok and rc == 1
+
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1
 
@@ -181,6 +252,9 @@ def main(argv=None, cli_fn=cli):
     ap.add_argument("--node", default="lnnode")
     ap.add_argument("--self-test", action="store_true",
                     help="run the built-in self-test (stubbed CLI, no live node) and exit")
+    ap.add_argument("--strict", action="store_true",
+                    help="disable typed-vs-string normalization and compare raw values "
+                         "(for Phase 1b, once Rust returns properly typed values)")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -188,7 +262,7 @@ def main(argv=None, cli_fn=cli):
 
     fixtures_path = pathlib.Path(__file__).parents[2] / "fixtures/options.json"
     table = load_fixtures(fixtures_path)
-    results, total = run_diff(cli_fn, args.node, table)
+    results, total = run_diff(cli_fn, args.node, table, strict=args.strict)
     return report(results, total)
 
 

@@ -17,14 +17,21 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
 }
 
 /// List all table names in the database, sorted.
-pub fn table_names(conn: &Connection) -> Vec<String> {
+///
+/// Returns `Err` rather than panicking on a `prepare`/`query` failure (e.g.
+/// `SQLITE_BUSY` under contention at init) so the caller can take the same
+/// graceful `disable()` path used for an `open_read_only` failure, instead
+/// of crashing plugin startup.
+pub fn table_names(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        .expect("prepare");
-    stmt.query_map([], |r| r.get::<_, String>(0))
-        .expect("query")
+        .context("prepare table_names query")?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .context("run table_names query")?
         .filter_map(|r| r.ok())
-        .collect()
+        .collect();
+    Ok(names)
 }
 
 /// Dual-column msat/sat convention from the Python sats->msat migration:

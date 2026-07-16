@@ -45,6 +45,27 @@ mod tests {
         assert_eq!(shadow_name("something-else"), "revops-r-something-else");
     }
 
+    /// Guard test: `main.rs`'s `config_name_map()` and `register_python_options()`
+    /// both derive the shadow/canonical suffix from a fixture entry's `name`
+    /// by stripping a literal `"revenue-ops-"` prefix (`strip_prefix` /
+    /// `removeprefix`, falling back to the whole name unchanged if the
+    /// prefix is absent). If a future fixture regeneration ever emits a
+    /// name that doesn't start with `"revenue-ops-"`, that fallback would
+    /// silently succeed with the wrong suffix instead of failing loudly --
+    /// this test catches that drift at fixture-load time instead.
+    #[test]
+    fn every_fixture_option_name_has_canonical_prefix() {
+        let opts = load();
+        assert!(!opts.is_empty());
+        for opt in &opts {
+            assert!(
+                opt.name.starts_with("revenue-ops-"),
+                "fixture option {:?} does not start with 'revenue-ops-'",
+                opt.name
+            );
+        }
+    }
+
     /// Guard test: all embedded fixture entries must have defaults that parse
     /// for their declared opt_type. Null defaults are allowed (they register
     /// as valueless options). This catches fixture drift at test time.

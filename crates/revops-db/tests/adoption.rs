@@ -7,7 +7,7 @@ fn fixture_path() -> std::path::PathBuf {
 #[test]
 fn opens_python_initialized_db_read_only() {
     let conn = open_read_only(&fixture_path()).unwrap();
-    let tables = table_names(&conn);
+    let tables = table_names(&conn).unwrap();
     // Spot-check the load-bearing tables the observer reads.
     for t in [
         "forwards",

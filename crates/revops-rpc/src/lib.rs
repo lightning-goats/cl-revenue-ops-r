@@ -25,26 +25,7 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn timeout_basic() {
-        let slow = async {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            Ok::<u32, anyhow::Error>(42)
-        };
-        let err = call_with_timeout("listchannels", 0, slow)
-            .await
-            .unwrap_err();
-        assert_eq!(err.to_string(), "RPC timeout after 0s on listchannels");
-        assert!(matches!(err, RpcProxyError::Timeout { .. }));
-    }
-
-    #[tokio::test]
-    async fn passthrough_on_success() {
-        let fast = async { Ok::<u32, anyhow::Error>(7) };
-        assert_eq!(call_with_timeout("getinfo", 15, fast).await.unwrap(), 7);
-    }
-}
+// Unit-test coverage for `call_with_timeout` lives in the integration test
+// `crates/revops-rpc/tests/timeout.rs` (`timeout_error_string_matches_python`,
+// `passthrough_on_success`) -- those duplicated this module's former inline
+// `#[cfg(test)]` bodies verbatim, so the inline copies were removed.
