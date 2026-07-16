@@ -26,6 +26,18 @@ pub struct DbReservationState {
     pub reserved_sats: i64,
 }
 
+/// Checked sat->msat expansion for a DB-sourced `reserved_sats` value.
+/// `reserved_sats` is untrusted DB content (not a checked `Sat`/`Msat`
+/// domain type at this boundary), so `* 1000` is checked rather than a bare
+/// multiply — Python's ledger never overflows (`sum`/`*` on arbitrary-
+/// precision ints), so this can only fire against an adversarial or
+/// corrupted DB; fail closed with `Err` rather than wrapping.
+fn db_reserved_msat_checked(reserved_sats: i64) -> EconResult<i64> {
+    reserved_sats.checked_mul(1000).ok_or_else(|| EconError {
+        msg: format!("reconcile: db reserved_sats * 1000 overflow: {reserved_sats}"),
+    })
+}
+
 /// Statuses in `spend_reservations` that mean "no longer outstanding".
 const DB_TERMINAL: [&str; 2] = ["spent", "released"];
 
@@ -147,26 +159,32 @@ pub fn reconcile(
                 })
             }
             Some(row) if row.status == "active" && ledger_msat == 0 => {
+                let db_msat = db_reserved_msat_checked(row.reserved_sats)?;
                 divergences.push(Divergence {
                     kind: "ledger_missing_reservation".to_string(),
                     key: key.clone(),
                     ledger_reserved_msat: 0,
                     db_status: Some(row.status.clone()),
                     db_reserved_sats: Some(row.reserved_sats),
-                    resolution: Some(json!({"reserved_msat": row.reserved_sats * 1000})),
+                    resolution: Some(json!({"reserved_msat": db_msat})),
                     details: json!({"db_status": row.status}),
                 })
             }
-            Some(row) if row.status == "active" && ledger_msat != row.reserved_sats * 1000 => {
-                divergences.push(Divergence {
-                    kind: "amount_mismatch".to_string(),
-                    key: key.clone(),
-                    ledger_reserved_msat: ledger_msat,
-                    db_status: Some(row.status.clone()),
-                    db_reserved_sats: Some(row.reserved_sats),
-                    resolution: Some(json!({"reserved_msat": row.reserved_sats * 1000})),
-                    details: json!({"db_status": row.status}),
-                })
+            Some(row) if row.status == "active" => {
+                let db_msat = db_reserved_msat_checked(row.reserved_sats)?;
+                if ledger_msat != db_msat {
+                    divergences.push(Divergence {
+                        kind: "amount_mismatch".to_string(),
+                        key: key.clone(),
+                        ledger_reserved_msat: ledger_msat,
+                        db_status: Some(row.status.clone()),
+                        db_reserved_sats: Some(row.reserved_sats),
+                        resolution: Some(json!({"reserved_msat": db_msat})),
+                        details: json!({"db_status": row.status}),
+                    })
+                } else {
+                    matched += 1;
+                }
             }
             _ => matched += 1,
         }

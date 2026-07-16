@@ -39,7 +39,7 @@ use crate::arbiter::ActiveIntentRegistry;
 use crate::intents::{is_expired, IntentEnvelope};
 use crate::ledger::EconLedger;
 use crate::reason::Code;
-use crate::types::{EconResult, UnixTime};
+use crate::types::{EconError, EconResult, UnixTime};
 
 /// Phase 4 (Workstream I): the global authority ladder. Governed actions
 /// whose required level exceeds the configured level are rejected with
@@ -142,8 +142,11 @@ impl GovernorFacade<'_> {
     /// fee/HTLC change): authorize WITHOUT reservation and WITHOUT a
     /// `budget_reserved` event. Ledger keying: `intent_authorized` under
     /// `env.idempotency_key`; `budget_reserved` under
-    /// `effective_reservation_id`. `token_id` = `"auth-" + key[..16]`;
-    /// `reserved_msat` = `reserve_sats * 1000`.
+    /// `effective_reservation_id`. `token_id` = `"auth-" + key.get(..16)`
+    /// (defensive: falls back to the whole key on a short/multibyte-boundary
+    /// key rather than panicking — see the inline comment at the slice
+    /// site); `reserved_msat` = checked `reserve_sats * 1000` (`Err` on
+    /// overflow rather than wrapping).
     pub fn authorize(
         &self,
         env: &IntentEnvelope,
@@ -200,11 +203,38 @@ impl GovernorFacade<'_> {
             }
         }
 
+        // `reserve_sats * 1000` (msat) is checked rather than a bare `*`:
+        // `max_cost_msat` is only bounded to u63 (`[0, 2**63-1]`), and
+        // `to_sats_ceil` can push `reserve_sats` just far enough that
+        // re-expanding to msat overflows i64 (e.g. `max_cost_msat ==
+        // i64::MAX` ceils to a sat count whose *1000 exceeds i64::MAX by
+        // 193). This is reachable with a legitimately-constructed
+        // max-range envelope, not just adversarial input — fail closed
+        // with `Err` rather than wrapping.
+        let reserved_msat = reserve_sats.checked_mul(1000).ok_or_else(|| EconError {
+            msg: format!("governor authorize: reserve_sats * 1000 overflow: {reserve_sats}"),
+        })?;
+
+        // `env.idempotency_key[..16]` panics if the key arrives (via
+        // `from_wire`) shorter than 16 bytes or with a multibyte
+        // codepoint straddling the byte-16 boundary. Python's
+        // `IntentEnvelope.__post_init__` (see `modules/econ_intents.py`)
+        // does NOT validate `idempotency_key` shape at all — Python
+        // string slicing (`env.idempotency_key[:16]`) never raises
+        // regardless of length or content. Parity therefore means: do
+        // not add a validation Python lacks; instead make the Rust byte
+        // slice defensive with `.get(..16)`, which returns `None` (falling
+        // back to the whole key) on both "too short" and "not a char
+        // boundary" rather than panicking.
+        let token_id_key = env
+            .idempotency_key
+            .get(..16)
+            .unwrap_or(&env.idempotency_key);
         let token = AuthorizationToken {
-            token_id: format!("auth-{}", &env.idempotency_key[..16]),
+            token_id: format!("auth-{token_id_key}"),
             intent_id: env.intent_id.as_str().to_string(),
             reservation_id: effective_reservation_id.clone(),
-            reserved_msat: reserve_sats * 1000,
+            reserved_msat,
             budget_bucket: env.budget_bucket.clone(),
             issued_at: now,
             arbitration_key: env.idempotency_key.clone(),

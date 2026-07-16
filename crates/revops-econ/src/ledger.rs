@@ -297,6 +297,14 @@ impl EconLedger {
     ///
     /// Output: `reserved_msat` drops zero-valued entries (Python's `if v`
     /// truthiness test, which for `int` is exactly "nonzero").
+    ///
+    /// Overflow: Python's `spent[key] = spent.get(key, 0) + cost` and
+    /// `sum(spent.values())` run on arbitrary-precision ints and never
+    /// overflow. This port's `i64` accumulators can, given enough
+    /// adversarial/corrupted rows (each individual amount is only bounded to
+    /// u63 at `append()` time, so many of them can still sum past
+    /// `i64::MAX`) — every such accumulation is `checked_add`, failing
+    /// closed with `Err(EconError)` rather than wrapping.
     pub fn replay(&self) -> EconResult<LedgerState> {
         let mut reserved: BTreeMap<String, i64> = BTreeMap::new();
         let mut spent: BTreeMap<String, i64> = BTreeMap::new();
@@ -317,7 +325,20 @@ impl EconLedger {
                         anomalies.push(format!("cost_recorded without reservation: {key}"));
                     }
                     let cur_spent = *spent.get(key).unwrap_or(&0);
-                    spent.insert(key.clone(), cur_spent + cost);
+                    // Python's replay sums with arbitrary-precision ints and
+                    // never overflows; each individual amount is bounded to
+                    // u63 at `append()` time, but repeated `cost_recorded`
+                    // events for the same key can still accumulate past
+                    // i64::MAX in this i64 accumulator. Only an adversarial
+                    // or corrupted ledger can reach this — fail closed with
+                    // `Err` rather than wrapping.
+                    let new_spent = cur_spent.checked_add(cost).ok_or_else(|| EconError {
+                        msg: format!(
+                            "ledger replay: spend accumulation overflow for {key}: \
+                             {cur_spent} + {cost}"
+                        ),
+                    })?;
+                    spent.insert(key.clone(), new_spent);
                     reserved.insert(key.clone(), (cur_reserved - cost).max(0));
                 }
                 "reservation_released" => {
@@ -329,7 +350,13 @@ impl EconLedger {
                     }
                     if let Some(v) = event.amounts.get("cost_msat") {
                         let cur_spent = *spent.get(key).unwrap_or(&0);
-                        spent.insert(key.clone(), cur_spent + v);
+                        let new_spent = cur_spent.checked_add(*v).ok_or_else(|| EconError {
+                            msg: format!(
+                                "ledger replay: reconciliation_completed spend \
+                                 accumulation overflow for {key}: {cur_spent} + {v}"
+                            ),
+                        })?;
+                        spent.insert(key.clone(), new_spent);
                     }
                     let is_terminal = event
                         .details
@@ -351,7 +378,17 @@ impl EconLedger {
             }
         }
 
-        let total_spent_msat: i64 = spent.values().sum();
+        // Same rationale as the per-key accumulation above: Python's
+        // `sum(spent.values())` never overflows (arbitrary-precision), but
+        // this i64 accumulator can, once enough distinct keys' spend adds
+        // up past i64::MAX — adversarial/corrupted-ledger territory only;
+        // fail closed with `Err`.
+        let mut total_spent_msat: i64 = 0;
+        for v in spent.values() {
+            total_spent_msat = total_spent_msat.checked_add(*v).ok_or_else(|| EconError {
+                msg: "ledger replay: total_spent_msat accumulation overflow".to_string(),
+            })?;
+        }
         let reserved_msat: BTreeMap<String, i64> =
             reserved.into_iter().filter(|(_, v)| *v != 0).collect();
 

@@ -9,4 +9,13 @@ jobs:
         with: { components: "rustfmt, clippy" }
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `corpus_is_byte_identical_to_source` (crates/revops-econ/tests/
+      # conformance.rs) is a drift guard against the Python reference corpus
+      # at ~/bin/cl_revenue_ops-port (or $REVOPS_PY_CORPUS). This CI runner
+      # doesn't check out that sibling repo, so the guard's own
+      # `resolve_source_dir` no-ops here (prints "skip ..." and returns) —
+      # it only actually compares corpora in a local dev checkout that has
+      # both worktrees side by side. Not a gap to "fix" in CI: the guard is
+      # deliberately environment-gated rather than faked with a partial
+      # checkout.
       - run: cargo test --workspace

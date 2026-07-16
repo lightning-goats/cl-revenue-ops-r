@@ -346,6 +346,65 @@ mod replay {
         assert!(state.reserved_msat.is_empty());
         assert!(state.terminal.is_empty());
     }
+
+    // --- pre-Phase-2b fix: unchecked money arithmetic (replay
+    // accumulations) ---
+    //
+    // Python's `spent[key] = spent.get(key, 0) + cost` and
+    // `sum(spent.values())` run on arbitrary-precision ints and never
+    // overflow; each individual `amounts` value is only bounded to u63 at
+    // `append()` time (not validated further), so an adversarial/corrupted
+    // ledger can still accumulate past `i64::MAX` in this port's `i64`
+    // accumulators. `replay` must return `Err`, never panic or wrap.
+
+    #[test]
+    fn cost_recorded_accumulation_overflow_returns_err() {
+        let dir = TempDir::new().unwrap();
+        let ledger = new_ledger(&dir);
+        // Two cost_recorded events for the same key, each i64::MAX:
+        // cur_spent (i64::MAX) + cost (i64::MAX) overflows on the second.
+        append_with_amounts(&ledger, "cost_recorded", KEY, &[("cost_msat", i64::MAX)]);
+        append_with_amounts(&ledger, "cost_recorded", KEY, &[("cost_msat", i64::MAX)]);
+        let result = ledger.replay();
+        assert!(
+            result.is_err(),
+            "expected Err on cur_spent + cost overflow, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn total_spent_msat_accumulation_overflow_returns_err() {
+        let dir = TempDir::new().unwrap();
+        let ledger = new_ledger(&dir);
+        // Two DIFFERENT keys, each with a single (non-overflowing)
+        // cost_recorded event: per-key accumulation is fine, but summing
+        // spent.values() for total_spent_msat overflows i64::MAX + 1.
+        append_with_amounts(&ledger, "cost_recorded", KEY, &[("cost_msat", i64::MAX)]);
+        append_with_amounts(&ledger, "cost_recorded", KEY2, &[("cost_msat", 1)]);
+        let result = ledger.replay();
+        assert!(
+            result.is_err(),
+            "expected Err on total_spent_msat overflow, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn reconciliation_completed_cost_accumulation_overflow_returns_err() {
+        let dir = TempDir::new().unwrap();
+        let ledger = new_ledger(&dir);
+        append_with_amounts(&ledger, "cost_recorded", KEY, &[("cost_msat", i64::MAX)]);
+        append_with_amounts(
+            &ledger,
+            "reconciliation_completed",
+            KEY,
+            &[("cost_msat", i64::MAX)],
+        );
+        let result = ledger.replay();
+        assert!(
+            result.is_err(),
+            "expected Err on reconciliation_completed spend overflow, got {result:?}"
+        );
+    }
 }
 
 /// Phase 2 pilot B: `reconciliation_completed` corrects replay state

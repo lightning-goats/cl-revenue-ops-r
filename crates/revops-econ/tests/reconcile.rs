@@ -339,6 +339,53 @@ fn apply_skips_quarantined() {
     assert_eq!(apply(&ledger, &report, NOW).unwrap(), 0);
 }
 
+// --- pre-Phase-2b fix: unchecked money arithmetic (reconcile `* 1000`
+// sites) ---
+//
+// `row.reserved_sats * 1000` used a bare multiply against an untrusted
+// DB-sourced `reserved_sats: i64` (not a checked `Sat`/`Msat` domain type at
+// this boundary). Python's ledger/DB comparisons never overflow
+// (arbitrary-precision ints); this port must fail closed with `Err` rather
+// than wrap on an adversarial/corrupted `spend_reservations` row.
+#[test]
+fn reconcile_ledger_missing_reservation_overflow_returns_err() {
+    // Ledger shows nothing outstanding for KEY; DB has an "active" row
+    // whose reserved_sats * 1000 overflows i64 -> the
+    // `ledger_missing_reservation` site's checked_mul must fail.
+    let dir = TempDir::new().unwrap();
+    let ledger = new_ledger(&dir);
+    let mut db_states = BTreeMap::new();
+    db_states.insert(KEY.to_string(), active(i64::MAX));
+    let result = reconcile(&ledger, &db_states, NOW, 3600);
+    assert!(
+        result.is_err(),
+        "expected Err on reserved_sats * 1000 overflow, got {result:?}"
+    );
+}
+
+#[test]
+fn reconcile_amount_mismatch_overflow_returns_err() {
+    // Ledger shows a (small, non-overflowing) reservation; DB's
+    // reserved_sats * 1000 overflows i64 -> the `amount_mismatch` site's
+    // checked_mul must fail, not silently compare against a wrapped value.
+    let dir = TempDir::new().unwrap();
+    let ledger = new_ledger(&dir);
+    append(
+        &ledger,
+        "budget_reserved",
+        KEY,
+        NOW,
+        &[("reserved_msat", 3_000)],
+    );
+    let mut db_states = BTreeMap::new();
+    db_states.insert(KEY.to_string(), active(i64::MAX));
+    let result = reconcile(&ledger, &db_states, NOW, 3600);
+    assert!(
+        result.is_err(),
+        "expected Err on reserved_sats * 1000 overflow, got {result:?}"
+    );
+}
+
 mod fee_intent_completeness_tests {
     use super::*;
 

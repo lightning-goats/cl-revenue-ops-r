@@ -2,6 +2,16 @@
 resolver = "2"
 members = ["crates/revops", "crates/revops-core", "crates/revops-db", "crates/revops-econ", "crates/revops-rpc"]
 
+# Money arithmetic must fail loudly, never silently wrap, even in a release
+# build (debug builds already panic on overflow by default). This is
+# belt-and-suspenders alongside the explicit `checked_*` ops in
+# `revops-econ` (governor/reconcile/ledger) — those return `Err(EconError)`
+# on the specific sites known to be reachable with adversarial or
+# max-range-legitimate input; this profile setting is the backstop for any
+# arithmetic that has not (yet) been converted.
+[profile.release]
+overflow-checks = true
+
 [workspace.package]
 edition = "2021"
 license = "MIT"

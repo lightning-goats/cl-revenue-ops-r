@@ -21,7 +21,9 @@
 
 use revops_econ::arbiter::ActiveIntentRegistry;
 use revops_econ::governor::{authority_allows, AuthorizationToken, GovernorFacade};
-use revops_econ::intents::{make_intent, Explanation, IntentEnvelope, IntentFields};
+use revops_econ::intents::{
+    from_wire, make_intent, to_wire, Explanation, IntentEnvelope, IntentFields,
+};
 use revops_econ::ledger::EconLedger;
 use revops_econ::types::{EconResult, Micro, Msat, SignedMsat, UnixTime};
 use tempfile::TempDir;
@@ -479,4 +481,121 @@ fn registry_conflict_blocks_with_conflict_code_and_ledgers_intent_rejected() {
     assert_eq!(rejected_event.details["arbitration"], true);
     // Never reserved on the rejected path.
     assert_eq!(ledger.count_events(Some("budget_reserved")).unwrap(), 0);
+}
+
+// --- pre-Phase-2b fix: idempotency_key[..16] panic on a short/multibyte
+// key arriving via from_wire (governor.rs token_id construction) ---
+//
+// Python's `IntentEnvelope.__post_init__` (modules/econ_intents.py) does
+// NOT validate `idempotency_key` shape at all, and Python string slicing
+// (`key[:16]`) never raises regardless of length or content. Parity means
+// Rust must not add a validation Python lacks; instead `authorize` uses a
+// defensive `.get(..16).unwrap_or(&full_key)` byte slice. These tests drive
+// a short/multibyte key through `from_wire` -> `authorize` and assert the
+// call completes (no panic) rather than asserting a particular decision.
+
+fn wire_with_idempotency_key(env: &IntentEnvelope, key: &str) -> IntentEnvelope {
+    let mut wire = to_wire(env);
+    wire["idempotency_key"] = serde_json::json!(key);
+    from_wire(&wire).expect(
+        "from_wire must accept any non-empty string key (no shape validation, matching Python)",
+    )
+}
+
+#[test]
+fn from_wire_accepts_short_idempotency_key_and_authorize_does_not_panic() {
+    let base = env(Args::default());
+    // 3 bytes: shorter than the 16-byte slice the old code took unconditionally.
+    let short_key_env = wire_with_idempotency_key(&base, "abc");
+
+    let facade = GovernorFacade {
+        reserve_spend: &noop_reserve,
+        release_spend: &noop_release,
+        is_paused: &not_paused,
+        ledger: None,
+        registry: None,
+        authority_check: None,
+    };
+    // Must not panic; the actual decision doesn't matter for this test.
+    let decision = facade.authorize(&short_key_env, NOW, None).unwrap();
+    assert!(decision.authorized);
+    let token = decision.token.unwrap();
+    assert_eq!(token.token_id, "auth-abc");
+}
+
+#[test]
+fn from_wire_accepts_multibyte_boundary_idempotency_key_and_authorize_does_not_panic() {
+    let base = env(Args::default());
+    // 15 ASCII bytes + one 2-byte UTF-8 codepoint ('é'): byte offset 16
+    // lands on the second byte of 'é', not a char boundary. The old
+    // `&s[..16]` would panic here even though the string is >= 16 bytes.
+    let multibyte_key = format!("{}é", "a".repeat(15));
+    assert_eq!(multibyte_key.len(), 17); // 15 + 2 bytes for 'é'
+    let mb_env = wire_with_idempotency_key(&base, &multibyte_key);
+
+    let facade = GovernorFacade {
+        reserve_spend: &noop_reserve,
+        release_spend: &noop_release,
+        is_paused: &not_paused,
+        ledger: None,
+        registry: None,
+        authority_check: None,
+    };
+    // Must not panic; falls back to the whole key since byte 16 isn't a
+    // char boundary.
+    let decision = facade.authorize(&mb_env, NOW, None).unwrap();
+    assert!(decision.authorized);
+    let token = decision.token.unwrap();
+    assert_eq!(token.token_id, format!("auth-{multibyte_key}"));
+}
+
+// --- pre-Phase-2b fix: unchecked money arithmetic (governor reserve site)
+// ---
+//
+// `reserve_sats * 1000` used a bare multiply. `max_cost_msat` is only
+// bounded to u63 (`[0, 2**63-1]`); `to_sats_ceil` can round a max-range
+// value up just far enough that re-expanding to msat overflows i64 — this
+// is reachable with a legitimately-constructed max-range envelope, not
+// just adversarial input. `authorize` must return `Err`, not panic.
+#[test]
+fn authorize_reserve_site_max_range_overflow_returns_err() {
+    let created_at = UnixTime::new(NOW).unwrap();
+    let env = make_intent(IntentFields {
+        intent_type: "REBALANCE".to_string(),
+        snapshot_id: "snap-1".to_string(),
+        created_at,
+        expires_at: created_at.plus_seconds(600).unwrap(),
+        target: "111x222x0".to_string(),
+        amount_msat: None,
+        expected_benefit_msat: SignedMsat(0),
+        // i64::MAX msat ceils to a sat count whose * 1000 exceeds i64::MAX.
+        max_cost_msat: Msat::new(i64::MAX).unwrap(),
+        capital_committed_msat: Msat::new(0).unwrap(),
+        confidence_micro: Micro::new(0).unwrap(),
+        reason_codes: vec![],
+        explanation: Explanation {
+            kind: "conformance".to_string(),
+            components: vec![],
+        },
+        preconditions: vec![],
+        priority: 50,
+        budget_bucket: "rebalance".to_string(),
+        origin_policy: "conformance".to_string(),
+        reversible: false,
+    })
+    .unwrap();
+
+    let facade = GovernorFacade {
+        reserve_spend: &noop_reserve, // grants the reservation
+        release_spend: &noop_release,
+        is_paused: &not_paused,
+        ledger: None,
+        registry: None,
+        authority_check: None,
+    };
+    let result = facade.authorize(&env, NOW, Some("r-overflow"));
+    assert!(
+        result.is_err(),
+        "expected Err on reserved_msat overflow, got {result:?}"
+    );
 }
