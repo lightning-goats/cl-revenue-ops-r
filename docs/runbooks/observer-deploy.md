@@ -347,3 +347,13 @@ lightningd itself relies on.
   Python and Rust default paths use it) resolves through this symlink;
   always pass explicit absolute paths for both `revops-r-db-path` and
   `revops-r-observer-db-path` on this node rather than trusting defaults.
+
+## Appendix: log asymmetry gotcha (found live 2026-07-16)
+
+CLN logs plugin *kills* at INFO (`Killing plugin: ...`) but logs **nothing at
+INFO for a successful dynamic `plugin start`** — a log-only audit will show
+stops with no matching starts and look like the plugin never ran. Liveness
+truth is `lightning-cli plugin list` (`active: true`) + `revenue-r-ping`,
+not the log. Ingestion truth is `MAX(timestamp)` advancing in
+`revops-r-observer.db` with node traffic (~1 forward / 15 min on lnnode —
+allow a quiet window before concluding anything).
