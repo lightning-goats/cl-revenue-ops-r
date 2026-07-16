@@ -1,0 +1,10 @@
+{
+  "inputs": {
+    "forward_count_30d": 40,
+    "lifetime_role": "OUTBOUND_GATEWAY",
+    "sourced_forward_count_30d": 2,
+    "total_forward_count_30d": 42,
+    "window_30d_available": true
+  },
+  "role_30d": "OUTBOUND_GATEWAY"
+}
