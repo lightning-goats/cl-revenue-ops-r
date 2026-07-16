@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/revops", "crates/revops-core"]
+members = ["crates/revops", "crates/revops-core", "crates/revops-db"]
 
 [workspace.package]
 edition = "2021"

@@ -1,2 +1,6 @@
 .superpowers/
 /target
+# WAL side-files: the fixture db is production-schema (journal_mode=WAL),
+# so read-only opens regenerate these transiently. Never the fixture itself.
+fixtures/*.db-shm
+fixtures/*.db-wal
