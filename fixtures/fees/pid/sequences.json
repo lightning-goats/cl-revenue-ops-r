@@ -1,0 +1,308 @@
+{
+ "now": 1752400000,
+ "sequences": [
+  {
+   "name": "source_capacity_floor",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.95",
+     "capacity_sats": 1,
+     "flow_state": "source",
+     "multiplier": "0.940992864473624",
+     "ewma_error": "-0.075",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752403600,
+     "ratio": "0.85",
+     "capacity_sats": 1,
+     "flow_state": "source",
+     "multiplier": "0.9203337334211167",
+     "ewma_error": "-0.0975",
+     "integral_error": "-0.0975"
+    },
+    {
+     "now": 1752421600,
+     "ratio": "0.6",
+     "capacity_sats": 1,
+     "flow_state": "source",
+     "multiplier": "0.9581740327355512",
+     "ewma_error": "-0.03825",
+     "integral_error": "-0.28875"
+    }
+   ]
+  },
+  {
+   "name": "sink_capacity_1e6_integral_saturation",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.9",
+     "capacity_sats": 1000000,
+     "flow_state": "sink",
+     "multiplier": "0.9120183210248166",
+     "ewma_error": "-0.18000000000000002",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752572800,
+     "ratio": "0.95",
+     "capacity_sats": 1000000,
+     "flow_state": "sink",
+     "multiplier": "0.7858554253402836",
+     "ewma_error": "-0.32099999999999995",
+     "integral_error": "-3.0"
+    },
+    {
+     "now": 1752745600,
+     "ratio": "0.97",
+     "capacity_sats": 1000000,
+     "flow_state": "sink",
+     "multiplier": "0.7448658463338292",
+     "ewma_error": "-0.42569999999999997",
+     "integral_error": "-3.0"
+    }
+   ]
+  },
+  {
+   "name": "balanced_active_capacity_5e6",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.55",
+     "capacity_sats": 5000000,
+     "flow_state": "balanced_active",
+     "multiplier": "0.9956764858455821",
+     "ewma_error": "-0.015000000000000013",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752401800,
+     "ratio": "0.45",
+     "capacity_sats": 5000000,
+     "flow_state": "balanced_active",
+     "multiplier": "1.00133325091725",
+     "ewma_error": "0.004499999999999987",
+     "integral_error": "0.0022499999999999933"
+    }
+   ]
+  },
+  {
+   "name": "dormant_capacity_5e8",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.5",
+     "capacity_sats": 500000000,
+     "flow_state": "dormant",
+     "multiplier": "1.0",
+     "ewma_error": "0.0",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752443200,
+     "ratio": "0.5",
+     "capacity_sats": 500000000,
+     "flow_state": "dormant",
+     "multiplier": "1.0",
+     "ewma_error": "0.0",
+     "integral_error": "0.0"
+    }
+   ]
+  },
+  {
+   "name": "congested_ratio_edges",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.0",
+     "capacity_sats": 1,
+     "flow_state": "congested",
+     "multiplier": "1.129346836363115",
+     "ewma_error": "0.15",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752403600,
+     "ratio": "1.0",
+     "capacity_sats": 1,
+     "flow_state": "congested",
+     "multiplier": "0.9624083625656217",
+     "ewma_error": "-0.045",
+     "integral_error": "-0.045"
+    }
+   ]
+  },
+  {
+   "name": "flow_state_unknown_key",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.3",
+     "capacity_sats": 1000000,
+     "flow_state": "unknown",
+     "multiplier": "1.0311744548587467",
+     "ewma_error": "0.06",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752410800,
+     "ratio": "0.4",
+     "capacity_sats": 1000000,
+     "flow_state": "unknown",
+     "multiplier": "1.0432739445660173",
+     "ewma_error": "0.07199999999999998",
+     "integral_error": "0.21599999999999994"
+    }
+   ]
+  },
+  {
+   "name": "flow_state_not_in_dict_router",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.6",
+     "capacity_sats": 5000000,
+     "flow_state": "router",
+     "multiplier": "0.9913716644658076",
+     "ewma_error": "-0.029999999999999992",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752407200,
+     "ratio": "0.6",
+     "capacity_sats": 5000000,
+     "flow_state": "totally_unknown_state",
+     "multiplier": "0.9839255951166741",
+     "ewma_error": "-0.05099999999999999",
+     "integral_error": "-0.10199999999999998"
+    }
+   ]
+  },
+  {
+   "name": "nan_ratio_guard",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "nan",
+     "capacity_sats": 500000000,
+     "flow_state": "balanced",
+     "multiplier": "1.0",
+     "ewma_error": "0.0",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752403600,
+     "ratio": "nan",
+     "capacity_sats": 500000000,
+     "flow_state": "balanced",
+     "multiplier": "1.0",
+     "ewma_error": "0.0",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752407200,
+     "ratio": "0.5",
+     "capacity_sats": 500000000,
+     "flow_state": "balanced",
+     "multiplier": "1.0",
+     "ewma_error": "0.0",
+     "integral_error": "0.0"
+    }
+   ]
+  },
+  {
+   "name": "very_large_dt_integral_clamp",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.99",
+     "capacity_sats": 1,
+     "flow_state": "sink",
+     "multiplier": "0.8454701349088493",
+     "ewma_error": "-0.207",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1756000000,
+     "ratio": "0.99",
+     "capacity_sats": 1,
+     "flow_state": "sink",
+     "multiplier": "0.6656404747348917",
+     "ewma_error": "-0.3519",
+     "integral_error": "-3.0"
+    }
+   ]
+  },
+  {
+   "name": "overshoot_ratio_hits_multiplier_clamp",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "-0.5",
+     "capacity_sats": 1000000,
+     "flow_state": "balanced",
+     "multiplier": "1.165898460415139",
+     "ewma_error": "0.3",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752403600,
+     "ratio": "1.5",
+     "capacity_sats": 1000000,
+     "flow_state": "balanced",
+     "multiplier": "0.9528002675473167",
+     "ewma_error": "-0.09",
+     "integral_error": "-0.09"
+    }
+   ]
+  },
+  {
+   "name": "flow_state_and_capacity_change_across_steps",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.8",
+     "capacity_sats": 1000000,
+     "flow_state": "source",
+     "multiplier": "0.984767998525599",
+     "ewma_error": "-0.030000000000000027",
+     "integral_error": "0.0"
+    },
+    {
+     "now": 1752414400,
+     "ratio": "0.4",
+     "capacity_sats": 5000000,
+     "flow_state": "sink",
+     "multiplier": "0.9824771610288504",
+     "ewma_error": "-0.05100000000000003",
+     "integral_error": "-0.20400000000000013"
+    },
+    {
+     "now": 1752428800,
+     "ratio": "0.5",
+     "capacity_sats": 500000000,
+     "flow_state": "balanced",
+     "multiplier": "0.9952172333925499",
+     "ewma_error": "-0.035700000000000016",
+     "integral_error": "-0.3468000000000002"
+    }
+   ]
+  },
+  {
+   "name": "conformance_scenario_12_fresh_state",
+   "steps": [
+    {
+     "now": 1752400000,
+     "ratio": "0.2",
+     "capacity_sats": 5000000,
+     "flow_state": "balanced",
+     "multiplier": "1.0263382034393023",
+     "ewma_error": "0.09",
+     "integral_error": "0.0"
+    }
+   ]
+  }
+ ]
+}
