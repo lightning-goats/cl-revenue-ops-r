@@ -224,7 +224,7 @@ fn m3_to_value(m: &M3) -> OValue {
 
 fn observation_to_value(o: &Observation) -> OValue {
     let mut items = vec![
-        OValue::Int(o.fee as i64),
+        num_value(o.fee, o.fee_is_int),
         OValue::Float(o.revenue_rate),
         OValue::Float(o.weight),
         OValue::Int(o.ts),
@@ -463,6 +463,7 @@ fn convert_observations(arr: &[OValue], legacy_weights: bool) -> Vec<Observation
             continue;
         }
         let fee = t[0].as_f64().unwrap_or(0.0);
+        let fee_is_int = matches!(t[0], OValue::Int(_));
         let revenue_rate = t[1].as_f64().unwrap_or(0.0);
         let weight = t[2].as_f64().unwrap_or(0.0);
         let ts = t[3].as_i64().unwrap_or(0);
@@ -479,6 +480,7 @@ fn convert_observations(arr: &[OValue], legacy_weights: bool) -> Vec<Observation
         };
         out.push(Observation {
             fee,
+            fee_is_int,
             revenue_rate,
             weight,
             ts,

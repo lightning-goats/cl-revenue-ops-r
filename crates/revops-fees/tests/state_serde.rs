@@ -179,3 +179,28 @@ fn non_ascii_unknown_value_escapes_correctly() {
     let fx = fixture();
     assert_round_trip(case(&fx, "non_ascii_unknown_value"));
 }
+
+/// A legacy thompson_aimd_v1-era blob can carry an observation fee as a
+/// JSON float (`250.0`); `from_dict`/`to_dict` never cast observation[0]
+/// (same non-cast contract as `prior_mean_fee`/`prior_std_fee`), so a
+/// float-typed fee must re-emit as `250.0` and an int-typed fee in the same
+/// list must independently re-emit as `250` — byte-identical to Python.
+#[test]
+fn observation_fee_int_float_typing_preserved_independently() {
+    let fx = fixture();
+    let c = case(&fx, "float_and_int_observation_fee_roundtrip");
+    assert_round_trip(c);
+
+    let blob = c["blob"].as_str().unwrap();
+    let parsed = parse(blob).unwrap();
+    let state = gts_from_dict(&parsed);
+
+    assert_eq!(state.observations.len(), 2);
+    assert!(
+        !state.observations[0].fee_is_int,
+        "first fee was JSON float"
+    );
+    assert!(state.observations[1].fee_is_int, "second fee was JSON int");
+    assert_eq!(state.observations[0].fee, 250.0);
+    assert_eq!(state.observations[1].fee, 250.0);
+}

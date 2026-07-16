@@ -71,9 +71,26 @@ pub const ZERO_PROBE_FLAG: &str = "zero_probe";
 /// are never longer than 6 today, but a future schema version might add a
 /// 7th, and this port must not silently drop it (lossless-round-trip is
 /// the load-bearing contract for this whole module).
+///
+/// ## `fee`/`fee_is_int`
+///
+/// Like `GaussianThompsonState::prior_mean_fee`/`prior_mean_fee_is_int`
+/// (see that struct's doc comment), Python's `from_dict`/`to_dict` never
+/// casts an observation tuple's fee element (`t[0]`) — a persisted blob's
+/// number TEXT survives untouched. Real production `v2_state_json` blobs
+/// from the `thompson_aimd_v1` era may carry a JSON float fee
+/// (`[250.0, ...]`); re-emitting it as `250` (an int) would be a
+/// byte-mismatch against Python's own round trip. `fee_is_int` records
+/// whether the source JSON had no decimal point, so `to_dict` can re-emit
+/// the same representation. `fee` itself stays the single numeric
+/// accessor other code (T2's recompute functions) reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
     pub fee: f64,
+    /// `true` when the persisted fee had no JSON decimal point (a Python
+    /// `int`), so `to_dict` re-emits it as a bare integer rather than
+    /// `N.0`. See the struct doc comment.
+    pub fee_is_int: bool,
     pub revenue_rate: f64,
     pub weight: f64,
     pub ts: i64,
