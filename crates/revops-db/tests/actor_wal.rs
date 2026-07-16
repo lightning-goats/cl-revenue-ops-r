@@ -11,9 +11,15 @@
 //! 2. `cold_start_before_writer_fails_gracefully` — pointing the actor at a
 //!    path with no `-wal`/`-shm` (indeed no file at all) must fail with a
 //!    clean `Err`, never hang or panic.
+//! 3. `table_listing_failure_at_spawn_returns_err` — a path that opens
+//!    fine (SQLite's open is lazy) but fails the `table_names` probe
+//!    (not a valid database) must fail `spawn_read_only` itself, not
+//!    silently succeed and defer the failure to first request -- pins
+//!    the table-listing-leniency-regression fix (option (a) from review).
 
 use revops_db::actor::spawn_read_only;
 use rusqlite::Connection;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -23,12 +29,48 @@ async fn cold_start_before_writer_fails_gracefully() {
     // pointing revops-r-db-path at a DB the Python plugin hasn't
     // initialized yet (or a typo'd path). Must be a clean Err, never a
     // panic that would crash plugin init.
-    let err = spawn_read_only(Path::new("/nonexistent/cl-revops-phase1b/nope.db"))
-        .await
+    //
+    // Wrapped in a timeout so a future regression that makes this path
+    // hang (rather than fail fast) fails CI loudly instead of wedging it.
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        spawn_read_only(Path::new("/nonexistent/cl-revops-phase1b/nope.db")),
+    )
+    .await;
+    let err = result
+        .expect("spawn_read_only must fail fast on a cold-start path, not hang")
         .unwrap_err();
     assert!(
         err.to_string().contains("not found") || err.to_string().contains("database"),
         "unexpected error message: {err}"
+    );
+}
+
+#[tokio::test]
+async fn table_listing_failure_at_spawn_returns_err() {
+    // A file that exists (so `open_read_only`'s `path.exists()` check
+    // passes) and that SQLite's lazy `Connection::open_with_flags` opens
+    // without complaint, but that is not actually a valid SQLite database
+    // -- the failure only surfaces once something tries to read the
+    // header, which is exactly what the `table_names` probe does. Before
+    // the fix, `spawn_read_only` returned `Ok` here (the failure was
+    // deferred to the first `table_count()`/`query_i64()` call and then
+    // swallowed by the `.ok()` at the `revenue-r-status` call site); the
+    // fix makes this fail synchronously at spawn time instead.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("not-a-database.db");
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"this is not a sqlite file, just garbage bytes\0\0\0\0")
+            .unwrap();
+    }
+
+    let err = spawn_read_only(&path)
+        .await
+        .expect_err("table_names probe over a non-database file must fail spawn_read_only");
+    assert!(
+        err.to_string().contains("table_names probe"),
+        "expected the probe context to be present: {err}"
     );
 }
 

@@ -68,16 +68,32 @@ impl DbHandle {
 /// Open the database read-only and spawn the single-owner actor task that
 /// owns the resulting `Connection` for the rest of the plugin's lifetime.
 ///
-/// Errors (missing file, `PRAGMA`/open failure) propagate synchronously to
-/// the caller before any task is spawned -- same fail path `main.rs`
-/// already uses for a bad `db-path` (`configured.disable(...)`), just with
-/// the connection's ownership moving into the actor task on success
-/// instead of being dropped after one probe.
+/// Errors (missing file, `PRAGMA`/open failure, or a schema-listing
+/// failure) propagate synchronously to the caller before any task is
+/// spawned -- same fail path `main.rs` already uses for a bad `db-path`
+/// (`configured.disable(...)`), just with the connection's ownership
+/// moving into the actor task on success instead of being dropped after
+/// one probe.
 pub async fn spawn_read_only(path: &Path) -> Result<DbHandle> {
     // Open (and validate) on the CALLER's task first so a bad path fails
     // plugin init synchronously, exactly like Phase 1a's probe-drop did --
     // only the *ownership* of the connection moves into the actor task.
     let conn = crate::open_read_only(path)?;
+    // Probe `table_names` synchronously here, before the actor task is
+    // spawned and before we return `Ok`. A file can open fine (SQLite's
+    // open is lazy -- it doesn't read the header until the first query)
+    // and still fail to list tables (corrupt `sqlite_master`, a lock we
+    // can't get past `busy_timeout`, etc). Deferring that check to
+    // request time -- as `DbHandle::table_count` used to be the only
+    // caller of `table_names` -- let a schema-listing failure slip past
+    // `main.rs`'s open-failure handling entirely (the `.ok()` at the
+    // `revenue-r-status` call site swallowed it), silently dropping the
+    // default-vs-explicit leniency split commit 126f391 added for this
+    // exact class of failure. Probing here instead means a schema-listing
+    // failure returns `Err` from `spawn_read_only` itself, so it goes
+    // through the *same* default-path-miss/explicit-path-miss branches in
+    // `main.rs` that an open failure already does.
+    crate::table_names(&conn).context("initial table_names probe")?;
     let (tx, mut rx) = mpsc::channel::<Command>(32);
     tokio::task::spawn_blocking(move || {
         // rusqlite::Connection is !Sync; owning it inside one blocking
