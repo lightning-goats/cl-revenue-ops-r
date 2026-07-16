@@ -1,0 +1,12 @@
+[package]
+name = "revops"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cln-plugin = "0.7"
+serde_json.workspace = true
+tokio.workspace = true
+revops-core = { path = "../revops-core" }
