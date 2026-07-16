@@ -30,7 +30,7 @@
 //! remains the correctness backstop, so a partial/aborted hydration is
 //! safe, never wrong.
 
-use crate::notify::forward_row_from_json;
+use crate::notify::{forward_row_from_json, json_timestamp};
 use anyhow::{bail, Context, Result};
 use cln_rpc::ClnRpc;
 use revops_db::notifications::compute_forward_hydration_start;
@@ -71,10 +71,14 @@ pub async fn fetch_settled_forwards(socket_path: &Path, start_time: i64) -> Resu
             .context("listforwards response missing 'forwards' array")?;
 
         for fwd in forwards {
-            let rt = fwd
-                .get("received_time")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            // CLN's `listforwards` reports `received_time` as a float
+            // (decimal seconds, e.g. `1560696342.368`) -- a naive
+            // `.as_i64()` returns `None` for that shape and this filter
+            // would silently default every real row to `rt = 0`, which
+            // then never passes `rt > start_time` and hydration backfills
+            // nothing. See `notify::json_timestamp`'s doc comment
+            // (CRITICAL 1) for the full failure mode.
+            let rt = json_timestamp(fwd.get("received_time"));
             if rt > start_time {
                 collected.push(fwd.clone());
             }

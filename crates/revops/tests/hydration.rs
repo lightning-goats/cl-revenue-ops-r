@@ -95,6 +95,36 @@ async fn single_short_page_filters_by_start_time() {
     assert_eq!(collected[0]["received_time"].as_i64(), Some(1_800_000_100));
 }
 
+/// Regression for CRITICAL 1: real CLN `listforwards` entries carry
+/// `received_time` as a FLOAT (decimal seconds, e.g. `1560696342.368`),
+/// not an integer. Before the fix, the page filter's `.as_i64()` returned
+/// `None` for every such row, defaulted to `rt = 0`, and `0 > start_time`
+/// was always false for any positive `start_time` -- so hydration silently
+/// backfilled nothing against real production data despite the mock tests
+/// (which use plain integer literals) passing throughout.
+#[tokio::test]
+async fn float_received_time_is_compared_correctly_against_start_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = socket_path(&dir);
+    serve(
+        path.clone(),
+        vec![json!({
+            "forwards": [
+                {"received_time": 1560696342.368, "created_index": 5},
+                {"received_time": 1560696300.5, "created_index": 6},
+            ]
+        })],
+    );
+
+    let collected = fetch_settled_forwards(&path, 1_560_696_320).await.unwrap();
+    assert_eq!(
+        collected.len(),
+        1,
+        "only the float-timestamped row newer than start_time survives the filter"
+    );
+    assert_eq!(collected[0]["received_time"].as_f64(), Some(1560696342.368));
+}
+
 #[tokio::test]
 async fn empty_page_returns_empty_collection() {
     let dir = tempfile::tempdir().unwrap();
@@ -210,6 +240,35 @@ async fn run_startup_hydration_inserts_settled_forwards_on_empty_table() {
     assert_eq!(
         observer.last_forward_ts().await.unwrap(),
         Some(1_800_000_000)
+    );
+}
+
+/// End-to-end CRITICAL 1 regression: a float-timestamped forward from a
+/// real `listforwards` page must be ingested with its truncated integer
+/// timestamp, not silently dropped/zeroed by the paging filter or the
+/// `ForwardRow` extraction.
+#[tokio::test]
+async fn run_startup_hydration_handles_float_timestamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = socket_path(&dir);
+    serve(
+        socket.clone(),
+        vec![json!({"forwards": [
+            {"in_channel": "1x1x0", "out_channel": "2x2x0", "in_msat": 100_000,
+             "out_msat": 99_000, "fee_msat": 1_000,
+             "received_time": 1_800_000_000.5, "resolved_time": 1_800_000_005.9},
+        ]})],
+    );
+
+    let observer = revops_db::owner::spawn_read_write(&dir.path().join("obs.db"))
+        .await
+        .unwrap();
+    let inserted = run_startup_hydration(&observer, &socket, 7, 1_800_000_100).await;
+    assert_eq!(inserted, 1);
+    assert_eq!(
+        observer.last_forward_ts().await.unwrap(),
+        Some(1_800_000_000),
+        "float received_time must truncate to a real timestamp, never 0"
     );
 }
 

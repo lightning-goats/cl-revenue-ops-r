@@ -5,7 +5,7 @@
 Usage: ./diff_read_rpcs.py [--node lnnode] [--window-days 30]
                             [--observer-db ~/.lightning/revops-r-observer.db]
                             [--python-db ~/.lightning/revenue_ops.db]
-                            [--tolerance 2]
+                            [--tolerance 2] [--since <unix-ts>]
 
 Runs four comparisons in sequence and exits with the WORST severity seen
 across all of them: 0 full parity, 1 if any field mismatch or per-RPC
@@ -41,16 +41,34 @@ one leaf is always skipped rather than compared -- unlike the dashboard's
 `_phase1b_gaps`, this is not a phase gap, just an unavoidable artifact of
 diffing two live processes one after another.
 
-NOTE -- ingestion window: the Rust observer's `ingested_forwards` table
-only ever contains rows ingested since ITS OWN process started (there is
-no backdated bulk import), so its own `MIN(timestamp)` row IS "the same
-time window" the two sides can be fairly compared over -- no separate
---since flag is needed. We derive it at runtime: fetch
-`MIN(timestamp)` from `ingested_forwards`, then count Python's
-`forwards` rows with `timestamp >= that`. If the observer table is empty
-(fresh deploy, no rows yet), we fall back to the LOCAL wall clock
-(`time.time()`) as the window start, which is always >= any historical
-Python forward, so an empty observer naturally compares 0 against ~0.
+NOTE -- ingestion window: naively using the Rust observer's own
+`MIN(timestamp)` from `ingested_forwards` as the shared window start is
+NOT safe on its own. It's true the Rust observer's table only ever
+contains rows ingested since ITS OWN process started PLUS whatever startup
+hydration backfilled -- but hydration backfills up to 14 days
+(`_hydration_fetch_settled_forwards`'s warm-start window,
+cl-revenue-ops.py:602-625 / `compute_forward_hydration_start`), while
+Python's OWN `forwards` table is pruned at roughly 8 days
+(`modules/database.py`'s forward-retention housekeeping). So a `MIN(
+timestamp)` from 12 days ago is a real, honest value on the Rust side, but
+Python's `forwards` table simply no longer has any rows that old -- not a
+port defect, just two different retention windows read naively as if they
+were the same window. Without a clamp this is a GUARANTEED spurious
+mismatch on any node where hydration's backfill reached further back than
+Python's pruning horizon (a near-certainty in production: 14 > 8).
+
+We derive `since_ts` at runtime, then clamp it forward to never look
+further back than Python's own pruning horizon:
+  1. fetch `MIN(timestamp)` from `ingested_forwards` (or the LOCAL wall
+     clock via `time.time()` if the table is empty -- a fresh deploy with
+     no rows yet, which is always >= any historical Python forward, so an
+     empty observer naturally compares 0 against ~0).
+  2. `since_ts = max(since_ts, now - 7*86400)` -- 7 days rather than
+     Python's exact ~8-day prune point, leaving a one-day safety margin
+     against prune-timing jitter rather than clamping to the exact edge.
+  3. `--since <unix ts>` overrides both of the above outright, for a
+     caller who wants to pin an exact window (e.g. reproducing a specific
+     day's mismatch) rather than trust the derived value.
 
 NOTE -- numeric comparison: ints and strings compare with plain `==`.
 Floats compare with `==` after `round(x, 6)` on BOTH sides. Both ports
@@ -265,20 +283,38 @@ def report_section(name, results):
     return 0
 
 
-def diff_ingestion(sqlite_fn, node, observer_db, python_db, tolerance=2):
+# Clamp floor: never look further back than this many seconds, regardless
+# of what the observer's own MIN(timestamp) says -- see module docstring's
+# "ingestion window" note (hydration backfills 14d, Python prunes ~8d; a
+# 7-day floor leaves a one-day margin against prune-timing jitter).
+INGESTION_WINDOW_CLAMP_SECONDS = 7 * 86400
+
+
+def diff_ingestion(sqlite_fn, node, observer_db, python_db, tolerance=2, since_override=None):
     """Compare `ingested_forwards` row count (Rust observer db) against
     `forwards` row count (Python production db) over the window derived
-    from the observer's own earliest row -- see module docstring's
-    "ingestion window" note. Never raises; failures come back as a
-    "transport" result dict, same shape family as diff_rpc()'s results.
-    """
-    try:
-        min_raw = sqlite_fn(node, observer_db, "SELECT MIN(timestamp) FROM ingested_forwards")
-    except subprocess.CalledProcessError as exc:
-        return {"status": "transport", "side": "rust", "cause": _one_line(exc)}
+    from the observer's own earliest row, clamped forward so it never
+    predates Python's own forward-retention horizon -- see module
+    docstring's "ingestion window" note. Never raises; failures come back
+    as a "transport" result dict, same shape family as diff_rpc()'s
+    results.
 
-    min_raw = (min_raw or "").strip()
-    since_ts = int(min_raw) if min_raw else int(time.time())
+    `since_override`, when given, is used verbatim as `since_ts` and skips
+    the `MIN(timestamp)` query (and the clamp) entirely -- for a caller
+    who wants to pin an exact window rather than trust the derived value
+    (the harness's own `--since` flag).
+    """
+    if since_override is not None:
+        since_ts = since_override
+    else:
+        try:
+            min_raw = sqlite_fn(node, observer_db, "SELECT MIN(timestamp) FROM ingested_forwards")
+        except subprocess.CalledProcessError as exc:
+            return {"status": "transport", "side": "rust", "cause": _one_line(exc)}
+
+        min_raw = (min_raw or "").strip()
+        derived_ts = int(min_raw) if min_raw else int(time.time())
+        since_ts = max(derived_ts, int(time.time()) - INGESTION_WINDOW_CLAMP_SECONDS)
 
     try:
         rs_raw = sqlite_fn(node, observer_db, "SELECT COUNT(*) FROM ingested_forwards")
@@ -537,6 +573,47 @@ def self_test():
     print(f"[self-test] ingestion transport failure: exit={rc} (expect 2)")
     ok = ok and rc == 2
 
+    # -- 6d. ingestion window clamp (IMPORTANT 2): the observer's own
+    # MIN(timestamp) can legitimately be ~14 days old (hydration's own
+    # backfill window), but Python's `forwards` table is pruned at ~8
+    # days -- an unclamped since_ts guarantees a spurious mismatch on any
+    # real node. Confirm since_ts is clamped to the 7-day floor, not the
+    # raw 14-day-old value.
+    old_min = int(time.time()) - 14 * 86400
+
+    def sqlite_old_min(node, db_path, query):
+        if "ingested_forwards" in query:
+            return f"{old_min}\n" if "MIN" in query else "50\n"
+        return "51\n"
+
+    result = diff_ingestion(sqlite_old_min, "node",
+                           "~/.lightning/revops-r-observer.db",
+                           "~/.lightning/revenue_ops.db", tolerance=2)
+    rc = report_ingestion(result)
+    clamp_floor = int(time.time()) - INGESTION_WINDOW_CLAMP_SECONDS
+    print(f"[self-test] ingestion window clamp: exit={rc} since_ts={result['since_ts']} "
+          f"clamp_floor={clamp_floor} old_min={old_min} "
+          f"(expect since_ts >= clamp_floor, since_ts != old_min)")
+    ok = ok and result["since_ts"] >= clamp_floor and result["since_ts"] != old_min
+
+    # -- 6e. --since override skips the derived MIN() query (and the
+    # clamp) entirely, using the caller's value verbatim.
+    def sqlite_since_override(node, db_path, query):
+        if "MIN" in query:
+            raise AssertionError("since_override must skip the MIN(timestamp) query entirely")
+        if "ingested_forwards" in query:
+            return "50\n"
+        return "51\n"
+
+    result = diff_ingestion(sqlite_since_override, "node",
+                           "~/.lightning/revops-r-observer.db",
+                           "~/.lightning/revenue_ops.db", tolerance=2,
+                           since_override=1_600_000_000)
+    rc = report_ingestion(result)
+    print(f"[self-test] ingestion --since override: exit={rc} since_ts={result['since_ts']} "
+          f"(expect since_ts==1600000000, MIN(timestamp) query never run)")
+    ok = ok and result["since_ts"] == 1_600_000_000
+
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1
 
@@ -554,6 +631,10 @@ def main(argv=None, cli_fn=cli, sqlite_fn=sqlite_query):
                     help="Python plugin's production sqlite db, on --node (default: ~/.lightning/revenue_ops.db)")
     ap.add_argument("--tolerance", type=int, default=2,
                     help="allowed row-count drift for the ingestion cross-check (default: 2)")
+    ap.add_argument("--since", type=int, default=None,
+                    help="override the ingestion cross-check's window start (unix ts) instead of "
+                         "deriving it from the observer db's own MIN(timestamp), clamped to a "
+                         "7-day floor (see module docstring's ingestion-window note)")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -577,7 +658,7 @@ def main(argv=None, cli_fn=cli, sqlite_fn=sqlite_query):
         f"revenue-dashboard vs revenue-r-dashboard (window_days={args.window_days})", results))
 
     result = diff_ingestion(sqlite_fn, args.node, args.observer_db, args.python_db,
-                           tolerance=args.tolerance)
+                           tolerance=args.tolerance, since_override=args.since)
     codes.append(report_ingestion(result))
 
     return max(codes) if codes else 0

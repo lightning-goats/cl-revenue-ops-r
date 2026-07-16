@@ -47,6 +47,28 @@ pub(crate) fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Parse a JSON timestamp field that may arrive as either an integer or a
+/// float. CLN's `forward_event`/`listforwards` timestamps
+/// (`received_time`/`resolved_time`) are documented as decimal seconds
+/// (e.g. `1560696342.368`), but `serde_json::Value::as_i64` returns `None`
+/// for ANY float-shaped JSON number -- even a whole one like `5.0` -- so a
+/// naive `.and_then(|v| v.as_i64())` silently drops every real CLN
+/// timestamp to the caller's `unwrap_or(0)` fallback. That collapses every
+/// forward's dedup-key timestamp to `0` and makes hydration's `rt >
+/// start_time` page filter (`hydration.rs`) never match anything real.
+///
+/// Mirrors Python's `int(x)` truncation-toward-zero semantics for a float
+/// (matching `parse_msat`'s own `f.trunc() as i64` treatment of float
+/// JSON numbers, just applied to a whole `Option<&Value>` field lookup
+/// rather than an already-guaranteed-present `&Value`). `pub(crate)` so
+/// `hydration.rs`'s page filter can share this exact parsing, keeping the
+/// live `forward_event` path and startup hydration's `listforwards` page
+/// filter consistent.
+pub(crate) fn json_timestamp(v: Option<&Value>) -> i64 {
+    v.and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f.trunc() as i64)))
+        .unwrap_or(0)
+}
+
 /// `forward_event` (cl-revenue-ops.py:6661): dedup-insert of settled
 /// forwards only (see module-level scope-boundary note). Non-`settled`
 /// statuses (`failed`, `local_failed`) are a no-op here.
@@ -105,14 +127,8 @@ pub(crate) fn forward_row_from_json(event: &Value) -> ForwardRow {
             .or_else(|| event.get("fee_msatoshi"))
             .unwrap_or(&Value::Null),
     );
-    let received_time = event
-        .get("received_time")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let resolved_time = event
-        .get("resolved_time")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let received_time = json_timestamp(event.get("received_time"));
+    let resolved_time = json_timestamp(event.get("resolved_time"));
 
     ForwardRow {
         in_channel,
@@ -297,6 +313,57 @@ mod tests {
         });
         on_forward_event(&handle, &event).await;
         assert_eq!(handle.last_forward_ts().await.unwrap(), Some(1_800_000_000));
+    }
+
+    /// Regression for CRITICAL 1: CLN's real `forward_event` payloads carry
+    /// `received_time`/`resolved_time` as FLOATS (e.g. `1560696342.368`,
+    /// decimal seconds), not integers. `serde_json::Value::as_i64` returns
+    /// `None` for any float-shaped number, so a naive `.as_i64()` collapses
+    /// every real forward's timestamp to the `unwrap_or(0)` fallback --
+    /// every forward gets dedup-keyed and stored at timestamp 0. Must
+    /// truncate toward zero instead (Python's `int(x)` semantics).
+    #[test]
+    fn forward_row_from_json_truncates_float_timestamps() {
+        let event = json!({
+            "in_channel": "1x1x0",
+            "out_channel": "2x2x0",
+            "in_msat": 100_000,
+            "out_msat": 99_000,
+            "fee_msat": 1_000,
+            "received_time": 1560696342.368,
+            "resolved_time": 1560696343.999,
+        });
+        let row = forward_row_from_json(&event);
+        assert_eq!(row.timestamp, 1_560_696_342);
+        assert_eq!(row.resolved_time, 1_560_696_343);
+    }
+
+    /// Same regression, exercised through the full `on_forward_event`
+    /// dedup-insert path (not just the pure parser) -- confirms a
+    /// float-timestamped settled forward actually lands in the DB at its
+    /// truncated integer timestamp, not 0.
+    #[tokio::test]
+    async fn on_forward_event_handles_float_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = revops_db::owner::spawn_read_write(&dir.path().join("obs.db"))
+            .await
+            .unwrap();
+        let event = json!({
+            "status": "settled",
+            "in_channel": "1x1x0",
+            "out_channel": "2x2x0",
+            "in_msat": 100_000,
+            "out_msat": 99_000,
+            "fee_msat": 1_000,
+            "received_time": 1560696342.368,
+            "resolved_time": 1560696343.5,
+        });
+        on_forward_event(&handle, &event).await;
+        assert_eq!(
+            handle.last_forward_ts().await.unwrap(),
+            Some(1_560_696_342),
+            "float received_time must truncate to a real timestamp, never collapse to 0"
+        );
     }
 
     #[tokio::test]

@@ -17,6 +17,7 @@ use revops::{hydration, notify};
 use revops_db::queries;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -49,12 +50,20 @@ struct State {
 type SharedState = Arc<State>;
 
 /// suffix -> full registered option name, for every option this plugin
-/// exposes: our own (`observer`, `db-path`) plus the entire shadowed Python
-/// option surface from `fixtures/options.json`.
+/// exposes: our own (`observer`, `db-path`, `observer-db-path`) plus the
+/// entire shadowed Python option surface from `fixtures/options.json`.
+///
+/// **`observer-db-path` (MINOR b)**: without this entry, `revenue-r-config
+/// key=observer-db-path` returned `{"exists": false}` even though the
+/// option is registered and resolvable via `p.option_str` -- the only way
+/// to introspect the observer's own ingestion-db path was reading
+/// lightningd's config/CLI args directly. Same registration pattern as
+/// `observer`/`db-path` above.
 fn config_name_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     map.insert("observer".to_string(), opt_name("observer"));
     map.insert("db-path".to_string(), opt_name("db-path"));
+    map.insert("observer-db-path".to_string(), opt_name("observer-db-path"));
     for opt in options_table::load() {
         let suffix = opt
             .name
@@ -100,14 +109,68 @@ fn expand_tilde(raw: &str) -> PathBuf {
 /// True if the observer's own db path (`observer-db-path`, already
 /// `~`-expanded) refers to the exact same file as the production db path
 /// (`db-path`, also already `~`-expanded, or `None` if production db-path
-/// isn't set). Pure path-equality on the expanded forms -- no
-/// canonicalization or filesystem access, matching every other path
-/// comparison in this module (neither path is required to exist).
+/// isn't set).
+///
+/// **Canonicalizes when both files exist.** Pure string equality on the
+/// expanded forms misses the realistic case of a symlinked lightning-dir
+/// (e.g. lnnode's own `~/.lightning -> /data/lightningd`): an operator can
+/// spell the observer's path through the symlink and the production path
+/// directly (or vice versa), landing on two textually-different paths that
+/// resolve to the exact same underlying file. A bypass here means opening
+/// the production DB in the observer's READ-WRITE actor -- not a cosmetic
+/// bug. When either path doesn't exist yet (the common case: this check
+/// runs before the observer db file is created), `std::fs::canonicalize`
+/// can't resolve it, so this falls back to the same string comparison as
+/// before -- neither path is required to exist for this function to be
+/// callable.
 fn observer_db_path_collides_with_production(
     observer_path: &std::path::Path,
     production_path: Option<&std::path::Path>,
 ) -> bool {
-    production_path == Some(observer_path)
+    let Some(production_path) = production_path else {
+        return false;
+    };
+    if observer_path.exists() && production_path.exists() {
+        if let (Ok(observer_canon), Ok(production_canon)) = (
+            std::fs::canonicalize(observer_path),
+            std::fs::canonicalize(production_path),
+        ) {
+            return observer_canon == production_canon;
+        }
+    }
+    observer_path == production_path
+}
+
+/// MINOR (a): each of the four subscription handlers logs once, the FIRST
+/// time it sees a notification while `observer_db` is unconfigured, then
+/// falls silent for the rest of this process's lifetime. Without this, a
+/// live routing node firing `forward_event`/`connect`/`disconnect` at its
+/// normal traffic rate with `observer-db-path` unset (or failed to open)
+/// would spam one `eprintln!` per notification forever -- pure log noise
+/// for a condition that, once true, stays true for the process's whole
+/// life (there is no live-reconfiguration path that would later set
+/// `observer_db` to `Some`). One `AtomicBool` per subscription topic (not
+/// one shared flag) so each topic's own first-drop is still visible in the
+/// log, rather than only ever logging whichever topic happens to notify
+/// first.
+static FORWARD_EVENT_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
+static CONNECT_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
+static DISCONNECT_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
+static CHANNEL_STATE_CHANGED_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Log `revops: debug: {topic} dropped (observer_db not configured)` at
+/// most once per `topic`'s `logged` flag (see the flags' doc comment).
+/// `Ordering::Relaxed` is sufficient: this only gates whether a debug
+/// `eprintln!` happens, never anything else's correctness, so no
+/// synchronization-with-other-memory-operations guarantee is needed --
+/// just "don't print more than once, near enough."
+fn log_observer_db_drop_once(logged: &AtomicBool, topic: &str) {
+    if !logged.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "revops: debug: {topic} dropped (observer_db not configured); \
+             further {topic} drops will not be logged"
+        );
+    }
 }
 
 fn opt_name(suffix: &str) -> String {
@@ -331,9 +394,7 @@ async fn main() -> Result<()> {
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 match p.state().observer_db.clone() {
                     Some(handle) => notify::on_forward_event(&handle, &v).await,
-                    None => eprintln!(
-                        "revops: debug: forward_event dropped (observer_db not configured)"
-                    ),
+                    None => log_observer_db_drop_once(&FORWARD_EVENT_DROP_LOGGED, "forward_event"),
                 }
                 Ok(())
             },
@@ -343,9 +404,7 @@ async fn main() -> Result<()> {
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 match p.state().observer_db.clone() {
                     Some(handle) => notify::on_connect(&handle, &v).await,
-                    None => {
-                        eprintln!("revops: debug: connect dropped (observer_db not configured)")
-                    }
+                    None => log_observer_db_drop_once(&CONNECT_DROP_LOGGED, "connect"),
                 }
                 Ok(())
             },
@@ -355,9 +414,7 @@ async fn main() -> Result<()> {
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 match p.state().observer_db.clone() {
                     Some(handle) => notify::on_disconnect(&handle, &v).await,
-                    None => {
-                        eprintln!("revops: debug: disconnect dropped (observer_db not configured)")
-                    }
+                    None => log_observer_db_drop_once(&DISCONNECT_DROP_LOGGED, "disconnect"),
                 }
                 Ok(())
             },
@@ -367,8 +424,9 @@ async fn main() -> Result<()> {
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 match p.state().observer_db.clone() {
                     Some(handle) => notify::on_channel_state_changed(&handle, &v).await,
-                    None => eprintln!(
-                        "revops: debug: channel_state_changed dropped (observer_db not configured)"
+                    None => log_observer_db_drop_once(
+                        &CHANNEL_STATE_CHANGED_DROP_LOGGED,
+                        "channel_state_changed",
                     ),
                 }
                 Ok(())
@@ -767,5 +825,82 @@ mod tests {
     fn observer_db_path_collides_with_production_no_production_path() {
         let observer = PathBuf::from("/home/testuser/.lightning/revops-r-observer.db");
         assert!(!observer_db_path_collides_with_production(&observer, None));
+    }
+
+    /// IMPORTANT 4 regression: two textually-DIFFERENT paths that resolve
+    /// to the SAME real file via a symlink (mirroring lnnode's own
+    /// `~/.lightning -> /data/lightningd`) must be caught as a collision.
+    /// Pure string equality misses this entirely -- the exact bypass that
+    /// would hand the observer's read-write actor the production DB.
+    #[test]
+    fn observer_db_path_collides_with_production_via_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // The "real" data directory and its one true db file.
+        let real_dir = dir.path().join("data/lightningd");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let production_path = real_dir.join("revenue_ops.db");
+        std::fs::write(&production_path, b"").unwrap();
+
+        // A symlink pointing at that same real directory, under a
+        // different parent -- e.g. `$HOME/.lightning`.
+        let home_dir = dir.path().join("home");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let symlinked_dir = home_dir.join(".lightning");
+        std::os::unix::fs::symlink(&real_dir, &symlinked_dir).unwrap();
+
+        // Observer path spelled THROUGH the symlink, at the exact same
+        // real file the production path points at directly.
+        let observer_path = symlinked_dir.join("revenue_ops.db");
+
+        assert_ne!(
+            observer_path, production_path,
+            "the two spellings must be textually different for this test to mean anything"
+        );
+        assert!(observer_db_path_collides_with_production(
+            &observer_path,
+            Some(&production_path),
+        ));
+    }
+
+    /// When files don't exist (the common real-world case -- this check
+    /// runs before the observer creates its own file), collision detection
+    /// still falls back to string equality rather than silently reporting
+    /// "no collision" just because canonicalize can't resolve anything.
+    #[test]
+    fn observer_db_path_collides_with_production_falls_back_when_files_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let same_path = dir.path().join("does-not-exist-yet.db");
+        assert!(observer_db_path_collides_with_production(
+            &same_path,
+            Some(&same_path),
+        ));
+    }
+
+    /// MINOR (a) regression: the once-only drop-log flag latches after its
+    /// first flip and stays latched -- confirms the swap-gate itself
+    /// (`log_observer_db_drop_once`'s `AtomicBool::swap`), even though a
+    /// unit test can't directly assert on `eprintln!`'s stderr output.
+    #[test]
+    fn log_observer_db_drop_once_latches_after_first_call() {
+        static TEST_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
+        assert!(!TEST_DROP_LOGGED.load(Ordering::Relaxed));
+        log_observer_db_drop_once(&TEST_DROP_LOGGED, "test_topic");
+        assert!(TEST_DROP_LOGGED.load(Ordering::Relaxed));
+        // Repeated calls are no-ops on the flag -- it was already true.
+        log_observer_db_drop_once(&TEST_DROP_LOGGED, "test_topic");
+        assert!(TEST_DROP_LOGGED.load(Ordering::Relaxed));
+    }
+
+    /// `config_name_map` must expose `observer-db-path` (MINOR b) so
+    /// `revenue-r-config key=observer-db-path` can resolve it, same as the
+    /// pre-existing `observer`/`db-path` entries.
+    #[test]
+    fn config_name_map_includes_observer_db_path() {
+        let map = config_name_map();
+        assert!(
+            map.contains_key("observer-db-path"),
+            "observer-db-path missing from config_name_map: {map:?}"
+        );
     }
 }

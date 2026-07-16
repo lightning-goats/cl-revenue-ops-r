@@ -210,23 +210,28 @@ the fixture; the plugin registers its own `revops-r-db-path` under a
 different contract, per `register_python_options`'s doc comment in
 `crates/revops/src/main.rs`).
 
-**Diff harness — read RPCs.** The plan's Task 6 (`docs/superpowers/plans/
-2026-07-17-phase1b-observer.md`, line ~730) calls for a new script,
-`tools/diff-harness/diff_read_rpcs.py`, comparing `revenue-history` vs
-`revenue-r-history`, `revenue-report costs` vs `revenue-r-report
-report_type=costs`, and `revenue-dashboard` vs `revenue-r-dashboard`
-field-by-field, skipping whatever the Rust response's own `_phase1b_gaps`
-array declares. **That script does not exist in this repo yet** — this is a
-docs-only pass (writing this runbook), so it is not authored here; treat it
-as an explicit open item before the Jul-19 checklist can be run in full. Once
-written, the invocation this runbook expects is:
+**Diff harness — read RPCs.** `tools/diff-harness/diff_read_rpcs.py`
+compares `revenue-history` vs `revenue-r-history`, `revenue-report costs`
+vs `revenue-r-report report_type=costs`, and `revenue-dashboard` vs
+`revenue-r-dashboard` field-by-field, skipping whatever the Rust
+response's own `_phase1b_gaps` array declares, plus an ingestion
+cross-check (`ingested_forwards` vs Python's `forwards` row count). It
+follows `diff_config.py`'s exact ssh + `lightning-cli` + JSON pattern
+(same `cli()`/transport/error/mismatch classification, same exit codes
+0/1/2). Invoke it as:
 
 ```sh
-python3 tools/diff-harness/diff_read_rpcs.py --node lnnode --strict
+python3 tools/diff-harness/diff_read_rpcs.py --node lnnode
 ```
 
-following `diff_config.py`'s exact ssh + `lightning-cli` + JSON pattern
-(same `cli()`/transport/error/mismatch classification, same exit codes 0/1/2).
+(there is no `--strict` flag on this script — `diff_config.py`'s
+`--strict` is specific to that script's normalized/string fallback mode,
+which `diff_read_rpcs.py` has no equivalent of). Run `--self-test` first
+to confirm the harness itself is sound before pointing it at lnnode:
+
+```sh
+python3 tools/diff-harness/diff_read_rpcs.py --self-test
+```
 
 ---
 
@@ -236,18 +241,27 @@ All five must be true before calling the comparison window closed:
 
 - [ ] **(a) Config parity** — `diff_config.py --node lnnode --strict` exits 0
       over the full option surface (119 keys minus `db-path` in `SKIP_KEYS`).
-- [ ] **(b) Read-RPC parity** — `diff_read_rpcs.py --node lnnode --strict`
-      (once authored) exits 0 modulo keys listed in each Rust response's own
+- [ ] **(b) Read-RPC parity** — `diff_read_rpcs.py --node lnnode`
+      exits 0 modulo keys listed in each Rust response's own
       `_phase1b_gaps` array (as of this check: `revenue-r-report`'s
       `summary`/`policies`/`peer` types are wholesale gap-marked, and
       `revenue-r-dashboard` gaps `financial_health.tlv_sats`,
       `financial_health.annualized_roc_pct`, `warnings`, `bleeder_count` —
-      see `crates/revops/src/rpc_report.rs` and `rpc_dashboard.rs`).
-- [ ] **(c) Ingestion row-count cross-check** — NOT a diff-harness script
-      (schemas intentionally differ); spot-check directly:
+      see `crates/revops/src/rpc_report.rs` and `rpc_dashboard.rs`). This
+      also runs the script's own ingestion cross-check (item (c) below),
+      so a manual spot-check is a supplementary sanity check, not the only
+      way to confirm this.
+- [ ] **(c) Ingestion row-count cross-check** — NOT a diff-harness
+      *config/RPC* comparison (the two tables' schemas intentionally
+      differ), but `diff_read_rpcs.py` does run it automatically (see
+      above). Production's `forwards` table stores CLN's `received_time`
+      under the column name `timestamp` (`fixtures/schema.sql`'s
+      `CREATE TABLE forwards` — there is no `received_time` column on
+      that table), so a manual spot-check must query `timestamp`, not
+      `received_time`:
       ```sh
       ssh lnnode 'sqlite3 /data/lightningd/.lightning/revenue_ops.db \
-        "SELECT COUNT(*) FROM forwards WHERE received_time >= <window_start>;"'
+        "SELECT COUNT(*) FROM forwards WHERE timestamp >= <window_start>;"'
       ssh lnnode 'sqlite3 /data/lightningd/.lightning/revops-r-observer.db \
         "SELECT COUNT(*) FROM ingested_forwards WHERE timestamp >= <window_start>;"'
       ```
