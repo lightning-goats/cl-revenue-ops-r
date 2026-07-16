@@ -227,3 +227,40 @@ async fn main() -> Result<()> {
     };
     plugin.join().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bad_default_opt(opt_type: &str, default: serde_json::Value) -> OptDef {
+        OptDef {
+            name: "revops-r-test-bad".to_string(),
+            opt_type: opt_type.to_string(),
+            default,
+            description: "synthetic option for panic-path coverage".to_string(),
+            dynamic: false,
+        }
+    }
+
+    /// Negative test: `register_option` must panic (not silently degrade to
+    /// a valueless option) when a non-null `int` default fails to parse.
+    /// This directly exercises the failure branch the guard test in
+    /// `options_table.rs` cannot reach (that test only walks known-good
+    /// fixture data).
+    #[test]
+    #[should_panic(expected = "has non-null default that fails to parse as i64")]
+    fn register_option_panics_on_unparseable_int_default() {
+        let builder = Builder::<(), _, _>::new(tokio::io::empty(), tokio::io::sink());
+        let opt = bad_default_opt("int", serde_json::json!("not-a-number"));
+        let _ = register_option(builder, "revops-r-test-bad", &opt);
+    }
+
+    /// Same, for the `bool` failure branch.
+    #[test]
+    #[should_panic(expected = "has non-null default that fails to parse as bool")]
+    fn register_option_panics_on_unparseable_bool_default() {
+        let builder = Builder::<(), _, _>::new(tokio::io::empty(), tokio::io::sink());
+        let opt = bad_default_opt("bool", serde_json::json!("not-a-bool"));
+        let _ = register_option(builder, "revops-r-test-bad", &opt);
+    }
+}
