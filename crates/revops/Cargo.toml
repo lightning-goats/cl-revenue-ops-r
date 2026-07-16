@@ -12,6 +12,8 @@ serde_json.workspace = true
 tokio.workspace = true
 revops-core = { path = "../revops-core" }
 revops-db = { path = "../revops-db" }
+revops-rpc = { path = "../revops-rpc" }
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite.workspace = true

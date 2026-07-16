@@ -1,0 +1,44 @@
+[
+ {
+  "last_forward_ts": null,
+  "flow_window_days": 7,
+  "now": 1800000000,
+  "result": 1798790400
+ },
+ {
+  "last_forward_ts": null,
+  "flow_window_days": 30,
+  "now": 1800000000,
+  "result": 1797408000
+ },
+ {
+  "last_forward_ts": 1799999900,
+  "flow_window_days": 7,
+  "now": 1800000000,
+  "result": null
+ },
+ {
+  "last_forward_ts": 1799999700,
+  "flow_window_days": 7,
+  "now": 1800000000,
+  "result": null
+ },
+ {
+  "last_forward_ts": 1799999699,
+  "flow_window_days": 7,
+  "now": 1800000000,
+  "result": 1799913299
+ },
+ {
+  "last_forward_ts": 1799136000,
+  "flow_window_days": 7,
+  "now": 1800000000,
+  "result": 1799049600
+ },
+ {
+  "last_forward_ts": 1791360000,
+  "flow_window_days": 7,
+  "now": 1800000000,
+  "result": 1798704000
+ }
+]

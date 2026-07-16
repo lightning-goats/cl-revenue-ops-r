@@ -448,6 +448,8 @@ dependencies = [
  "cln-plugin",
  "revops-core",
  "revops-db",
+ "revops-rpc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -468,6 +470,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
