@@ -480,7 +480,16 @@ async fn main() -> Result<()> {
                 match s.config_names.get(key) {
                     Some(full_name) => {
                         let fixture_value = p.option_str(full_name)?;
-                        let field_type = config_types::field_type_for(key);
+                        // `db_key` is the Python `Config` field name (used
+                        // for both the override lookup below AND the typed
+                        // JSON conversion) -- for the 4 keys in
+                        // `config_resolve::FIELD_NAME_OVERRIDES` this
+                        // differs from `key.replace('-', "_")`, which is why
+                        // this now goes through `db_override_key` rather
+                        // than passing `key` straight to `field_type_for`
+                        // (CRITICAL 2).
+                        let db_key = revops::config_resolve::db_override_key(key);
+                        let field_type = config_types::field_type_for(&db_key);
                         // (a) DB override / (b) listconfigs live Python-option
                         // value -- both meaningless for the three Rust-only
                         // keys (see `config_resolve::python_option_name`), so
@@ -490,20 +499,47 @@ async fn main() -> Result<()> {
                         let (db_override, python_value) =
                             match revops::config_resolve::python_option_name(key) {
                                 Some(python_name) => {
-                                    let db_key = revops::config_resolve::db_override_key(key);
-                                    let db_override = match &s.db {
-                                        Some(handle) => queries::config_override(handle, &db_key)
-                                            .await
-                                            .unwrap_or_else(|e| {
-                                                eprintln!(
-                                                    "revops: config_override query failed \
-                                                         for {db_key}: {e}"
-                                                );
-                                                None
-                                            }),
-                                        None => None,
-                                    }
-                                    .map(cln_plugin::options::Value::String);
+                                    // CRITICAL 4 / `IMMUTABLE_CONFIG_KEYS`
+                                    // (modules/config.py:22-25): `dry-run`
+                                    // never receives a DB override even if a
+                                    // row exists for it -- Python's
+                                    // `load_overrides` structurally skips
+                                    // applying one, so this skips the query
+                                    // entirely rather than fetching-then-
+                                    // discarding.
+                                    let db_override =
+                                        if revops::config_resolve::is_immutable_key(key) {
+                                            None
+                                        } else {
+                                            match &s.db {
+                                                Some(handle) => {
+                                                    queries::config_override(handle, &db_key)
+                                                    .await
+                                                    .unwrap_or_else(|e| {
+                                                        eprintln!(
+                                                            "revops: config_override query \
+                                                             failed for {db_key}: {e}"
+                                                        );
+                                                        None
+                                                    })
+                                                    // CRITICAL 1: mirror
+                                                    // `Config._apply_override`'s
+                                                    // type/range/enum gate --
+                                                    // an override that fails
+                                                    // any check is skipped
+                                                    // (never surfaced), so
+                                                    // resolution falls
+                                                    // through to (b)/(c).
+                                                    .and_then(|raw| {
+                                                        revops::config_resolve::validate_override(
+                                                            &db_key, &raw,
+                                                        )
+                                                    })
+                                                }
+                                                None => None,
+                                            }
+                                        }
+                                        .map(cln_plugin::options::Value::String);
                                     let python_value =
                                         s.python_option_values.get(&python_name).cloned();
                                     (db_override, python_value)

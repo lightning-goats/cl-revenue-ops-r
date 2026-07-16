@@ -43,11 +43,17 @@
 //! here; see [`python_option_name`]'s `observer`/`db-path`/
 //! `observer-db-path` exclusions.)
 
+use crate::config_types::{self, FieldType};
 use cln_plugin::options;
 use cln_rpc::ClnRpc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// `listconfigs`' RPC timeout, matching hydration's own house pattern
+/// (`crates/revops/src/hydration.rs`'s `RPC_TIMEOUT_SECONDS`, itself
+/// `Config.rpc_timeout_seconds`'s default, modules/config.py:734).
+const LISTCONFIGS_TIMEOUT_SECONDS: u64 = 15;
 
 /// `revenue-r-config` keys with NO Python option counterpart at all --
 /// `observer`/`db-path`/`observer-db-path` are this Rust plugin's own
@@ -68,13 +74,136 @@ pub fn python_option_name(key: &str) -> Option<String> {
     }
 }
 
+/// The four `revenue-r-config` suffixes whose registered CLN option name
+/// (layer (b), used verbatim by [`python_option_name`]) does NOT match the
+/// `Config` dataclass field name (layer (a)'s `config_overrides.key`) under
+/// the naive `suffix.replace("-", "_")` transform -- the exact "Case 2" set
+/// `tools/diff-harness/diff_config.py`'s `OPTION_ONLY_KEYS` comment
+/// documents (both landed there as SKIPPED before this fix, since neither
+/// harness nor this module had the remap). Verified directly against
+/// `cl-revenue-ops.py`:
+///   - `vegas-reflex` -> `enable_vegas_reflex` (line 2545)
+///   - `vegas-decay` -> `vegas_decay_rate` (line 2546)
+///   - `planner-max-fee-rate` -> `planner_max_fee_rate_sat_vb` (line 2560)
+///   - `boltz-structural-budget-sats` -> `boltz_structural_budget_sats_per_day`
+///     (line 2431)
+///
+/// `fixtures/config_types.json` (AST-extracted straight from the `Config`
+/// dataclass) carries only field-name -> type, not this suffix -> field-name
+/// mapping, so it can't be derived from the fixture; this is the "small
+/// cited map" fallback.
+const FIELD_NAME_OVERRIDES: [(&str, &str); 4] = [
+    ("vegas-reflex", "enable_vegas_reflex"),
+    ("vegas-decay", "vegas_decay_rate"),
+    ("planner-max-fee-rate", "planner_max_fee_rate_sat_vb"),
+    (
+        "boltz-structural-budget-sats",
+        "boltz_structural_budget_sats_per_day",
+    ),
+];
+
 /// The `config_overrides.key` value for `key` (a `revenue-r-config`
 /// suffix): the Python `Config` dataclass's snake_case field name, e.g.
 /// `min-fee-ppm` -> `min_fee_ppm`. Matches `diff_config.py`'s own
-/// `py_key = suffix.replace("-", "_")` transform exactly (same fixture,
-/// same two-namespace split documented there).
+/// `py_key = suffix.replace("-", "_")` transform for every key EXCEPT the
+/// four in [`FIELD_NAME_OVERRIDES`], which need the explicit remap instead.
 pub fn db_override_key(key: &str) -> String {
+    for (suffix, field) in FIELD_NAME_OVERRIDES {
+        if key == suffix {
+            return field.to_string();
+        }
+    }
     key.replace('-', "_")
+}
+
+/// `IMMUTABLE_CONFIG_KEYS` (modules/config.py:22-25): `Config.load_overrides`
+/// never applies a DB override to these fields even when a row exists, "to
+/// stop `dry_run` from being overridden to hide actions" (the file's own
+/// comment). `db_path` doesn't need an entry here -- it's already excluded
+/// structurally, since the Rust `db-path` key is [`SELF_ONLY_KEYS`] (this
+/// plugin's OWN db-path option, not reachable to Python's `db_path` field at
+/// all; see that const's doc comment) -- but `dry-run` maps to a REAL Python
+/// option (`revenue-ops-dry-run` -> `Config.dry_run`,
+/// cl-revenue-ops.py:1417,2539) that DOES flow through layers (a)/(b)/(c)
+/// here, so it needs an explicit skip of layer (a) to mirror Python's
+/// safety rule.
+const IMMUTABLE_KEYS: [&str; 1] = ["dry-run"];
+
+/// Whether `key` (a `revenue-r-config` suffix) must never have a DB override
+/// applied, mirroring `IMMUTABLE_CONFIG_KEYS`. See [`IMMUTABLE_KEYS`].
+pub fn is_immutable_key(key: &str) -> bool {
+    IMMUTABLE_KEYS.contains(&key)
+}
+
+/// Mirror of `Config._apply_override`'s type-conversion and validation gate
+/// (modules/config.py:1015-1047), given `field` (the Python `Config` field
+/// name, i.e. [`db_override_key`]'s output -- NOT the `revenue-r-config`
+/// suffix) and `raw` (the override's stored string value).
+///
+/// Returns `Some(raw)` unchanged if the override is admissible (downstream
+/// `config_types::convert_value` re-parses the same string the same way, so
+/// handing back the untouched raw value is equivalent to Python keeping its
+/// freshly `setattr`-assigned typed value), `None` if it must be skipped --
+/// callers must then fall through to layer (b)/(c), exactly as Python's
+/// `_apply_override` leaves the pre-existing (option-layer) value in place
+/// on any of these same three failure modes:
+///
+///   - unparseable for the field's declared type (`int(value)`/`float(value)`
+///     raise `ValueError`) -- `int`/`float` fields only; `bool`/`str` fields
+///     can't fail to parse (Python's bool conversion is a permissive
+///     `.lower() in (...)` membership test, never a raise).
+///   - a non-finite float (`NaN`/`Infinity`) -- `math.isfinite` check,
+///     AUDIT FIX C-2.
+///   - out of [`config_types::field_range`] (`CONFIG_FIELD_RANGES`), or not
+///     a recognized [`config_types::field_enum`] value
+///     (`STRING_ENUM_VALID_VALUES`, case-insensitive).
+///
+/// `field_type_for(field)` defaulting to `FieldType::String` when `field`
+/// has no typed metadata mirrors Python's own default:
+/// `CONFIG_FIELD_TYPES.get(key, str)`.
+pub fn validate_override(field: &str, raw: &str) -> Option<String> {
+    let field_type = config_types::field_type_for(field).unwrap_or(FieldType::String);
+    match field_type {
+        FieldType::Bool => Some(raw.to_string()),
+        FieldType::Int => {
+            let parsed: i64 = raw.parse().ok()?;
+            if !in_range(field, parsed as f64) {
+                return None;
+            }
+            Some(raw.to_string())
+        }
+        FieldType::Float => {
+            let parsed: f64 = raw.parse().ok()?;
+            if !parsed.is_finite() {
+                return None;
+            }
+            if !in_range(field, parsed) {
+                return None;
+            }
+            Some(raw.to_string())
+        }
+        FieldType::String => match config_types::field_enum(field) {
+            Some(valid) => {
+                let lower = raw.to_lowercase();
+                if valid.iter().any(|v| v == raw || v.to_lowercase() == lower) {
+                    // Python lowercases the typed value once it clears the
+                    // enum check (`_apply_override`: `typed_value =
+                    // typed_value.lower()`).
+                    Some(lower)
+                } else {
+                    None
+                }
+            }
+            None => Some(raw.to_string()),
+        },
+    }
+}
+
+fn in_range(field: &str, value: f64) -> bool {
+    match config_types::field_range(field) {
+        Some((min, max)) => value >= min && value <= max,
+        None => true,
+    }
 }
 
 /// Resolve which of the three layers wins, given each already fetched:
@@ -102,7 +231,7 @@ pub fn resolve_option_value(
 /// the exact pre-existing Phase 1a/1b behavior. A `listconfigs` outage at
 /// init must never block plugin startup or take `revenue-r-config` down.
 pub async fn fetch_python_option_values(socket_path: &Path) -> HashMap<String, options::Value> {
-    match call_listconfigs(socket_path).await {
+    match call_listconfigs(socket_path, LISTCONFIGS_TIMEOUT_SECONDS).await {
         Ok(body) => parse_listconfigs_response(&body),
         Err(e) => {
             eprintln!(
@@ -114,16 +243,34 @@ pub async fn fetch_python_option_values(socket_path: &Path) -> HashMap<String, o
     }
 }
 
-async fn call_listconfigs(socket_path: &Path) -> anyhow::Result<Value> {
-    let mut rpc = ClnRpc::new(socket_path).await.map_err(|e| {
-        anyhow::anyhow!(
-            "connect lightning-rpc socket {}: {e}",
-            socket_path.display()
-        )
-    })?;
-    rpc.call_raw::<Value, Value>("listconfigs", &json!({}))
-        .await
-        .map_err(|e| anyhow::anyhow!("listconfigs RPC error: {e}"))
+/// Wrapped in `revops_rpc::call_with_timeout`, matching hydration's house
+/// pattern for every lightningd RPC call this plugin makes
+/// (`crates/revops/src/hydration.rs`'s `fetch_settled_forwards`) -- a
+/// hung/slow `listconfigs` (e.g. lightningd under heavy load at plugin
+/// init) must degrade to the empty-map fallback within a bounded time,
+/// never block plugin startup indefinitely.
+///
+/// `timeout_secs` is a parameter (rather than reading
+/// `LISTCONFIGS_TIMEOUT_SECONDS` directly) purely so this function's own
+/// `#[cfg(test)]` seam can inject a 0-second budget and assert the actual
+/// timeout wiring fires deterministically, without a test that spends 15
+/// real seconds waiting -- the only production caller,
+/// [`fetch_python_option_values`], always passes the real
+/// `LISTCONFIGS_TIMEOUT_SECONDS` (15s).
+async fn call_listconfigs(socket_path: &Path, timeout_secs: u64) -> anyhow::Result<Value> {
+    revops_rpc::call_with_timeout("listconfigs", timeout_secs, async {
+        let mut rpc = ClnRpc::new(socket_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "connect lightning-rpc socket {}: {e}",
+                socket_path.display()
+            )
+        })?;
+        rpc.call_raw::<Value, Value>("listconfigs", &json!({}))
+            .await
+            .map_err(|e| anyhow::anyhow!("listconfigs RPC error: {e}"))
+    })
+    .await
+    .map_err(anyhow::Error::from)
 }
 
 /// Pure parse: extract `revenue-ops-*` entries from a raw `listconfigs`
@@ -196,6 +343,126 @@ mod tests {
     fn db_override_key_converts_hyphens_to_underscores() {
         assert_eq!(db_override_key("daily-budget-sats"), "daily_budget_sats");
         assert_eq!(db_override_key("min_fee_ppm"), "min_fee_ppm");
+    }
+
+    /// CRITICAL 2: the four suffixes whose `Config` field name doesn't match
+    /// the naive `suffix.replace("-", "_")` transform -- verified against
+    /// `cl-revenue-ops.py:2431,2545,2546,2560`.
+    #[test]
+    fn db_override_key_applies_field_name_overrides() {
+        assert_eq!(db_override_key("vegas-reflex"), "enable_vegas_reflex");
+        assert_eq!(db_override_key("vegas-decay"), "vegas_decay_rate");
+        assert_eq!(
+            db_override_key("planner-max-fee-rate"),
+            "planner_max_fee_rate_sat_vb"
+        );
+        assert_eq!(
+            db_override_key("boltz-structural-budget-sats"),
+            "boltz_structural_budget_sats_per_day"
+        );
+    }
+
+    /// IMPORTANT 4 / `IMMUTABLE_CONFIG_KEYS` (modules/config.py:22-25):
+    /// `dry-run` is flagged immutable; every other key (including a
+    /// similarly-named but distinct key) is not.
+    #[test]
+    fn is_immutable_key_flags_only_dry_run() {
+        assert!(is_immutable_key("dry-run"));
+        assert!(!is_immutable_key("planner-dry-run"));
+        assert!(!is_immutable_key("min-fee-ppm"));
+    }
+
+    // -- validate_override: CRITICAL 1 (Config._apply_override port) --
+
+    /// An unparseable int override is skipped (falls through), matching
+    /// Python's `int(value)` raising `ValueError` inside `_apply_override`'s
+    /// try/except.
+    #[test]
+    fn validate_override_rejects_unparseable_int() {
+        assert_eq!(validate_override("daily_budget_sats", "not-a-number"), None);
+    }
+
+    /// An out-of-range int override is skipped -- `daily_budget_sats`'s
+    /// `CONFIG_FIELD_RANGES` entry is `(0, 10_000_000)`.
+    #[test]
+    fn validate_override_rejects_out_of_range_int() {
+        assert_eq!(validate_override("daily_budget_sats", "50000000"), None);
+        assert_eq!(
+            validate_override("daily_budget_sats", "5000"),
+            Some("5000".to_string())
+        );
+    }
+
+    /// An out-of-range float override is skipped -- `min_fee_ppm`'s range is
+    /// `(5, 100000)` (CRITICAL-02 economic-viability floor).
+    #[test]
+    fn validate_override_rejects_out_of_range_via_min_fee_ppm() {
+        assert_eq!(validate_override("min_fee_ppm", "1"), None);
+        assert_eq!(
+            validate_override("min_fee_ppm", "40"),
+            Some("40".to_string())
+        );
+    }
+
+    /// A non-finite float override (NaN/Infinity) is skipped -- AUDIT FIX
+    /// C-2 in `_apply_override`.
+    #[test]
+    fn validate_override_rejects_non_finite_float() {
+        assert_eq!(validate_override("vegas_decay_rate", "nan"), None);
+        assert_eq!(validate_override("vegas_decay_rate", "inf"), None);
+        assert_eq!(
+            validate_override("vegas_decay_rate", "0.5"),
+            Some("0.5".to_string())
+        );
+    }
+
+    /// An unparseable float override is skipped the same way.
+    #[test]
+    fn validate_override_rejects_unparseable_float() {
+        assert_eq!(validate_override("vegas_decay_rate", "not-a-float"), None);
+    }
+
+    /// An invalid enum override (`fee_profile` only accepts
+    /// `STRING_ENUM_VALID_VALUES["fee_profile"]`) is skipped.
+    #[test]
+    fn validate_override_rejects_invalid_enum() {
+        assert_eq!(validate_override("fee_profile", "aggressive"), None);
+        assert_eq!(
+            validate_override("fee_profile", "active"),
+            Some("active".to_string())
+        );
+        // Case-insensitive match is admissible, mirroring
+        // `_apply_override`'s `.lower()` comparison.
+        assert_eq!(
+            validate_override("fee_profile", "ACTIVE"),
+            Some("active".to_string())
+        );
+    }
+
+    /// A bool override is never rejected for parse failure (Python's bool
+    /// conversion is a permissive membership test, not a raise) and bool
+    /// fields have no range/enum entries to fail either.
+    #[test]
+    fn validate_override_bool_field_always_passes_through() {
+        assert_eq!(
+            validate_override("enable_vegas_reflex", "true"),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            validate_override("enable_vegas_reflex", "garbage"),
+            Some("garbage".to_string())
+        );
+    }
+
+    /// A field with no typed metadata at all defaults to `String` (Python's
+    /// `CONFIG_FIELD_TYPES.get(key, str)`) and passes through unless it also
+    /// has an enum constraint.
+    #[test]
+    fn validate_override_unknown_field_defaults_to_string() {
+        assert_eq!(
+            validate_override("not-a-real-config-field", "anything"),
+            Some("anything".to_string())
+        );
     }
 
     /// (a) DB override wins over everything, even when (b)/(c) both have a
@@ -325,5 +592,33 @@ mod tests {
         });
         let map = parse_listconfigs_response(&body);
         assert!(map.is_empty());
+    }
+
+    /// IMPORTANT 3: `call_listconfigs` is wrapped in
+    /// `revops_rpc::call_with_timeout` -- a connection that accepts but
+    /// never replies must time out rather than hang forever. Injects a
+    /// 0-second budget (same trick as
+    /// `revops-rpc/tests/timeout.rs::timeout_error_string_matches_python`)
+    /// so this asserts the real timeout wiring fires without the test
+    /// suite waiting out the production 15s budget.
+    #[tokio::test]
+    async fn call_listconfigs_times_out_on_a_hanging_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lightning-rpc");
+        // Bind but deliberately never `accept()`/write a reply -- the
+        // client's connect() succeeds (AF_UNIX doesn't require an accept()
+        // to complete a local connect), then `call_raw` hangs forever
+        // waiting for a response that never comes. Held alive for the
+        // test's duration so the socket isn't torn down mid-await.
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let held = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            drop(listener);
+        });
+
+        let err = call_listconfigs(&path, 0).await.unwrap_err();
+        assert_eq!(err.to_string(), "RPC timeout after 0s on listconfigs");
+
+        held.abort();
     }
 }

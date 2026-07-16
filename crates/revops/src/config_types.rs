@@ -42,6 +42,16 @@ struct RawTable {
     fields: HashMap<String, String>,
     public_keys: Vec<String>,
     deprecated_keys: Vec<String>,
+    /// `CONFIG_FIELD_RANGES` (modules/config.py:354-480, 96 entries as of
+    /// this writing): field name -> `[min, max]`, both numbers (int or
+    /// float in Python; `f64` here covers both without loss for the
+    /// comparison this table exists for).
+    #[serde(default)]
+    ranges: HashMap<String, (f64, f64)>,
+    /// `STRING_ENUM_VALID_VALUES` (modules/config.py:483-490, 5 entries):
+    /// field name -> valid value list.
+    #[serde(default)]
+    enums: HashMap<String, Vec<String>>,
 }
 
 /// Typed `Config` field metadata plus the public/deprecated runtime-key
@@ -50,6 +60,10 @@ pub struct ConfigTypes {
     pub fields: HashMap<String, FieldType>,
     pub public_keys: Vec<String>,
     pub deprecated_keys: Vec<String>,
+    /// `CONFIG_FIELD_RANGES` -- see [`field_range`].
+    pub ranges: HashMap<String, (f64, f64)>,
+    /// `STRING_ENUM_VALID_VALUES` -- see [`field_enum`].
+    pub enums: HashMap<String, Vec<String>>,
 }
 
 /// Load the embedded `fixtures/config_types.json` table.
@@ -65,7 +79,25 @@ pub fn load() -> ConfigTypes {
         fields,
         public_keys: raw.public_keys,
         deprecated_keys: raw.deprecated_keys,
+        ranges: raw.ranges,
+        enums: raw.enums,
     }
+}
+
+/// `CONFIG_FIELD_RANGES[field]` (`(min, max)`), or `None` if `field` has no
+/// range constraint. `field` must already be the Python `Config` field name
+/// (snake_case) -- unlike [`field_type_for`]/[`classify_runtime_key`], no
+/// hyphen-to-underscore fallback is applied here since every caller in this
+/// module already resolves to the field name first (via
+/// `config_resolve::db_override_key`).
+pub fn field_range(field: &str) -> Option<(f64, f64)> {
+    load().ranges.get(field).copied()
+}
+
+/// `STRING_ENUM_VALID_VALUES[field]`, or `None` if `field` has no enum
+/// constraint. Same field-name-only lookup contract as [`field_range`].
+pub fn field_enum(field: &str) -> Option<Vec<String>> {
+    load().enums.get(field).cloned()
 }
 
 /// Resolve a `FieldType` for `key`, trying it verbatim first (the Python
@@ -189,6 +221,34 @@ mod tests {
         assert!(!table.fields.is_empty());
         assert!(!table.public_keys.is_empty());
         assert!(!table.deprecated_keys.is_empty());
+        assert!(!table.ranges.is_empty());
+        assert!(!table.enums.is_empty());
+    }
+
+    /// `CONFIG_FIELD_RANGES['min_fee_ppm']` (modules/config.py:355):
+    /// `(5, 100000)`, the CRITICAL-02 economic-viability floor.
+    #[test]
+    fn field_range_loads_min_fee_ppm() {
+        assert_eq!(field_range("min_fee_ppm"), Some((5.0, 100000.0)));
+    }
+
+    #[test]
+    fn field_range_unknown_field_is_none() {
+        assert_eq!(field_range("not-a-real-config-field"), None);
+    }
+
+    /// `STRING_ENUM_VALID_VALUES['fee_profile']` (modules/config.py:485).
+    #[test]
+    fn field_enum_loads_fee_profile() {
+        assert_eq!(
+            field_enum("fee_profile"),
+            Some(vec!["active".to_string(), "conservative".to_string()])
+        );
+    }
+
+    #[test]
+    fn field_enum_unknown_field_is_none() {
+        assert_eq!(field_enum("not-a-real-config-field"), None);
     }
 
     #[test]

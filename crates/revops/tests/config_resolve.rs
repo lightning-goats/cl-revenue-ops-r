@@ -109,3 +109,38 @@ async fn missing_socket_yields_empty_map() {
     let map = fetch_python_option_values(&path).await;
     assert!(map.is_empty());
 }
+
+/// CRITICAL 2 end-to-end: a DB override row seeded under the Python
+/// `Config` FIELD name (`enable_vegas_reflex`) is found via
+/// `db_override_key`'s remap of the `revenue-r-config` OPTION-SUFFIX key
+/// (`vegas-reflex`) -- exactly the query `main.rs`'s `revenue-r-config`
+/// handler runs. Before CRITICAL 2's fix, `db_override_key("vegas-reflex")`
+/// naively produced `"vegas_reflex"`, which never matches this row, so the
+/// override was silently invisible to layer (a).
+#[tokio::test]
+async fn db_override_key_resolves_seeded_override_for_a_renamed_field() {
+    use revops::config_resolve::db_override_key;
+    use revops_db::queries::config_override;
+
+    let fixture_db =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seeded.db");
+    std::fs::copy(&fixture_db, &path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["enable_vegas_reflex", "true", 1i64, 1_800_000_000i64],
+        )
+        .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+
+    let db_key = db_override_key("vegas-reflex");
+    assert_eq!(db_key, "enable_vegas_reflex");
+    assert_eq!(
+        config_override(&handle, &db_key).await.unwrap(),
+        Some("true".to_string())
+    );
+}
