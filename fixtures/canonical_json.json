@@ -1,0 +1,48 @@
+[
+ {
+  "value": {
+   "b": 1,
+   "a": [
+    3,
+    2,
+    {
+     "z": null,
+     "y": true
+    }
+   ],
+   "μ": "ünïcode"
+  },
+  "canonical": "{\"a\":[3,2,{\"y\":true,\"z\":null}],\"b\":1,\"μ\":\"ünïcode\"}"
+ },
+ {
+  "value": {
+   "nested": {
+    "c": {
+     "b": {
+      "a": 0
+     }
+    }
+   },
+   "empty": {},
+   "list": []
+  },
+  "canonical": "{\"empty\":{},\"list\":[],\"nested\":{\"c\":{\"b\":{\"a\":0}}}}"
+ },
+ {
+  "value": {
+   "floats_forbidden_note": "ints only in canonical payloads",
+   "n": 9007199254740991
+  },
+  "canonical": "{\"floats_forbidden_note\":\"ints only in canonical payloads\",\"n\":9007199254740991}"
+ },
+ {
+  "value": {
+   "s": "quote\" backslash\\ newline\n tab\t"
+  },
+  "canonical": "{\"s\":\"quote\\\" backslash\\\\ newline\\n tab\\t\"}"
+ },
+ {
+  "value": {},
+  "canonical": "{}"
+ }
+]

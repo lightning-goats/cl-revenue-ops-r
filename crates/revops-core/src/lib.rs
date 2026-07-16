@@ -3,4 +3,5 @@
 //! `docs/superpowers/plans/2026-07-16-phase1a-foundations.md`.
 #![forbid(unsafe_code)]
 
+pub mod canonical;
 pub mod msat;
