@@ -12,7 +12,7 @@
 //! and the owning task exits cleanly on its own.
 
 use anyhow::{Context, Result};
-use rusqlite::{types::Value as SqlValue, Connection, Row};
+use rusqlite::{types::Value as SqlValue, Connection, OptionalExtension, Row};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
@@ -25,6 +25,20 @@ enum Command {
         sql: &'static str,
         params: Vec<SqlValue>,
         reply: oneshot::Sender<Result<i64>>,
+    },
+    /// Single-nullable-string-column query -- for lookups where "no row"
+    /// is the normal, common case (e.g. `config_overrides` has no row for
+    /// most keys, since most settings are never overridden) and must
+    /// resolve to `Ok(None)`, not an `Err` indistinguishable from a real
+    /// SQL/connection failure. `query_i64`/`query_row` both propagate
+    /// `rusqlite`'s `QueryReturnedNoRows` as an `Err` (via
+    /// `Connection::query_row`), which is correct for their own callers
+    /// (every existing caller's query always expects exactly one row, via
+    /// `COALESCE(...)`/aggregate SQL) but wrong for this one.
+    QueryOptionalString {
+        sql: &'static str,
+        params: Vec<SqlValue>,
+        reply: oneshot::Sender<Result<Option<String>>>,
     },
     /// Type-erased job for [`DbHandle::query_row`]. Rust enums can't carry
     /// a generic variant, so the job closure captures its own (typed)
@@ -74,6 +88,24 @@ impl DbHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Command::QueryI64 { sql, params, reply })
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+
+    /// Single-nullable-string-column query. `Ok(None)` means "zero rows
+    /// matched" (the normal case for a lookup like `config_overrides` on an
+    /// un-overridden key) -- see [`Command::QueryOptionalString`]'s doc
+    /// comment for why this needs its own primitive rather than reusing
+    /// `query_i64`/`query_row`.
+    pub async fn query_optional_string(
+        &self,
+        sql: &'static str,
+        params: Vec<SqlValue>,
+    ) -> Result<Option<String>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::QueryOptionalString { sql, params, reply })
             .await
             .context("actor gone")?;
         rx.await.context("actor dropped reply")?
@@ -164,6 +196,10 @@ pub async fn spawn_read_only(path: &Path) -> Result<DbHandle> {
                     let result = run_query_i64(&conn, sql, &params);
                     let _ = reply.send(result);
                 }
+                Command::QueryOptionalString { sql, params, reply } => {
+                    let result = run_query_optional_string(&conn, sql, &params);
+                    let _ = reply.send(result);
+                }
                 Command::Exec(job) => job(&conn),
             }
         }
@@ -176,4 +212,16 @@ fn run_query_i64(conn: &Connection, sql: &str, params: &[SqlValue]) -> Result<i6
         params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     conn.query_row(sql, param_refs.as_slice(), |r: &Row| r.get(0))
         .context("query_i64")
+}
+
+fn run_query_optional_string(
+    conn: &Connection,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<Option<String>> {
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    conn.query_row(sql, param_refs.as_slice(), |r: &Row| r.get::<_, String>(0))
+        .optional()
+        .context("query_optional_string")
 }
