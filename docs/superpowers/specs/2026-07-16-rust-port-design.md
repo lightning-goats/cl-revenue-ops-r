@@ -59,6 +59,15 @@ ledger, so capital controls hold across both plugins during the transition.
 During pre-cutover phases the Rust plugin opens the production DB read-only
 (or a snapshot copy) and writes only to its own parallel DB file.
 
+**Name collisions during coexistence:** CLN rejects a plugin that registers
+an option or RPC method name another loaded plugin already owns. While both
+plugins are loaded, the Rust plugin therefore registers namespaced names —
+options `revops-r-<suffix>` (for Python's `revenue-ops-<suffix>`), RPC
+methods `revenue-r-*` (for Python's `revenue-*`) — selected at startup via
+the `REVOPS_CANONICAL_NAMES` environment switch. At final cutover (Python
+unloaded) the switch flips and the canonical names apply, so operator config
+files load unchanged. The diff harness owns the name mapping.
+
 ## Architecture
 
 Cargo workspace, one binary:
