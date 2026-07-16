@@ -103,20 +103,72 @@ pub fn classify_runtime_key(key: &str) -> &'static str {
 
 /// Convert a resolved `cln-plugin` option value into the JSON scalar shape
 /// Python would emit for a `Config` field of the given (already-resolved)
-/// type. `Int`/`Bool`/`String` fields pass their native `cln-plugin` value
-/// straight through (their CLN option type already matches); a `Float`
-/// field backed by a `string`-typed CLN option gets parsed to `f64` --
-/// several `Config` float fields are declared as CLN `string` options
-/// (confirmed per-field from the fixture, not assumed). `field_type: None`
-/// (no typed metadata for this key) also passes the raw value through
-/// unconverted.
+/// type.
+///
+/// Cross-referencing `fixtures/config_types.json` against
+/// `fixtures/options.json` shows 62 of the 90 `Int`/`Bool` `Config` fields
+/// are registered as CLN `string`-typed options (their Python default is a
+/// string like `"5000"` or `"true"`, parsed by hand in
+/// `cl-revenue-ops.py`'s `_safe_int`/`_safe_int_opt` calls and the assorted
+/// inline `.lower() == 'true'` / `.lower() in (...)` checks around
+/// `config_kwargs`). At runtime those arrive here as
+/// `options::Value::String("5000")`, not `Value::Integer`/`Value::Boolean`
+/// -- so `Int`/`Bool` fields need the same "parse the string" treatment
+/// `Float` already got, or they'd pass through this function as JSON
+/// strings where Python returns ints/bools.
+///
+/// `Int` fields: `s.parse::<i64>()`, mirroring Python's `int(options[key])`
+/// (`_safe_int`/`_safe_int_opt` in `cl-revenue-ops.py`) -- both reject
+/// non-integer strings (e.g. `"5000.0"`) the same way.
+///
+/// `Bool` fields: Python's own bool-parsing is *not* consistent across the
+/// `Config` field spread -- `cl-revenue-ops.py`'s per-field startup
+/// conversions vary between `.lower() == 'true'` (14 fields) and
+/// `.lower() in ('true', '1', 'yes')` (9 fields), but the one generic,
+/// field-type-driven bool parser in the codebase --
+/// `modules/config.py`'s `Config._apply_override`/`update_runtime`, which
+/// (like this function) looks up a field's declared type and converts
+/// generically rather than per-field -- accepts `('true', '1', 'yes',
+/// 'on')` case-insensitively as truthy, anything else as false. Since this
+/// function is the direct Rust analogue of that generic, type-driven
+/// conversion (not of the ad hoc per-field startup expressions), it
+/// mirrors `_apply_override`'s tolerance: `true`/`1`/`yes`/`on`
+/// (case-insensitive) are truthy, everything else (including unparseable
+/// junk) is false -- matching `_apply_override`'s permissive fallthrough
+/// rather than `update_runtime`'s stricter reject-on-typo behavior, since
+/// this is a read path (`revenue-r-config get`), not a validated write.
+///
+/// `Float` fields backed by a `string`-typed CLN option get parsed to
+/// `f64` -- several `Config` float fields are declared as CLN `string`
+/// options (confirmed per-field from the fixture, not assumed).
+///
+/// Native-typed values (an `Int` field backed by a CLN `int` option, a
+/// `Bool` field backed by a CLN `bool` option, any `String` field) pass
+/// through unconverted, as does `field_type: None` (no typed metadata for
+/// this key).
 pub fn convert_value(field_type: Option<FieldType>, raw: &options::Value) -> Value {
-    if field_type == Some(FieldType::Float) {
-        if let options::Value::String(s) = raw {
-            if let Ok(f) = s.parse::<f64>() {
-                return serde_json::json!(f);
+    match field_type {
+        Some(FieldType::Float) => {
+            if let options::Value::String(s) = raw {
+                if let Ok(f) = s.parse::<f64>() {
+                    return serde_json::json!(f);
+                }
             }
         }
+        Some(FieldType::Int) => {
+            if let options::Value::String(s) = raw {
+                if let Ok(i) = s.parse::<i64>() {
+                    return serde_json::json!(i);
+                }
+            }
+        }
+        Some(FieldType::Bool) => {
+            if let options::Value::String(s) = raw {
+                let truthy = matches!(s.to_lowercase().as_str(), "true" | "1" | "yes" | "on");
+                return serde_json::json!(truthy);
+            }
+        }
+        _ => {}
     }
     serde_json::to_value(raw).unwrap_or(Value::Null)
 }
@@ -155,6 +207,121 @@ mod tests {
         assert_eq!(
             convert_value(None, &options::Value::Integer(9)),
             serde_json::json!(9)
+        );
+    }
+
+    /// `flow_interval` (fixture: `"int"`) is registered as a `string`-typed
+    /// CLN option (`revenue-ops-flow-interval`, default `"3600"` in
+    /// `fixtures/options.json`) -- this is the actual runtime shape
+    /// `cln-plugin` hands back for it: `options::Value::String("5000")`,
+    /// not `Value::Integer`. Confirms the fix for CRITICAL 1: a
+    /// string-backed `Int` field must parse to a JSON number, matching
+    /// Python's `_safe_int('revenue-ops-flow-interval')`.
+    #[test]
+    fn convert_value_parses_string_backed_int_field() {
+        assert_eq!(field_type_for("flow_interval"), Some(FieldType::Int));
+        assert_eq!(
+            convert_value(
+                Some(FieldType::Int),
+                &options::Value::String("5000".to_string())
+            ),
+            serde_json::json!(5000)
+        );
+    }
+
+    /// Unparseable string for an `Int` field (e.g. corrupted config) falls
+    /// back to passing the raw value through as JSON, rather than
+    /// panicking -- matches this function's existing no-field-type
+    /// fallback behavior.
+    #[test]
+    fn convert_value_int_field_falls_back_on_unparseable_string() {
+        assert_eq!(
+            convert_value(
+                Some(FieldType::Int),
+                &options::Value::String("not-a-number".to_string())
+            ),
+            serde_json::json!("not-a-number")
+        );
+    }
+
+    /// A real string-backed bool field: `hot_channel_protection_enabled`
+    /// (fixture: `"bool"`) is registered as CLN option
+    /// `revenue-ops-hot-channel-protection-enabled`, a `string`-typed
+    /// option with default `"true"` per `fixtures/options.json`. Runtime
+    /// shape is `options::Value::String("true")`; must convert to JSON
+    /// `true`, not the string `"true"`.
+    #[test]
+    fn convert_value_parses_string_backed_bool_field() {
+        assert_eq!(
+            field_type_for("hot_channel_protection_enabled"),
+            Some(FieldType::Bool)
+        );
+        assert_eq!(
+            convert_value(
+                Some(FieldType::Bool),
+                &options::Value::String("true".to_string())
+            ),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            convert_value(
+                Some(FieldType::Bool),
+                &options::Value::String("false".to_string())
+            ),
+            serde_json::json!(false)
+        );
+    }
+
+    /// Bool tolerance mirrors `modules/config.py`'s generic,
+    /// field-type-driven parser (`Config._apply_override` /
+    /// `update_runtime`): `true`/`1`/`yes`/`on` (case-insensitive) are
+    /// truthy; everything else -- including "false" spellings and
+    /// unparseable junk -- is false.
+    #[test]
+    fn convert_value_bool_field_accepts_python_truthy_spellings() {
+        for truthy in ["true", "TRUE", "True", "1", "yes", "YES", "on", "On"] {
+            assert_eq!(
+                convert_value(
+                    Some(FieldType::Bool),
+                    &options::Value::String(truthy.to_string())
+                ),
+                serde_json::json!(true),
+                "expected {truthy:?} to parse truthy"
+            );
+        }
+        for falsy in ["false", "FALSE", "0", "no", "off", "garbage", ""] {
+            assert_eq!(
+                convert_value(
+                    Some(FieldType::Bool),
+                    &options::Value::String(falsy.to_string())
+                ),
+                serde_json::json!(false),
+                "expected {falsy:?} to parse falsy"
+            );
+        }
+    }
+
+    /// A `Bool` field already backed by a native CLN `bool` option (the 28
+    /// of 90 that aren't string-typed) passes through unconverted -- no
+    /// double-parsing of an already-correct `Value::Boolean`.
+    #[test]
+    fn convert_value_native_bool_passes_through() {
+        assert_eq!(
+            convert_value(Some(FieldType::Bool), &options::Value::Boolean(true)),
+            serde_json::json!(true)
+        );
+    }
+
+    /// A `Float` field's existing conversion is unaffected by the
+    /// Int/Bool fix -- regression guard.
+    #[test]
+    fn convert_value_still_parses_string_backed_float_field() {
+        assert_eq!(
+            convert_value(
+                Some(FieldType::Float),
+                &options::Value::String("0.20".to_string())
+            ),
+            serde_json::json!(0.20)
         );
     }
 }
