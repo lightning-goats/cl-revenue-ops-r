@@ -63,67 +63,12 @@ impl ProfitabilityClass {
 }
 
 // =============================================================================
-// Local ChannelRole mirror (see module doc comment above)
+// ChannelRole + revenue_role_30d: canonical versions from classification
+// (T4's task-local mirrors reconciled at merge time; review verified
+// semantic identity)
 // =============================================================================
 
-/// Mirrors `classification::ChannelRole` (Task 2) — see module doc comment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelRole {
-    InboundGateway,
-    OutboundGateway,
-    Balanced,
-    Dormant,
-}
-
-impl ChannelRole {
-    pub fn as_value(&self) -> &'static str {
-        match self {
-            ChannelRole::InboundGateway => "inbound_gateway",
-            ChannelRole::OutboundGateway => "outbound_gateway",
-            ChannelRole::Balanced => "balanced",
-            ChannelRole::Dormant => "dormant",
-        }
-    }
-
-    pub fn as_name(&self) -> &'static str {
-        match self {
-            ChannelRole::InboundGateway => "INBOUND_GATEWAY",
-            ChannelRole::OutboundGateway => "OUTBOUND_GATEWAY",
-            ChannelRole::Balanced => "BALANCED",
-            ChannelRole::Dormant => "DORMANT",
-        }
-    }
-}
-
-const ROLE_MIN_FORWARDS_30D: i64 = 10;
-const ROLE_DIRECTIONAL_RATIO: f64 = 0.70;
-
-/// Windowed (30d) revenue-role classification (audit F2), mirroring
-/// `classification.revenue_role_30d` 1:1. Falls back to `lifetime_role`
-/// when no 30d window was fetched.
-pub fn revenue_role_30d(
-    window_30d_available: bool,
-    forward_count_30d: i64,
-    sourced_forward_count_30d: i64,
-    lifetime_role: ChannelRole,
-) -> ChannelRole {
-    if !window_30d_available {
-        return lifetime_role;
-    }
-    let total_forwards = forward_count_30d + sourced_forward_count_30d;
-    if total_forwards < ROLE_MIN_FORWARDS_30D {
-        return ChannelRole::Dormant;
-    }
-    let inbound_ratio = sourced_forward_count_30d as f64 / total_forwards as f64;
-    let outbound_ratio = forward_count_30d as f64 / total_forwards as f64;
-    if inbound_ratio > ROLE_DIRECTIONAL_RATIO {
-        ChannelRole::InboundGateway
-    } else if outbound_ratio > ROLE_DIRECTIONAL_RATIO {
-        ChannelRole::OutboundGateway
-    } else {
-        ChannelRole::Balanced
-    }
-}
+pub use crate::classification::{revenue_role_30d, ChannelRole};
 
 // =============================================================================
 // msat -> sat rounding (frozen boundary semantics)
