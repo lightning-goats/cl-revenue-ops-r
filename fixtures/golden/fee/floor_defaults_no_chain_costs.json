@@ -1,0 +1,8 @@
+{
+  "floor_ppm": 21,
+  "inputs": {
+    "capacity_sats": 2000000,
+    "chain_costs": null,
+    "opener": "local"
+  }
+}

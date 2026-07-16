@@ -1,0 +1,77 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "current_fee_ppm": 1,
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": 100
+  },
+  {
+   "current_fee_ppm": 1,
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": 50
+  },
+  {
+   "current_fee_ppm": 0,
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": 100
+  },
+  {
+   "current_fee_ppm": -5,
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": 100
+  },
+  {
+   "current_fee_ppm": 100,
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": 25
+  },
+  {
+   "current_fee_ppm": 101,
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": 26
+  },
+  {
+   "current_fee_ppm": 201,
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": 51
+  },
+  {
+   "current_fee_ppm": 200,
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": 50
+  },
+  {
+   "current_fee_ppm": 1000,
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": 500
+  },
+  {
+   "current_fee_ppm": 1000,
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": 200
+  },
+  {
+   "current_fee_ppm": 5,
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": 25
+  },
+  {
+   "current_fee_ppm": 3,
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": 10
+  }
+ ]
+}

@@ -1,0 +1,15 @@
+{
+  "applied_fee_ppm": 1150,
+  "diag": {
+    "cap_applied": true,
+    "cap_reason": "normal_cycle_delta_cap",
+    "max_delta_ppm": 150,
+    "requested_delta_ppm": 4000,
+    "wake_damping_applied": false
+  },
+  "inputs": {
+    "current": 1000,
+    "target": 5000,
+    "woke": false
+  }
+}

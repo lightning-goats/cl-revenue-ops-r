@@ -1,0 +1,293 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "label": "passthrough_nonzero_rate",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 800,
+    "min_fee": 10,
+    "zero_revenue_streak": 20,
+    "forwards_since_update": 0,
+    "revenue_rate": "1.5",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 800,
+   "expected_tag": null
+  },
+  {
+   "label": "passthrough_nonzero_forwards",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 800,
+    "min_fee": 10,
+    "zero_revenue_streak": 20,
+    "forwards_since_update": 3,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 800,
+   "expected_tag": null
+  },
+  {
+   "label": "passthrough_streak_below_guard",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 800,
+    "min_fee": 10,
+    "zero_revenue_streak": 2,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 800,
+   "expected_tag": null
+  },
+  {
+   "label": "hold_at_guard_thresh_lower_target",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 300,
+    "min_fee": 10,
+    "zero_revenue_streak": 8,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 300,
+   "expected_tag": "zero_flow_ratchet_guard"
+  },
+  {
+   "label": "hold_at_guard_thresh_higher_target_blocked",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 900,
+    "min_fee": 10,
+    "zero_revenue_streak": 8,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 500,
+   "expected_tag": "zero_flow_ratchet_guard"
+  },
+  {
+   "label": "floor_override_raise",
+   "inputs": {
+    "current_fee": 50,
+    "target_fee": 40,
+    "min_fee": 100,
+    "zero_revenue_streak": 8,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 100,
+   "expected_tag": "zero_flow_floor_override"
+  },
+  {
+   "label": "downshift_step_at_thresh",
+   "inputs": {
+    "current_fee": 1000,
+    "target_fee": 1200,
+    "min_fee": 10,
+    "zero_revenue_streak": 24,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 850,
+   "expected_tag": "zero_flow_downshift"
+  },
+  {
+   "label": "hold_at_thresh_plus_11",
+   "inputs": {
+    "current_fee": 1000,
+    "target_fee": 1200,
+    "min_fee": 10,
+    "zero_revenue_streak": 35,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 1000,
+   "expected_tag": "zero_flow_ratchet_guard"
+  },
+  {
+   "label": "downshift_step_at_thresh_plus_12",
+   "inputs": {
+    "current_fee": 1000,
+    "target_fee": 1200,
+    "min_fee": 10,
+    "zero_revenue_streak": 36,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 850,
+   "expected_tag": "zero_flow_downshift"
+  },
+  {
+   "label": "downshift_capped_by_supported_ceiling",
+   "inputs": {
+    "current_fee": 1000,
+    "target_fee": 1200,
+    "min_fee": 10,
+    "zero_revenue_streak": 24,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": "700.0",
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 700,
+   "expected_tag": "zero_flow_downshift"
+  },
+  {
+   "label": "downshift_soft_anchor_floor_absorbs_step",
+   "inputs": {
+    "current_fee": 1000,
+    "target_fee": 100,
+    "min_fee": 10,
+    "zero_revenue_streak": 24,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": "1900.0",
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 950,
+   "expected_tag": "zero_flow_downshift"
+  },
+  {
+   "label": "downshift_anchor_floor_override_raise",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 100,
+    "min_fee": 10,
+    "zero_revenue_streak": 24,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": "1900.0",
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 500,
+   "expected_tag": "zero_flow_ratchet_guard"
+  },
+  {
+   "label": "trickle_reclassified_as_silence",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 300,
+    "min_fee": 10,
+    "zero_revenue_streak": 8,
+    "forwards_since_update": 2,
+    "revenue_rate": "0.4",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": false
+   },
+   "expected_fee": 300,
+   "expected_tag": "zero_flow_ratchet_guard"
+  },
+  {
+   "label": "meaningful_rate_not_reclassified",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 300,
+    "min_fee": 10,
+    "zero_revenue_streak": 8,
+    "forwards_since_update": 2,
+    "revenue_rate": "0.4",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": null,
+    "downshift_streak": null,
+    "rate_is_meaningful": true
+   },
+   "expected_fee": 300,
+   "expected_tag": null
+  },
+  {
+   "label": "custom_guard_streak_used",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 300,
+    "min_fee": 10,
+    "zero_revenue_streak": 4,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": 4,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 300,
+   "expected_tag": "zero_flow_ratchet_guard"
+  },
+  {
+   "label": "falsy_zero_guard_streak_falls_back_to_default",
+   "inputs": {
+    "current_fee": 500,
+    "target_fee": 300,
+    "min_fee": 10,
+    "zero_revenue_streak": 8,
+    "forwards_since_update": 0,
+    "revenue_rate": "0.0",
+    "supported_fee_ceiling": null,
+    "earning_anchor_ppm": null,
+    "guard_streak": 0,
+    "downshift_streak": null,
+    "rate_is_meaningful": null
+   },
+   "expected_fee": 300,
+   "expected_tag": "zero_flow_ratchet_guard"
+  }
+ ]
+}

@@ -1,0 +1,45 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "expected_demand": "0.0",
+   "expected": "1.0"
+  },
+  {
+   "expected_demand": "0.01",
+   "expected": "1.0"
+  },
+  {
+   "expected_demand": "0.05",
+   "expected": "1.0"
+  },
+  {
+   "expected_demand": "0.25",
+   "expected": "1.0"
+  },
+  {
+   "expected_demand": "0.4999999",
+   "expected": "1.0"
+  },
+  {
+   "expected_demand": "0.5",
+   "expected": "1.0"
+  },
+  {
+   "expected_demand": "0.75",
+   "expected": "1.5"
+  },
+  {
+   "expected_demand": "1.0",
+   "expected": "2.0"
+  },
+  {
+   "expected_demand": "1.5",
+   "expected": "2.0"
+  },
+  {
+   "expected_demand": "10.0",
+   "expected": "2.0"
+  }
+ ]
+}

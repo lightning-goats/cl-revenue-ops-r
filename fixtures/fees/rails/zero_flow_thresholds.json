@@ -1,0 +1,65 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "gap_ema_hours": "0.0",
+   "cycle_hours": "0.5",
+   "expected_guard": 8,
+   "expected_downshift": 24
+  },
+  {
+   "gap_ema_hours": "-5.0",
+   "cycle_hours": "0.5",
+   "expected_guard": 8,
+   "expected_downshift": 24
+  },
+  {
+   "gap_ema_hours": "48.0",
+   "cycle_hours": "0.5",
+   "expected_guard": 192,
+   "expected_downshift": 384
+  },
+  {
+   "gap_ema_hours": "nan",
+   "cycle_hours": "0.5",
+   "expected_guard": 8,
+   "expected_downshift": 24
+  },
+  {
+   "gap_ema_hours": "48.0",
+   "cycle_hours": "0.0",
+   "expected_guard": 8,
+   "expected_downshift": 24
+  },
+  {
+   "gap_ema_hours": "48.0",
+   "cycle_hours": "nan",
+   "expected_guard": 8,
+   "expected_downshift": 24
+  },
+  {
+   "gap_ema_hours": "1000.0",
+   "cycle_hours": "0.5",
+   "expected_guard": 672,
+   "expected_downshift": 1344
+  },
+  {
+   "gap_ema_hours": "1.0",
+   "cycle_hours": "1.0",
+   "expected_guard": 8,
+   "expected_downshift": 24
+  },
+  {
+   "gap_ema_hours": "168.0",
+   "cycle_hours": "0.5",
+   "expected_guard": 672,
+   "expected_downshift": 1344
+  },
+  {
+   "gap_ema_hours": "200.0",
+   "cycle_hours": "0.5",
+   "expected_guard": 672,
+   "expected_downshift": 1344
+  }
+ ]
+}
