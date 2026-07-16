@@ -1,0 +1,10 @@
+{
+  "classification": "STAGNANT_CANDIDATE",
+  "inputs": {
+    "days_open": 400,
+    "forward_count": 15,
+    "last_routed": 1740044800,
+    "net_profit": -8000,
+    "roi": -0.4
+  }
+}
