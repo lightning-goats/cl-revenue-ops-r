@@ -41,6 +41,58 @@ import argparse, json, subprocess, sys, pathlib
 # by the Rust plugin per the design spec's db-path ruling.
 SKIP_KEYS = {"db-path"}
 
+# Keys whose `revenue-ops-*` CLN option has no `Config` dataclass attribute
+# reachable via this harness's fixed `py_key = suffix.replace("-", "_")`
+# transform (see diff_key()'s docstring) -- so `revenue-config get <py_key>`
+# (which resolves purely via `hasattr(config, py_key)`/`getattr(config,
+# py_key)`, cl-revenue-ops.py:5669-5673) ALWAYS returns {"error": "Unknown
+# config key: ..."} for these, never a comparable value. That is a
+# structural property of Python's own `revenue-config get` command, not a
+# Rust-side defect, so these are SKIPPED rather than reported as ERROR.
+#
+# Two distinct reasons land a key here, both with the identical
+# harness-visible symptom:
+#
+#   1. No `Config` equivalent at all -- the option feeds a DIFFERENT
+#      subsystem's constructor kwargs, never `Config`. Twelve `boltz-*`
+#      keys are this case: e.g. `revenue-ops-boltz-btc-wallet` is read
+#      once at init (`options.get('revenue-ops-boltz-btc-wallet', 'CLN')`,
+#      cl-revenue-ops.py:2633) and passed straight into the `BoltzManager`
+#      constructor -- there never was a `Config.boltz_btc_wallet` field
+#      for `revenue-config get` to resolve.
+#   2. A `Config` field DOES exist, but under a different attribute name
+#      than this harness's naive suffix->underscore conversion produces:
+#      `vegas-reflex` -> `Config.enable_vegas_reflex`
+#      (cl-revenue-ops.py:2545), `vegas-decay` -> `vegas_decay_rate`
+#      (:2546), `planner-max-fee-rate` -> `planner_max_fee_rate_sat_vb`
+#      (:2560), `boltz-structural-budget-sats` ->
+#      `boltz_structural_budget_sats_per_day` (:2431). `revenue-config get
+#      vegas_reflex` still 404s (there is no such attribute) even though
+#      the underlying setting genuinely is configurable -- diffing these
+#      correctly would need a suffix->field-name remap table, which is
+#      future work, not this pass's scope.
+OPTION_ONLY_KEYS = {
+    # Case 1: no Config attribute at all -- BoltzManager-only kwargs.
+    "boltz-enabled",
+    "boltz-cli-path",
+    "boltz-datadir",
+    "boltz-use-sudo",
+    "boltz-sudo-user",
+    "boltz-timeout-seconds",
+    "boltz-daily-budget-sats",
+    "boltz-enforce-budget",
+    "boltz-btc-wallet",
+    "boltz-lbtc-wallet",
+    "boltz-routing-fee-limit-ppm",
+    "boltz-max-withdraw-sats",
+    # Case 2: a Config attribute exists, under a different name than
+    # suffix.replace("-", "_") produces.
+    "vegas-reflex",
+    "vegas-decay",
+    "planner-max-fee-rate",
+    "boltz-structural-budget-sats",
+}
+
 
 def cli(node, *args):
     """Run `lightning-cli <args>` on `node` over ssh and parse JSON stdout.
@@ -133,11 +185,24 @@ def load_fixtures(path):
 
 def run_diff(cli_fn, node, table, strict=False):
     """Diff every non-skipped key in `table`. Never raises -- per-key
-    failures are captured in the returned result dicts (see diff_key)."""
+    failures are captured in the returned result dicts (see diff_key).
+
+    Keys in OPTION_ONLY_KEYS are never dispatched to `cli_fn` at all (no
+    ssh/RPC round trip) -- they are structurally unresolvable by Python's
+    `revenue-config get` (see OPTION_ONLY_KEYS' docstring), so this
+    short-circuits straight to a "skipped" result.
+    """
     results = []
     for opt in table:
         suffix = opt["name"].removeprefix("revenue-ops-")
         if suffix in SKIP_KEYS:
+            continue
+        if suffix in OPTION_ONLY_KEYS:
+            results.append({
+                "key": suffix,
+                "status": "skipped",
+                "cause": "not a Config dataclass field (see OPTION_ONLY_KEYS)",
+            })
             continue
         results.append(diff_key(cli_fn, node, suffix, strict=strict))
     return results, len(table) - len(SKIP_KEYS)
@@ -145,10 +210,15 @@ def run_diff(cli_fn, node, table, strict=False):
 
 def report(results, total):
     """Print an aligned-column report of any non-ok results and return the
-    process exit code: 0 parity, 1 mismatch/error, 2 transport failure."""
+    process exit code: 0 parity, 1 mismatch/error, 2 transport failure.
+
+    SKIPPED rows (OPTION_ONLY_KEYS) are informational only -- they never
+    affect the exit code, unlike MISMATCH/ERROR/TRANSPORT.
+    """
     mismatches = [r for r in results if r["status"] == "mismatch"]
     errors = [r for r in results if r["status"] == "error"]
     transport = [r for r in results if r["status"] == "transport"]
+    skipped = [r for r in results if r["status"] == "skipped"]
 
     rows = []
     for r in mismatches:
@@ -157,6 +227,8 @@ def report(results, total):
         rows.append(("ERROR", r["key"], f"({r['side']}): {r['cause']}"))
     for r in transport:
         rows.append(("TRANSPORT", r["key"], f"({r['side']}): {r['cause']}"))
+    for r in skipped:
+        rows.append(("SKIPPED", r["key"], r["cause"]))
 
     if rows:
         w_status = max(len(row[0]) for row in rows)
@@ -169,7 +241,8 @@ def report(results, total):
         return 2
     if mismatches or errors:
         return 1
-    print(f"parity: {total} keys identical")
+    compared = total - len(skipped)
+    print(f"parity: {compared} keys identical ({len(skipped)} skipped)")
     return 0
 
 
@@ -242,6 +315,25 @@ def self_test():
     rc = report(results, total)
     print(f"[self-test] typed-vs-string (bool True vs \"true\") --strict: exit={rc} (expect 1)")
     ok = ok and rc == 1
+
+    # OPTION_ONLY_KEYS: a key with no Config attribute must be reported as
+    # SKIPPED (never ERROR/MISMATCH) and must short-circuit BEFORE any
+    # cli_fn dispatch at all -- if cli_fn is ever called for this suffix,
+    # something is wrong with the skip-before-call ordering in run_diff().
+    def cli_should_not_be_called(node, *a):
+        raise AssertionError(
+            "cli_fn must not be called for an OPTION_ONLY_KEYS suffix"
+        )
+
+    table_option_only = [{"name": "revenue-ops-boltz-btc-wallet"}]
+    results, total = run_diff(cli_should_not_be_called, "node", table_option_only)
+    rc = report(results, total)
+    statuses = {r["status"] for r in results}
+    print(
+        f"[self-test] option-only key case: exit={rc} statuses={statuses} "
+        f"(expect 0, {{'skipped'}})"
+    )
+    ok = ok and rc == 0 and statuses == {"skipped"}
 
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1

@@ -40,6 +40,13 @@ struct State {
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
+    /// Cached `listconfigs` snapshot of every `revenue-ops-*` (Python
+    /// plugin) option's live resolved value, keyed by the FULL Python
+    /// option name (e.g. `revenue-ops-min-fee-ppm`). Fetched ONCE at init
+    /// via `revops::config_resolve::fetch_python_option_values` -- see that
+    /// module's doc comment for the full (a) DB override > (b) this map >
+    /// (c) fixture-default precedence `revenue-r-config` resolves through.
+    python_option_values: HashMap<String, cln_plugin::options::Value>,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
@@ -472,8 +479,42 @@ async fn main() -> Result<()> {
                 let s = p.state();
                 match s.config_names.get(key) {
                     Some(full_name) => {
-                        let value = p.option_str(full_name)?;
+                        let fixture_value = p.option_str(full_name)?;
                         let field_type = config_types::field_type_for(key);
+                        // (a) DB override / (b) listconfigs live Python-option
+                        // value -- both meaningless for the three Rust-only
+                        // keys (see `config_resolve::python_option_name`), so
+                        // both stay `None` for those and this falls straight
+                        // through to (c) `fixture_value`, unchanged from
+                        // before this resolution order existed.
+                        let (db_override, python_value) =
+                            match revops::config_resolve::python_option_name(key) {
+                                Some(python_name) => {
+                                    let db_key = revops::config_resolve::db_override_key(key);
+                                    let db_override = match &s.db {
+                                        Some(handle) => queries::config_override(handle, &db_key)
+                                            .await
+                                            .unwrap_or_else(|e| {
+                                                eprintln!(
+                                                    "revops: config_override query failed \
+                                                         for {db_key}: {e}"
+                                                );
+                                                None
+                                            }),
+                                        None => None,
+                                    }
+                                    .map(cln_plugin::options::Value::String);
+                                    let python_value =
+                                        s.python_option_values.get(&python_name).cloned();
+                                    (db_override, python_value)
+                                }
+                                None => (None, None),
+                            };
+                        let effective = revops::config_resolve::resolve_option_value(
+                            db_override,
+                            python_value,
+                            fixture_value,
+                        );
                         // Phase 1b has no DB-backed config-override-write
                         // path yet, so there is no live per-key version to
                         // report; build_config_response documents this
@@ -481,7 +522,7 @@ async fn main() -> Result<()> {
                         Ok(build_config_response(
                             key,
                             true,
-                            value.as_ref(),
+                            effective.as_ref(),
                             field_type,
                             0,
                         ))
@@ -661,6 +702,21 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    // Layer (b) of `revenue-r-config`'s resolution order (see
+    // `revops::config_resolve`'s doc comment): one `listconfigs` RPC call,
+    // cached for the plugin's whole lifetime. Uses the SAME socket-path
+    // derivation hydration uses below (`lightning_dir`/`rpc_file` off
+    // `Configuration`) -- `ConfiguredPlugin::configuration()` exposes it
+    // before `start()`, so this can run synchronously here rather than as
+    // a deferred background task like hydration: `listconfigs` is a single
+    // fast, local config-file read (no wallet/chain/history paging), so it
+    // doesn't carry hydration's "could be slow on a big history" risk that
+    // motivated deferring that call instead.
+    let init_cfg = configured.configuration();
+    let init_socket_path = PathBuf::from(&init_cfg.lightning_dir).join(&init_cfg.rpc_file);
+    let python_option_values =
+        revops::config_resolve::fetch_python_option_values(&init_socket_path).await;
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -668,6 +724,7 @@ async fn main() -> Result<()> {
         db,
         observer_db,
         config_names: config_name_map(),
+        python_option_values,
     });
 
     let plugin = configured.start(state).await?;

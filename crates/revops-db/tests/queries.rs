@@ -17,7 +17,7 @@
 
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
-    closed_channels_summary, closure_costs_windows, lifetime_stats, pnl_summary,
+    closed_channels_summary, closure_costs_windows, config_override, lifetime_stats, pnl_summary,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -251,4 +251,64 @@ async fn pnl_summary_on_empty_db_is_zero_revenue_zero_margin() {
     // No revenue, no opex -> margin is 0.0 (Python: "no revenue - margin is
     // undefined, use 0 if no costs").
     assert_eq!(pnl.operating_margin_pct, 0.0);
+}
+
+/// `config_override` port of `Database.get_config_override`
+/// (modules/database.py:7316-7322) -- layer (a) of `revenue-r-config`'s
+/// resolution order (`revops::config_resolve`). Seeds a row directly via
+/// the same `config_overrides` schema `Database.set_config_override`
+/// writes to, keyed by the Python `Config` field name (snake_case), not
+/// the CLN option suffix.
+#[tokio::test]
+async fn config_override_returns_seeded_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("overrides.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["min_fee_ppm", "40", 1i64, NOW],
+        )
+        .unwrap();
+    }
+    let handle = spawn_read_only(&path).await.unwrap();
+    assert_eq!(
+        config_override(&handle, "min_fee_ppm").await.unwrap(),
+        Some("40".to_string())
+    );
+}
+
+/// No row for `key` -> `Ok(None)`, never an `Err` -- the common case (most
+/// settings are never overridden via `revenue-config set`).
+#[tokio::test]
+async fn config_override_returns_none_when_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("no_overrides.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+    assert_eq!(config_override(&handle, "min_fee_ppm").await.unwrap(), None);
+}
+
+/// A different key's override row must not leak into an unrelated lookup
+/// -- confirms the query is keyed by `key`, not "any row present".
+#[tokio::test]
+async fn config_override_does_not_leak_across_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("other_key.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["daily_budget_sats", "1000", 1i64, NOW],
+        )
+        .unwrap();
+    }
+    let handle = spawn_read_only(&path).await.unwrap();
+    assert_eq!(config_override(&handle, "min_fee_ppm").await.unwrap(), None);
+    assert_eq!(
+        config_override(&handle, "daily_budget_sats").await.unwrap(),
+        Some("1000".to_string())
+    );
 }

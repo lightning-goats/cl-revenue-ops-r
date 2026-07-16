@@ -18,6 +18,24 @@ use anyhow::Result;
 use revops_core::msat::{base_to_sats_ceil, base_to_sats_floor, py_round2};
 use rusqlite::types::Value as SqlValue;
 
+/// Port of `Database.get_config_override` (modules/database.py:7316-7322):
+/// `SELECT value FROM config_overrides WHERE key = ?`. `key` is the Python
+/// `Config` dataclass field name (snake_case, e.g. `min_fee_ppm`), NOT the
+/// CLN option suffix (`min-fee-ppm`) -- `config_overrides.key` is written
+/// by `Database.set_config_override` keyed exactly the same way
+/// `Config.load_overrides` reads it back (`hasattr(self, key)`,
+/// modules/config.py:912). Returns `None` when no override row exists for
+/// `key` -- the common case, never an error (see
+/// [`crate::actor::DbHandle::query_optional_string`]).
+pub async fn config_override(handle: &DbHandle, key: &str) -> Result<Option<String>> {
+    handle
+        .query_optional_string(
+            "SELECT value FROM config_overrides WHERE key = ?1",
+            vec![SqlValue::Text(key.to_string())],
+        )
+        .await
+}
+
 /// Port of `Database.get_lifetime_stats` (modules/database.py:6018-6087).
 ///
 /// Deliberately EIGHT separate single-column queries, mirroring Python's
