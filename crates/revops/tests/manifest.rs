@@ -107,8 +107,9 @@ fn manifest_registers_all_python_options_under_shadow_prefix() {
         .map(|o| o["name"].as_str().unwrap())
         .filter(|n| n.starts_with("revops-r-"))
         .collect();
-    // +1 for our own revops-r-observer
-    assert_eq!(shadow.len(), expected + 1, "shadow options registered");
+    // +2 for our own revops-r-observer and revops-r-observer-db-path (Task
+    // 2's own writable notification-ingestion db -- no Python analog).
+    assert_eq!(shadow.len(), expected + 2, "shadow options registered");
 }
 
 #[test]
@@ -128,17 +129,22 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         opt_names.contains(&"revenue-ops-db-path"),
         "options: {opt_names:?}"
     );
+    assert!(
+        opt_names.contains(&"revenue-ops-observer-db-path"),
+        "options: {opt_names:?}"
+    );
 
     let canonical: Vec<&&str> = opt_names
         .iter()
         .filter(|n| n.starts_with("revenue-ops-"))
         .collect();
-    // +1 for our own revenue-ops-observer (revenue-ops-db-path is registered
-    // exactly once, under the fixture's own canonical name -- see
-    // register_python_options' doc comment on the db-path skip).
+    // +2 for our own revenue-ops-observer and revenue-ops-observer-db-path
+    // (revenue-ops-db-path is registered exactly once, under the fixture's
+    // own canonical name -- see register_python_options' doc comment on
+    // the db-path skip).
     assert_eq!(
         canonical.len(),
-        expected + 1,
+        expected + 2,
         "canonical options registered"
     );
 

@@ -5,6 +5,8 @@
 //! `tests/manifest.rs` black-box test covers instead).
 
 pub mod config_types;
+pub mod hydration;
+pub mod notify;
 pub mod options_table;
 pub mod rpc_dashboard;
 pub mod rpc_history;

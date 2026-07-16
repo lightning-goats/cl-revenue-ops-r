@@ -13,6 +13,7 @@ use revops::rpc_history::build_history;
 use revops::rpc_report::build_report;
 use revops::rpc_status::{build_config_response, build_status, StatusInputs};
 use revops::{as_bool_default, as_int_default, as_string_default, now_unix};
+use revops::{hydration, notify};
 use revops_db::queries;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,6 +30,12 @@ struct State {
     observer: bool,
     db_path: Option<String>,
     db: Option<revops_db::actor::DbHandle>,
+    /// The Rust plugin's OWN read-write notification-ingestion db (never
+    /// the production DB — see `revops_db::owner`). `None` when
+    /// `observer-db-path` is unset/empty or failed to open; every
+    /// subscription handler and startup hydration treat that as a no-op,
+    /// never falling back to the read-only `db` connection above.
+    observer_db: Option<revops_db::owner::ObserverHandle>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -88,6 +95,19 @@ fn expand_tilde(raw: &str) -> PathBuf {
         }
     }
     PathBuf::from(raw)
+}
+
+/// True if the observer's own db path (`observer-db-path`, already
+/// `~`-expanded) refers to the exact same file as the production db path
+/// (`db-path`, also already `~`-expanded, or `None` if production db-path
+/// isn't set). Pure path-equality on the expanded forms -- no
+/// canonicalization or filesystem access, matching every other path
+/// comparison in this module (neither path is required to exist).
+fn observer_db_path_collides_with_production(
+    observer_path: &std::path::Path,
+    production_path: Option<&std::path::Path>,
+) -> bool {
+    production_path == Some(observer_path)
 }
 
 fn opt_name(suffix: &str) -> String {
@@ -285,6 +305,16 @@ async fn main() -> Result<()> {
         "Path to the revops sqlite database, opened read-only at init (empty = disabled)",
     );
 
+    // The Rust plugin's OWN writable sqlite file (Task 2) -- no Python
+    // analog, so no shadow/canonical collision risk; `opt_name` is reused
+    // purely for naming-prefix consistency with every other option here.
+    let observer_db_name = opt_name("observer-db-path");
+    let observer_db_opt = DefaultStringConfigOption::new_str_with_default(
+        &observer_db_name,
+        "~/.lightning/revops-r-observer.db",
+        "Path to the Rust plugin's OWN sqlite file (read-write). Never the production DB.",
+    );
+
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
@@ -295,6 +325,55 @@ async fn main() -> Result<()> {
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         .option(observer_opt.clone())
         .option(db_path_opt.clone())
+        .option(observer_db_opt.clone())
+        .subscribe(
+            "forward_event",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_forward_event(&handle, &v).await,
+                    None => eprintln!(
+                        "revops: debug: forward_event dropped (observer_db not configured)"
+                    ),
+                }
+                Ok(())
+            },
+        )
+        .subscribe(
+            "connect",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_connect(&handle, &v).await,
+                    None => {
+                        eprintln!("revops: debug: connect dropped (observer_db not configured)")
+                    }
+                }
+                Ok(())
+            },
+        )
+        .subscribe(
+            "disconnect",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_disconnect(&handle, &v).await,
+                    None => {
+                        eprintln!("revops: debug: disconnect dropped (observer_db not configured)")
+                    }
+                }
+                Ok(())
+            },
+        )
+        .subscribe(
+            "channel_state_changed",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_channel_state_changed(&handle, &v).await,
+                    None => eprintln!(
+                        "revops: debug: channel_state_changed dropped (observer_db not configured)"
+                    ),
+                }
+                Ok(())
+            },
+        )
         .rpcmethod(
             &ping_name,
             "liveness probe for the Rust port",
@@ -473,15 +552,101 @@ async fn main() -> Result<()> {
         None => (None, None),
     };
 
+    // The observer's OWN read-write db (Task 2 -- never the production
+    // `db` connection above). Unlike production db-path, a spawn failure
+    // here never disables the plugin: it only means notification
+    // ingestion is a no-op (per the plan's Global Constraint) while
+    // `ping`/`status`/`config` keep working.
+    //
+    // Path equality (after `~` expansion) against the production db-path
+    // is checked first and refused outright: the production connection is
+    // a read-only single-owner actor (`revops_db::actor`) and the
+    // observer's is a read-write single-owner actor (`revops_db::owner`)
+    // -- pointing both at one file breaks the single-owner invariant
+    // either actor relies on (and would hand the observer write access to
+    // the production DB, which this plugin is never supposed to touch).
+    let production_db_path_expanded = db_path.as_deref().map(expand_tilde);
+    let observer_db_raw = configured.option(&observer_db_opt)?;
+    let observer_db = match (!observer_db_raw.is_empty()).then_some(observer_db_raw) {
+        Some(raw) => {
+            let path = expand_tilde(&raw);
+            if observer_db_path_collides_with_production(
+                &path,
+                production_db_path_expanded.as_deref(),
+            ) {
+                eprintln!(
+                    "revops: {observer_db_name} ({}) resolves to the same file as \
+                     {db_path_name}; refusing to open it as the observer's own \
+                     read-write db (notification ingestion disabled)",
+                    path.display()
+                );
+                None
+            } else {
+                match revops_db::owner::spawn_read_write(&path).await {
+                    Ok(handle) => Some(handle),
+                    Err(e) => {
+                        eprintln!(
+                            "revops: {observer_db_name} spawn failed ({e}); notification \
+                             ingestion disabled (never falls back to the production \
+                             db-path connection)"
+                        );
+                        None
+                    }
+                }
+            }
+        }
+        None => None,
+    };
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
         db_path,
         db,
+        observer_db,
         config_names: config_name_map(),
     });
 
     let plugin = configured.start(state).await?;
+
+    // Startup hydration runs as a background task, off the init-handshake
+    // path: paging `listforwards` over a live socket could be slow on a
+    // node with a large forwards history, and lightningd's own init
+    // handshake must not wait on it (see the plan's Task 2 self-review
+    // note on splitting hydration into a post-start spawned task).
+    {
+        let hydration_plugin = plugin.clone();
+        tokio::spawn(async move {
+            let Some(observer_db) = hydration_plugin.state().observer_db.clone() else {
+                return;
+            };
+            let cfg = hydration_plugin.configuration();
+            let socket_path = PathBuf::from(cfg.lightning_dir).join(cfg.rpc_file);
+            // `flow_window_days` must be read LIVE from the resolved
+            // option (not a hardcoded default) so an operator running a
+            // non-default flow window still gets the correct backfill
+            // bounds (plan Task 2 self-review, second-order risk).
+            let flow_window_days = hydration_plugin
+                .option_str(&opt_name("flow-window-days"))
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                .unwrap_or(7);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let inserted =
+                hydration::run_startup_hydration(&observer_db, &socket_path, flow_window_days, now)
+                    .await;
+            if inserted > 0 {
+                eprintln!(
+                    "revops: startup hydration inserted {inserted} forwards into the observer db"
+                );
+            }
+        });
+    }
+
     plugin.join().await
 }
 
@@ -574,5 +739,33 @@ mod tests {
             expand_tilde("~alice/db.sqlite"),
             PathBuf::from("~alice/db.sqlite")
         );
+    }
+
+    /// Same expanded path -> collision, refuse.
+    #[test]
+    fn observer_db_path_collides_with_production_same_path() {
+        let production = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
+        assert!(observer_db_path_collides_with_production(
+            &production,
+            Some(&production),
+        ));
+    }
+
+    /// Different paths -> no collision.
+    #[test]
+    fn observer_db_path_collides_with_production_different_paths() {
+        let observer = PathBuf::from("/home/testuser/.lightning/revops-r-observer.db");
+        let production = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
+        assert!(!observer_db_path_collides_with_production(
+            &observer,
+            Some(&production),
+        ));
+    }
+
+    /// Production db-path unset (`None`) -> never a collision.
+    #[test]
+    fn observer_db_path_collides_with_production_no_production_path() {
+        let observer = PathBuf::from("/home/testuser/.lightning/revops-r-observer.db");
+        assert!(!observer_db_path_collides_with_production(&observer, None));
     }
 }
