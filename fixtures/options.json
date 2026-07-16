@@ -1,0 +1,835 @@
+[
+ {
+  "name": "revenue-ops-db-path",
+  "opt_type": "string",
+  "default": "~/.lightning/revenue_ops.db",
+  "description": "Path to the SQLite database for storing state",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-flow-interval",
+  "opt_type": "string",
+  "default": "3600",
+  "description": "Interval in seconds for flow analysis (default: 1 hour)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-interval",
+  "opt_type": "string",
+  "default": "1800",
+  "description": "Interval in seconds for fee adjustments (default: 30 min)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-interval",
+  "opt_type": "string",
+  "default": "900",
+  "description": "Interval in seconds for rebalance checks (default: 15 min)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-min-fee-ppm",
+  "opt_type": "string",
+  "default": "10",
+  "description": "Minimum fee floor in PPM (default: 10)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-min-fee-ppm-saturated",
+  "opt_type": "string",
+  "default": "0",
+  "description": "Class-aware min-fee floor (PPM) for channels classified saturated (outbound >= 85% of capacity) or source. Applied only when set BELOW revenue-ops-min-fee-ppm; 0 (default) allows true cheap egress on saturated edges. Cost-recovery floors still apply. Flow-aware exemption: high-local channels whose 7d flow is balanced at healthy turnover (self-refilling routers the discount cannot drain) keep the normal min-fee-ppm floor.",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-max-fee-ppm",
+  "opt_type": "string",
+  "default": "2000",
+  "description": "Maximum fee ceiling in PPM (default: 2000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-profile",
+  "opt_type": "string",
+  "default": "active",
+  "description": "Fee controller profile: 'active' for normal routing nodes, 'conservative' for low-volume nodes",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-market-boundary-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Deprecated no-op compatibility flag; fee market boundary logic is ignored (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-market-boundary-min-competitors",
+  "opt_type": "string",
+  "default": "3",
+  "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 3)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-market-boundary-margin-ppm",
+  "opt_type": "string",
+  "default": "5",
+  "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 5)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-market-boundary-margin-ratio",
+  "opt_type": "string",
+  "default": "0.05",
+  "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 0.05)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-market-boundary-max-downshift-ratio",
+  "opt_type": "string",
+  "default": "0.35",
+  "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 0.35)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-fee-market-boundary-cache-seconds",
+  "opt_type": "string",
+  "default": "60",
+  "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 60)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-market-fee-mode",
+  "opt_type": "string",
+  "default": "undercut",
+  "description": "How to price relative to neighbor-median fee. \"undercut\" (default): price below the median to win volume. \"match\": target the median, no undercut. \"premium\": price above the median using the same per-corridor weight that would otherwise undercut. Use \"premium\" in inelastic-demand markets to maximize revenue per forward. \"competition_aware\": apply the median-undercut ONLY when a competitor is priced at or below DTS's target; preserve DTS when we're already below every competitor (undercut would otherwise drag fees down against an inelastic market).",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-base-fee-policy",
+  "opt_type": "string",
+  "default": "off",
+  "description": "Base-fee policy (Upgrade A, 2026-04-22). \"off\" (default) and \"adaptive\" are equivalent: every channel gets the internal base fee default of 0 msat (the per-role split was retired; there is no revenue-ops-base-fee-msat option).",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-neighbor-median-min-competitors",
+  "opt_type": "string",
+  "default": "2",
+  "description": "Minimum competitor count for neighbor_median computation (default: 2). The median is used by market-fee-mode (undercut/match/premium/competition_aware); below this threshold the helper returns None and the market-fee-mode branch is skipped. Prod nodes with dense gossip may prefer 3.",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-min-profit",
+  "opt_type": "string",
+  "default": "10",
+  "description": "Deprecated no-op compatibility setting; minimum-profit gating is enforced by the sats-EV gate and revenue-ops-rebalance-hold-margin (default: 10)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-emergency-local-ratio",
+  "opt_type": "string",
+  "default": "0.10",
+  "description": "Local ratio below which a destination bypasses the channel-level rebalance cooldown (Phase 3, default: 0.10; 0 disables)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-drift-override-ratio",
+  "opt_type": "string",
+  "default": "0.30",
+  "description": "Drift since last successful rebalance that bypasses the cooldown (Phase 3, default: 0.30; 0 disables)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-hold-margin",
+  "opt_type": "string",
+  "default": "0.0",
+  "description": "Minimum final_score in SATS of expected net value a priced pair must clear or it is rejected as below_hold_margin (Phase 4, default: 0.0)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-pair-fee-cap-ppm",
+  "opt_type": "string",
+  "default": "1000",
+  "description": "Per-pair fee budget = max(dest capex, ceil(amount * ppm / 1M)). Decouples per-rebalance fee from capex bootstrap (Iter1, default: 1000 = 0.1% of amount; 0 disables)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-rebalance-activity-window-seconds",
+  "opt_type": "string",
+  "default": "3600",
+  "description": "Window in seconds over which recent forwarding activity is measured for the activity-recency penalty (default: 3600 = 1 hour)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-activity-penalty-coeff",
+  "opt_type": "string",
+  "default": "0.5",
+  "description": "Coefficient applied to the activity-recency penalty when scoring a rebalance candidate (default: 0.5; 0 disables)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-activity-penalty-cap-frac",
+  "opt_type": "string",
+  "default": "0.5",
+  "description": "Maximum fraction of score the activity-recency penalty may remove (default: 0.5)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-utilization-window-days",
+  "opt_type": "string",
+  "default": "7",
+  "description": "Trailing window in days over which forwarding utilization is measured for utilization-based sizing (default: 7)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-utilization-floor",
+  "opt_type": "string",
+  "default": "0.05",
+  "description": "Minimum utilization ratio floor used when normalizing observed flow (default: 0.05)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-utilization-ceiling",
+  "opt_type": "string",
+  "default": "1.0",
+  "description": "Maximum utilization ratio ceiling used when normalizing observed flow (default: 1.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-utilization-min-forwards",
+  "opt_type": "string",
+  "default": "5",
+  "description": "Minimum number of forwards in the utilization window required before utilization-based sizing is trusted (default: 5)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-size-tiered-targets",
+  "opt_type": "string",
+  "default": "true",
+  "description": "Enable size-tiered rebalance targets (bucket target amounts by channel capacity percentile instead of a single flat target) (default: true)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-size-reference-percentile",
+  "opt_type": "string",
+  "default": "0.5",
+  "description": "Percentile (0.0-1.0) of the channel-capacity distribution used as the reference point for size-tiered target amounts (default: 0.5)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rebalance-small-channel-band-half-width",
+  "opt_type": "string",
+  "default": "0.15",
+  "description": "Half-width (fraction) of the \"small channel\" band around the reference percentile (default: 0.15)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-flow-window-days",
+  "opt_type": "string",
+  "default": "7",
+  "description": "Number of days to analyze for flow calculation (default: 7)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-daily-budget-sats",
+  "opt_type": "string",
+  "default": "5000",
+  "description": "Max rebalancing fees to spend in 24 hours (default: 5000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-growth-budget-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable dynamic growth budget: base daily budget plus bounded earned/growth credit (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-growth-budget-earned-fraction",
+  "opt_type": "string",
+  "default": "0.25",
+  "description": "Fraction of trailing net profit that can raise the effective daily budget when growth budget is enabled (default: 0.25)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-growth-budget-experiment-fraction",
+  "opt_type": "string",
+  "default": "0.10",
+  "description": "INERT since v2.17.0: the growth-experiment credit required the retired fleet prior producer; this option is kept only so existing configs load (default: 0.10)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-growth-budget-max-extra-sats",
+  "opt_type": "string",
+  "default": "2000",
+  "description": "INERT since v2.17.0: caps the growth-experiment credit, which can no longer be granted (fleet prior producer retired); kept only so existing configs load (default: 2000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-growth-budget-hard-ceiling-sats",
+  "opt_type": "string",
+  "default": "10000",
+  "description": "Local hard ceiling for dynamic effective daily budget; fleet hints cannot exceed this (default: 10000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-diagnostic-rebalance-max-fee-sats",
+  "opt_type": "string",
+  "default": "400",
+  "description": "Fee cap in sats for the diagnostic (defibrillator) shock rebalance; the shock ppm ceiling is derived from this cap. Clamped to [1, min(daily budget, 10000)] (default: 400)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-allow-zero-cost-auto-rebalance-when-budget-zero",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Allow automatic zero-fee rebalances when daily_budget_sats is zero (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-weekly-budget-sats",
+  "opt_type": "string",
+  "default": "35000",
+  "description": "Max rebalancing fees to spend in 7 days - hard ceiling over daily burst limit (default: 35000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-min-wallet-reserve",
+  "opt_type": "string",
+  "default": "1000000",
+  "description": "Minimum total funds (on-chain + off-chain) to keep in reserve (default: 1,000,000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-dry-run",
+  "opt_type": "string",
+  "default": "false",
+  "description": "If true, log actions but do not execute (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-htlc-congestion-threshold",
+  "opt_type": "string",
+  "default": "0.8",
+  "description": "HTLC slot utilization threshold (0.0-1.0) above which channel is considered congested (default: 0.8)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-enable-reputation",
+  "opt_type": "string",
+  "default": "true",
+  "description": "If true, weight volume by peer reputation (success rate) in fee decisions (default: true)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-reputation-decay",
+  "opt_type": "string",
+  "default": "0.98",
+  "description": "Reputation decay factor applied per flow-interval (default: 0.98). 0.98^24 \u2248 0.61 daily decay.",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-enable-kelly",
+  "opt_type": "string",
+  "default": "false",
+  "description": "If true, scale rebalance budget using Kelly Criterion based on peer reputation (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-vegas-reflex",
+  "opt_type": "string",
+  "default": "true",
+  "description": "Enable Vegas Reflex mempool spike defense (default: true)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-vegas-decay",
+  "opt_type": "string",
+  "default": "0.85",
+  "description": "Vegas Reflex decay rate per cycle, 0.0-1.0 (default: 0.85 = ~30min half-life)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-rpc-timeout-seconds",
+  "opt_type": "string",
+  "default": "15",
+  "description": "Hard timeout for all RPC calls to lightningd (default: 15)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-reservation-timeout-hours",
+  "opt_type": "int",
+  "default": "4",
+  "description": "Hours before stale budget reservations are auto-released (default: 4)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-enabled",
+  "opt_type": "string",
+  "default": "true",
+  "description": "Enable aggressive rebalance protection for fast-draining high-profit channels (default: true)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-override-peers",
+  "opt_type": "string",
+  "default": "",
+  "description": "CSV peer pubkeys to force hot-channel protection (default: empty)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-min-velocity",
+  "opt_type": "string",
+  "default": "0.20",
+  "description": "Minimum daily turnover ratio to qualify for hot-channel protection (default: 0.20)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-min-marginal-roi",
+  "opt_type": "string",
+  "default": "0.20",
+  "description": "Minimum marginal ROI (decimal) for hot-channel protection (default: 0.20)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-profit-budget-pct",
+  "opt_type": "string",
+  "default": "0.75",
+  "description": "Max fraction of daily channel contribution spendable on protective rebalancing (default: 0.75)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-max-chunk-multiplier",
+  "opt_type": "string",
+  "default": "4.0",
+  "description": "Max multiplier on rebalance chunk size for hot-channel protection (default: 4.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-hot-channel-protection-min-cooldown-hours",
+  "opt_type": "string",
+  "default": "1.0",
+  "description": "Minimum cooldown hours for protected hot channels (default: 1.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable Boltz CLI integration for revenue-boltz-* RPCs (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-cli-path",
+  "opt_type": "string",
+  "default": "/usr/local/bin/boltzcli",
+  "description": "Path to boltzcli binary (default: /usr/local/bin/boltzcli)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-datadir",
+  "opt_type": "string",
+  "default": "/var/lib/boltz",
+  "description": "Boltz data dir for boltzd client auth (default: /var/lib/boltz)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-use-sudo",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Run boltzcli via sudo -n -u <user> (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-sudo-user",
+  "opt_type": "string",
+  "default": "boltz",
+  "description": "User for sudo boltzcli execution when enabled (default: boltz)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-timeout-seconds",
+  "opt_type": "string",
+  "default": "60",
+  "description": "boltzcli command timeout in seconds (default: 60)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-daily-budget-sats",
+  "opt_type": "string",
+  "default": "3000",
+  "description": "Daily Boltz swap fee budget used by revenue-boltz loop methods (default: 3000)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-boltz-enforce-budget",
+  "opt_type": "string",
+  "default": "true",
+  "description": "If true, reject Boltz swaps when estimated fee exceeds remaining daily budget (default: true)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-boltz-btc-wallet",
+  "opt_type": "string",
+  "default": "CLN",
+  "description": "Preferred boltzd BTC wallet name (default: CLN)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-lbtc-wallet",
+  "opt_type": "string",
+  "default": "LOOP-LBTC",
+  "description": "Preferred boltzd LBTC wallet name (default: LOOP-LBTC)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-routing-fee-limit-ppm",
+  "opt_type": "string",
+  "default": "0",
+  "description": "Max routing fee in PPM for reverse swaps (0 = no limit, boltzcli default)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-max-withdraw-sats",
+  "opt_type": "string",
+  "default": "10000000",
+  "description": "Hard cap on a single Boltz on-chain withdraw in sats (default: 10000000; 0 disables). A sweep withdraw bypasses this cap and requires confirm_sweep=true.",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-auto-cycle-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable in-plugin periodic profit-gated Boltz balance cycles (default: false; automated spending must be opted into explicitly)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-auto-cycle-interval-minutes",
+  "opt_type": "string",
+  "default": "15",
+  "description": "Minutes between scheduled Boltz auto-balance cycles (default: 15)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-auto-cycle-max-actions",
+  "opt_type": "string",
+  "default": "1",
+  "description": "Maximum Boltz actions per scheduled auto-cycle (default: 1)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-auto-cycle-startup-delay-seconds",
+  "opt_type": "string",
+  "default": "120",
+  "description": "Startup delay before first Boltz auto-cycle run (default: 120)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-receivable-ratio-target",
+  "opt_type": "string",
+  "default": "0.30",
+  "description": "Node receivable/capacity ratio at which structural drain pressure reaches zero",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-receivable-ratio-floor",
+  "opt_type": "string",
+  "default": "0.20",
+  "description": "Receivable/capacity ratio below which the node is considered inbound-starved",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-boltz-structural-budget-sats",
+  "opt_type": "string",
+  "default": "0",
+  "description": "Daily swap-fee budget (sats) for scarcity-credited Boltz loop-outs (0 = disabled)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-drain-fee-discount-max",
+  "opt_type": "string",
+  "default": "0.0",
+  "description": "Max bounded fee discount on stagnant over-local channels (0.0 = disabled)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-node-drain-bias-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable node-liquidity-aware auto-drain-bias on over-local channel fees when the node is source-heavy (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-node-drain-bias-max",
+  "opt_type": "string",
+  "default": "0.3",
+  "description": "Max node-scaled fee discount applied to over-local channels when node-drain-bias is enabled (0.0-0.5)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-enable-dynamic-htlcmax",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable the dynamic htlc_max flow valve: scale each channel max HTLC by flow state (sinks tightest). Default: false",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-htlcmax-source-pct",
+  "opt_type": "string",
+  "default": "0.50",
+  "description": "Max HTLC as a fraction of capacity for SOURCE channels when dynamic htlcmax is enabled (0.01-1.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-htlcmax-sink-pct",
+  "opt_type": "string",
+  "default": "0.25",
+  "description": "Max HTLC as a fraction of capacity for SINK channels when dynamic htlcmax is enabled (0.01-1.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-htlcmax-balanced-pct",
+  "opt_type": "string",
+  "default": "0.45",
+  "description": "Max HTLC as a fraction of capacity for balanced channels when dynamic htlcmax is enabled (0.01-1.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable expansion treasury mode (reverse-swap excess LN to on-chain for opens) (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-onchain-target-sats",
+  "opt_type": "string",
+  "default": "5000000",
+  "description": "Target confirmed on-chain reserve in sats for expansion treasury mode (default: 5000000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-min-deficit-sats",
+  "opt_type": "string",
+  "default": "250000",
+  "description": "Minimum on-chain reserve deficit before treasury swaps are attempted (default: 250000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-preferred-currency",
+  "opt_type": "string",
+  "default": "BTC",
+  "description": "Preferred Boltz reverse-swap output currency for expansion treasury (BTC or LBTC; default: BTC)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-max-actions",
+  "opt_type": "string",
+  "default": "1",
+  "description": "Max treasury reverse swaps per treasury cycle (default: 1)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-min-source-local-pct",
+  "opt_type": "string",
+  "default": "80.0",
+  "description": "Minimum local balance percent to consider a channel as treasury harvest source (default: 80.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-expansion-treasury-exclude-protected",
+  "opt_type": "string",
+  "default": "true",
+  "description": "Exclude hot/protected channels from treasury harvesting (default: true)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Enable automated capacity planner for channel opens/closes (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-interval",
+  "opt_type": "string",
+  "default": "21600",
+  "description": "Seconds between capacity planner evaluation cycles (default: 21600 = 6 hours)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-dry-run",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Log planner decisions without executing (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-max-opens-per-cycle",
+  "opt_type": "string",
+  "default": "1",
+  "description": "Maximum automated channel opens per planner cycle (default: 1)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-max-closes-per-cycle",
+  "opt_type": "string",
+  "default": "0",
+  "description": "Maximum planner close executions per cycle when close execution is enabled (default: 0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-close-fee-reserve-multiplier",
+  "opt_type": "string",
+  "default": "2.0",
+  "description": "Multiplier applied to estimated close fee for planner close budget reservation (default: 2.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-close-fee-cap-sats",
+  "opt_type": "string",
+  "default": "0",
+  "description": "Fixed planner close fee cap/reservation in sats; 0 uses reserve multiplier (default: 0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-close-feerange-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Pass a CLN close feerange cap derived from the planner close fee reservation (default: false)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-min-channel-sats",
+  "opt_type": "string",
+  "default": "500000",
+  "description": "Minimum channel size in sats for automated opens (default: 500000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-max-channel-sats",
+  "opt_type": "string",
+  "default": "10000000",
+  "description": "Maximum channel size in sats for automated opens (default: 10000000)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-max-fee-rate",
+  "opt_type": "string",
+  "default": "50.0",
+  "description": "Maximum on-chain fee rate (sat/vB) for automated opens/closes (default: 50.0)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-min-annual-roi-pct",
+  "opt_type": "string",
+  "default": "1.0",
+  "description": "Minimum annualized return hurdle for automated channel opens (default: 1.0%)",
+  "dynamic": false
+ },
+ {
+  "name": "revenue-ops-planner-execute-closes",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Allow the capacity planner to execute close RPCs (default: false)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-swaps-enabled",
+  "opt_type": "string",
+  "default": "true",
+  "description": "Enable LN+ liquidity swap automation (default: true)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-execute-applications",
+  "opt_type": "string",
+  "default": "true",
+  "description": "Allow live LN+ swap applications; false = recommendation-only (default: true)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-swap-preference-margin",
+  "opt_type": "string",
+  "default": "0.2",
+  "description": "Regular open must beat swap EV by this fraction to win the slot (default: 0.2)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-max-duration-months",
+  "opt_type": "string",
+  "default": "3",
+  "description": "Maximum LN+ swap contract duration in months (default: 3)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-min-peer-positive-ratings",
+  "opt_type": "string",
+  "default": "5",
+  "description": "Minimum LN+ positive ratings for every non-fleet swap participant (default: 5)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-min-peer-rank",
+  "opt_type": "string",
+  "default": "8",
+  "description": "Minimum LN+ rank (1-10, higher better; 8=\"Gold\") for every non-fleet swap participant (default: 8)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-max-participants",
+  "opt_type": "string",
+  "default": "4",
+  "description": "Maximum LN+ swap participant count (default: 4)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-min-participants",
+  "opt_type": "string",
+  "default": "3",
+  "description": "Minimum LN+ swap participant count; among equal-EV qualifiers fewer participants win (default: 3)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-apply-feerate-ceiling",
+  "opt_type": "string",
+  "default": "5000",
+  "description": "No LN+ applications when opening feerate exceeds this (perkw, default: 5000)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-pending-timeout-days",
+  "opt_type": "string",
+  "default": "7",
+  "description": "Withdraw LN+ applications stuck pending beyond this (default: 7)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-inbound-credit-factor",
+  "opt_type": "string",
+  "default": "0.5",
+  "description": "Damping on the inbound-liquidity EV credit for LN+ swaps (default: 0.5)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-lnplus-watcher-interval",
+  "opt_type": "string",
+  "default": "3600",
+  "description": "LN+ obligations watcher interval in seconds (default: 3600)",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-rebalance-router",
+  "opt_type": "string",
+  "default": "v3",
+  "description": "Rebalance route discovery: 'v3' (askrene getroutes, required). Legacy 'v2' getroute routing has been removed. This option remains only as a compatibility shim and only accepts 'v3'.",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-askrene-layers",
+  "opt_type": "string",
+  "default": "standalone",
+  "description": "CSV of askrene layer names passed to v3 router getroutes calls. Missing layers are silently dropped by askrene. Blank or 'standalone'/'none' values configure no layers (askrene's own gossip view only).",
+  "dynamic": false
+ }
+]
