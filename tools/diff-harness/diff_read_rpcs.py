@@ -320,7 +320,16 @@ def diff_ingestion(sqlite_fn, node, observer_db, python_db, tolerance=2, since_o
         since_ts = max(derived_ts, int(time.time()) - INGESTION_WINDOW_CLAMP_SECONDS)
 
     try:
-        rs_raw = sqlite_fn(node, observer_db, "SELECT COUNT(*) FROM ingested_forwards")
+        # Both sides MUST be filtered by the same since_ts: the observer
+        # hydrates a 14-day backfill while the window clamps to 7 days, so
+        # an unfiltered Rust count over-reports by the whole clamped-out
+        # backfill (found live 2026-07-16: 1560 unfiltered vs 847 == 847
+        # in-window on both sides).
+        rs_raw = sqlite_fn(
+            node,
+            observer_db,
+            f"SELECT COUNT(*) FROM ingested_forwards WHERE timestamp >= {since_ts}",
+        )
         rs_count = int(rs_raw.strip())
     except subprocess.CalledProcessError as exc:
         return {"status": "transport", "side": "rust", "cause": _one_line(exc)}
