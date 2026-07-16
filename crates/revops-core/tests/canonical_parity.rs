@@ -4,13 +4,34 @@
 //! script for how each case was produced (Python json.dumps(sort_keys=True,
 //! separators=(",",":"), ensure_ascii=False) is the arbiter).
 use revops_core::canonical::canonical_json;
+use serde_json::json;
 
 #[test]
 fn canonical_json_matches_python_bytes() {
     let raw = include_str!("../../../fixtures/canonical_json.json");
     let cases: serde_json::Value = serde_json::from_str(raw).unwrap();
     for case in cases.as_array().unwrap() {
-        let got = canonical_json(&case["value"]);
+        let got = canonical_json(&case["value"]).unwrap();
         assert_eq!(got, case["canonical"].as_str().unwrap());
     }
+}
+
+#[test]
+fn canonical_json_rejects_nested_float() {
+    let v = json!({"a": [1, 2.5]});
+    let err = canonical_json(&v).unwrap_err();
+    assert!(
+        err.to_string().contains("/a/1"),
+        "expected error path /a/1 in message, got: {err}"
+    );
+}
+
+#[test]
+fn canonical_json_rejects_integral_float() {
+    let v = json!({"a": 1.0});
+    let err = canonical_json(&v).unwrap_err();
+    assert!(
+        err.to_string().contains("/a"),
+        "expected error path /a in message, got: {err}"
+    );
 }
