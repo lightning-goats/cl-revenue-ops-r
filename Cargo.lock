@@ -364,6 +364,7 @@ dependencies = [
  "anyhow",
  "cln-plugin",
  "revops-core",
+ "revops-db",
  "serde",
  "serde_json",
  "tokio",

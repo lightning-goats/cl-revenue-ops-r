@@ -1,17 +1,57 @@
 #![forbid(unsafe_code)]
 
-mod options_table;
-
 use anyhow::Result;
 use cln_plugin::options::{
     BooleanConfigOption, DefaultBooleanConfigOption, DefaultIntegerConfigOption,
     DefaultStringConfigOption, FlagConfigOption, IntegerConfigOption, StringConfigOption,
 };
-use cln_plugin::Builder;
-use options_table::OptDef;
+use cln_plugin::{Builder, Plugin};
+use revops::options_table::{self, OptDef};
+use revops::rpc_status::{build_config_response, build_status, StatusInputs};
+use revops::{as_bool_default, as_int_default, as_string_default};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Shared plugin state, resolved once at init (option values, and — if
+/// `revops-r-db-path` is set — a one-shot read-only DB probe). See
+/// `revops::rpc_status` for the pure response builders that consume this.
+struct State {
+    version: String,
+    observer: bool,
+    db_path: Option<String>,
+    db_tables: Option<usize>,
+    /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
+    /// registered option name (shadow- or canonical-mapped).
+    config_names: HashMap<String, String>,
+}
+
+/// `cln-plugin` clones the state per request; keep it cheap to clone by
+/// Arc'ing the actual data. Does NOT hold a DB `Connection` (that type is
+/// `!Sync`) — the DB is opened, probed, and dropped once at init. Phase 1b
+/// brings a persistent-connection actor.
+type SharedState = Arc<State>;
+
+/// suffix -> full registered option name, for every option this plugin
+/// exposes: our own (`observer`, `db-path`) plus the entire shadowed Python
+/// option surface from `fixtures/options.json`.
+fn config_name_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert("observer".to_string(), opt_name("observer"));
+    map.insert("db-path".to_string(), opt_name("db-path"));
+    for opt in options_table::load() {
+        let suffix = opt
+            .name
+            .strip_prefix("revenue-ops-")
+            .unwrap_or(&opt.name)
+            .to_string();
+        map.insert(suffix.clone(), opt_name(&suffix));
+    }
+    map
+}
 
 /// Shadow-vs-canonical naming per design spec (coexistence collision rule).
 fn canonical_names() -> bool {
@@ -33,43 +73,6 @@ fn rpc_name(suffix: &str) -> String {
         format!("revenue-{suffix}")
     } else {
         format!("revenue-r-{suffix}")
-    }
-}
-
-/// `serde_json::Value` -> `String`, for `opt_type == "string"` defaults.
-pub fn as_string_default(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        other => Some(other.to_string()),
-    }
-}
-
-/// `serde_json::Value` -> `i64`, for `opt_type == "int"` defaults. The
-/// Python source stores every default as a string literal (even for the one
-/// `opt_type="int"` option), so this accepts both a JSON number and a
-/// numeric string.
-pub fn as_int_default(v: &serde_json::Value) -> Option<i64> {
-    match v {
-        serde_json::Value::Number(n) => n.as_i64(),
-        serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
-        _ => None,
-    }
-}
-
-/// `serde_json::Value` -> `bool`, for `opt_type == "bool"` defaults.
-pub fn as_bool_default(v: &serde_json::Value) -> Option<bool> {
-    match v {
-        serde_json::Value::Bool(b) => Some(*b),
-        serde_json::Value::Number(n) => n.as_i64().map(|i| i != 0),
-        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Some(true),
-            "false" | "0" | "no" => Some(false),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
@@ -185,6 +188,18 @@ where
 /// Register the full Python option surface (`fixtures/options.json`) under
 /// the shadow prefix, or under the original canonical names when
 /// `REVOPS_CANONICAL_NAMES=1`.
+///
+/// **`revenue-ops-db-path` is deliberately skipped here.** Its shadow name
+/// (`revops-r-db-path`) is *exactly* the name Task 8 registers directly in
+/// `main` for the new DB-probe option — same underlying concept (the sqlite
+/// path), but Phase 1 wants an empty-string default (DB probing disabled)
+/// rather than the Python plugin's live default of
+/// `~/.lightning/revenue_ops.db`. Registering both under the same name would
+/// silently collide in cln-plugin's name-keyed option map (last registration
+/// wins), so we register it exactly once, under our own definition, instead
+/// of double-registering with conflicting defaults. This does not change the
+/// total registered-option count (`fixture_len + 1`): the skip here is
+/// offset by `main`'s own registration of the same name.
 fn register_python_options<S, I, O>(
     mut builder: Builder<S, I, O>,
     canonical: bool,
@@ -195,6 +210,9 @@ where
     I: AsyncRead + Send + Unpin + 'static,
 {
     for opt in options_table::load() {
+        if opt.name == "revenue-ops-db-path" {
+            continue;
+        }
         let name = if canonical {
             opt.name.clone()
         } else {
@@ -208,23 +226,102 @@ where
 #[tokio::main]
 async fn main() -> Result<()> {
     let observer_name = opt_name("observer");
+    let db_path_name = opt_name("db-path");
     let observer_opt = DefaultBooleanConfigOption::new_bool_with_default(
         &observer_name,
         true,
         "Run in observer (read-only) mode",
     );
+    let db_path_opt = DefaultStringConfigOption::new_str_with_default(
+        &db_path_name,
+        "",
+        "Path to the revops sqlite database, opened read-only at init (empty = disabled)",
+    );
+
     let ping_name = rpc_name("ping");
+    let status_name = rpc_name("status");
+    let config_name = rpc_name("config");
+
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
-        .option(observer_opt)
+        .option(observer_opt.clone())
+        .option(db_path_opt.clone())
         .rpcmethod(
             &ping_name,
             "liveness probe for the Rust port",
             |_p, _v| async move { Ok(serde_json::json!({"pong": true, "version": VERSION})) },
+        )
+        .rpcmethod(
+            &status_name,
+            "status snapshot for the Rust port",
+            |p: Plugin<SharedState>, _v| async move {
+                let s = p.state();
+                Ok(build_status(&StatusInputs {
+                    version: s.version.clone(),
+                    observer: s.observer,
+                    db_path: s.db_path.clone(),
+                    db_tables: s.db_tables,
+                }))
+            },
+        )
+        .rpcmethod(
+            &config_name,
+            "read a registered option's current resolved value",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let Some(key) = v.get("key").and_then(|k| k.as_str()) else {
+                    return Ok(serde_json::json!({"error": "missing 'key' param"}));
+                };
+                let s = p.state();
+                match s.config_names.get(key) {
+                    Some(full_name) => {
+                        let value = p.option_str(full_name)?;
+                        Ok(build_config_response(key, true, value.as_ref()))
+                    }
+                    None => Ok(build_config_response(key, false, None)),
+                }
+            },
         );
     let builder = register_python_options(builder, canonical_names());
-    let Some(plugin) = builder.start(()).await? else {
-        return Ok(()); // lightningd disabled us at manifest time
+
+    let Some(configured) = builder.configure().await? else {
+        return Ok(()); // lightningd disabled us (or --help) at manifest time
     };
+
+    let observer = configured.option(&observer_opt)?;
+    let db_path_raw = configured.option(&db_path_opt)?;
+    let db_path_setting = (!db_path_raw.is_empty()).then_some(db_path_raw);
+
+    // Open the DB read-only once at init, count its tables, and drop the
+    // connection — it is not `Sync` so it cannot live in plugin state.
+    // Phase 1b brings a persistent-connection actor.
+    let (db_path, db_tables) = match db_path_setting {
+        Some(raw) => {
+            let path = PathBuf::from(&raw);
+            match revops_db::open_read_only(&path) {
+                Ok(conn) => {
+                    let tables = revops_db::table_names(&conn).len();
+                    drop(conn);
+                    (Some(raw), Some(tables))
+                }
+                Err(e) => {
+                    configured
+                        .disable(&format!("revops-r-db-path set but DB open failed: {e}"))
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
+        None => (None, None),
+    };
+
+    let state: SharedState = Arc::new(State {
+        version: VERSION.to_string(),
+        observer,
+        db_path,
+        db_tables,
+        config_names: config_name_map(),
+    });
+
+    let plugin = configured.start(state).await?;
     plugin.join().await
 }
 

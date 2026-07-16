@@ -46,6 +46,7 @@ fn manifest_advertises_shadow_names() {
         .map(|o| o["name"].as_str().unwrap())
         .collect();
     assert!(opts.contains(&"revops-r-observer"), "options: {opts:?}");
+    assert!(opts.contains(&"revops-r-db-path"), "options: {opts:?}");
     let methods: Vec<&str> = result["rpcmethods"]
         .as_array()
         .unwrap()
@@ -53,6 +54,14 @@ fn manifest_advertises_shadow_names() {
         .map(|m| m["name"].as_str().unwrap())
         .collect();
     assert!(methods.contains(&"revenue-r-ping"), "methods: {methods:?}");
+    assert!(
+        methods.contains(&"revenue-r-status"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-r-config"),
+        "methods: {methods:?}"
+    );
 }
 
 #[test]
