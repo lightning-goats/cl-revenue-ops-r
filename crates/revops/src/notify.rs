@@ -70,10 +70,10 @@ async fn try_on_forward_event(handle: &ObserverHandle, event: &Value) -> anyhow:
 
 /// Extract a [`ForwardRow`] out of either a `forward_event` notification
 /// payload or a raw `listforwards` entry -- both shapes carry the same
-/// field names (`in_channel`/`out_channel`/`*_msat`(`oshi`)/`received_time`/
-/// `resolved_time`), so startup hydration (`hydration.rs`) and the live
-/// notification handler share this one parser. `pub(crate)` for that
-/// cross-module reuse.
+/// field names (`in_channel`/`out_channel`/`*_msat`/`*_msatoshi`/
+/// `received_time`/`resolved_time`), so startup hydration (`hydration.rs`)
+/// and the live notification handler share this one parser. `pub(crate)`
+/// for that cross-module reuse.
 pub(crate) fn forward_row_from_json(event: &Value) -> ForwardRow {
     let in_channel = event
         .get("in_channel")

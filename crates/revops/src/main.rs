@@ -93,6 +93,19 @@ fn expand_tilde(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+/// True if the observer's own db path (`observer-db-path`, already
+/// `~`-expanded) refers to the exact same file as the production db path
+/// (`db-path`, also already `~`-expanded, or `None` if production db-path
+/// isn't set). Pure path-equality on the expanded forms -- no
+/// canonicalization or filesystem access, matching every other path
+/// comparison in this module (neither path is required to exist).
+fn observer_db_path_collides_with_production(
+    observer_path: &std::path::Path,
+    production_path: Option<&std::path::Path>,
+) -> bool {
+    production_path == Some(observer_path)
+}
+
 fn opt_name(suffix: &str) -> String {
     if canonical_names() {
         format!("revenue-ops-{suffix}")
@@ -309,8 +322,11 @@ async fn main() -> Result<()> {
         .subscribe(
             "forward_event",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(handle) = p.state().observer_db.clone() {
-                    notify::on_forward_event(&handle, &v).await;
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_forward_event(&handle, &v).await,
+                    None => eprintln!(
+                        "revops: debug: forward_event dropped (observer_db not configured)"
+                    ),
                 }
                 Ok(())
             },
@@ -318,8 +334,11 @@ async fn main() -> Result<()> {
         .subscribe(
             "connect",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(handle) = p.state().observer_db.clone() {
-                    notify::on_connect(&handle, &v).await;
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_connect(&handle, &v).await,
+                    None => {
+                        eprintln!("revops: debug: connect dropped (observer_db not configured)")
+                    }
                 }
                 Ok(())
             },
@@ -327,8 +346,11 @@ async fn main() -> Result<()> {
         .subscribe(
             "disconnect",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(handle) = p.state().observer_db.clone() {
-                    notify::on_disconnect(&handle, &v).await;
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_disconnect(&handle, &v).await,
+                    None => {
+                        eprintln!("revops: debug: disconnect dropped (observer_db not configured)")
+                    }
                 }
                 Ok(())
             },
@@ -336,8 +358,11 @@ async fn main() -> Result<()> {
         .subscribe(
             "channel_state_changed",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(handle) = p.state().observer_db.clone() {
-                    notify::on_channel_state_changed(&handle, &v).await;
+                match p.state().observer_db.clone() {
+                    Some(handle) => notify::on_channel_state_changed(&handle, &v).await,
+                    None => eprintln!(
+                        "revops: debug: channel_state_changed dropped (observer_db not configured)"
+                    ),
                 }
                 Ok(())
             },
@@ -472,18 +497,41 @@ async fn main() -> Result<()> {
     // here never disables the plugin: it only means notification
     // ingestion is a no-op (per the plan's Global Constraint) while
     // `ping`/`status`/`config` keep working.
+    //
+    // Path equality (after `~` expansion) against the production db-path
+    // is checked first and refused outright: the production connection is
+    // a read-only single-owner actor (`revops_db::actor`) and the
+    // observer's is a read-write single-owner actor (`revops_db::owner`)
+    // -- pointing both at one file breaks the single-owner invariant
+    // either actor relies on (and would hand the observer write access to
+    // the production DB, which this plugin is never supposed to touch).
+    let production_db_path_expanded = db_path.as_deref().map(expand_tilde);
     let observer_db_raw = configured.option(&observer_db_opt)?;
     let observer_db = match (!observer_db_raw.is_empty()).then_some(observer_db_raw) {
         Some(raw) => {
             let path = expand_tilde(&raw);
-            match revops_db::owner::spawn_read_write(&path).await {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    eprintln!(
-                        "revops: {observer_db_name} spawn failed ({e}); notification ingestion \
-                         disabled (never falls back to the production db-path connection)"
-                    );
-                    None
+            if observer_db_path_collides_with_production(
+                &path,
+                production_db_path_expanded.as_deref(),
+            ) {
+                eprintln!(
+                    "revops: {observer_db_name} ({}) resolves to the same file as \
+                     {db_path_name}; refusing to open it as the observer's own \
+                     read-write db (notification ingestion disabled)",
+                    path.display()
+                );
+                None
+            } else {
+                match revops_db::owner::spawn_read_write(&path).await {
+                    Ok(handle) => Some(handle),
+                    Err(e) => {
+                        eprintln!(
+                            "revops: {observer_db_name} spawn failed ({e}); notification \
+                             ingestion disabled (never falls back to the production \
+                             db-path connection)"
+                        );
+                        None
+                    }
                 }
             }
         }
@@ -631,5 +679,33 @@ mod tests {
             expand_tilde("~alice/db.sqlite"),
             PathBuf::from("~alice/db.sqlite")
         );
+    }
+
+    /// Same expanded path -> collision, refuse.
+    #[test]
+    fn observer_db_path_collides_with_production_same_path() {
+        let production = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
+        assert!(observer_db_path_collides_with_production(
+            &production,
+            Some(&production),
+        ));
+    }
+
+    /// Different paths -> no collision.
+    #[test]
+    fn observer_db_path_collides_with_production_different_paths() {
+        let observer = PathBuf::from("/home/testuser/.lightning/revops-r-observer.db");
+        let production = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
+        assert!(!observer_db_path_collides_with_production(
+            &observer,
+            Some(&production),
+        ));
+    }
+
+    /// Production db-path unset (`None`) -> never a collision.
+    #[test]
+    fn observer_db_path_collides_with_production_no_production_path() {
+        let observer = PathBuf::from("/home/testuser/.lightning/revops-r-observer.db");
+        assert!(!observer_db_path_collides_with_production(&observer, None));
     }
 }

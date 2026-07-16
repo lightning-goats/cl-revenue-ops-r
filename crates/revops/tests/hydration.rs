@@ -1,17 +1,21 @@
-//! Tests for `revops::hydration::fetch_settled_forwards` -- the hand-rolled
-//! unix-socket JSON-RPC client used for startup hydration's paged
+//! Tests for `revops::hydration::fetch_settled_forwards` -- the
+//! `cln_rpc::ClnRpc`-backed client used for startup hydration's paged
 //! `listforwards` call. Mirrors the paging/fallback contract at
 //! cl-revenue-ops.py:632-667 (`_hydration_fetch_settled_forwards`): pages
 //! via `index="created"`, stops when a page returns fewer than the page
 //! limit, and errors out (never silently truncates) if a full page is
 //! missing `created_index` or the RPC itself errors.
 //!
-//! These tests stand up a tiny mock `lightning-rpc` unix-socket server
-//! (a bare `tokio::net::UnixListener` speaking the same "write a JSON
-//! request, read back one JSON response" protocol lightningd's own RPC
-//! socket uses) rather than requiring a real lightningd -- lnnode is the
-//! only real node available (design spec constraint), so parity here is
-//! pinned at the wire-protocol level.
+//! These tests stand up a tiny mock `lightning-rpc` unix-socket server (a
+//! bare `tokio::net::UnixListener`) rather than requiring a real
+//! lightningd -- lnnode is the only real node available (design spec
+//! constraint), so parity here is pinned at the wire-protocol level. The
+//! mock replies using the real `\n\n`-delimited framing `cln_rpc`'s own
+//! `MultiLineCodec` expects (see `cln_rpc::codec`) -- a prior hand-rolled
+//! client here used a single `\n`, which diverged from what both
+//! `cln-rpc` and `cln-plugin` actually speak on the wire and would have
+//! hung every real hydration call until the timeout (see the phase1b
+//! task-2 report's Fix Round 1 correction).
 
 use revops::hydration::{fetch_settled_forwards, run_startup_hydration};
 use serde_json::{json, Value};
@@ -56,7 +60,12 @@ fn serve(socket_path: std::path::PathBuf, responses: Vec<Value>) {
                     }),
                 };
                 let mut out = serde_json::to_vec(&body).unwrap();
-                out.push(b'\n');
+                // `cln_rpc`'s `MultiLineCodec` splits on a `\n\n`
+                // delimiter (see `cln_rpc::codec`) -- a single trailing
+                // `\n` here would never be recognized as a complete
+                // message and every call would hang to the client's
+                // timeout.
+                out.extend_from_slice(b"\n\n");
                 let _ = stream.write_all(&out).await;
             });
         }
@@ -160,7 +169,7 @@ async fn rpc_error_response_propagates_as_err() {
             "error": {"code": -32601, "message": "Unknown command 'listforwards'"}
         });
         let mut out = serde_json::to_vec(&body).unwrap();
-        out.push(b'\n');
+        out.extend_from_slice(b"\n\n");
         stream.write_all(&out).await.unwrap();
     });
 

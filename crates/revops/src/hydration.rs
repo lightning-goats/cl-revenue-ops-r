@@ -1,16 +1,24 @@
-//! Startup hydration: page `listforwards` via a hand-rolled unix-socket
-//! JSON-RPC client against lightningd's own RPC socket
-//! (`{lightning-dir}/{rpc-file}`, from `cln-plugin`'s `Configuration`).
+//! Startup hydration: page `listforwards` via `cln_rpc::ClnRpc` against
+//! lightningd's own RPC socket (`{lightning-dir}/{rpc-file}`, from
+//! `cln-plugin`'s `Configuration`).
 //!
-//! **Why hand-rolled instead of the `cln-rpc` crate**: the phase1b plan's
-//! Task 2 self-review flags `cln-rpc` as the "obvious" choice but allows a
-//! hand-rolled unix-socket client as an explicit fallback if the crate
-//! isn't a good fit. It isn't vendored in this workspace's registry cache
-//! and this phase needs exactly one read-only RPC method (`listforwards`),
-//! so a small dedicated client -- reusing `revops-rpc`'s
-//! `call_with_timeout` for the same "RPC timeout after {n}s on {method}"
-//! parity string Python's `ThreadSafeRpcProxy` produces
-//! (cl-revenue-ops.py:881) -- is the narrower, fully-auditable surface.
+//! **Uses the `cln-rpc` crate** (it is vendored in this workspace's
+//! registry cache -- see `Cargo.lock`/`~/.cargo/registry`; an earlier
+//! version of this module claimed otherwise and hand-rolled a unix-socket
+//! client instead, corrected in the phase1b task-2 report's Fix Round 1).
+//! That hand-rolled client wrote requests terminated with a single `\n`,
+//! but both `cln-rpc` and `cln-plugin` -- and, per `cln-rpc`'s own
+//! `MultiLineCodec` doc comment, lightningd itself -- frame messages with
+//! a `\n\n` (blank-line) delimiter. Against real lightningd, every
+//! hydration call would have blocked on that framing mismatch until the
+//! `call_with_timeout` deadline, silently disabling hydration in
+//! production while every mock-socket test (which used the same `\n\n`-
+//! blind client on both ends) passed. Using `cln_rpc::ClnRpc` here closes
+//! that gap by construction -- the wire framing is the crate's own tested
+//! code, not reimplemented here. `revops_rpc::call_with_timeout` still
+//! wraps each page's RPC call for the exact "RPC timeout after {n}s on
+//! {method}" parity string Python's `ThreadSafeRpcProxy` produces
+//! (cl-revenue-ops.py:881).
 //!
 //! Mirrors the paging/fallback contract at cl-revenue-ops.py:632-667
 //! (`_hydration_fetch_settled_forwards`): page via
@@ -24,12 +32,11 @@
 
 use crate::notify::forward_row_from_json;
 use anyhow::{bail, Context, Result};
+use cln_rpc::ClnRpc;
 use revops_db::notifications::compute_forward_hydration_start;
 use revops_db::owner::ObserverHandle;
 use serde_json::{json, Value};
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 
 /// Matches Python's `_HYDRATION_PAGE_LIMIT` (cl-revenue-ops.py:628).
 const HYDRATION_PAGE_LIMIT: i64 = 1000;
@@ -99,57 +106,20 @@ pub async fn fetch_settled_forwards(socket_path: &Path, start_time: i64) -> Resu
     bail!("listforwards paging exceeded max page count ({HYDRATION_MAX_PAGES})")
 }
 
-/// One `listforwards` call: connect fresh, write the request, read back
-/// exactly one JSON-RPC response. A fresh connection per page keeps the
-/// client trivially sequential (no request-id multiplexing needed) --
-/// lightningd's RPC socket accepts unlimited concurrent connections, so
-/// this has no meaningful cost over reusing one.
+/// One `listforwards` call over a fresh `cln_rpc::ClnRpc` connection.
+/// A fresh connection per page keeps the client trivially sequential (no
+/// request-id multiplexing to reason about) -- lightningd's RPC socket
+/// accepts unlimited concurrent connections, so this has no meaningful
+/// cost over reusing one across pages.
 async fn call_listforwards(socket_path: &Path, start: i64, limit: i64) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket_path)
+    let mut rpc = ClnRpc::new(socket_path)
         .await
         .with_context(|| format!("connect lightning-rpc socket {}", socket_path.display()))?;
 
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": "revops-r-hydration",
-        "method": "listforwards",
-        "params": {"status": "settled", "index": "created", "start": start, "limit": limit},
-    });
-    let mut body = serde_json::to_vec(&request)?;
-    body.push(b'\n');
-    stream
-        .write_all(&body)
+    let params = json!({"status": "settled", "index": "created", "start": start, "limit": limit});
+    rpc.call_raw::<Value, Value>("listforwards", &params)
         .await
-        .context("write listforwards request")?;
-    stream.flush().await.context("flush listforwards request")?;
-
-    // lightningd's RPC socket streams back a JSON document with no
-    // length-prefix framing. Since exactly one request is ever in flight
-    // per connection here, reading until the accumulated bytes parse as a
-    // single complete JSON value is sufficient and avoids depending on any
-    // particular delimiter convention.
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .context("read listforwards response")?;
-        if n == 0 {
-            bail!("lightning-rpc socket closed before a complete response was read");
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Ok(value) = serde_json::from_slice::<Value>(&buf) {
-            if let Some(err) = value.get("error") {
-                bail!("listforwards RPC error: {err}");
-            }
-            return value
-                .get("result")
-                .cloned()
-                .context("listforwards response missing 'result'");
-        }
-        // Not a complete JSON document yet -- keep reading.
-    }
+        .map_err(|e| anyhow::anyhow!("listforwards RPC error: {e}"))
 }
 
 /// Run once at startup: compute a bounded backfill window via
