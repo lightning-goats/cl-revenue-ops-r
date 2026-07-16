@@ -120,15 +120,18 @@ def cli(node, *args):
 
 def sqlite_query(node, db_path, query):
     """Run `query` against `db_path` on `node`, read-only, via sqlite3's
-    URI `mode=ro`, and return raw stdout (not parsed -- see diff_ingestion
-    for how the scalar COUNT/MIN results are interpreted).
+    `-readonly` flag, and return raw stdout (not parsed -- see
+    diff_ingestion for how the scalar COUNT/MIN results are interpreted).
+
+    `-readonly` rather than `-uri file:...?mode=ro`: lnnode's sqlite3 CLI
+    (3.46.1, Ubuntu 25.04) rejects `-uri` ("unknown option", found live
+    2026-07-16); `-readonly` is the portable spelling of the same intent.
 
     See the module docstring's "ssh argv vs single string" note for why
     this builds one pre-quoted remote command string instead of passing
     positional argv tokens the way `cli()` does.
     """
-    uri = f"file:{db_path}?mode=ro"
-    remote_cmd = f"sqlite3 -uri {shlex.quote(uri)} {shlex.quote(query)}"
+    remote_cmd = f"sqlite3 -readonly {shlex.quote(db_path)} {shlex.quote(query)}"
     return subprocess.run(["ssh", node, remote_cmd],
                          capture_output=True, text=True, check=True).stdout
 
