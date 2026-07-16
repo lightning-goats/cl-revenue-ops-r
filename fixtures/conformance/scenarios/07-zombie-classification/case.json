@@ -1,0 +1,12 @@
+{
+ "case": "zombie-classification",
+ "category": "classification",
+ "expected": {
+  "classification": "ZOMBIE"
+ },
+ "inputs": {},
+ "requirement": "Workstream A: zombie after failed defibrillation",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/profitability/classify_zombie_after_failed_defib.json"
+}

@@ -1,0 +1,89 @@
+{
+ "case": "open-vs-lnplus-conflict",
+ "category": "arbitration",
+ "expected": {
+  "ordered_intent_ids": [
+   "int-3d0c93c3b4d98c38"
+  ],
+  "rejected": [
+   {
+    "conflicting_key": "target 02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb already has an open intent",
+    "intent_id": "int-7a1a535688437c94",
+    "reason_code": "CONFLICT_DUPLICATE_OPEN"
+   }
+  ]
+ },
+ "inputs": {
+  "extended_rules": true,
+  "intents": [
+   {
+    "amount_msat": 1000000000,
+    "budget_bucket": "channel_open",
+    "capital_committed_msat": 1000000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "7a1a535688437c94d3fb1770fadcff1d4fe8b5b6a33516c8531207ef66423686",
+    "intent_id": "int-7a1a535688437c94",
+    "intent_type": "OPEN_CHANNEL",
+    "max_cost_msat": 3000000,
+    "origin_policy": "planner",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   {
+    "amount_msat": 2000000000,
+    "budget_bucket": "channel_open",
+    "capital_committed_msat": 2000000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "3d0c93c3b4d98c387d36ef7884e8cbf60079cf632843c29f9d97c2029db9ff40",
+    "intent_id": "int-3d0c93c3b4d98c38",
+    "intent_type": "OPEN_CHANNEL",
+    "max_cost_msat": 3000000,
+    "origin_policy": "lnplus_lifecycle_governed",
+    "preconditions": [],
+    "priority": 80,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   }
+  ]
+ },
+ "notes": [
+  "Gated by econ_conflict_rules_extended (PR 10)."
+ ],
+ "requirement": "Spec conflict rule: open vs LN+ \u2014 both paths emit OPEN_CHANNEL to the peer; CONFLICT_DUPLICATE_OPEN rejects the lower-priority one (the LN+ obligation at priority 80 wins)",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

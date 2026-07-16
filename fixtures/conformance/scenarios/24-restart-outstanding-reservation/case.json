@@ -1,0 +1,18 @@
+{
+ "case": "restart-with-outstanding-reservation",
+ "category": "reservation",
+ "expected": {
+  "state_after_restart": {
+   "restart-1": "{'status': 'active', 'reserved_sats': 500}"
+  }
+ },
+ "inputs": {
+  "reserved_before_restart": {
+   "amount_sats": 500,
+   "id": "restart-1"
+  }
+ },
+ "requirement": "DoD 5: reservations survive restart (durable store)",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

@@ -1,0 +1,16 @@
+{
+ "case": "fee-rail-floor",
+ "category": "fee_stage",
+ "expected": {
+  "floor_ppm": 21
+ },
+ "inputs": {
+  "capacity_sats": 2000000,
+  "chain_costs": null,
+  "opener": "local"
+ },
+ "requirement": "ADR-001 stage 1 (rails): fee floor",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/fee/floor_defaults_no_chain_costs.json"
+}

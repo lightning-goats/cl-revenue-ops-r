@@ -1,0 +1,89 @@
+{
+ "case": "circular-rebalance-vs-boltz-structural",
+ "category": "arbitration",
+ "expected": {
+  "ordered_intent_ids": [
+   "int-02f9475d26486caf"
+  ],
+  "rejected": [
+   {
+    "conflicting_key": "target 111x222x0 has a structural swap intent",
+    "intent_id": "int-1119af2f103eb344",
+    "reason_code": "CONFLICT_REBALANCE_SWAP"
+   }
+  ]
+ },
+ "inputs": {
+  "extended_rules": true,
+  "intents": [
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "1119af2f103eb34445d30decf78b97f16d11267a8fe66e6aa83b340abdbe33f4",
+    "intent_id": "int-1119af2f103eb344",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "111x222x0"
+   },
+   {
+    "amount_msat": 250000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 250000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "02f9475d26486caf2bc1b731dfccf638ff03205214440a60190f0dc6c7d97bf7",
+    "intent_id": "int-02f9475d26486caf",
+    "intent_type": "SWAP_OUT",
+    "max_cost_msat": 3000000,
+    "origin_policy": "boltz",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "111x222x0"
+   }
+  ]
+ },
+ "notes": [
+  "Gated by econ_conflict_rules_extended (PR 10)."
+ ],
+ "requirement": "Spec conflict rule: rebalance vs structural swap \u2014 the structural SWAP_OUT outranks; CONFLICT_REBALANCE_SWAP rejects the circular rebalance (live registry blocks both directions)",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

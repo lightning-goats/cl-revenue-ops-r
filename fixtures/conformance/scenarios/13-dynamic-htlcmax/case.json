@@ -1,0 +1,19 @@
+{
+ "case": "dynamic-htlcmax",
+ "category": "admission",
+ "expected": {
+  "htlcmax_msat": 1000000000
+ },
+ "inputs": {
+  "cfg_overrides": {},
+  "channel_info": {
+   "capacity": 2000000,
+   "spendable_msat": 1900000000
+  },
+  "flow_state": "balanced"
+ },
+ "requirement": "F3: dynamic htlc_max admission control",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/htlcmax/balanced_mid_share.json"
+}

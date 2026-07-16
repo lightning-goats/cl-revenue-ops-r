@@ -1,0 +1,58 @@
+{
+ "case": "sanitized-production-decisions",
+ "category": "production_capture",
+ "expected": {
+  "replay": {
+   "anomalies": [],
+   "reserved_msat": {},
+   "spent_msat": {},
+   "terminal": {}
+  }
+ },
+ "inputs": {
+  "events": [
+   {
+    "amounts": {
+     "reserved_msat": 400000
+    },
+    "at": 1783946902,
+    "cycle_id": "spend-rebalance",
+    "details": {},
+    "event_type": "budget_reserved",
+    "idempotency_key": "504",
+    "intent_id": "sanitized",
+    "schema_name": "ledger_event",
+    "schema_version": 0
+   },
+   {
+    "amounts": {},
+    "at": 1783946902,
+    "cycle_id": "spend-generic",
+    "details": {
+     "reason": "released"
+    },
+    "event_type": "reservation_released",
+    "idempotency_key": "504",
+    "intent_id": "sanitized",
+    "schema_name": "ledger_event",
+    "schema_version": 0
+   },
+   {
+    "amounts": {},
+    "at": 1783962518,
+    "cycle_id": "preview-1783962518",
+    "details": {
+     "observed_at": 1783962518
+    },
+    "event_type": "snapshot_created",
+    "idempotency_key": "preview-1783962518",
+    "intent_id": "preview-1783962518",
+    "schema_name": "ledger_event",
+    "schema_version": 0
+   }
+  ]
+ },
+ "requirement": "DoD 17: replaying real production lifecycles reproduces the reference ledger state",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

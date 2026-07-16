@@ -1,0 +1,15 @@
+{
+ "case": "underwater-classification",
+ "category": "classification",
+ "expected": {
+  "marginal_roi": -0.5
+ },
+ "inputs": {
+  "marginal_profit_30d_sats": -300,
+  "rebalance_cost_30d_sats": 600
+ },
+ "requirement": "Workstream A: negative marginal ROI (underwater)",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/profitability/marginal_roi_negative_profit.json"
+}

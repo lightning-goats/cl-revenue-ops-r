@@ -1,0 +1,54 @@
+{
+ "case": "lnplus-obligation-under-lower-authority",
+ "category": "authorization",
+ "expected": {
+  "if_authority_gated": {
+   "authorized": false,
+   "reason_code": "AUTHORITY_LEVEL_BLOCKED"
+  },
+  "invariant": "obligation fulfillment is EXEMPT from authority_level but NEVER from the governor",
+  "lnplus_path_is_ungated": {
+   "authorized": true,
+   "reason_code": ""
+  }
+ },
+ "inputs": {
+  "authority_level": "observe",
+  "intent": {
+   "amount_msat": null,
+   "budget_bucket": "channel_open",
+   "capital_committed_msat": 2000000000,
+   "confidence_micro": 0,
+   "created_at": 1752400000,
+   "expected_benefit_msat": 0,
+   "expires_at": 1752400600,
+   "explanation": {
+    "components": [
+     [
+      "case",
+      1
+     ]
+    ],
+    "kind": "conformance"
+   },
+   "idempotency_key": "4ef5f723031e93afe9520809f759f47f2ff5d5a41d9264e222780812bdf18fd3",
+   "intent_id": "int-4ef5f723031e93af",
+   "intent_type": "OPEN_CHANNEL",
+   "max_cost_msat": 214000,
+   "origin_policy": "conformance",
+   "preconditions": [],
+   "priority": 80,
+   "reason_codes": [
+    "CONTRACT_OBLIGATION"
+   ],
+   "reversible": false,
+   "schema_name": "intent",
+   "schema_version": 0,
+   "snapshot_id": "snap-1",
+   "target": "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+ },
+ "requirement": "Invariant 6 + Workstream I: accepted obligations complete under any authority level, still authorized and ledgered",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

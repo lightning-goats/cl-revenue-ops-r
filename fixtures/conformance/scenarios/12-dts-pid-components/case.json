@@ -1,0 +1,36 @@
+{
+ "case": "dts-pid-components",
+ "category": "fee_stage",
+ "expected": {
+  "pid_ewma_error": 0.09,
+  "pid_multiplier": 1.026338203439,
+  "posterior_mean": 297.560975609756,
+  "posterior_std": 46.852128566582
+ },
+ "inputs": {
+  "dts_observations": [
+   {
+    "fee": 250,
+    "hours": 6.0,
+    "revenue_rate": 3.5
+   },
+   {
+    "fee": 400,
+    "hours": 6.0,
+    "revenue_rate": 2.0
+   }
+  ],
+  "pid": {
+   "capacity_sats": 5000000,
+   "current_outbound_ratio": 0.2,
+   "flow_state": "balanced",
+   "fresh_state": true
+  }
+ },
+ "notes": [
+  "PID dt=0 (fresh state); sampling randomness is the recorded portability hazard and is NOT part of this case."
+ ],
+ "requirement": "ADR-001: DTS posterior update + PID multiplier are deterministic given inputs",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

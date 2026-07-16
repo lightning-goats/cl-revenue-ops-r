@@ -1,0 +1,19 @@
+{
+ "case": "boltz-timeout-after-acceptance",
+ "category": "failure_mode",
+ "expected": {
+  "quarantine_when_stale": true,
+  "resolvable_as_db_missing": false
+ },
+ "inputs": {
+  "age_seconds": 7200,
+  "lifecycle": [
+   "execution_started"
+  ],
+  "stale_after_seconds": 3600
+ },
+ "requirement": "Reconciler spec: in-flight (started-without-terminal) keys are NEVER auto-zeroed; stale ones quarantine only",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "modules/econ_reconcile.py (TDD-pinned in tests/test_econ_reconcile.py)"
+}

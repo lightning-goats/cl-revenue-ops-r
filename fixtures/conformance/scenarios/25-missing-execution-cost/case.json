@@ -1,0 +1,26 @@
+{
+ "case": "missing-execution-cost-context",
+ "category": "ledger",
+ "expected": {
+  "anomalies": [
+   "cost_recorded without reservation: k-25"
+  ],
+  "spent_msat": {
+   "k-25": 7000
+  }
+ },
+ "inputs": {
+  "events": [
+   {
+    "amounts": {
+     "cost_msat": 7000
+    },
+    "event_type": "cost_recorded",
+    "idempotency_key": "k-25"
+   }
+  ]
+ },
+ "requirement": "DoD 6: cost without reservation context is an ANOMALY, never silently absorbed",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

@@ -1,0 +1,23 @@
+{
+ "case": "fee-rate-limit-clamp",
+ "category": "fee_stage",
+ "expected": {
+  "applied_fee_ppm": 1150,
+  "diag": {
+   "cap_applied": true,
+   "cap_reason": "normal_cycle_delta_cap",
+   "max_delta_ppm": 150,
+   "requested_delta_ppm": 4000,
+   "wake_damping_applied": false
+  }
+ },
+ "inputs": {
+  "current": 1000,
+  "target": 5000,
+  "woke": false
+ },
+ "requirement": "ADR-001 stage 2 (rate_limit): per-cycle delta cap",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/fee/damping_large_raise_clamped.json"
+}

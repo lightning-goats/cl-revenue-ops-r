@@ -1,0 +1,153 @@
+{
+ "case": "partial-batch-completion",
+ "category": "arbitration",
+ "expected": {
+  "ordered_intent_ids": [
+   "int-3ccd42809618aef8",
+   "int-8c5dd83990a13524"
+  ],
+  "rejected": [
+   {
+    "conflicting_key": "duplicate idempotency key",
+    "intent_id": "int-8c5dd83990a13524",
+    "reason_code": "INTENT_SUPERSEDED"
+   },
+   {
+    "conflicting_key": "target 500x1x0 has a close intent",
+    "intent_id": "int-a6b3b9ad3da78e42",
+    "reason_code": "CONFLICT_CLOSE_REBALANCE"
+   }
+  ]
+ },
+ "inputs": {
+  "intents": [
+   {
+    "amount_msat": null,
+    "budget_bucket": "channel_open",
+    "capital_committed_msat": 0,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "3ccd42809618aef8e730135b0dde6ec5c88df098460fe6d2bb639c4ce2dc7c10",
+    "intent_id": "int-3ccd42809618aef8",
+    "intent_type": "CLOSE_CHANNEL",
+    "max_cost_msat": 0,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 60,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "500x1x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "8c5dd83990a135249a862c42d946856345c7123261ea6cf87bcb1c4202cd96aa",
+    "intent_id": "int-8c5dd83990a13524",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "600x1x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "a6b3b9ad3da78e42a83a28c4d34f435e1366c04a2249def23962a320f1b15713",
+    "intent_id": "int-a6b3b9ad3da78e42",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "500x1x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "8c5dd83990a135249a862c42d946856345c7123261ea6cf87bcb1c4202cd96aa",
+    "intent_id": "int-8c5dd83990a13524",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "600x1x0"
+   }
+  ]
+ },
+ "requirement": "Workstream H: a batch completes partially \u2014 survivors ordered, each rejection carries its own reason code",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

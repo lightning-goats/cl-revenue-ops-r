@@ -1,0 +1,18 @@
+{
+ "case": "stagnant-candidate",
+ "category": "classification",
+ "expected": {
+  "classification": "STAGNANT_CANDIDATE"
+ },
+ "inputs": {
+  "days_open": 400,
+  "forward_count": 15,
+  "last_routed": 1740044800,
+  "net_profit": -8000,
+  "roi": -0.4
+ },
+ "requirement": "Workstream A: stagnant classification",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/profitability/classify_old_loser_stagnant.json"
+}

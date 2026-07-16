@@ -1,0 +1,52 @@
+{
+ "case": "expired-intent-predicate",
+ "category": "intent_semantics",
+ "expected": {
+  "is_expired": [
+   false,
+   true,
+   true
+  ]
+ },
+ "inputs": {
+  "intent": {
+   "amount_msat": 400000000,
+   "budget_bucket": "rebalance",
+   "capital_committed_msat": 400000000,
+   "confidence_micro": 0,
+   "created_at": 1752400000,
+   "expected_benefit_msat": 0,
+   "expires_at": 1752400600,
+   "explanation": {
+    "components": [
+     [
+      "case",
+      1
+     ]
+    ],
+    "kind": "conformance"
+   },
+   "idempotency_key": "1119af2f103eb34445d30decf78b97f16d11267a8fe66e6aa83b340abdbe33f4",
+   "intent_id": "int-1119af2f103eb344",
+   "intent_type": "REBALANCE",
+   "max_cost_msat": 3000000,
+   "origin_policy": "conformance",
+   "preconditions": [],
+   "priority": 50,
+   "reason_codes": [],
+   "reversible": false,
+   "schema_name": "intent",
+   "schema_version": 0,
+   "snapshot_id": "snap-1",
+   "target": "111x222x0"
+  },
+  "probe_times": [
+   1752400599,
+   1752400600,
+   1752400601
+  ]
+ },
+ "requirement": "Workstream B: expiry boundary is inclusive at expires_at",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

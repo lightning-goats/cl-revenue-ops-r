@@ -1,0 +1,13 @@
+{
+ "case": "protected-close-rejection",
+ "category": "authorization",
+ "expected": {
+  "allowed": false,
+  "reason": "Channel tagged 'protect' \u2014 close blocked"
+ },
+ "inputs": {},
+ "requirement": "F5: protection tags veto closure before any intent exists",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/close_protection/allowed_protect_tag_blocks.json"
+}

@@ -1,0 +1,22 @@
+{
+ "case": "unknown-external-execution-outcome",
+ "category": "ledger",
+ "expected": {
+  "reserved_msat": {
+   "k-26": 5000
+  },
+  "terminal": {
+   "k-26": "execution_outcome_unknown"
+  }
+ },
+ "inputs": {
+  "lifecycle": [
+   "budget_reserved",
+   "execution_started",
+   "execution_outcome_unknown"
+  ]
+ },
+ "requirement": "Workstream E: unknown outcome is a TERMINAL state pending reconciliation; reservation state preserved for the sweep",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

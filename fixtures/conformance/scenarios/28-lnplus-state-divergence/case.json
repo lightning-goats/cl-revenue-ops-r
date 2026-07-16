@@ -1,0 +1,18 @@
+{
+ "case": "lnplus-state-divergence-gate",
+ "category": "failure_mode",
+ "expected": {
+  "overrides": {
+   "participant_max_count": 2
+  },
+  "rejection": "terms:fewer than 3 participants"
+ },
+ "inputs": {},
+ "notes": [
+  "Full watcher divergence handling is exercised by tests/test_lnplus_swaps.py::reconcile paths."
+ ],
+ "requirement": "Workstream G: LN+ platform-state divergence rejected at the gate chain; watcher reconciliation is preflight-gated",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/lnplus/filter_dual_swap_rejected.json"
+}

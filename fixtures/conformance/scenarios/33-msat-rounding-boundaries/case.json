@@ -1,0 +1,29 @@
+{
+ "case": "msat-sat-rounding-boundaries",
+ "category": "intent_semantics",
+ "expected": {
+  "ceil_sats": [
+   1,
+   1,
+   2,
+   2
+  ],
+  "floor_sats": [
+   0,
+   1,
+   1,
+   1
+  ]
+ },
+ "inputs": {
+  "msat": [
+   999,
+   1000,
+   1001,
+   1999
+  ]
+ },
+ "requirement": "Workstream J: explicit, documented rounding at msat/sat boundaries",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

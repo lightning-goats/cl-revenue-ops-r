@@ -1,0 +1,21 @@
+{
+ "case": "map-insertion-order-independence",
+ "category": "determinism",
+ "expected": {
+  "canonical": "{\"a\":1,\"b\":2,\"nested\":{\"x\":1,\"y\":2}}",
+  "insertion_order_independent": true
+ },
+ "inputs": {
+  "payload": {
+   "a": 1,
+   "b": 2,
+   "nested": {
+    "x": 1,
+    "y": 2
+   }
+  }
+ },
+ "requirement": "Workstream J: canonical JSON is insertion-order independent",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}
