@@ -4,6 +4,7 @@
 //! unit-testing in isolation from the cln-plugin stdio handshake (which the
 //! `tests/manifest.rs` black-box test covers instead).
 
+pub mod config_types;
 pub mod options_table;
 pub mod rpc_status;
 

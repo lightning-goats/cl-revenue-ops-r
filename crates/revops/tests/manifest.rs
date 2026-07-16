@@ -148,22 +148,47 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     );
 
     // Per the design spec's db-path ruling (docs/superpowers/specs/
-    // 2026-07-16-rust-port-design.md), canonical mode currently registers
-    // revenue-ops-db-path with an empty-string default (DB probing
-    // disabled) rather than the Python plugin's live default of
-    // `~/.lightning/revenue_ops.db` -- Phase 1 deliberately does not want
-    // an accidental DB probe on every init. This assertion pins today's
-    // (Phase 1a) value so that Phase 1b's default fix shows up here as a
-    // test failure demanding a deliberate update, not a silent behavior
-    // change.
+    // 2026-07-16-rust-port-design.md lines 78-87): in canonical mode (Python
+    // unloaded, this Rust plugin IS the only plugin) the db-path option's
+    // default must equal Python's own fixture default
+    // (`~/.lightning/revenue_ops.db`, `fixtures/options.json`'s
+    // `revenue-ops-db-path` entry), not the shadow-mode opt-in-empty
+    // default -- an operator relying on the option's default must still get
+    // DB access post-cutover.
     let db_path_opt = opts
         .iter()
         .find(|o| o["name"].as_str() == Some("revenue-ops-db-path"))
         .expect("revenue-ops-db-path registered");
-    // 1b must change this to Python's default -- see spec
+    let table_default = table
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "revenue-ops-db-path")
+        .expect("fixture has revenue-ops-db-path")["default"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        db_path_opt["default"].as_str(),
+        Some(table_default.as_str()),
+        "canonical-mode db-path default must equal Python's fixture default: {db_path_opt:?}"
+    );
+}
+
+/// Shadow mode (both plugins loaded) must keep the opt-in-empty default --
+/// this is a companion pin to the canonical-mode assertion above so a
+/// future change can't accidentally flip both defaults at once.
+#[test]
+fn manifest_shadow_mode_db_path_default_stays_empty() {
+    let result = manifest_with(false);
+    let opts = result["options"].as_array().unwrap();
+    let db_path_opt = opts
+        .iter()
+        .find(|o| o["name"].as_str() == Some("revops-r-db-path"))
+        .expect("revops-r-db-path registered");
     assert_eq!(
         db_path_opt["default"].as_str(),
         Some(""),
-        "db-path default: {db_path_opt:?}"
+        "shadow default must stay opt-in-empty"
     );
 }

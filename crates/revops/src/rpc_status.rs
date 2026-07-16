@@ -4,6 +4,7 @@
 //! itself can be unit-tested without spinning up a plugin process over
 //! stdio.
 
+use crate::config_types::{self, FieldType};
 use cln_plugin::options;
 use serde_json::{json, Value};
 
@@ -47,15 +48,42 @@ pub fn option_value_to_json(value: Option<&options::Value>) -> Value {
 /// registered option names at all; `value` is that option's current
 /// resolved value (already defaulted by cln-plugin's init handshake when
 /// CLN didn't set it explicitly — see `ConfiguredPlugin::option_str`/
-/// `Plugin::option_str`). An unknown key produces the stable
-/// `{"error": "unknown config key: <key>"}` shape the diff harness matches;
-/// a known key always produces `{"key": ..., "value": ...}`, with `value`
-/// possibly `null`.
-pub fn build_config_response(key: &str, known: bool, value: Option<&options::Value>) -> Value {
+/// `Plugin::option_str`); `field_type` is the corresponding `Config` field's
+/// declared Python type, if `key` maps onto one (see
+/// [`crate::config_types::field_type_for`]) — used to render the value in
+/// Python's native scalar shape rather than cln-plugin's raw option
+/// representation. An unknown key produces the stable capital-U
+/// `{"error": "Unknown config key: <key>"}` shape (byte-parity with
+/// `cl-revenue-ops.py`'s `revenue-config get`, cl-revenue-ops.py:5670); a
+/// known key produces `{"key", "value", "version", "classification"}` --
+/// Python's exact shape (cl-revenue-ops.py:5671-5679) MINUS the `warning`
+/// key, which only applies to non-public keys and isn't reproduced here (a
+/// documented, not silent, gap — see the plan's Task 3 gap note).
+///
+/// `version` is always a Phase 1b placeholder: Python's live per-key
+/// `version` is the DB-persisted `config._version`, incremented on writes
+/// through `revenue-config set`, and Phase 1b has no DB-backed
+/// override-write path yet. Every known-key response therefore lists
+/// `"version"` in a `_phase1b_gaps` array so the diff harness's `--strict`
+/// mode skips that one key instead of flagging a false mismatch.
+pub fn build_config_response(
+    key: &str,
+    known: bool,
+    value: Option<&options::Value>,
+    field_type: Option<FieldType>,
+    version: i64,
+) -> Value {
     if !known {
-        return json!({"error": format!("unknown config key: {key}")});
+        return json!({"error": format!("Unknown config key: {key}")});
     }
-    json!({"key": key, "value": option_value_to_json(value)})
+    let typed_value = value.map_or(Value::Null, |v| config_types::convert_value(field_type, v));
+    json!({
+        "key": key,
+        "value": typed_value,
+        "version": version,
+        "classification": config_types::classify_runtime_key(key),
+        "_phase1b_gaps": ["version"],
+    })
 }
 
 // Unit-test coverage for `build_status`, `build_config_response`, and

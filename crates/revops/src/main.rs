@@ -6,6 +6,7 @@ use cln_plugin::options::{
     DefaultStringConfigOption, FlagConfigOption, IntegerConfigOption, StringConfigOption,
 };
 use cln_plugin::{Builder, Plugin};
+use revops::config_types;
 use revops::options_table::{self, OptDef};
 use revops::rpc_status::{build_config_response, build_status, StatusInputs};
 use revops::{as_bool_default, as_int_default, as_string_default};
@@ -232,9 +233,26 @@ async fn main() -> Result<()> {
         true,
         "Run in observer (read-only) mode",
     );
+    // Per the design spec's db-path ruling (docs/superpowers/specs/
+    // 2026-07-16-rust-port-design.md lines 78-87): in shadow mode (both
+    // plugins loaded) the default stays "" -- no accidental DB probe just
+    // because this plugin loaded alongside Python. In canonical mode
+    // (REVOPS_CANONICAL_NAMES=1, Python unloaded), this Rust plugin IS the
+    // only plugin, so the default must be Python's own live default
+    // (`fixtures/options.json`'s `revenue-ops-db-path` entry) or an
+    // operator relying on the option's default silently loses DB access.
+    let db_path_default: String = if canonical_names() {
+        options_table::load()
+            .into_iter()
+            .find(|o| o.name == "revenue-ops-db-path")
+            .and_then(|o| as_string_default(&o.default))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let db_path_opt = DefaultStringConfigOption::new_str_with_default(
         &db_path_name,
-        "",
+        &db_path_default,
         "Path to the revops sqlite database, opened read-only at init (empty = disabled)",
     );
 
@@ -274,9 +292,20 @@ async fn main() -> Result<()> {
                 match s.config_names.get(key) {
                     Some(full_name) => {
                         let value = p.option_str(full_name)?;
-                        Ok(build_config_response(key, true, value.as_ref()))
+                        let field_type = config_types::field_type_for(key);
+                        // Phase 1b has no DB-backed config-override-write
+                        // path yet, so there is no live per-key version to
+                        // report; build_config_response documents this
+                        // placeholder in its `_phase1b_gaps` array.
+                        Ok(build_config_response(
+                            key,
+                            true,
+                            value.as_ref(),
+                            field_type,
+                            0,
+                        ))
                     }
-                    None => Ok(build_config_response(key, false, None)),
+                    None => Ok(build_config_response(key, false, None, None, 0)),
                 }
             },
         );
