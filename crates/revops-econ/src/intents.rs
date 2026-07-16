@@ -144,10 +144,10 @@ pub struct IntentEnvelope {
 impl IntentEnvelope {
     /// Mirrors Python's `IntentEnvelope.__post_init__` exactly: intent_type
     /// membership, non-empty snapshot_id/target/budget_bucket/origin_policy,
-    /// `expires_at > created_at`, `0 <= priority <= 100`, and every reason
-    /// code present in the catalog. (Python also type-checks `amount_msat`
-    /// is `Msat | None`; here that's enforced by the `Option<Msat>` field
-    /// type itself, so there is nothing further to check.)
+    /// non-empty explanation.kind, `expires_at > created_at`, `0 <= priority <= 100`,
+    /// and every reason code present in the catalog. (Python also type-checks
+    /// `amount_msat` is `Msat | None`; here that's enforced by the
+    /// `Option<Msat>` field type itself, so there is nothing further to check.)
     fn validate(&self) -> EconResult<()> {
         if !INTENT_TYPES.contains(&self.intent_type.as_str()) {
             return Err(EconError {
@@ -162,6 +162,11 @@ impl IntentEnvelope {
         if self.budget_bucket.is_empty() || self.origin_policy.is_empty() {
             return Err(EconError {
                 msg: "budget_bucket and origin_policy required".to_string(),
+            });
+        }
+        if self.explanation.kind.is_empty() {
+            return Err(EconError {
+                msg: "Explanation.kind must be non-empty".to_string(),
             });
         }
         if self.expires_at.value() <= self.created_at.value() {
@@ -598,6 +603,20 @@ mod tests {
     }
 
     #[test]
+    fn make_intent_rejects_empty_explanation_kind() {
+        let mut f = golden_fields();
+        f.explanation.kind = String::new();
+        let result = make_intent(f);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.msg.contains("Explanation.kind"),
+            "error message should name the field: {}",
+            err.msg
+        );
+    }
+
+    #[test]
     fn make_intent_accepts_none_amount() {
         let mut f = golden_fields();
         f.amount_msat = None;
@@ -695,5 +714,20 @@ mod tests {
         assert!(wire["amount_msat"].is_null());
         let round_tripped = from_wire(&wire).unwrap();
         assert_eq!(env, round_tripped);
+    }
+
+    #[test]
+    fn from_wire_rejects_empty_explanation_kind() {
+        let env = make_intent(golden_fields()).unwrap();
+        let mut wire = to_wire(&env);
+        wire["explanation"]["kind"] = json!("");
+        let result = from_wire(&wire);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.msg.contains("Explanation.kind"),
+            "error message should name the field: {}",
+            err.msg
+        );
     }
 }
