@@ -8,8 +8,12 @@ use cln_plugin::options::{
 use cln_plugin::{Builder, Plugin};
 use revops::config_types;
 use revops::options_table::{self, OptDef};
+use revops::rpc_dashboard::{build_dashboard, parse_window_days};
+use revops::rpc_history::build_history;
+use revops::rpc_report::build_report;
 use revops::rpc_status::{build_config_response, build_status, StatusInputs};
-use revops::{as_bool_default, as_int_default, as_string_default};
+use revops::{as_bool_default, as_int_default, as_string_default, now_unix};
+use revops_db::queries;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -284,6 +288,9 @@ async fn main() -> Result<()> {
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
+    let history_name = rpc_name("history");
+    let report_name = rpc_name("report");
+    let dashboard_name = rpc_name("dashboard");
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         .option(observer_opt.clone())
@@ -339,6 +346,59 @@ async fn main() -> Result<()> {
                     }
                     None => Ok(build_config_response(key, false, None, None, 0)),
                 }
+            },
+        )
+        .rpcmethod(
+            &history_name,
+            "lifetime financial history (Phase 1b: fully DB-backed)",
+            |p: Plugin<SharedState>, _v| async move {
+                let s = p.state();
+                let Some(handle) = &s.db else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                let now = now_unix();
+                let stats = queries::lifetime_stats(handle, now).await?;
+                let closed = queries::closed_channels_summary(handle).await?;
+                Ok(build_history(&stats, &closed))
+            },
+        )
+        .rpcmethod(
+            &report_name,
+            "financial/policy reports (Phase 1b: 'costs' is DB-backed; \
+             'summary'/'policies'/'peer' are gap-marked, see _phase1b_gaps)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let s = p.state();
+                let report_type = v
+                    .get("report_type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("summary");
+                if report_type != "costs" {
+                    return Ok(build_report(report_type, None, 0));
+                }
+                let Some(handle) = &s.db else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                let now = now_unix();
+                let costs = queries::closure_costs_windows(handle, now).await?;
+                Ok(build_report(report_type, Some(&costs), now))
+            },
+        )
+        .rpcmethod(
+            &dashboard_name,
+            "P&L dashboard (Phase 1b: period.*/net_profit/margin are \
+             DB-backed; tlv/roc/warnings/bleeders are gap-marked)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let s = p.state();
+                let Some(handle) = &s.db else {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                let window_days = match parse_window_days(v.get("window_days")) {
+                    Ok(w) => w,
+                    Err(e) => return Ok(e),
+                };
+                let now = now_unix();
+                let pnl = queries::pnl_summary(handle, window_days, now).await?;
+                Ok(build_dashboard(&pnl))
             },
         );
     let builder = register_python_options(builder, canonical_names());

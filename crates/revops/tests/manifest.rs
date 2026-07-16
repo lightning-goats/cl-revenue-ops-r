@@ -81,6 +81,18 @@ fn manifest_advertises_shadow_names() {
         methods.contains(&"revenue-r-config"),
         "methods: {methods:?}"
     );
+    assert!(
+        methods.contains(&"revenue-r-history"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-r-report"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-r-dashboard"),
+        "methods: {methods:?}"
+    );
 }
 
 #[test]
@@ -139,11 +151,18 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     assert!(methods.contains(&"revenue-ping"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-status"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-config"), "methods: {methods:?}");
-    // Exactly 3 rpc methods total (no leftover revenue-r-* names bleeding
-    // through from shadow mode).
+    assert!(methods.contains(&"revenue-history"), "methods: {methods:?}");
+    assert!(methods.contains(&"revenue-report"), "methods: {methods:?}");
+    assert!(
+        methods.contains(&"revenue-dashboard"),
+        "methods: {methods:?}"
+    );
+    // Exactly 6 rpc methods total (no leftover revenue-r-* names bleeding
+    // through from shadow mode) -- ping/status/config (Phase 1a) plus
+    // Phase 1b Task 5's history/report/dashboard read-RPC subset.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        3,
+        6,
         "methods: {methods:?}"
     );
 

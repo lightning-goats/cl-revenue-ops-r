@@ -4,6 +4,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
 pub mod actor;
+pub mod queries;
 
 /// Open the production sqlite database read-only. Never creates the file;
 /// errors if it does not already exist.

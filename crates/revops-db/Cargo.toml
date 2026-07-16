@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+revops-core = { path = "../revops-core" }
 rusqlite = "0.32"        # NO "bundled" feature — system sqlite by design
 tokio.workspace = true
 
