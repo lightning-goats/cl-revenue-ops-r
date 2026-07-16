@@ -1,0 +1,7 @@
+{
+  "exceeds": true,
+  "inputs": {
+    "current_msat": 0,
+    "new_msat": 500000000
+  }
+}
