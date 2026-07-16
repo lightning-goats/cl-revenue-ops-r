@@ -1,0 +1,7 @@
+{
+  "inputs": {
+    "marginal_profit_30d_sats": -300,
+    "rebalance_cost_30d_sats": 600
+  },
+  "marginal_roi": -0.5
+}

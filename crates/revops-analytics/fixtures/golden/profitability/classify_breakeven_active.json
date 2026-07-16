@@ -1,0 +1,10 @@
+{
+  "classification": "BREAK_EVEN",
+  "inputs": {
+    "days_open": 90,
+    "forward_count": 500,
+    "last_routed": 1752396400,
+    "net_profit": 10,
+    "roi": 0.005
+  }
+}

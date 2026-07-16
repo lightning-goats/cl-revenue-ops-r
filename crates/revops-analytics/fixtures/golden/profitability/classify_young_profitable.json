@@ -1,0 +1,10 @@
+{
+  "classification": "PROFITABLE",
+  "inputs": {
+    "days_open": 10,
+    "forward_count": 200,
+    "last_routed": 1752313600,
+    "net_profit": 5000,
+    "roi": 0.25
+  }
+}
