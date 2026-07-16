@@ -37,35 +37,10 @@ pub const SOURCED_FEE_PROTECT_SATS: i64 = 100;
 pub const SOURCED_FEE_ROI_FLOOR_PCT: f64 = -50.0;
 pub const REVENUE_ROUTE_ROI_FLOOR_PCT: f64 = -30.0;
 
-/// See the module-level doc comment: a task-local duplicate of Task 2's
-/// `classification::ChannelRole`, pending merge-time reconciliation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChannelRole {
-    InboundGateway,
-    OutboundGateway,
-    Balanced,
-    Dormant,
-}
-
-impl ChannelRole {
-    pub fn as_value(&self) -> &'static str {
-        match self {
-            ChannelRole::InboundGateway => "inbound_gateway",
-            ChannelRole::OutboundGateway => "outbound_gateway",
-            ChannelRole::Balanced => "balanced",
-            ChannelRole::Dormant => "dormant",
-        }
-    }
-
-    pub fn as_name(&self) -> &'static str {
-        match self {
-            ChannelRole::InboundGateway => "INBOUND_GATEWAY",
-            ChannelRole::OutboundGateway => "OUTBOUND_GATEWAY",
-            ChannelRole::Balanced => "BALANCED",
-            ChannelRole::Dormant => "DORMANT",
-        }
-    }
-}
+// Merge-time reconciliation (T5 review sanctioned): the task-local
+// duplicate is gone; T2's canonical enum is re-exported so this module's
+// public path keeps working.
+pub use crate::classification::ChannelRole;
 
 /// Spec Workstream F5 lifecycle model (distinct from economic role) —
 /// `protection_service.py`'s `ChannelLifecycle`.
