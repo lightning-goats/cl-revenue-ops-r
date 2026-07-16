@@ -1,15 +1,15 @@
 [package]
-name = "revops-db"
+name = "revops-analytics"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 revops-core = { path = "../revops-core" }
-rusqlite = "0.32"        # NO "bundled" feature — system sqlite by design
+revops-econ = { path = "../revops-econ" }
+serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
