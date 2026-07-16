@@ -1,0 +1,85 @@
+{
+ "case": "conflicting-close-and-rebalance",
+ "category": "arbitration",
+ "expected": {
+  "ordered_intent_ids": [
+   "int-9c2fdcd788a9c1f0"
+  ],
+  "rejected": [
+   {
+    "conflicting_key": "target 111x222x0 has a close intent",
+    "intent_id": "int-1119af2f103eb344",
+    "reason_code": "CONFLICT_CLOSE_REBALANCE"
+   }
+  ]
+ },
+ "inputs": {
+  "intents": [
+   {
+    "amount_msat": null,
+    "budget_bucket": "channel_open",
+    "capital_committed_msat": 0,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "9c2fdcd788a9c1f0ccf5c7e1cad94235d84c80b7898440153e8bb7d4a905ce5c",
+    "intent_id": "int-9c2fdcd788a9c1f0",
+    "intent_type": "CLOSE_CHANNEL",
+    "max_cost_msat": 0,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 60,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "111x222x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "1119af2f103eb34445d30decf78b97f16d11267a8fe66e6aa83b340abdbe33f4",
+    "intent_id": "int-1119af2f103eb344",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "111x222x0"
+   }
+  ]
+ },
+ "requirement": "J3/spec conflict rule: rebalance into a channel scheduled for closure is rejected (CONFLICT_CLOSE_REBALANCE)",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

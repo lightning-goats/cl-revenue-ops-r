@@ -1,0 +1,18 @@
+{
+ "case": "balanced-channel-role",
+ "category": "classification",
+ "expected": {
+  "role_30d": "BALANCED"
+ },
+ "inputs": {
+  "forward_count_30d": 20,
+  "lifetime_role": "OUTBOUND_GATEWAY",
+  "sourced_forward_count_30d": 22,
+  "total_forward_count_30d": 42,
+  "window_30d_available": true
+ },
+ "requirement": "Workstream A: BALANCED role from 30d flow evidence",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/profitability/role30d_balanced_30d.json"
+}

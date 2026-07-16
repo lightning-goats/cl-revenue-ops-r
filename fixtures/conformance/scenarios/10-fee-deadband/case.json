@@ -1,0 +1,23 @@
+{
+ "case": "fee-deadband-no-change",
+ "category": "fee_stage",
+ "expected": {
+  "applied_fee_ppm": 750,
+  "diag": {
+   "cap_applied": false,
+   "cap_reason": "none",
+   "max_delta_ppm": 113,
+   "requested_delta_ppm": 0,
+   "wake_damping_applied": false
+  }
+ },
+ "inputs": {
+  "current": 750,
+  "target": 750,
+  "woke": false
+ },
+ "requirement": "ADR-001 stage 3 (deadband): no-op suppression",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/fee/damping_no_change.json"
+}

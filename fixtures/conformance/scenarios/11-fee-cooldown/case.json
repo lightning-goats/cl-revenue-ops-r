@@ -1,0 +1,23 @@
+{
+ "case": "fee-cooldown-wake-cycle",
+ "category": "fee_stage",
+ "expected": {
+  "applied_fee_ppm": 1500,
+  "diag": {
+   "cap_applied": true,
+   "cap_reason": "wake_cycle_delta_cap",
+   "max_delta_ppm": 500,
+   "requested_delta_ppm": 4000,
+   "wake_damping_applied": true
+  }
+ },
+ "inputs": {
+  "current": 1000,
+  "target": 5000,
+  "woke": true
+ },
+ "requirement": "ADR-001 stage 4 (cooldown): wake-from-sleep cycle semantics",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/fee/damping_wake_cycle_wider_cap.json"
+}

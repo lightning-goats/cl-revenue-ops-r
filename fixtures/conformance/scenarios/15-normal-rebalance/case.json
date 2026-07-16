@@ -1,0 +1,82 @@
+{
+ "case": "normal-rebalance-plan",
+ "category": "rebalance_mode",
+ "expected": {
+  "drain_demand": {
+   "entries": [],
+   "over_local_count": 1,
+   "paired_count": 1,
+   "total_excess_sats": 0
+  },
+  "selected": [
+   {
+    "amount_sats": 2000000,
+    "dest_activity_in_sats": 0,
+    "dest_budget_source": "none",
+    "dest_capacity_sats": 50000000,
+    "dest_channel_id": "bbb",
+    "dest_fee_history_validated": true,
+    "dest_historical_direct_fee_ppm": 0.0,
+    "dest_historical_sourced_fee_ppm": 0.0,
+    "dest_local_ratio": 0.0,
+    "dest_out_fee_ppm": 250,
+    "dest_peer_id": "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dest_realized_utilization": 0.5,
+    "dest_utilization_is_realized": false,
+    "dest_value_class": "active",
+    "pair_budget_sats": 100000,
+    "reason_code": "ev_positive",
+    "rejection_reason": "",
+    "route": null,
+    "route_cost_sats": null,
+    "route_decision": null,
+    "score": 0.29800000000000004,
+    "score_decomposition": {
+     "beats_do_nothing": true,
+     "capital_risk_penalty": 0.0,
+     "do_nothing_score": 0.0,
+     "expected_fee": 0.0,
+     "expected_future_value": 0.298,
+     "failure_penalty": 0.0,
+     "final_score": 0.149,
+     "inputs": {
+      "amount_sats": 2000000,
+      "cheap_return_term": 0.098,
+      "dest_local_ratio": 0.0,
+      "dest_urgency_term": 0.0,
+      "dest_value_term": 0.2,
+      "imbalance_score": 0.35,
+      "pair_budget_sats": 100000,
+      "source_drain_term": 0.0,
+      "source_local_ratio": 1.0,
+      "value_score": 1
+     },
+     "model_version": "v2-bootstrap-explainability",
+     "p_success": 0.5,
+     "rejection_reason": "",
+     "score_units": "planner_score_minus_budget_share",
+     "source_opportunity_cost": 0.0,
+     "stage": "planner_pre_route"
+    },
+    "source_activity_out_sats": 0,
+    "source_budget_source": "none",
+    "source_capacity_sats": 50000000,
+    "source_channel_id": "aaa",
+    "source_historical_direct_fee_ppm": 0.0,
+    "source_historical_sourced_fee_ppm": 0.0,
+    "source_local_ratio": 1.0,
+    "source_out_fee_ppm": 250,
+    "source_peer_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_realized_utilization": 0.5,
+    "source_utilization_is_realized": false,
+    "source_value_class": "active"
+   }
+  ],
+  "skipped": []
+ },
+ "inputs": {},
+ "requirement": "F4: one planner; chunk-bounded amounts",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/rebalance/plan_amount_bounded_by_chunk.json"
+}

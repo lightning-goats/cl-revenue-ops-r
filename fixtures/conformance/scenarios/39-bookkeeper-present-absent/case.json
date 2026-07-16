@@ -1,0 +1,22 @@
+{
+ "case": "bookkeeper-present-and-absent",
+ "category": "failure_mode",
+ "expected": {
+  "bookkeeper_absent": "falls back to estimated_open_cost_sats; profitability stays computable",
+  "bookkeeper_present": "open cost from bookkeeper events",
+  "invariant": "absence degrades cost precision, never availability"
+ },
+ "inputs": {
+  "open_cost_source": [
+   "bookkeeper",
+   "estimate_fallback"
+  ]
+ },
+ "notes": [
+  "Behavioral pin lives in the profitability unit tests; this case records the contract for porters."
+ ],
+ "requirement": "Workstream G: bookkeeper is an optional evidence source",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "modules/profitability_analyzer.py:_get_open_cost_from_bookkeeper"
+}

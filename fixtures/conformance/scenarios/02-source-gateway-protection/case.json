@@ -1,0 +1,12 @@
+{
+ "case": "source-gateway-protection",
+ "category": "classification",
+ "expected": {
+  "reason": "INBOUND_GATEWAY"
+ },
+ "inputs": {},
+ "requirement": "F5: inbound-gateway channels protected from closure",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/close_protection/gateway_30d_protected.json"
+}

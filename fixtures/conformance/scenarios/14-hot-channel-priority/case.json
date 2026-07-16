@@ -1,0 +1,18 @@
+{
+ "case": "hot-channel-priority",
+ "category": "rebalance_mode",
+ "expected": {
+  "hot_beats_normal": true,
+  "hot_protection_priority": 90,
+  "normal_priority": 50
+ },
+ "inputs": {
+  "modes": [
+   "hot_protection",
+   "normal"
+  ]
+ },
+ "requirement": "F4 table: hot-channel protection outranks normal redistribution as priority data, not a separate path",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

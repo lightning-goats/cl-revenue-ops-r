@@ -1,0 +1,9 @@
+{
+ "anomalies": [],
+ "reserved_msat": {},
+ "schema_name": "ledger_projection",
+ "schema_version": 0,
+ "spent_msat": {},
+ "terminal": {},
+ "total_spent_msat": 0
+}

@@ -1,0 +1,17 @@
+{
+ "case": "numeric-overflow-underflow",
+ "category": "intent_semantics",
+ "expected": {
+  "negative_msat": "EconArithmeticError",
+  "overflow_2_pow_63": "EconArithmeticError"
+ },
+ "inputs": {
+  "msat_values": [
+   "2**63",
+   "-1"
+  ]
+ },
+ "requirement": "Workstream J numeric rules: msat in [0, 2^63-1], checked \u2014 out-of-range raises, never wraps",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

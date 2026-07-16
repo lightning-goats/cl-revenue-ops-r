@@ -1,0 +1,16 @@
+{
+ "case": "clock-seed-determinism",
+ "category": "determinism",
+ "expected": {
+  "idempotency_keys_equal": true,
+  "intent_id": "int-1119af2f103eb344",
+  "intent_ids_equal": true
+ },
+ "inputs": {
+  "fixed_created_at": 1752400000,
+  "identical_field_sets": 2
+ },
+ "requirement": "Workstream J: identical (fields, clock) -> identical ids; no hidden entropy in the authoritative path",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

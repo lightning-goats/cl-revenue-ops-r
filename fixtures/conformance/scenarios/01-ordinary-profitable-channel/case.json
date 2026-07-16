@@ -1,0 +1,18 @@
+{
+ "case": "ordinary-profitable-channel",
+ "category": "classification",
+ "expected": {
+  "classification": "PROFITABLE"
+ },
+ "inputs": {
+  "days_open": 10,
+  "forward_count": 200,
+  "last_routed": 1752313600,
+  "net_profit": 5000,
+  "roi": 0.25
+ },
+ "requirement": "DoD 1/9: profitable classification from routing evidence",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/profitability/classify_young_profitable.json"
+}

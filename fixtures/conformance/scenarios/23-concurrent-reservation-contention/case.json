@@ -1,0 +1,27 @@
+{
+ "case": "concurrent-reservation-contention",
+ "category": "reservation",
+ "expected": {
+  "first_granted": true,
+  "second_granted": false
+ },
+ "inputs": {
+  "budget_sats": 1000,
+  "reservations": [
+   {
+    "amount_sats": 800,
+    "id": "c-1"
+   },
+   {
+    "amount_sats": 800,
+    "id": "c-2"
+   }
+  ]
+ },
+ "notes": [
+  "Sequential here; the atomicity itself is exercised by the 8-thread governor concurrency test."
+ ],
+ "requirement": "DoD 5: atomic reservations cannot jointly oversubscribe",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

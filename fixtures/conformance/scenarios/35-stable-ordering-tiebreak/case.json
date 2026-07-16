@@ -1,0 +1,144 @@
+{
+ "case": "stable-ordering-tie-breaking",
+ "category": "determinism",
+ "expected": {
+  "ordered_intent_ids": [
+   "int-6ca7481bc9571b1b",
+   "int-7c4fe00860f83371",
+   "int-f39fe2e07353af1f",
+   "int-7da60549413f85a1"
+  ],
+  "rejected": []
+ },
+ "inputs": {
+  "intents": [
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 5000,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "7da60549413f85a19d37f71dbf75d3edb0b97dcc7add821984377dc0a740d8fb",
+    "intent_id": "int-7da60549413f85a1",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "300x1x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 5000,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "f39fe2e07353af1fc0fd20857a0f317ac8c0d5311e2af71fa5e00669bcb4083b",
+    "intent_id": "int-f39fe2e07353af1f",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "100x1x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 0,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "6ca7481bc9571b1b3c651e1c9e653935a50bd27dd28f560563e102e16e7bb12b",
+    "intent_id": "int-6ca7481bc9571b1b",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 80,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "200x1x0"
+   },
+   {
+    "amount_msat": 400000000,
+    "budget_bucket": "rebalance",
+    "capital_committed_msat": 400000000,
+    "confidence_micro": 0,
+    "created_at": 1752400000,
+    "expected_benefit_msat": 9000,
+    "expires_at": 1752400600,
+    "explanation": {
+     "components": [
+      [
+       "case",
+       1
+      ]
+     ],
+     "kind": "conformance"
+    },
+    "idempotency_key": "7c4fe00860f833714bf5a6d019d4e6466d29c030c05fe8a13448994ec96756d3",
+    "intent_id": "int-7c4fe00860f83371",
+    "intent_type": "REBALANCE",
+    "max_cost_msat": 3000000,
+    "origin_policy": "conformance",
+    "preconditions": [],
+    "priority": 50,
+    "reason_codes": [],
+    "reversible": false,
+    "schema_name": "intent",
+    "schema_version": 0,
+    "snapshot_id": "snap-1",
+    "target": "400x1x0"
+   }
+  ]
+ },
+ "requirement": "J3 ladder: precedence, -priority, -EV, -confidence, capital, target, intent_id \u2014 total and stable",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}

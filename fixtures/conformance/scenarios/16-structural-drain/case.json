@@ -1,0 +1,67 @@
+{
+ "case": "structural-drain-boltz",
+ "category": "rebalance_mode",
+ "expected": {
+  "executed": [
+   {
+    "amount_sats": 200000,
+    "channel_id": "100x1x0",
+    "direction": "loop_out",
+    "estimated_fee_sats": 100,
+    "peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "recommendation": {
+     "amount_sats": 200000,
+     "channel_id": "100x1x0",
+     "direction": "loop_out",
+     "economics": {
+      "estimated_swap_fee_sats": 100,
+      "passes_profit_guard": true
+     },
+     "peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "status": "would_execute"
+   }
+  ],
+  "executed_count": 1,
+  "mode": "balance",
+  "notes": [
+   "loop-out is channel-pinnable via boltzcli --chan-id",
+   "loop-in (submarine) is not channel-pinnable on boltzcli v2.11.0; target channel/peer is a planning hint and should be verified post-swap",
+   "profit guard uses a conservative heuristic expected-uplift estimate based on recent channel contribution and imbalance severity",
+   "dynamic channel protection tuning raises loop-in trigger/target, amount cap, and cadence for fast-draining high-profit channels"
+  ],
+  "plan": {
+   "budget": {
+    "remaining_24h_sats_estimate": 1000000
+   },
+   "pending_swap_count": 0,
+   "recommendations": [
+    {
+     "amount_sats": 200000,
+     "channel_id": "100x1x0",
+     "direction": "loop_out",
+     "economics": {
+      "estimated_swap_fee_sats": 100,
+      "passes_profit_guard": true
+     },
+     "peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+   ],
+   "skipped_count": 0,
+   "skipped_examples": [],
+   "total_candidates": 1
+  },
+  "remaining_budget_sats_estimate_after_cycle": 999900,
+  "reserve_deficit_sats": 0,
+  "selection_reason": "onchain_reserve_healthy_use_balance_mode",
+  "skipped": [],
+  "skipped_count": 0,
+  "status": "dry_run",
+  "trigger": "golden"
+ },
+ "inputs": {},
+ "requirement": "F4/G: structural drain via Boltz balance plan (dry-run)",
+ "schema_name": "conformance_case",
+ "schema_version": 0,
+ "source": "tests/golden/fixtures/boltz/cycle_dry_run_executable_balance_plan.json"
+}

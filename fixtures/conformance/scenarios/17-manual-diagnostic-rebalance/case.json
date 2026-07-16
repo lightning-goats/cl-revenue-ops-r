@@ -1,0 +1,23 @@
+{
+ "case": "manual-and-diagnostic-modes",
+ "category": "rebalance_mode",
+ "expected": {
+  "diagnostic": {
+   "bounded_spend": true,
+   "priority": 10
+  },
+  "manual": {
+   "operator_directed": true,
+   "priority": 100
+  }
+ },
+ "inputs": {
+  "modes": [
+   "manual",
+   "diagnostic"
+  ]
+ },
+ "requirement": "F4 + contradiction #7: manual is operator-directed; diagnostic is a BOUNDED spend (evidence purchase), not free",
+ "schema_name": "conformance_case",
+ "schema_version": 0
+}
