@@ -1,0 +1,17 @@
+# crates/revops-fees/Cargo.toml
+[package]
+name = "revops-fees"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+revops-core = { path = "../revops-core" }
+revops-econ = { path = "../revops-econ" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
