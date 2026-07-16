@@ -1,0 +1,11 @@
+{
+  "htlcmax_msat": null,
+  "inputs": {
+    "cfg_overrides": {},
+    "channel_info": {
+      "capacity": 0,
+      "spendable_msat": 0
+    },
+    "flow_state": "source"
+  }
+}

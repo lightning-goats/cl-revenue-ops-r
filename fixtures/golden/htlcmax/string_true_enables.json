@@ -1,0 +1,13 @@
+{
+  "htlcmax_msat": 850000000,
+  "inputs": {
+    "cfg_overrides": {
+      "enable_dynamic_htlcmax": "true"
+    },
+    "channel_info": {
+      "capacity": 2000000,
+      "spendable_msat": 1000000000
+    },
+    "flow_state": "source"
+  }
+}
