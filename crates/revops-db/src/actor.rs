@@ -26,6 +26,21 @@ enum Command {
         params: Vec<SqlValue>,
         reply: oneshot::Sender<Result<i64>>,
     },
+    /// Type-erased job for [`DbHandle::query_row`]. Rust enums can't carry
+    /// a generic variant, so the job closure captures its own (typed)
+    /// oneshot reply sender and does the query + reply-send internally;
+    /// the actor loop just calls it with the connection. This is the
+    /// `QueryRow<T>` extension point Task 1's doc comment flagged ("extend
+    /// with a `QueryRow<T>` variant if a later task needs more than one
+    /// column") -- Task 5 is that later task (`get_closed_channels_summary`
+    /// is a 9-column aggregate).
+    ///
+    /// `+ Sync` (in addition to `+ Send`) keeps `Command` itself `Sync`, so
+    /// `mpsc::error::SendError<Command>` stays usable with
+    /// `anyhow::Context` the same way it already was for the other two
+    /// variants -- dropping it would silently break `.context("actor
+    /// gone")` on every variant, not just this one.
+    Exec(Box<dyn FnOnce(&Connection) + Send + Sync>),
 }
 
 /// Cheap, `Clone`-able handle to the actor task. Cloning just clones the
@@ -59,6 +74,46 @@ impl DbHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Command::QueryI64 { sql, params, reply })
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+
+    /// Single-row, multi-column query with a caller-supplied row mapper --
+    /// the general form `query_i64` deliberately stayed narrower than (see
+    /// its doc comment). Needed for aggregates that select more than one
+    /// column in a single statement, e.g. `get_closed_channels_summary`'s
+    /// 9-column `SELECT`.
+    ///
+    /// Running that as ONE statement (rather than nine separate
+    /// `query_i64` calls, one per column) matters beyond convenience: it
+    /// mirrors Python's own single-`.execute()` atomicity. Production's DB
+    /// can be concurrently written by the Python plugin under WAL; nine
+    /// independent round trips could each land on a different WAL
+    /// snapshot if a write commits in between, producing a combination of
+    /// values Python's one atomic read could never have produced. A single
+    /// `query_row` call takes one snapshot for every column.
+    pub async fn query_row<T, F>(
+        &self,
+        sql: &'static str,
+        params: Vec<SqlValue>,
+        map: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: Fn(&Row) -> rusqlite::Result<T> + Send + Sync + 'static,
+    {
+        let (reply, rx) = oneshot::channel::<Result<T>>();
+        let job: Box<dyn FnOnce(&Connection) + Send + Sync> = Box::new(move |conn: &Connection| {
+            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            let result = conn
+                .query_row(sql, param_refs.as_slice(), |r| map(r))
+                .context("query_row");
+            let _ = reply.send(result);
+        });
+        self.tx
+            .send(Command::Exec(job))
             .await
             .context("actor gone")?;
         rx.await.context("actor dropped reply")?
@@ -109,6 +164,7 @@ pub async fn spawn_read_only(path: &Path) -> Result<DbHandle> {
                     let result = run_query_i64(&conn, sql, &params);
                     let _ = reply.send(result);
                 }
+                Command::Exec(job) => job(&conn),
             }
         }
     });

@@ -30,6 +30,26 @@ pub fn sats_to_base(sats: u64) -> u64 {
     sats * 1000
 }
 
+/// Round a float to 2 decimal places, matching Python's `round(x, 2)` on a
+/// `float` argument (correctly-rounded decimal conversion of the underlying
+/// IEEE-754 double, ties-to-even). Rust's own `format!("{value:.2}")`
+/// performs the same correctly-rounded decimal conversion CPython's
+/// `round()` does, so this is a direct parity primitive, not a
+/// reimplementation of rounding arithmetic -- the same technique
+/// `revops_econ::pyfloat::py_round` already uses (and Phase 2 validated
+/// against a real-Python fixture corpus). Duplicated here rather than
+/// depending on `revops-econ` because `revops-core` sits below both
+/// `revops-db` and `revops-econ` in the workspace's dependency graph, and
+/// this phase's DB-backed reports (`lifetime_roi_percent`,
+/// `operating_margin_pct`) need it before `revops-econ`'s Phase 2 gate is
+/// in scope for the observer.
+pub fn py_round2(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    format!("{value:.2}").parse::<f64>().unwrap_or(value)
+}
+
 /// Mirrors Python `utils.parse_msat`: never errors, returns 0 on anything
 /// unparseable.
 ///
