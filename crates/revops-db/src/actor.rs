@@ -1,0 +1,107 @@
+//! Persistent read-only DB actor: a single-owner task that holds the
+//! `rusqlite::Connection` (which is `!Sync`) and services requests off an
+//! `mpsc` channel. Replaces Phase 1a's Task 8 probe-and-drop
+//! (`open_read_only` -> use once -> `drop`) with a long-lived connection
+//! that coexists safely with the Python plugin's writer under WAL: the
+//! connection never crosses a task boundary, only request/reply messages
+//! do (mirrors the design spec's "single-owner actor tasks (mpsc) where
+//! Python held one lock across a whole cycle").
+//!
+//! There is no explicit shutdown message: once every [`DbHandle`] clone is
+//! dropped, the `mpsc::Sender` side closes, `blocking_recv` returns `None`,
+//! and the owning task exits cleanly on its own.
+
+use anyhow::{Context, Result};
+use rusqlite::{types::Value as SqlValue, Connection, Row};
+use std::path::Path;
+use tokio::sync::{mpsc, oneshot};
+
+enum Command {
+    TableCount(oneshot::Sender<Result<usize>>),
+    /// `sql` must be `'static` (a query literal, never operator input) --
+    /// callers build query STRINGS at compile time; only bind PARAMETERS
+    /// are dynamic. This keeps the actor a closed, auditable surface.
+    QueryI64 {
+        sql: &'static str,
+        params: Vec<SqlValue>,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+}
+
+/// Cheap, `Clone`-able handle to the actor task. Cloning just clones the
+/// `mpsc::Sender`; the underlying `Connection` stays pinned to the one
+/// owning task.
+#[derive(Clone, Debug)]
+pub struct DbHandle {
+    tx: mpsc::Sender<Command>,
+}
+
+impl DbHandle {
+    /// Number of tables in the database (`sqlite_master` count), resolved
+    /// live at call time rather than snapshotted once at init -- so a
+    /// caller (e.g. `revenue-r-status`) always reports the DB's current
+    /// state.
+    pub async fn table_count(&self) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::TableCount(reply))
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+
+    /// Single-i64-column query -- covers every aggregate this phase's read
+    /// RPCs need (`SUM(...)`, `COUNT(*)`). Extend with a `QueryRow<T>`
+    /// variant if a later task needs more than one column; keep this one
+    /// narrow rather than over-generalizing ahead of a real second caller
+    /// shape.
+    pub async fn query_i64(&self, sql: &'static str, params: Vec<SqlValue>) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::QueryI64 { sql, params, reply })
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+}
+
+/// Open the database read-only and spawn the single-owner actor task that
+/// owns the resulting `Connection` for the rest of the plugin's lifetime.
+///
+/// Errors (missing file, `PRAGMA`/open failure) propagate synchronously to
+/// the caller before any task is spawned -- same fail path `main.rs`
+/// already uses for a bad `db-path` (`configured.disable(...)`), just with
+/// the connection's ownership moving into the actor task on success
+/// instead of being dropped after one probe.
+pub async fn spawn_read_only(path: &Path) -> Result<DbHandle> {
+    // Open (and validate) on the CALLER's task first so a bad path fails
+    // plugin init synchronously, exactly like Phase 1a's probe-drop did --
+    // only the *ownership* of the connection moves into the actor task.
+    let conn = crate::open_read_only(path)?;
+    let (tx, mut rx) = mpsc::channel::<Command>(32);
+    tokio::task::spawn_blocking(move || {
+        // rusqlite::Connection is !Sync; owning it inside one blocking
+        // task and only ever touching it from this thread is what makes
+        // the single-owner-actor pattern sound here.
+        while let Some(cmd) = rx.blocking_recv() {
+            match cmd {
+                Command::TableCount(reply) => {
+                    let result = crate::table_names(&conn).map(|v| v.len());
+                    let _ = reply.send(result);
+                }
+                Command::QueryI64 { sql, params, reply } => {
+                    let result = run_query_i64(&conn, sql, &params);
+                    let _ = reply.send(result);
+                }
+            }
+        }
+    });
+    Ok(DbHandle { tx })
+}
+
+fn run_query_i64(conn: &Connection, sql: &str, params: &[SqlValue]) -> Result<i64> {
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    conn.query_row(sql, param_refs.as_slice(), |r: &Row| r.get(0))
+        .context("query_i64")
+}

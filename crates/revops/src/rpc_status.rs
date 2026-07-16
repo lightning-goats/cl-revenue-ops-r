@@ -8,9 +8,10 @@ use crate::config_types::{self, FieldType};
 use cln_plugin::options;
 use serde_json::{json, Value};
 
-/// Inputs for [`build_status`], gathered once at plugin init (the DB probe
-/// is a one-shot read at init; see the module docs on `main.rs`'s `State`
-/// for why the `Connection` itself isn't retained).
+/// Inputs for [`build_status`]. `db_tables` is resolved live, at call time,
+/// via the persistent DB actor (`revops_db::actor::DbHandle::table_count`)
+/// rather than snapshotted once at init -- see `main.rs`'s `State`, which
+/// holds a `DbHandle` instead of a one-shot `Option<usize>` count.
 pub struct StatusInputs {
     pub version: String,
     pub observer: bool,

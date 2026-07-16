@@ -18,22 +18,23 @@ use tokio::io::{AsyncRead, AsyncWrite};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Shared plugin state, resolved once at init (option values, and — if
-/// `revops-r-db-path` is set — a one-shot read-only DB probe). See
+/// `revops-r-db-path` is set — a persistent read-only DB actor). See
 /// `revops::rpc_status` for the pure response builders that consume this.
 struct State {
     version: String,
     observer: bool,
     db_path: Option<String>,
-    db_tables: Option<usize>,
+    db: Option<revops_db::actor::DbHandle>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
-/// Arc'ing the actual data. Does NOT hold a DB `Connection` (that type is
-/// `!Sync`) — the DB is opened, probed, and dropped once at init. Phase 1b
-/// brings a persistent-connection actor.
+/// Arc'ing the actual data. Does NOT hold a DB `Connection` directly (that
+/// type is `!Sync`) — `db` is a [`revops_db::actor::DbHandle`], a cheap
+/// `Clone`-able `mpsc::Sender` to the single-owner task that actually holds
+/// the `Connection` (see `revops_db::actor`).
 type SharedState = Arc<State>;
 
 /// suffix -> full registered option name, for every option this plugin
@@ -297,11 +298,18 @@ async fn main() -> Result<()> {
             "status snapshot for the Rust port",
             |p: Plugin<SharedState>, _v| async move {
                 let s = p.state();
+                // Resolved live via the actor at request time (not an
+                // init-time snapshot) so `revenue-r-status` always
+                // reflects the DB's current table count.
+                let db_tables = match &s.db {
+                    Some(handle) => handle.table_count().await.ok(),
+                    None => None,
+                };
                 Ok(build_status(&StatusInputs {
                     version: s.version.clone(),
                     observer: s.observer,
                     db_path: s.db_path.clone(),
-                    db_tables: s.db_tables,
+                    db_tables,
                 }))
             },
         )
@@ -348,9 +356,12 @@ async fn main() -> Result<()> {
     let db_path_is_default = db_path_raw == db_path_default;
     let db_path_setting = (!db_path_raw.is_empty()).then_some(db_path_raw);
 
-    // Open the DB read-only once at init, count its tables, and drop the
-    // connection — it is not `Sync` so it cannot live in plugin state.
-    // Phase 1b brings a persistent-connection actor.
+    // Spawn the persistent read-only DB actor (`revops_db::actor`) once at
+    // init. The actor owns the `Connection` for the plugin's whole
+    // lifetime (it is not `Sync` so it cannot live directly in plugin
+    // state — only the cheap, `Clone`-able `DbHandle` does); this replaces
+    // Phase 1a's Task 8 probe-and-drop (open once, count tables, drop the
+    // connection).
     //
     // **Deviation from "any DB-open failure disables the plugin":**
     // Python's `Database.__init__` (modules/database.py:308,338-350)
@@ -376,33 +387,11 @@ async fn main() -> Result<()> {
     //     other than the default and it still doesn't open) → keep the
     //     existing Phase 1a probe-and-disable behavior: a bad *explicit*
     //     path is a real misconfiguration worth surfacing loudly.
-    let (db_path, db_tables) = match db_path_setting {
+    let (db_path, db) = match db_path_setting {
         Some(raw) => {
             let path = expand_tilde(&raw);
-            match revops_db::open_read_only(&path) {
-                Ok(conn) => match revops_db::table_names(&conn) {
-                    Ok(tables) => {
-                        let count = tables.len();
-                        drop(conn);
-                        (Some(raw), Some(count))
-                    }
-                    Err(e) if db_path_is_default => {
-                        eprintln!(
-                            "revops: {db_path_name} default path {} listing tables failed ({e}); \
-                             continuing without DB (no explicit db-path set)",
-                            path.display()
-                        );
-                        (None, None)
-                    }
-                    Err(e) => {
-                        configured
-                            .disable(&format!(
-                                "{db_path_name} set but listing tables failed: {e}"
-                            ))
-                            .await?;
-                        return Ok(());
-                    }
-                },
+            match revops_db::actor::spawn_read_only(&path).await {
+                Ok(handle) => (Some(raw), Some(handle)),
                 Err(e) if db_path_is_default => {
                     eprintln!(
                         "revops: {db_path_name} default path {} not usable ({e}); continuing \
@@ -413,7 +402,9 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     configured
-                        .disable(&format!("{db_path_name} set but DB open failed: {e}"))
+                        .disable(&format!(
+                            "{db_path_name} set but DB actor spawn failed: {e}"
+                        ))
                         .await?;
                     return Ok(());
                 }
@@ -426,7 +417,7 @@ async fn main() -> Result<()> {
         version: VERSION.to_string(),
         observer,
         db_path,
-        db_tables,
+        db,
         config_names: config_name_map(),
     });
 
