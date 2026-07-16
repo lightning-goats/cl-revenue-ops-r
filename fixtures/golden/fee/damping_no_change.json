@@ -1,0 +1,15 @@
+{
+  "applied_fee_ppm": 750,
+  "diag": {
+    "cap_applied": false,
+    "cap_reason": "none",
+    "max_delta_ppm": 113,
+    "requested_delta_ppm": 0,
+    "wake_damping_applied": false
+  },
+  "inputs": {
+    "current": 750,
+    "target": 750,
+    "woke": false
+  }
+}

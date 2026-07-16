@@ -1,0 +1,269 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "posterior_std": "300.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "300.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "300.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "300.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "200.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "200.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "200.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "200.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "199.999999",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.3"
+  },
+  {
+   "posterior_std": "199.999999",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "199.999999",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "199.999999",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "150.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.3"
+  },
+  {
+   "posterior_std": "150.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "150.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "150.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "100.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.3"
+  },
+  {
+   "posterior_std": "100.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "100.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "100.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "99.999999",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.45"
+  },
+  {
+   "posterior_std": "99.999999",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "99.999999",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "99.999999",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "75.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.45"
+  },
+  {
+   "posterior_std": "75.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "75.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "75.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "50.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.45"
+  },
+  {
+   "posterior_std": "50.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "50.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "50.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "49.999999",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.6"
+  },
+  {
+   "posterior_std": "49.999999",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "49.999999",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "49.999999",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "10.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.6"
+  },
+  {
+   "posterior_std": "10.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "10.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "10.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  },
+  {
+   "posterior_std": "0.0",
+   "woke_from_sleep": false,
+   "profile_name": "active",
+   "expected": "0.6"
+  },
+  {
+   "posterior_std": "0.0",
+   "woke_from_sleep": false,
+   "profile_name": "conservative",
+   "expected": "0.2"
+  },
+  {
+   "posterior_std": "0.0",
+   "woke_from_sleep": true,
+   "profile_name": "active",
+   "expected": "0.15"
+  },
+  {
+   "posterior_std": "0.0",
+   "woke_from_sleep": true,
+   "profile_name": "conservative",
+   "expected": "0.1"
+  }
+ ]
+}

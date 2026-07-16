@@ -1,0 +1,117 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "current_fee_ppm": 1000,
+   "bounded_target_ppm": 1003,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": false,
+   "posterior_std": "100.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 1001,
+   "expected_diag": {
+    "blend_ratio": "0.3",
+    "blended_delta_ppm": 1,
+    "sparse_data_conservative": false
+   }
+  },
+  {
+   "current_fee_ppm": 1000,
+   "bounded_target_ppm": 997,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": false,
+   "posterior_std": "100.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 999,
+   "expected_diag": {
+    "blend_ratio": "0.3",
+    "blended_delta_ppm": -1,
+    "sparse_data_conservative": false
+   }
+  },
+  {
+   "current_fee_ppm": 1000,
+   "bounded_target_ppm": 1001,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": false,
+   "posterior_std": "100.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 1001,
+   "expected_diag": {
+    "blend_ratio": "0.3",
+    "blended_delta_ppm": 1,
+    "sparse_data_conservative": false
+   }
+  },
+  {
+   "current_fee_ppm": 1000,
+   "bounded_target_ppm": 999,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": false,
+   "posterior_std": "100.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 999,
+   "expected_diag": {
+    "blend_ratio": "0.3",
+    "blended_delta_ppm": -1,
+    "sparse_data_conservative": false
+   }
+  },
+  {
+   "current_fee_ppm": 1000,
+   "bounded_target_ppm": 1000,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": false,
+   "posterior_std": "100.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 1000,
+   "expected_diag": {
+    "blend_ratio": "0.3",
+    "blended_delta_ppm": 0,
+    "sparse_data_conservative": false
+   }
+  },
+  {
+   "current_fee_ppm": 500,
+   "bounded_target_ppm": 1500,
+   "woke_from_sleep": true,
+   "sparse_data_conservative": false,
+   "posterior_std": "250.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 650,
+   "expected_diag": {
+    "blend_ratio": "0.15",
+    "blended_delta_ppm": 150,
+    "sparse_data_conservative": false
+   }
+  },
+  {
+   "current_fee_ppm": 500,
+   "bounded_target_ppm": 1500,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": true,
+   "posterior_std": "30.0",
+   "profile_name": "conservative",
+   "expected_blended_target_ppm": 700,
+   "expected_diag": {
+    "blend_ratio": "0.2",
+    "blended_delta_ppm": 200,
+    "sparse_data_conservative": true
+   }
+  },
+  {
+   "current_fee_ppm": 2000,
+   "bounded_target_ppm": 100,
+   "woke_from_sleep": false,
+   "sparse_data_conservative": false,
+   "posterior_std": "40.0",
+   "profile_name": "active",
+   "expected_blended_target_ppm": 860,
+   "expected_diag": {
+    "blend_ratio": "0.6",
+    "blended_delta_ppm": -1140,
+    "sparse_data_conservative": false
+   }
+  }
+ ]
+}

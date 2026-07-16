@@ -1,0 +1,11 @@
+{
+  "floor_ppm": 8,
+  "inputs": {
+    "capacity_sats": 2000000,
+    "chain_costs": {
+      "close_cost_sats": 1500,
+      "open_cost_sats": 2500
+    },
+    "opener": "remote"
+  }
+}

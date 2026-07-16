@@ -1,0 +1,35 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "revenue_rate": "0.0",
+   "spendable_sats": "24999.0",
+   "expected": true
+  },
+  {
+   "revenue_rate": "0.0",
+   "spendable_sats": "25000.0",
+   "expected": false
+  },
+  {
+   "revenue_rate": "0.0",
+   "spendable_sats": "25001.0",
+   "expected": false
+  },
+  {
+   "revenue_rate": "1.0",
+   "spendable_sats": "100.0",
+   "expected": false
+  },
+  {
+   "revenue_rate": "-1.0",
+   "spendable_sats": "0.0",
+   "expected": true
+  },
+  {
+   "revenue_rate": "0.0",
+   "spendable_sats": "0.0",
+   "expected": true
+  }
+ ]
+}
