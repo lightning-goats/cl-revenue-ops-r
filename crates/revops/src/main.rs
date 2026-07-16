@@ -37,7 +37,7 @@ fn rpc_name(suffix: &str) -> String {
 }
 
 /// `serde_json::Value` -> `String`, for `opt_type == "string"` defaults.
-fn as_string_default(v: &serde_json::Value) -> Option<String> {
+pub fn as_string_default(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s.clone()),
@@ -51,7 +51,7 @@ fn as_string_default(v: &serde_json::Value) -> Option<String> {
 /// Python source stores every default as a string literal (even for the one
 /// `opt_type="int"` option), so this accepts both a JSON number and a
 /// numeric string.
-fn as_int_default(v: &serde_json::Value) -> Option<i64> {
+pub fn as_int_default(v: &serde_json::Value) -> Option<i64> {
     match v {
         serde_json::Value::Number(n) => n.as_i64(),
         serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
@@ -60,7 +60,7 @@ fn as_int_default(v: &serde_json::Value) -> Option<i64> {
 }
 
 /// `serde_json::Value` -> `bool`, for `opt_type == "bool"` defaults.
-fn as_bool_default(v: &serde_json::Value) -> Option<bool> {
+pub fn as_bool_default(v: &serde_json::Value) -> Option<bool> {
     match v {
         serde_json::Value::Bool(b) => Some(*b),
         serde_json::Value::Number(n) => n.as_i64().map(|i| i != 0),
@@ -77,6 +77,10 @@ fn as_bool_default(v: &serde_json::Value) -> Option<bool> {
 /// canonical-mapped by the caller), mapping the table's `opt_type` to the
 /// matching cln-plugin 0.7 option constructor. A `null` default registers a
 /// valueless/optional variant of the same type.
+///
+/// **Fail-closed**: if a non-null default fails to parse for its declared
+/// `opt_type`, this panics with a clear error message naming the option,
+/// type, and bad default. This prevents silent loss of configuration defaults.
 fn register_option<S, I, O>(builder: Builder<S, I, O>, name: &str, opt: &OptDef) -> Builder<S, I, O>
 where
     O: Send + AsyncWrite + Unpin + 'static,
@@ -97,6 +101,14 @@ where
                 builder.option(c)
             }
             None => {
+                // Only allow None (no default) if the original default was null.
+                // Non-null defaults that fail to parse are a configuration error.
+                if !opt.default.is_null() {
+                    panic!(
+                        "option '{}' (type: int) has non-null default that fails to parse as i64: {:?}",
+                        opt.name, opt.default
+                    );
+                }
                 let mut c = IntegerConfigOption::new_i64_no_default(name, &opt.description);
                 if opt.dynamic {
                     c = c.dynamic();
@@ -117,6 +129,13 @@ where
                 builder.option(c)
             }
             None => {
+                // Only allow None (no default) if the original default was null.
+                if !opt.default.is_null() {
+                    panic!(
+                        "option '{}' (type: bool) has non-null default that fails to parse as bool: {:?}",
+                        opt.name, opt.default
+                    );
+                }
                 let mut c = BooleanConfigOption::new_bool_no_default(name, &opt.description);
                 if opt.dynamic {
                     c = c.dynamic();
@@ -146,6 +165,13 @@ where
                 builder.option(c)
             }
             None => {
+                // Only allow None (no default) if the original default was null.
+                if !opt.default.is_null() {
+                    panic!(
+                        "option '{}' (type: string) has non-null default that fails to parse as string: {:?}",
+                        opt.name, opt.default
+                    );
+                }
                 let mut c = StringConfigOption::new_str_no_default(name, &opt.description);
                 if opt.dynamic {
                     c = c.dynamic();

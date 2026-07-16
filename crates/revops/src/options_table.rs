@@ -44,4 +44,31 @@ mod tests {
         assert_eq!(shadow_name("revenue-ops-db-path"), "revops-r-db-path");
         assert_eq!(shadow_name("something-else"), "revops-r-something-else");
     }
+
+    /// Guard test: all embedded fixture entries must have defaults that parse
+    /// for their declared opt_type. Null defaults are allowed (they register
+    /// as valueless options). This catches fixture drift at test time.
+    #[test]
+    fn fixture_defaults_parse_for_declared_type() {
+        let opts = load();
+        for opt in &opts {
+            let parse_result = match opt.opt_type.as_str() {
+                "int" => crate::as_int_default(&opt.default).is_some(),
+                "bool" => crate::as_bool_default(&opt.default).is_some(),
+                _ => crate::as_string_default(&opt.default).is_some(),
+            };
+            // All current entries have either:
+            // - null default (parse_result = true, as no-default is correct)
+            // - non-null default that successfully parses (parse_result = true)
+            // If an entry has a non-null default that doesn't parse, this fails.
+            let is_null = opt.default.is_null();
+            assert!(
+                is_null || parse_result,
+                "option {} (type: {}) has non-null default that fails to parse: {:?}",
+                opt.name,
+                opt.opt_type,
+                opt.default
+            );
+        }
+    }
 }
