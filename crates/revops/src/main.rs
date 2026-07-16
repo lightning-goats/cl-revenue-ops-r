@@ -354,7 +354,7 @@ async fn main() -> Result<()> {
             |p: Plugin<SharedState>, _v| async move {
                 let s = p.state();
                 let Some(handle) = &s.db else {
-                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 let now = now_unix();
                 let stats = queries::lifetime_stats(handle, now).await?;
@@ -376,7 +376,7 @@ async fn main() -> Result<()> {
                     return Ok(build_report(report_type, None, 0));
                 }
                 let Some(handle) = &s.db else {
-                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 let now = now_unix();
                 let costs = queries::closure_costs_windows(handle, now).await?;
@@ -388,13 +388,13 @@ async fn main() -> Result<()> {
             "P&L dashboard (Phase 1b: period.*/net_profit/margin are \
              DB-backed; tlv/roc/warnings/bleeders are gap-marked)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                let window_days = match parse_window_days(v.get("window_days")) {
-                    Ok(w) => w,
-                    Err(e) => return Ok(e),
-                };
                 let s = p.state();
                 let Some(handle) = &s.db else {
                     return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                let window_days = match parse_window_days(v.get("window_days")) {
+                    Ok(w) => w,
+                    Err(e) => return Ok(e),
                 };
                 let now = now_unix();
                 let pnl = queries::pnl_summary(handle, window_days, now).await?;

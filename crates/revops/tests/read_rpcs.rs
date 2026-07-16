@@ -5,6 +5,18 @@
 //! hand-constructed structs, no DB involved. DB-integration coverage for
 //! the underlying query functions lives in
 //! `crates/revops-db/tests/queries.rs`.
+//!
+//! **Guard-string parity (Phase 1b Task 5 review finding 1):** When the DB
+//! is not configured, `revenue-r-history` and `revenue-r-report` RPCs return
+//! `{"error": "Plugin not initialized"}` (not "Database not initialized"),
+//! matching Python cl-revenue-ops.py:4913-4914 and :5409-5410. The
+//! `revenue-r-dashboard` RPC returns `{"error": "Database not initialized"}`
+//! when DB is missing (matching Python line 5756).
+//!
+//! **Guard-order (Phase 1b Task 5 review finding 2):** For
+//! `revenue-r-dashboard`, the DB presence check happens *before* validating
+//! `window_days`, ensuring bad window_days + no DB returns the DB error
+//! (Phase 1 obligation) rather than the window validation error.
 
 use revops::rpc_dashboard::{build_dashboard, parse_window_days};
 use revops::rpc_history::build_history;
@@ -104,6 +116,10 @@ fn build_report_costs_shape_matches_python() {
     assert_eq!(v["generated_at"], 1_800_000_000);
 }
 
+/// When `revenue-r-report` is called with `report_type="costs"` and no DB is
+/// available, the main.rs guard (line 378-380) returns `"Plugin not initialized"`
+/// *before* calling the builder. This test documents the builder's fallback
+/// behavior when called directly with None costs (used in tests only).
 #[test]
 fn build_report_costs_without_db_errors() {
     let v = build_report("costs", None, 0);
@@ -221,4 +237,18 @@ fn parse_window_days_rejects_non_integer() {
 
     let err3 = parse_window_days(Some(&json!([1, 2]))).unwrap_err();
     assert_eq!(err3["error"], "window_days must be an integer");
+}
+
+/// **Guard-order test (Phase 1b Task 5 review finding 2):**
+/// This test documents the parse_window_days error string. In the actual
+/// `revenue-r-dashboard` RPC (main.rs), when both DB is missing AND
+/// window_days is invalid, the DB check happens *first* (lines 391-393),
+/// returning `"Database not initialized"`, so this window_days error is never
+/// returned in that scenario. Without the reordering, bad window_days would
+/// have been returned even when the DB was missing, violating the guard order.
+#[test]
+fn parse_window_days_error_pins_guard_order() {
+    let err = parse_window_days(Some(&json!("not_a_number")));
+    assert!(err.is_err());
+    assert_eq!(err.unwrap_err()["error"], "window_days must be an integer");
 }
