@@ -56,6 +56,20 @@ fn manifest() -> serde_json::Value {
 }
 
 #[test]
+fn manifest_advertises_dynamic_plugin() {
+    // lightningd refuses `plugin start` for any plugin whose manifest says
+    // dynamic=false — found live on lnnode ("Not a dynamic plugin"). The
+    // whole deployment model (dynamically started shadow observer) rides
+    // on this flag.
+    let result = manifest();
+    assert_eq!(
+        result["dynamic"],
+        serde_json::json!(true),
+        "manifest: {result}"
+    );
+}
+
+#[test]
 fn manifest_advertises_shadow_names() {
     let result = manifest();
     let opts: Vec<&str> = result["options"]

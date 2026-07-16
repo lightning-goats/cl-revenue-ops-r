@@ -386,6 +386,11 @@ async fn main() -> Result<()> {
     let dashboard_name = rpc_name("dashboard");
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
+        // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
+        // lightningd only allows `plugin start`/`plugin stop` at runtime when
+        // the manifest advertises dynamic=true. The shadow-observer deploy
+        // model starts and stops this plugin deliberately on a live node.
+        .dynamic()
         .option(observer_opt.clone())
         .option(db_path_opt.clone())
         .option(observer_db_opt.clone())
