@@ -6,6 +6,7 @@ use cln_plugin::options::{
     DefaultStringConfigOption, FlagConfigOption, IntegerConfigOption, StringConfigOption,
 };
 use cln_plugin::{Builder, Plugin};
+use revops::config_types;
 use revops::options_table::{self, OptDef};
 use revops::rpc_status::{build_config_response, build_status, StatusInputs};
 use revops::{as_bool_default, as_int_default, as_string_default};
@@ -58,6 +59,30 @@ fn canonical_names() -> bool {
     std::env::var("REVOPS_CANONICAL_NAMES")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// Expand a leading `~` (bare, or `~/...`) against `$HOME`, mirroring
+/// Python's `os.path.expanduser` as used on this exact option
+/// (`os.path.expanduser(options['revenue-ops-db-path'])` in
+/// `cl-revenue-ops.py`, and again in `Database.__init__`,
+/// `modules/database.py:308`). Only the `~`/`~/...` forms are handled (no
+/// `~user/...` lookup) -- that is the only form Python's own config ever
+/// produces or that this plugin's fixture default uses. No new
+/// dependency: `std::env::var("HOME")` only. If `HOME` isn't set, the
+/// input is returned unexpanded (same fallback shape as
+/// `os.path.expanduser`, which also leaves the string untouched when it
+/// can't resolve a home directory).
+fn expand_tilde(raw: &str) -> PathBuf {
+    if raw == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(raw)
 }
 
 fn opt_name(suffix: &str) -> String {
@@ -232,9 +257,26 @@ async fn main() -> Result<()> {
         true,
         "Run in observer (read-only) mode",
     );
+    // Per the design spec's db-path ruling (docs/superpowers/specs/
+    // 2026-07-16-rust-port-design.md lines 78-87): in shadow mode (both
+    // plugins loaded) the default stays "" -- no accidental DB probe just
+    // because this plugin loaded alongside Python. In canonical mode
+    // (REVOPS_CANONICAL_NAMES=1, Python unloaded), this Rust plugin IS the
+    // only plugin, so the default must be Python's own live default
+    // (`fixtures/options.json`'s `revenue-ops-db-path` entry) or an
+    // operator relying on the option's default silently loses DB access.
+    let db_path_default: String = if canonical_names() {
+        options_table::load()
+            .into_iter()
+            .find(|o| o.name == "revenue-ops-db-path")
+            .and_then(|o| as_string_default(&o.default))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let db_path_opt = DefaultStringConfigOption::new_str_with_default(
         &db_path_name,
-        "",
+        &db_path_default,
         "Path to the revops sqlite database, opened read-only at init (empty = disabled)",
     );
 
@@ -274,9 +316,20 @@ async fn main() -> Result<()> {
                 match s.config_names.get(key) {
                     Some(full_name) => {
                         let value = p.option_str(full_name)?;
-                        Ok(build_config_response(key, true, value.as_ref()))
+                        let field_type = config_types::field_type_for(key);
+                        // Phase 1b has no DB-backed config-override-write
+                        // path yet, so there is no live per-key version to
+                        // report; build_config_response documents this
+                        // placeholder in its `_phase1b_gaps` array.
+                        Ok(build_config_response(
+                            key,
+                            true,
+                            value.as_ref(),
+                            field_type,
+                            0,
+                        ))
                     }
-                    None => Ok(build_config_response(key, false, None)),
+                    None => Ok(build_config_response(key, false, None, None, 0)),
                 }
             },
         );
@@ -288,20 +341,58 @@ async fn main() -> Result<()> {
 
     let observer = configured.option(&observer_opt)?;
     let db_path_raw = configured.option(&db_path_opt)?;
+    // Whether the resolved value is exactly the registered default
+    // (i.e. the operator never overrode db-path) -- see the
+    // default-path-miss ruling below. Computed before db_path_raw is
+    // consumed by `then_some`.
+    let db_path_is_default = db_path_raw == db_path_default;
     let db_path_setting = (!db_path_raw.is_empty()).then_some(db_path_raw);
 
     // Open the DB read-only once at init, count its tables, and drop the
     // connection — it is not `Sync` so it cannot live in plugin state.
     // Phase 1b brings a persistent-connection actor.
+    //
+    // **Deviation from "any DB-open failure disables the plugin":**
+    // Python's `Database.__init__` (modules/database.py:308,338-350)
+    // expands `~` and then *creates* the sqlite file (and its parent
+    // directory) if it doesn't exist yet — `os.makedirs(..., exist_ok=True)`
+    // followed by `sqlite3.connect(...)`, which creates the file, then
+    // `CREATE TABLE IF NOT EXISTS` runs unconditionally at startup. This
+    // Rust plugin is a read-only *observer* by design (Phase 1a
+    // convention: it never writes to or creates the DB). That means a
+    // fresh machine that has never run the Python plugin — or an
+    // operator who simply hasn't pointed db-path anywhere yet — will
+    // always miss on the *default* path, through no misconfiguration of
+    // their own. Disabling the whole plugin over that would be a
+    // self-inflicted outage for a purely cosmetic gap (no DB-backed
+    // status fields). So:
+    //   - **default-path miss** (db-path left at the fixture default) →
+    //     log a warning to stderr (picked up by lightningd as the
+    //     plugin's log, since `cln-plugin`'s default logging redirects
+    //     the `log` crate, but we're pre-`start()` here so stderr is the
+    //     simplest available channel) and continue with `db=None` — the
+    //     plugin still comes up and serves `ping`/`status`/`config`.
+    //   - **explicit-path miss** (operator set db-path to something
+    //     other than the default and it still doesn't open) → keep the
+    //     existing Phase 1a probe-and-disable behavior: a bad *explicit*
+    //     path is a real misconfiguration worth surfacing loudly.
     let (db_path, db_tables) = match db_path_setting {
         Some(raw) => {
-            let path = PathBuf::from(&raw);
+            let path = expand_tilde(&raw);
             match revops_db::open_read_only(&path) {
                 Ok(conn) => match revops_db::table_names(&conn) {
                     Ok(tables) => {
                         let count = tables.len();
                         drop(conn);
                         (Some(raw), Some(count))
+                    }
+                    Err(e) if db_path_is_default => {
+                        eprintln!(
+                            "revops: {db_path_name} default path {} listing tables failed ({e}); \
+                             continuing without DB (no explicit db-path set)",
+                            path.display()
+                        );
+                        (None, None)
                     }
                     Err(e) => {
                         configured
@@ -312,6 +403,14 @@ async fn main() -> Result<()> {
                         return Ok(());
                     }
                 },
+                Err(e) if db_path_is_default => {
+                    eprintln!(
+                        "revops: {db_path_name} default path {} not usable ({e}); continuing \
+                         without DB (observer mode, no explicit db-path set)",
+                        path.display()
+                    );
+                    (None, None)
+                }
                 Err(e) => {
                     configured
                         .disable(&format!("{db_path_name} set but DB open failed: {e}"))
@@ -369,5 +468,60 @@ mod tests {
         let builder = Builder::<(), _, _>::new(tokio::io::empty(), tokio::io::sink());
         let opt = bad_default_opt("bool", serde_json::json!("not-a-bool"));
         let _ = register_option(builder, "revops-r-test-bad", &opt);
+    }
+
+    /// `expand_tilde` on the fixture's own default
+    /// (`~/.lightning/revenue_ops.db`) against a synthetic `$HOME` --
+    /// mirrors `os.path.expanduser("~/.lightning/revenue_ops.db")`.
+    #[test]
+    fn expand_tilde_expands_leading_tilde_slash() {
+        // SAFETY: test-only env mutation; not run concurrently with other
+        // HOME-reading tests in this process (cargo runs unit tests in
+        // this crate's own process, but each #[test] here is
+        // self-contained and doesn't read HOME elsewhere).
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/home/testuser");
+        let expanded = expand_tilde("~/.lightning/revenue_ops.db");
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            expanded,
+            PathBuf::from("/home/testuser/.lightning/revenue_ops.db")
+        );
+    }
+
+    /// Bare `~` (no trailing slash) expands to exactly `$HOME`.
+    #[test]
+    fn expand_tilde_expands_bare_tilde() {
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/home/testuser");
+        let expanded = expand_tilde("~");
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(expanded, PathBuf::from("/home/testuser"));
+    }
+
+    /// A path with no leading `~` passes through unchanged.
+    #[test]
+    fn expand_tilde_leaves_absolute_path_unchanged() {
+        assert_eq!(
+            expand_tilde("/var/lib/revops/revenue_ops.db"),
+            PathBuf::from("/var/lib/revops/revenue_ops.db")
+        );
+    }
+
+    /// `~user/...` (not the plain `~/...` this plugin's config ever
+    /// produces) is deliberately left unexpanded -- documented
+    /// limitation, matches this function's own doc comment.
+    #[test]
+    fn expand_tilde_does_not_expand_tilde_user_form() {
+        assert_eq!(
+            expand_tilde("~alice/db.sqlite"),
+            PathBuf::from("~alice/db.sqlite")
+        );
     }
 }
