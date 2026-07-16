@@ -221,11 +221,21 @@ git add -A && git commit -m "feat: workspace scaffold, CI, loadable plugin skele
 - Test: `crates/revops-core/tests/rounding_parity.rs`
 
 **Interfaces:**
-- Produces:
-  - `revops_core::msat::parse_msat(v: &serde_json::Value) -> Option<u64>` — accepts int, `"123msat"`, `"123"`, float-free; mirrors Python `utils.parse_msat`.
-  - `base_to_sats_ceil(msat: u64) -> u64` (fees/costs/revenue)
+- Produces (verified against `modules/utils.py` on the port worktree — Python
+  `parse_msat` returns 0 on anything unparseable, NEVER errors; bools are
+  explicitly 0 (U-1 fix); floats truncate toward zero; ints may be negative):
+  - `revops_core::msat::parse_msat(v: &serde_json::Value) -> i64` — int
+    passthrough, float toward-zero truncation, `"123msat"`/`"123"` strings
+    (trimmed), bool → 0, null → 0, everything else → 0.
+  - `base_to_sats_ceil(msat: u64) -> u64` (fees/costs/revenue; Python is
+    `-(-base // 1000)`)
   - `base_to_sats_floor(msat: u64) -> u64` (balances)
   - `sats_to_base(sats: u64) -> u64`
+
+Adjust the Step 2/Step 4 code accordingly: the test reads `case["msat"].as_i64()`,
+and the generator's STR_CASES gains `[-1500, 1.9, -1.9, True, None, "garbage"]`
+as extra `parse` inputs (True/None expressed in Python; expected 0, 1, -1, 0, 0, 0
+respectively — let the generator compute them, do not hand-write).
 
 - [ ] **Step 1: Write the fixture generator against Python truth**
 
