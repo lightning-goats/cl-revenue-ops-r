@@ -601,6 +601,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "revops-analytics"
+version = "0.1.0"
+dependencies = [
+ "revops-core",
+ "revops-econ",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "revops-core"
 version = "0.1.0"
 dependencies = [
