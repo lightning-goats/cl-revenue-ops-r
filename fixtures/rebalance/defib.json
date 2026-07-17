@@ -1,0 +1,2740 @@
+{
+ "constants": {
+  "DIAGNOSTIC_FEE_CAP_CEILING_SATS": 10000,
+  "DIAGNOSTIC_MAX_SOURCE_ATTEMPTS": 3,
+  "SHOCK_AMOUNT_SATS": 50000
+ },
+ "envelope_cases": [
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 0,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 100,
+   "max_fee_ppm": 2000
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 100,
+   "max_fee_ppm": 2000
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 100,
+   "max_fee_ppm": 2000
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 100,
+   "max_fee_ppm": 2000
+  },
+  {
+   "diag_max_fee_sats": 100,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 100,
+   "max_fee_ppm": 2000
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 399,
+   "max_fee_ppm": 7980
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 400,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 399,
+   "max_fee_ppm": 7980
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 401,
+   "max_fee_ppm": 8020
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 401,
+   "max_fee_ppm": 8020
+  },
+  {
+   "diag_max_fee_sats": 401,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 401,
+   "max_fee_ppm": 8020
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 399,
+   "max_fee_ppm": 7980
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 5000,
+   "max_fee_ppm": 100000
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 9999,
+   "max_fee_ppm": 199980
+  },
+  {
+   "diag_max_fee_sats": 9999,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 9999,
+   "max_fee_ppm": 199980
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 399,
+   "max_fee_ppm": 7980
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 5000,
+   "max_fee_ppm": 100000
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 10000,
+   "max_fee_ppm": 200000
+  },
+  {
+   "diag_max_fee_sats": 10000,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 10000,
+   "max_fee_ppm": 200000
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 399,
+   "max_fee_ppm": 7980
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 5000,
+   "max_fee_ppm": 100000
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 10000,
+   "max_fee_ppm": 200000
+  },
+  {
+   "diag_max_fee_sats": 20000,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 10000,
+   "max_fee_ppm": 200000
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 0,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 1,
+   "max_fee_sats": 1,
+   "max_fee_ppm": 20
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 50,
+   "max_fee_sats": 50,
+   "max_fee_ppm": 1000
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 399,
+   "max_fee_sats": 399,
+   "max_fee_ppm": 7980
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 400,
+   "max_fee_sats": 400,
+   "max_fee_ppm": 8000
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 5000,
+   "max_fee_sats": 5000,
+   "max_fee_ppm": 100000
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 10000,
+   "max_fee_sats": 10000,
+   "max_fee_ppm": 200000
+  },
+  {
+   "diag_max_fee_sats": 1000000000,
+   "daily_budget_sats": 100000,
+   "max_fee_sats": 10000,
+   "max_fee_ppm": 200000
+  }
+ ],
+ "is_source_route_failure_cases": [
+  {
+   "error": null,
+   "expected": false
+  },
+  {
+   "error": "",
+   "expected": false
+  },
+  {
+   "error": "route_pricing_failed",
+   "expected": true
+  },
+  {
+   "error": "route_pricing_failed: askrene timeout",
+   "expected": true
+  },
+  {
+   "error": "route_pricing_failed: no_route (market)",
+   "expected": true
+  },
+  {
+   "error": "native_route_invalid: first_hop_mismatch",
+   "expected": true
+  },
+  {
+   "error": "no_route",
+   "expected": true
+  },
+  {
+   "error": "no_routes",
+   "expected": true
+  },
+  {
+   "error": "prefix no_route suffix",
+   "expected": true
+  },
+  {
+   "error": "no route",
+   "expected": false
+  },
+  {
+   "error": "NO_ROUTE",
+   "expected": false
+  },
+  {
+   "error": "native_route_over_budget: 500 > 200",
+   "expected": false
+  },
+  {
+   "error": "native_sendpay_error: WIRE_TEMPORARY_CHANNEL_FAILURE (failcode=4103)",
+   "expected": false
+  },
+  {
+   "error": "local_budget_block: 0 sats remaining of 5000 unified budget",
+   "expected": false
+  },
+  {
+   "error": "payment_pending_timeout: waitsendpay code 200",
+   "expected": false
+  },
+  {
+   "error": "unknown_source_node",
+   "expected": false
+  },
+  {
+   "error": "engine_busy",
+   "expected": false
+  },
+  {
+   "error": "dest_inflight",
+   "expected": false
+  },
+  {
+   "error": "Native route invalid",
+   "expected": false
+  }
+ ],
+ "scenarios": [
+  {
+   "name": "success_first_source",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": true,
+     "fee_msat": 12345
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "completed",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock completed",
+     "actual_fee_sats": 13
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     }
+    ]
+   }
+  },
+  {
+   "name": "success_first_source_zero_fee",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": true,
+     "fee_msat": 0
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "completed",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock completed",
+     "actual_fee_sats": 0
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     }
+    ]
+   }
+  },
+  {
+   "name": "advance_on_route_failure_then_terminal_stop",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": false,
+     "error": "route_pricing_failed: no_route (market)"
+    },
+    {
+     "success": false,
+     "error": "native_sendpay_error: WIRE_TEMPORARY_CHANNEL_FAILURE (failcode=4103, erring_channel=102x1x0)"
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "failed",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock failed"
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     },
+     {
+      "source": "101x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 51,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 2,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 1,
+      "status": "failed",
+      "error_message": "route_pricing_failed: no_route (market)"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 2,
+      "from_channel": "101x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 2,
+      "status": "failed",
+      "error_message": "native_sendpay_error: WIRE_TEMPORARY_CHANNEL_FAILURE (failcode=4103, erring_channel=102x1x0)"
+     }
+    ]
+   }
+  },
+  {
+   "name": "advance_then_success_second_source",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": false,
+     "error": "native_route_invalid: first_hop_mismatch"
+    },
+    {
+     "success": true,
+     "fee_msat": 7001
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "completed",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock completed",
+     "actual_fee_sats": 8
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     },
+     {
+      "source": "101x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 51,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 2,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 1,
+      "status": "failed",
+      "error_message": "native_route_invalid: first_hop_mismatch"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 2,
+      "from_channel": "101x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     }
+    ]
+   }
+  },
+  {
+   "name": "three_route_failures_exhaust_attempts",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": false,
+     "error": "route_pricing_failed: no_route (market)"
+    },
+    {
+     "success": false,
+     "error": "native_route_invalid: first_hop_mismatch"
+    },
+    {
+     "success": false,
+     "error": "no_route"
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "failed",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock failed"
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     },
+     {
+      "source": "101x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 51,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 2,
+      "reserve_budget": true,
+      "account_costs": true
+     },
+     {
+      "source": "103x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 53,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 3,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 1,
+      "status": "failed",
+      "error_message": "route_pricing_failed: no_route (market)"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 2,
+      "from_channel": "101x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 2,
+      "status": "failed",
+      "error_message": "native_route_invalid: first_hop_mismatch"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 3,
+      "from_channel": "103x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 3,
+      "status": "failed",
+      "error_message": "no_route"
+     }
+    ]
+   }
+  },
+  {
+   "name": "pending_reports_pending_and_stops",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": false,
+     "payment_pending": true,
+     "error": "payment_pending_timeout: waitsendpay code 200"
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "pending",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock pending"
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     }
+    ]
+   }
+  },
+  {
+   "name": "budget_block_reports_blocked",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [
+    {
+     "success": false,
+     "error": "local_budget_block: 0 sats remaining of 5000 unified budget"
+    }
+   ],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "blocked",
+     "message": "Defibrillator active: Zero-Fee flag set + Shock blocked"
+    },
+    "engine_calls": [
+     {
+      "source": "102x1x0",
+      "to_channel": "700x1x0",
+      "source_peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "to_peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "amount_sats": 50000,
+      "amount_msat": 50000000,
+      "outbound_fee_ppm": 0,
+      "inbound_fee_ppm": 150,
+      "source_fee_ppm": 52,
+      "max_budget_sats": 400,
+      "max_budget_msat": 400000,
+      "max_fee_ppm": 8000,
+      "expected_profit_sats": -50,
+      "dest_flow_state": "diagnostic",
+      "rebalance_id": 1,
+      "reserve_budget": true,
+      "account_costs": true
+     }
+    ],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     },
+     {
+      "call": "record_rebalance",
+      "id": 1,
+      "from_channel": "102x1x0",
+      "to_channel": "700x1x0",
+      "amount_sats": 50000,
+      "max_fee_sats": 400,
+      "expected_profit_sats": -50,
+      "rebalance_type": "diagnostic",
+      "reason_code": "defibrillator"
+     },
+     {
+      "call": "update_rebalance_result",
+      "id": 1,
+      "status": "failed",
+      "error_message": "local_budget_block: 0 sats remaining of 5000 unified budget"
+     }
+    ]
+   }
+  },
+  {
+   "name": "capital_controls_pre_gate_blocks",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 0,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "blocked",
+     "message": "Zero-Fee flag set, but Active Shock blocked: daily budget exhausted or reserve too low"
+    },
+    "engine_calls": [],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     }
+    ]
+   }
+  },
+  {
+   "name": "wallet_reserve_blocks",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 10000000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "blocked",
+     "message": "Zero-Fee flag set, but Active Shock blocked: daily budget exhausted or reserve too low"
+    },
+    "engine_calls": [],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     }
+    ]
+   }
+  },
+  {
+   "name": "no_sources_above_floor",
+   "channel_id": "700x1x0",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "106x1x0",
+      "our_amount_msat": 40000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "106x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [],
+   "expected": {
+    "result": {
+     "success": true,
+     "shock_status": "failed",
+     "message": "Exploration flag set, but no sources available for active shock."
+    },
+    "engine_calls": [],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "700x1x0",
+      "probe_type": "bounded_low_fee"
+     }
+    ]
+   }
+  },
+  {
+   "name": "channel_not_found_locally",
+   "channel_id": "999x9x9",
+   "config": {
+    "daily_budget_sats": 5000,
+    "weekly_budget_sats": 35000,
+    "min_wallet_reserve": 1000000,
+    "total_cost_budget_window_hours": 24,
+    "inbound_fee_estimate_ppm": 50,
+    "diagnostic_rebalance_max_fee_sats": 400
+   },
+   "listfunds": {
+    "outputs": [
+     {
+      "status": "confirmed",
+      "amount_msat": 2000000000
+     }
+    ],
+    "channels": [
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "700x1x0",
+      "our_amount_msat": 500000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "101x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "102x1x0",
+      "our_amount_msat": 9000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "103x1x0",
+      "our_amount_msat": 3000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "104x1x0",
+      "our_amount_msat": 100000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     },
+     {
+      "state": "CHANNELD_NORMAL",
+      "short_channel_id": "105x1x0",
+      "our_amount_msat": 2000000000,
+      "amount_msat": 10000000000,
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+     }
+    ]
+   },
+   "listpeerchannels": {
+    "channels": [
+     {
+      "short_channel_id": "700x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0200ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 50,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "101x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 51,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "102x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0202ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 52,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "103x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0203ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 53,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "104x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0204ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 54,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     },
+     {
+      "short_channel_id": "105x1x0",
+      "state": "CHANNELD_NORMAL",
+      "peer_id": "0205ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fee_proportional_millionths": 55,
+      "fee_base_msat": 0,
+      "htlcs": [],
+      "updates": {
+       "remote": {
+        "fee_proportional_millionths": 100,
+        "fee_base_msat": 0
+       }
+      }
+     }
+    ]
+   },
+   "engine_script": [],
+   "expected": {
+    "result": {
+     "success": false,
+     "shock_status": "failed",
+     "message": "Channel not found locally"
+    },
+    "engine_calls": [],
+    "db_calls": [
+     {
+      "call": "set_channel_probe",
+      "channel_id": "999x9x9",
+      "probe_type": "bounded_low_fee"
+     }
+    ]
+   }
+  }
+ ]
+}

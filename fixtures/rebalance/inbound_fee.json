@@ -1,0 +1,339 @@
+{
+ "cases": [
+  {
+   "name": "high_uses_median",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "high",
+    "median_fee_ppm": 350,
+    "avg_fee_ppm": 380,
+    "sample_count": 12,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": {
+    "fee_ppm": 999,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 350
+  },
+  {
+   "name": "medium_blends_with_last_hop",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "medium",
+    "median_fee_ppm": 400,
+    "avg_fee_ppm": 410,
+    "sample_count": 6,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": {
+    "fee_ppm": 120,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 316
+  },
+  {
+   "name": "medium_blend_truncates",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "medium",
+    "median_fee_ppm": 401,
+    "avg_fee_ppm": 410,
+    "sample_count": 7,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": {
+    "fee_ppm": 33,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 290
+  },
+  {
+   "name": "medium_without_last_hop_uses_median",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "medium",
+    "median_fee_ppm": 400,
+    "avg_fee_ppm": 410,
+    "sample_count": 5,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 400
+  },
+  {
+   "name": "low_avg_with_buffer",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "low",
+    "median_fee_ppm": 300,
+    "avg_fee_ppm": 333,
+    "sample_count": 3,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 366
+  },
+  {
+   "name": "low_avg_float_edge_110",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "low",
+    "median_fee_ppm": 100,
+    "avg_fee_ppm": 110,
+    "sample_count": 4,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 121
+  },
+  {
+   "name": "low_avg_float_edge_170",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": {
+    "confidence": "low",
+    "median_fee_ppm": 160,
+    "avg_fee_ppm": 170,
+    "sample_count": 3,
+    "total_volume_sats": 1000000
+   },
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 187
+  },
+  {
+   "name": "last_hop_peer_cache_with_base",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 100,
+    "base_msat": 1000
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 160
+  },
+  {
+   "name": "last_hop_base_ppm_capped",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 7,
+    "base_msat": 200000000000
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 1000057
+  },
+  {
+   "name": "last_hop_amount_scales_base",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 10000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 100,
+    "base_msat": 1000
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 250
+  },
+  {
+   "name": "gossip_fallback_hit",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [
+    {
+     "destination": "03aa00000000000000000000000000000000000000000000000000000000000000",
+     "fee_per_millionth": 75,
+     "base_fee_millisatoshi": 2000
+    }
+   ],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 145
+  },
+  {
+   "name": "gossip_base_ppm_capped",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [
+    {
+     "destination": "03aa00000000000000000000000000000000000000000000000000000000000000",
+     "fee_per_millionth": 9,
+     "base_fee_millisatoshi": 1000000000000
+    }
+   ],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 1000059
+  },
+  {
+   "name": "gossip_other_destination_ignored",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [
+    {
+     "destination": "02cc22222222222222222222222222222222222222222222222222222222222222",
+     "fee_per_millionth": 75,
+     "base_fee_millisatoshi": 0
+    }
+   ],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 50
+  },
+  {
+   "name": "failed_floor_bumps_estimate",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 100,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [
+    {
+     "status": "failed",
+     "max_fee_sats": 10,
+     "amount_sats": 50000
+    },
+    {
+     "status": "success",
+     "max_fee_sats": 99,
+     "amount_sats": 50000
+    }
+   ],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 225
+  },
+  {
+   "name": "failed_floor_equal_bumps",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 100,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [
+    {
+     "status": "failed",
+     "max_fee_sats": 15,
+     "amount_sats": 100000
+    }
+   ],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 175
+  },
+  {
+   "name": "failed_floor_below_keeps_estimate",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 100,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [
+    {
+     "status": "failed",
+     "max_fee_sats": 5,
+     "amount_sats": 50000
+    }
+   ],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 150
+  },
+  {
+   "name": "failed_rows_zero_amount_skipped",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": {
+    "fee_ppm": 100,
+    "base_msat": 0
+   },
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [
+    {
+     "status": "failed",
+     "max_fee_sats": 10,
+     "amount_sats": 0
+    }
+   ],
+   "inbound_fee_estimate_ppm": 50,
+   "expected_ppm": 150
+  },
+  {
+   "name": "default_fallback",
+   "peer_id": "02bb11111111111111111111111111111111111111111111111111111111111111",
+   "amount_msat": 100000000,
+   "hist": null,
+   "peer_inbound": null,
+   "our_id": "03aa00000000000000000000000000000000000000000000000000000000000000",
+   "gossip_channels": [],
+   "peer_history": [],
+   "inbound_fee_estimate_ppm": 77,
+   "expected_ppm": 77
+  }
+ ]
+}
