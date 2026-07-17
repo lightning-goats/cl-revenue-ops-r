@@ -41,6 +41,11 @@ fn sats_ev_gate_replays_python_fixture_byte_identically() {
             efv_sats: inputs["efv_sats"].as_f64().unwrap(),
             fee_sats: inputs["fee_sats"].as_i64().unwrap(),
             source_opportunity_sats: inputs["source_opportunity_sats"].as_f64().unwrap(),
+            // This fixture's gate_cases were all driven with an EMPTY
+            // failure history (see ev.rs module docs); failure_penalty_sats
+            // is exercised separately by `failure_penalty_fold_cases`
+            // below.
+            failure_penalty_sats: 0.0,
             activity_penalty_sats: inputs["activity_penalty_sats"].as_f64().unwrap(),
             hold_margin_sats: inputs["hold_margin_sats"].as_f64().unwrap(),
         };
@@ -81,6 +86,7 @@ fn zero_cost_route_always_passes_regardless_of_score() {
         efv_sats: inputs["efv_sats"].as_f64().unwrap(),
         fee_sats: 0,
         source_opportunity_sats: inputs["source_opportunity_sats"].as_f64().unwrap(),
+        failure_penalty_sats: 0.0,
         activity_penalty_sats: inputs["activity_penalty_sats"].as_f64().unwrap(),
         hold_margin_sats: 1_000_000.0,
     };
@@ -103,6 +109,54 @@ fn hold_margin_exact_tie_passes_strict_inequality() {
         .find(|c| c["case_id"] == "hold_margin_just_above_rejects")
         .expect("just-above case present");
     assert!(!just_above["expected"]["pass"].as_bool().unwrap());
+}
+
+/// Task 9 (T7-review ledgered obligation): `failure_penalty_sats` is
+/// EvInputs's OWN field, subtracted by `sats_ev_gate` in Python's exact
+/// left-to-right sequence — NOT folded into `activity_penalty_sats`
+/// beforehand (that folding disagreed with Python in ~0.4% of a
+/// 20_000-case randomized sweep; see `ev.rs`'s module doc comment).
+/// `fixtures/rebalance/ev.json`'s `failure_penalty_fold_cases` (201 cases:
+/// 1 hand-built adversarial regression pin + 200 randomized) are driven
+/// with a NON-EMPTY in-cycle failure history — unlike every `gate_cases`
+/// entry above, which always used an empty history and so never exercised
+/// this term. Re-exercised from the conformance suite's scenario 17 replay.
+#[test]
+fn failure_penalty_fold_cases_replay_python_fixture_byte_identically() {
+    let fx = fixture();
+    let cases = fx["failure_penalty_fold_cases"]
+        .as_array()
+        .expect("failure_penalty_fold_cases array");
+    assert!(
+        cases.len() >= 200,
+        "expected >= 200 failure-penalty-fold cases, got {}",
+        cases.len()
+    );
+
+    for case in cases {
+        let case_id = case["case_id"].as_str().unwrap();
+        let inputs = &case["inputs"];
+        let ev_inputs = EvInputs {
+            probability_ppm: inputs["probability_ppm"].as_i64().unwrap(),
+            dest_attempts: inputs["dest_attempts"].as_i64().unwrap(),
+            dest_success_rate: inputs["dest_success_rate"].as_f64().unwrap(),
+            efv_sats: inputs["efv_sats"].as_f64().unwrap(),
+            fee_sats: inputs["fee_sats"].as_i64().unwrap(),
+            source_opportunity_sats: inputs["source_opportunity_sats"].as_f64().unwrap(),
+            failure_penalty_sats: inputs["failure_penalty_sats"].as_f64().unwrap(),
+            activity_penalty_sats: inputs["activity_penalty_sats"].as_f64().unwrap(),
+            hold_margin_sats: inputs["hold_margin_sats"].as_f64().unwrap(),
+        };
+
+        let verdict = sats_ev_gate(&ev_inputs);
+        let expected_final_score = case["expected"]["final_score_sats"].as_f64().unwrap();
+        assert_eq!(
+            py_repr(verdict.final_score_sats),
+            py_repr(expected_final_score),
+            "case {case_id}: final_score_sats mismatch (py_repr) — sequential \
+             subtraction order regression"
+        );
+    }
 }
 
 #[test]

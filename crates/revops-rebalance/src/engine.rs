@@ -76,12 +76,13 @@
 //!   skip records that Python ALSO appends to the plan/cycle result are
 //!   kept (they are engine data, not log stream).
 //! - The sats-EV gate consumes an [`EvProvider`] seam (the decomposition's
-//!   raw inputs live in the deferred state builder); the T6 interface note
-//!   is honored by folding `failure_count * fee_sats * FAILURE_COST_RATE`
-//!   into the activity-penalty term before [`sats_ev_gate`] — same sum as
-//!   Python's five-term formula, though the fold can differ in the last
-//!   ULP from Python's subtraction order (pinned exactly when the state
-//!   builder lands; no fixture crosses this seam yet).
+//!   raw inputs live in the deferred state builder); `failure_count *
+//!   fee_sats * FAILURE_COST_RATE` is passed to [`sats_ev_gate`] as its OWN
+//!   `failure_penalty_sats` term (Task 9 fix — `EvInputs` no longer folds
+//!   this into the activity-penalty term, which disagreed with Python's
+//!   left-to-right subtraction order in ~0.4% of randomized cases; pinned
+//!   by `fixtures/rebalance/ev.json`'s `failure_penalty_fold_cases` and
+//!   re-exercised via conformance scenario 17).
 //! - `_get_global_budget_limit`'s optional provider hook is wiring-deferred:
 //!   the limit is `max(0, config.daily_budget_sats)`.
 //! - `executor.is_available()` reduces to the our-id self-heal probe
@@ -1886,10 +1887,9 @@ impl EngineShared {
                     .lock()
                     .expect("futility mutex poisoned")
                     .fresh_failure_count(&pair.source_channel_id, &pair.dest_channel_id, now);
-                // T6 interface note: EvInputs carries no failure_count, so
-                // the failure penalty (count * fee * FAILURE_COST_RATE)
-                // folds into the activity term (same sum; see module docs
-                // for the last-ULP caveat vs Python's subtraction order).
+                // Task 9 fix: failure_penalty_sats is EvInputs's own field,
+                // subtracted by sats_ev_gate in Python's exact sequential
+                // order (no longer folded into activity_penalty_sats).
                 let failure_penalty_sats =
                     failure_count as f64 * route_result.route_cost_sats as f64 * FAILURE_COST_RATE;
                 let verdict = sats_ev_gate(&EvInputs {
@@ -1899,7 +1899,8 @@ impl EngineShared {
                     efv_sats: terms.efv_sats,
                     fee_sats: route_result.route_cost_sats,
                     source_opportunity_sats: terms.source_opportunity_sats,
-                    activity_penalty_sats: terms.activity_penalty_sats + failure_penalty_sats,
+                    failure_penalty_sats,
+                    activity_penalty_sats: terms.activity_penalty_sats,
                     hold_margin_sats: self.config.rebalance_hold_margin,
                 });
                 if !verdict.pass {
