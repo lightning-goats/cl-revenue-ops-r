@@ -727,6 +727,18 @@ fn read_mempool_ma(conn: &Connection, cutoff: i64) -> Result<f64> {
 }
 
 impl EvidenceSnapshot {
+    /// The snapshot's pinned read-only `Connection` (open read
+    /// transaction, WAL view frozen at cycle start). T6's scheduler passes
+    /// this to `fee_state::rehydrate` so per-cycle hydration observes the
+    /// EXACT same DB snapshot as every other evidence read this cycle --
+    /// reusing the connection is what makes hydrate-vs-evidence skew
+    /// structurally impossible. Read-only by construction
+    /// (`revops_db::open_read_only`), so handing it out cannot widen the
+    /// write surface.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Scalar i64 query over the frozen connection. Trait methods cannot
     /// surface `Result`; a query error here (only reachable via schema
     /// drift -- the SQL is static and the connection is healthy by

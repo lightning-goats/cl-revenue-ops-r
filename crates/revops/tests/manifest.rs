@@ -81,6 +81,7 @@ fn manifest_advertises_shadow_names() {
     assert!(opts.contains(&"revops-r-observer"), "options: {opts:?}");
     assert!(opts.contains(&"revops-r-db-path"), "options: {opts:?}");
     assert!(opts.contains(&"revops-r-journal-dir"), "options: {opts:?}");
+    assert!(opts.contains(&"revops-r-fee-dryrun"), "options: {opts:?}");
     let methods: Vec<&str> = result["rpcmethods"]
         .as_array()
         .unwrap()
@@ -122,9 +123,29 @@ fn manifest_registers_all_python_options_under_shadow_prefix() {
         .map(|o| o["name"].as_str().unwrap())
         .filter(|n| n.starts_with("revops-r-"))
         .collect();
-    // +3 for our own revops-r-observer, revops-r-observer-db-path (Task 2),
-    // and revops-r-journal-dir (Task 3) -- no Python analogs.
-    assert_eq!(shadow.len(), expected + 3, "shadow options registered");
+    // +4 for our own revops-r-observer, revops-r-observer-db-path (Task 2),
+    // revops-r-journal-dir (Task 3), and revops-r-fee-dryrun (Phase 4b
+    // Task 6) -- no Python analogs.
+    assert_eq!(shadow.len(), expected + 4, "shadow options registered");
+}
+
+/// Phase 4b Task 6 (non-negotiable plan constraint): `revops-r-fee-dryrun`
+/// is a bool option, default FALSE (a deploy/restart without explicit
+/// opt-in changes nothing), advertised `dynamic` so `setconfig` can flip
+/// it at runtime.
+#[test]
+fn manifest_fee_dryrun_is_bool_default_false_dynamic() {
+    let result = manifest();
+    let opt = result["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "revops-r-fee-dryrun")
+        .expect("revops-r-fee-dryrun registered")
+        .clone();
+    assert_eq!(opt["type"], serde_json::json!("bool"), "opt: {opt}");
+    assert_eq!(opt["default"], serde_json::json!(false), "opt: {opt}");
+    assert_eq!(opt["dynamic"], serde_json::json!(true), "opt: {opt}");
 }
 
 #[test]
@@ -157,13 +178,14 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         .iter()
         .filter(|n| n.starts_with("revenue-ops-"))
         .collect();
-    // +3 for our own revenue-ops-observer, revenue-ops-observer-db-path,
-    // and revenue-ops-journal-dir (revenue-ops-db-path is registered exactly
-    // once, under the fixture's own canonical name -- see
-    // register_python_options' doc comment on the db-path skip).
+    // +4 for our own revenue-ops-observer, revenue-ops-observer-db-path,
+    // revenue-ops-journal-dir, and revenue-ops-fee-dryrun
+    // (revenue-ops-db-path is registered exactly once, under the fixture's
+    // own canonical name -- see register_python_options' doc comment on
+    // the db-path skip).
     assert_eq!(
         canonical.len(),
-        expected + 3,
+        expected + 4,
         "canonical options registered"
     );
 

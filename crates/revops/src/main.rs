@@ -43,10 +43,15 @@ struct State {
     /// location from in that case. T6's scheduler consumes this to build
     /// `SchedulerConfig.journal_dir` (a required `PathBuf`) and skips
     /// spawning the fee-cycle scheduler entirely when this is `None`.
-    /// Not yet read anywhere in this task -- T6 is the first consumer;
-    /// `#[allow(dead_code)]` is scoped to exactly that until then.
-    #[allow(dead_code)]
     journal_dir: Option<PathBuf>,
+    /// The running fee-cycle scheduler's handle (T6) -- T7's fee-debug
+    /// RPC and wake triggers send through this. Set at most once, AFTER
+    /// `configured.start` (the scheduler spawns post-start, but `State`
+    /// is built pre-start -- hence `OnceLock` rather than an
+    /// `Option` field). Unset whenever the scheduler is off
+    /// (`revops-r-fee-dryrun=false`, or a missing db-path/journal-dir --
+    /// each case logged explicitly at init).
+    scheduler: std::sync::OnceLock<revops::fee_scheduler::SchedulerHandle>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -82,6 +87,7 @@ fn config_name_map() -> HashMap<String, String> {
     map.insert("db-path".to_string(), opt_name("db-path"));
     map.insert("observer-db-path".to_string(), opt_name("observer-db-path"));
     map.insert("journal-dir".to_string(), opt_name("journal-dir"));
+    map.insert("fee-dryrun".to_string(), opt_name("fee-dryrun"));
     for opt in options_table::load() {
         let suffix = opt
             .name
@@ -430,6 +436,21 @@ async fn main() -> Result<()> {
         "Directory for fee-controller dry-run journal (JSONL). Empty = parent of observer-db-path.",
     );
 
+    // T6 (Phase 4b): opt-in switch for the fee-cycle scheduler. Default
+    // FALSE so a deploy/restart without explicit opt-in changes nothing
+    // (Global Constraint); `.dynamic()` per the plan so a later
+    // `setconfig` can flip it without a manifest change (T6 itself only
+    // reads it once at init -- the scheduler does not start unless it
+    // resolves true THERE; live-toggle handling is future work).
+    let fee_dryrun_name = opt_name("fee-dryrun");
+    let fee_dryrun_opt = DefaultBooleanConfigOption::new_bool_with_default(
+        &fee_dryrun_name,
+        false,
+        "Run the ported fee controller in dry-run: journal decisions next to the observer db, \
+         never broadcast. The fee-cycle scheduler starts ONLY when this is true.",
+    )
+    .dynamic();
+
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
@@ -447,6 +468,7 @@ async fn main() -> Result<()> {
         .option(db_path_opt.clone())
         .option(observer_db_opt.clone())
         .option(journal_dir_opt.clone())
+        .option(fee_dryrun_opt.clone())
         .subscribe(
             "forward_event",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
@@ -813,6 +835,8 @@ async fn main() -> Result<()> {
     let journal_dir_raw = configured.option(&journal_dir_opt)?;
     let journal_dir = resolve_journal_dir(&journal_dir_raw, observer_db_path_expanded.as_deref());
 
+    let fee_dryrun = configured.option(&fee_dryrun_opt)?;
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -822,9 +846,56 @@ async fn main() -> Result<()> {
         journal_dir,
         config_names: config_name_map(),
         python_option_values,
+        scheduler: std::sync::OnceLock::new(),
     });
 
     let plugin = configured.start(state).await?;
+
+    // T6: spawn the single-owner fee-cycle scheduler -- ONLY IF the
+    // operator opted in AND both required paths resolved; otherwise say
+    // exactly why the fee cycle is off (plan requirement: never silent).
+    {
+        let s = plugin.state();
+        if !fee_dryrun {
+            eprintln!(
+                "revops: fee-cycle scheduler off: {fee_dryrun_name}=false (dry-run not \
+                 requested; default is off)"
+            );
+        } else {
+            match (production_db_path_expanded.as_ref(), s.journal_dir.as_ref()) {
+                (None, _) => eprintln!(
+                    "revops: fee-cycle scheduler off: {fee_dryrun_name}=true but \
+                     {db_path_name} is unset/unusable (no production DB to read evidence from)"
+                ),
+                (_, None) => eprintln!(
+                    "revops: fee-cycle scheduler off: {fee_dryrun_name}=true but no journal \
+                     dir resolved (set {journal_dir_name} or {observer_db_name})"
+                ),
+                (Some(prod_db_path), Some(journal_dir)) => {
+                    let handle = revops::fee_scheduler::spawn(
+                        revops::fee_scheduler::SchedulerConfig {
+                            db_path: prod_db_path.clone(),
+                            socket_path: init_socket_path.clone(),
+                            journal_dir: journal_dir.clone(),
+                            // Design Note 1: re-hydrate-per-cycle for the
+                            // whole dry-run window; SeedOnce is the
+                            // cutover flip.
+                            lifecycle: revops::fee_scheduler::StateLifecycle::RehydratePerCycle,
+                        },
+                        s.db.clone(),
+                        s.python_option_values.clone(),
+                    );
+                    let _ = s.scheduler.set(handle);
+                    eprintln!(
+                        "revops: fee-cycle scheduler started (dry-run; journal dir {}, first \
+                         tick at fee_interval+{}s)",
+                        journal_dir.display(),
+                        revops::fee_scheduler::TICK_PHASE_OFFSET_SECS
+                    );
+                }
+            }
+        }
+    }
 
     // Startup hydration runs as a background task, off the init-handshake
     // path: paging `listforwards` over a live socket could be slow on a
@@ -871,6 +942,44 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Serializes every test that mutates process-global environment
+    /// (`HOME`): the default test runner executes `#[test]`s on parallel
+    /// threads within this one process, so two HOME-mutating tests (or a
+    /// mutator racing a reader mid-`expand_tilde`) can interleave
+    /// set/restore and flake -- observed twice in release-leg CI runs.
+    /// Every HOME mutation must go through [`set_home`], which holds this
+    /// lock for the guard's lifetime.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard from [`set_home`]: restores the previous `HOME` (or
+    /// removes it) on drop -- INCLUDING on assert-panic unwind, so a
+    /// failing test can't leak its fake `HOME` into later tests. Holds
+    /// [`ENV_LOCK`] for its whole lifetime; a poisoned lock (an earlier
+    /// panicking holder) is recovered via `into_inner` -- the guard's own
+    /// Drop restored `HOME`, so the "poisoned" state is already clean.
+    struct HomeGuard {
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn set_home(home: &str) -> HomeGuard {
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home);
+        HomeGuard { prev, _lock: lock }
+    }
+
     fn bad_default_opt(opt_type: &str, default: serde_json::Value) -> OptDef {
         OptDef {
             name: "revops-r-test-bad".to_string(),
@@ -908,19 +1017,9 @@ mod tests {
     /// mirrors `os.path.expanduser("~/.lightning/revenue_ops.db")`.
     #[test]
     fn expand_tilde_expands_leading_tilde_slash() {
-        // SAFETY: test-only env mutation; not run concurrently with other
-        // HOME-reading tests in this process (cargo runs unit tests in
-        // this crate's own process, but each #[test] here is
-        // self-contained and doesn't read HOME elsewhere).
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/home/testuser");
-        let expanded = expand_tilde("~/.lightning/revenue_ops.db");
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+        let _home = set_home("/home/testuser");
         assert_eq!(
-            expanded,
+            expand_tilde("~/.lightning/revenue_ops.db"),
             PathBuf::from("/home/testuser/.lightning/revenue_ops.db")
         );
     }
@@ -928,14 +1027,8 @@ mod tests {
     /// Bare `~` (no trailing slash) expands to exactly `$HOME`.
     #[test]
     fn expand_tilde_expands_bare_tilde() {
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/home/testuser");
-        let expanded = expand_tilde("~");
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        assert_eq!(expanded, PathBuf::from("/home/testuser"));
+        let _home = set_home("/home/testuser");
+        assert_eq!(expand_tilde("~"), PathBuf::from("/home/testuser"));
     }
 
     /// A path with no leading `~` passes through unchanged.
@@ -1075,22 +1168,28 @@ mod tests {
         );
     }
 
+    /// Task 6 mirror of the two tests above: `revenue-r-config
+    /// key=fee-dryrun` must resolve the new dry-run switch.
+    #[test]
+    fn config_name_map_includes_fee_dryrun() {
+        let map = config_name_map();
+        assert!(
+            map.contains_key("fee-dryrun"),
+            "fee-dryrun missing from config_name_map: {map:?}"
+        );
+    }
+
     /// Task 3, branch 1: an explicit, non-empty `revops-r-journal-dir`
     /// value is used as-is after `expand_tilde`, regardless of what
     /// `observer_db_path` is (even `Some`, to prove the explicit value
     /// wins rather than being ignored).
     #[test]
     fn resolve_journal_dir_explicit_value_is_tilde_expanded() {
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/home/testuser");
+        let _home = set_home("/home/testuser");
         let resolved = resolve_journal_dir(
             "~/journal",
             Some(&PathBuf::from("/var/lib/revops/observer.db")),
         );
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
         assert_eq!(resolved, Some(PathBuf::from("/home/testuser/journal")));
     }
 
