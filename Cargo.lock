@@ -637,7 +637,9 @@ name = "revops-econ"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "revops-analytics",
  "revops-core",
+ "revops-db",
  "rusqlite",
  "serde",
  "serde_json",

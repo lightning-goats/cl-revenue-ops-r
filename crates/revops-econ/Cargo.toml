@@ -15,3 +15,9 @@ rusqlite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Phase 3 Task 10 (conformance un-defer flip): classification/protection and
+# the budget-rail replays live in these crates. Dev-only — revops-analytics
+# depends on revops-econ as a regular dependency, so this is a dev-dependency
+# cycle only (fine in Cargo: dev-deps never build the library target).
+revops-analytics = { path = "../revops-analytics" }
+revops-db = { path = "../revops-db" }

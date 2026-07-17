@@ -14,15 +14,27 @@
 //! (`_arb_wire`, `_decision_wire`, `_env`, pinned `NOW = 1_752_400_000`) and
 //! the schema gate mirrored from `tools/conformance/validate_fixtures.py`.
 //!
-//! 18 econ-core scenarios are replayed byte-identically (Step 2); the other
-//! 22 are schema-gated only, via the pinned, test-enforced [`DEFERRED`] skip
-//! list (Step 3) — every scenario directory must be either replayed or
-//! deferred, so adding scenario 41 breaks the build until triaged.
+//! 27 econ-core/analytics/budget-rail scenarios are replayed byte-identically
+//! (Step 2; Phase 3 Task 10 added 9 to the original Phase 2 Task 9 count of
+//! 18); the other 13 are schema-gated only, via the pinned, test-enforced
+//! [`DEFERRED`] skip list (Step 3) — every scenario directory must be either
+//! replayed or deferred, so adding scenario 41 breaks the build until
+//! triaged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use revops_analytics::classification::{revenue_role_30d, ChannelRole};
+use revops_analytics::policy::FeeStrategy;
+use revops_analytics::profitability::{
+    classify_channel, ChannelCosts, ChannelProfitability, ChannelRevenue, ClassifyEvidence,
+    DiagStats, ProfitabilityClass,
+};
+use revops_analytics::protection::{
+    close_protection_reason, policy_close_block, FlowEvidence, ProtProfEvidence,
+};
 use revops_core::canonical::canonical_json;
+use revops_db::budget::{BudgetDb, ReserveRequest};
 use revops_econ::arbiter::{arbitrate, ArbitrationResult};
 use revops_econ::governor::{authority_allows, GovernorDecision, GovernorFacade};
 use revops_econ::intents::{
@@ -189,12 +201,22 @@ fn forty_scenarios_present_and_schema_gated() {
 // Step 3: pinned replay / deferred partition
 // ---------------------------------------------------------------------------
 
-/// The 18 econ-core scenarios replayed byte-identically in this file.
+/// The 27 econ-core/analytics/budget-rail scenarios replayed byte-identically
+/// in this file (18 from Phase 2 Task 9 + 9 flipped in Phase 3 Task 10).
 const REPLAYED: &[&str] = &[
+    "01-ordinary-profitable-channel",
+    "02-source-gateway-protection",
+    "04-balanced-channel",
+    "05-underwater-classification",
+    "06-stagnant-candidate",
+    "07-zombie-classification",
     "18-conflicting-close-rebalance",
+    "19-protected-close-rejection",
     "20-open-vs-lnplus",
     "21-circular-vs-boltz-structural",
     "22-budget-exhaustion",
+    "23-concurrent-reservation-contention",
+    "24-restart-outstanding-reservation",
     "25-missing-execution-cost",
     "26-unknown-execution-outcome",
     "27-boltz-timeout-after-acceptance",
@@ -211,51 +233,40 @@ const REPLAYED: &[&str] = &[
     "40-sanitized-production-decisions",
 ];
 
-/// Explicit, never-silent skip list: the 22 scenarios owned by later phases.
+/// Explicit, never-silent skip list: the 13 scenarios owned by later phases.
 /// Adding scenario 41 without triaging it into either this list or
 /// [`REPLAYED`] fails [`all_scenarios_replayed_or_deferred`].
+///
+/// Phase 3 Task 10 re-tag (deliberate, logged per the conflict-rules-flip
+/// convention): scenarios 08-12's owner strings said "Phase 3: fee_stage
+/// controller" — that numbering predated the port phase plan. Re-tagged to
+/// "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)".
+/// 13-17 stay Phase 4/5 as already written. Scenario 19 ("Phase 3-5:
+/// close-protection gate") left this list entirely — the pure gate
+/// (`policy_close_block`) now replays; the *live* close-protection golden
+/// suite still rides Phase 6 capacity work. Scenario 39 stays deferred
+/// (prose-only, no code path).
 const DEFERRED: &[(&str, &str)] = &[
-    (
-        "01-ordinary-profitable-channel",
-        "Phase 3: profitability classification",
-    ),
-    (
-        "02-source-gateway-protection",
-        "Phase 3: profitability classification (inbound-gateway close protection)",
-    ),
     ("03-sink-depletion", "Phase 4: rebalance_mode planner"),
     (
-        "04-balanced-channel",
-        "Phase 3: profitability classification",
+        "08-fee-rail",
+        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
     ),
-    (
-        "05-underwater-classification",
-        "Phase 3: profitability classification",
-    ),
-    (
-        "06-stagnant-candidate",
-        "Phase 3: profitability classification",
-    ),
-    (
-        "07-zombie-classification",
-        "Phase 3: profitability classification",
-    ),
-    ("08-fee-rail", "Phase 3: fee_stage controller (rails)"),
     (
         "09-fee-rate-limit",
-        "Phase 3: fee_stage controller (rate limit)",
+        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
     ),
     (
         "10-fee-deadband",
-        "Phase 3: fee_stage controller (deadband)",
+        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
     ),
     (
         "11-fee-cooldown",
-        "Phase 3: fee_stage controller (cooldown)",
+        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
     ),
     (
         "12-dts-pid-components",
-        "Phase 3: fee_stage controller (DTS/PID)",
+        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
     ),
     (
         "13-dynamic-htlcmax",
@@ -275,18 +286,6 @@ const DEFERRED: &[(&str, &str)] = &[
         "Phase 4: rebalance_mode planner",
     ),
     (
-        "19-protected-close-rejection",
-        "Phase 3-5: close-protection gate (protect tags)",
-    ),
-    (
-        "23-concurrent-reservation-contention",
-        "Phase 3: budget reservation rail (Database.reserve_spend)",
-    ),
-    (
-        "24-restart-outstanding-reservation",
-        "Phase 3: budget reservation rail (Database restart durability)",
-    ),
-    (
         "28-lnplus-state-divergence",
         "Phase 6: LN+ lifecycle module",
     ),
@@ -298,8 +297,8 @@ const DEFERRED: &[(&str, &str)] = &[
 
 #[test]
 fn all_scenarios_replayed_or_deferred() {
-    assert_eq!(REPLAYED.len(), 18, "expected exactly 18 replayed scenarios");
-    assert_eq!(DEFERRED.len(), 22, "expected exactly 22 deferred scenarios");
+    assert_eq!(REPLAYED.len(), 27, "expected exactly 27 replayed scenarios");
+    assert_eq!(DEFERRED.len(), 13, "expected exactly 13 deferred scenarios");
 
     let mut dirs: Vec<String> = std::fs::read_dir(fixtures_root())
         .unwrap()
@@ -339,6 +338,215 @@ fn all_scenarios_replayed_or_deferred() {
 // ---------------------------------------------------------------------------
 // Step 2: replay dispatch
 // ---------------------------------------------------------------------------
+
+// --- classification (01, 02, 04, 05, 06, 07) ---
+
+fn channel_role_from_name(name: &str) -> ChannelRole {
+    match name {
+        "INBOUND_GATEWAY" => ChannelRole::InboundGateway,
+        "OUTBOUND_GATEWAY" => ChannelRole::OutboundGateway,
+        "BALANCED" => ChannelRole::Balanced,
+        "DORMANT" => ChannelRole::Dormant,
+        other => panic!("unknown ChannelRole name: {other}"),
+    }
+}
+
+fn default_classify_evidence(now: i64) -> ClassifyEvidence<'static> {
+    ClassifyEvidence {
+        now,
+        diag_stats: None,
+        posterior_variance: None,
+        contribution_30d_msat: None,
+    }
+}
+
+#[test]
+fn scenario_01_ordinary_profitable_channel() {
+    let case = case_json("01-ordinary-profitable-channel");
+    let inputs = &case["inputs"];
+    let result = classify_channel(
+        inputs["roi"].as_f64().expect("roi float"),
+        inputs["net_profit"].as_i64().expect("net_profit int"),
+        inputs["last_routed"].as_i64(),
+        inputs["days_open"].as_i64().expect("days_open int"),
+        inputs["forward_count"].as_i64().expect("forward_count int"),
+        &default_classify_evidence(NOW),
+    );
+    let produced = json!({"classification": result.as_name()});
+    assert_canon_eq(
+        &produced,
+        &case["expected"],
+        "01-ordinary-profitable-channel",
+    );
+}
+
+#[test]
+fn scenario_02_source_gateway_protection() {
+    let case = case_json("02-source-gateway-protection");
+    // Recipe pinned by the task brief (this fixture's `inputs` is `{}` — the
+    // evidence is not itself vendored in the corpus): role_30d =
+    // INBOUND_GATEWAY, marginal_roi_percent = -10.0, flow(confidence=0.9,
+    // forward_count=50), empty revenue-route set. Mirrors
+    // `tests/protection.rs::golden_gateway_30d_protected`'s `prof(...)`.
+    let prof = ProtProfEvidence {
+        role_30d: Some(ChannelRole::InboundGateway),
+        lifetime_role: ChannelRole::Balanced,
+        marginal_roi_percent: -10.0,
+        window_30d_available: true,
+        sourced_fee_30d_msat: 0,
+        lifetime_sourced_fee_sats: 0,
+        days_open: 100,
+    };
+    let flow = FlowEvidence {
+        confidence: Some(0.9),
+        forward_count: Some(50),
+    };
+    let reason = close_protection_reason("111x222x0", &prof, Some(&flow), &BTreeSet::new(), 7);
+    let produced = json!({"reason": reason});
+    assert_canon_eq(&produced, &case["expected"], "02-source-gateway-protection");
+}
+
+#[test]
+fn scenario_04_balanced_channel() {
+    let case = case_json("04-balanced-channel");
+    let inputs = &case["inputs"];
+    let lifetime_role = channel_role_from_name(
+        inputs["lifetime_role"]
+            .as_str()
+            .expect("lifetime_role string"),
+    );
+    let result = revenue_role_30d(
+        inputs["window_30d_available"]
+            .as_bool()
+            .expect("window_30d_available bool"),
+        inputs["forward_count_30d"]
+            .as_i64()
+            .expect("forward_count_30d int"),
+        inputs["sourced_forward_count_30d"]
+            .as_i64()
+            .expect("sourced_forward_count_30d int"),
+        lifetime_role,
+    );
+    let produced = json!({"role_30d": result.as_name()});
+    assert_canon_eq(&produced, &case["expected"], "04-balanced-channel");
+}
+
+/// Minimal [`ChannelProfitability`] carrying only the two fields
+/// [`ChannelProfitability::marginal_roi`] actually reads
+/// (`marginal_profit_30d_sats`, `rebalance_cost_30d_sats`); every other
+/// field is inert filler (mirrors `tests/profitability.rs::prof_with_marginal`
+/// in the revops-analytics crate, which this replay cannot import — it's a
+/// `#[cfg(test)]`-private helper of a different crate's test binary).
+fn profitability_for_marginal_roi(profit_30d: i64, cost_30d: i64) -> ChannelProfitability {
+    let costs = ChannelCosts {
+        channel_id: "111x222x0".to_string(),
+        peer_id: format!("02{}", "a".repeat(64)),
+        open_cost_sats: 0,
+        rebalance_cost_sats: 0,
+        effective_rebalance_cost_sats: 0,
+    };
+    let revenue = ChannelRevenue {
+        channel_id: "111x222x0".to_string(),
+        fees_earned_msat: 0,
+        volume_routed_msat: 0,
+        forward_count: 0,
+        sourced_volume_msat: 0,
+        sourced_fee_contribution_msat: 0,
+        sourced_forward_count: 0,
+    };
+    ChannelProfitability {
+        channel_id: "111x222x0".to_string(),
+        peer_id: format!("02{}", "a".repeat(64)),
+        capacity_sats: 0,
+        costs,
+        revenue,
+        net_profit_sats: 0,
+        roi_percent: 0.0,
+        classification: ProfitabilityClass::BreakEven,
+        cost_per_sat_routed: 0.0,
+        fee_per_sat_routed: 0.0,
+        days_open: 0,
+        last_routed: None,
+        marginal_profit_30d_sats: profit_30d,
+        rebalance_cost_30d_sats: cost_30d,
+        opener: "local".to_string(),
+        contribution_30d_msat: 0,
+        fees_earned_30d_msat: 0,
+        sourced_fee_30d_msat: 0,
+        forward_count_30d: 0,
+        sourced_forward_count_30d: 0,
+        window_30d_available: false,
+    }
+}
+
+/// Documented exception (task brief): the fixture's `expected.marginal_roi`
+/// is a JSON FLOAT (`-0.5`), and `canonical_json` categorically FORBIDS
+/// non-integer numbers (`revops_core::canonical::CanonicalError::
+/// NonIntegerNumber`) — so this scenario cannot go through
+/// [`assert_canon_eq`] at all, unlike every other replay in this file.
+/// Comparison is `f64::to_bits` bitwise identity against the fixture's own
+/// parsed float, per the brief's pinned choice (over a py_repr-string
+/// round-trip) — not epsilon-fuzzed, and -0.5 has an exact `f64`
+/// representation on both sides so the two forms agree here regardless.
+#[test]
+fn scenario_05_underwater_classification() {
+    let case = case_json("05-underwater-classification");
+    let inputs = &case["inputs"];
+    let profitability = profitability_for_marginal_roi(
+        inputs["marginal_profit_30d_sats"]
+            .as_i64()
+            .expect("marginal_profit_30d_sats int"),
+        inputs["rebalance_cost_30d_sats"]
+            .as_i64()
+            .expect("rebalance_cost_30d_sats int"),
+    );
+    let produced = profitability.marginal_roi();
+    let expected = case["expected"]["marginal_roi"]
+        .as_f64()
+        .expect("expected.marginal_roi is a JSON float");
+    assert_eq!(
+        produced.to_bits(),
+        expected.to_bits(),
+        "05-underwater-classification: marginal_roi bit-pattern mismatch (produced {produced}, expected {expected})"
+    );
+}
+
+#[test]
+fn scenario_06_stagnant_candidate() {
+    let case = case_json("06-stagnant-candidate");
+    let inputs = &case["inputs"];
+    let result = classify_channel(
+        inputs["roi"].as_f64().expect("roi float"),
+        inputs["net_profit"].as_i64().expect("net_profit int"),
+        inputs["last_routed"].as_i64(),
+        inputs["days_open"].as_i64().expect("days_open int"),
+        inputs["forward_count"].as_i64().expect("forward_count int"),
+        &default_classify_evidence(NOW),
+    );
+    let produced = json!({"classification": result.as_name()});
+    assert_canon_eq(&produced, &case["expected"], "06-stagnant-candidate");
+}
+
+#[test]
+fn scenario_07_zombie_classification() {
+    let case = case_json("07-zombie-classification");
+    // Recipe pinned by the task brief (this fixture's `inputs` is `{}`):
+    // DiagStats{attempt_count: 2, last_success_time: 0}, roi -0.40,
+    // last_routed = NOW - 30 days, days_open 200, forward_count 5.
+    let diag = DiagStats {
+        attempt_count: 2,
+        last_success_time: 0,
+    };
+    let ev = ClassifyEvidence {
+        now: NOW,
+        diag_stats: Some(&diag),
+        posterior_variance: None,
+        contribution_30d_msat: None,
+    };
+    let result = classify_channel(-0.40, 0, Some(NOW - 86_400 * 30), 200, 5, &ev);
+    let produced = json!({"classification": result.as_name()});
+    assert_canon_eq(&produced, &case["expected"], "07-zombie-classification");
+}
 
 // --- arbitration (18, 20, 21, 31, 35, 38) ---
 
@@ -478,7 +686,21 @@ fn scenario_38_partial_batch_completion() {
     run_arbitration_scenario("38-partial-batch-completion");
 }
 
-// --- authorization (22, 29, 30) ---
+// --- authorization (19, 22, 29, 30) ---
+
+#[test]
+fn scenario_19_protected_close_rejection() {
+    let case = case_json("19-protected-close-rejection");
+    // Recipe pinned by the task brief (`inputs` is `{}`):
+    // `policy_close_block(Dynamic, ["protect"])`. Byte-compares against the
+    // fixture's literal U+2014 EM DASH string.
+    let reason = policy_close_block(&FeeStrategy::Dynamic, &["protect".to_string()]);
+    let produced = json!({
+        "allowed": reason.is_none(),
+        "reason": reason,
+    });
+    assert_canon_eq(&produced, &case["expected"], "19-protected-close-rejection");
+}
 
 fn decision_wire(d: &GovernorDecision) -> Value {
     json!({"authorized": d.authorized, "reason_code": d.reason_code})
@@ -593,6 +815,110 @@ fn scenario_30_stale_intent() {
         &decision_wire(&decision),
         &case["expected"],
         "30-stale-intent",
+    );
+}
+
+// --- reservation (23, 24) ---
+
+#[test]
+fn scenario_23_concurrent_reservation_contention() {
+    let case = case_json("23-concurrent-reservation-contention");
+    let inputs = &case["inputs"];
+    let budget_sats = inputs["budget_sats"].as_i64().expect("budget_sats int");
+    let reservations = inputs["reservations"]
+        .as_array()
+        .expect("inputs.reservations array");
+    assert_eq!(
+        reservations.len(),
+        2,
+        "23-concurrent-reservation-contention: expected exactly 2 reservations"
+    );
+
+    let dir = TempDir::new().unwrap();
+    let mut db = BudgetDb::open(&dir.path().join("budget.db")).unwrap();
+
+    let mut granted = Vec::with_capacity(reservations.len());
+    for r in reservations {
+        let (g, _remaining) = db
+            .reserve_spend(
+                ReserveRequest {
+                    reservation_id: r["id"].as_str().expect("reservation id").to_string(),
+                    amount_sats: r["amount_sats"].as_i64().expect("amount_sats int"),
+                    category: "conformance".to_string(),
+                    effective_budget_sats: Some(budget_sats),
+                    ..ReserveRequest::default()
+                },
+                NOW,
+            )
+            .unwrap();
+        granted.push(g);
+    }
+
+    let produced = json!({
+        "first_granted": granted[0],
+        "second_granted": granted[1],
+    });
+    assert_canon_eq(
+        &produced,
+        &case["expected"],
+        "23-concurrent-reservation-contention",
+    );
+}
+
+#[test]
+fn scenario_24_restart_outstanding_reservation() {
+    let case = case_json("24-restart-outstanding-reservation");
+    let inputs = &case["inputs"];
+    let reserved = &inputs["reserved_before_restart"];
+    let rid = reserved["id"].as_str().expect("reservation id").to_string();
+    let amount_sats = reserved["amount_sats"].as_i64().expect("amount_sats int");
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("budget.db");
+    {
+        let mut db = BudgetDb::open(&db_path).unwrap();
+        let (granted, _) = db
+            .reserve_spend(
+                ReserveRequest {
+                    reservation_id: rid.clone(),
+                    amount_sats,
+                    category: "conformance".to_string(),
+                    ..ReserveRequest::default()
+                },
+                NOW,
+            )
+            .unwrap();
+        assert!(
+            granted,
+            "24-restart-outstanding-reservation: initial reserve must be granted"
+        );
+        // `db` drops here, releasing the connection, before the SAME file is
+        // reopened below — this is the "restart" the scenario name promises.
+    }
+
+    let db = BudgetDb::open(&db_path).unwrap();
+    let states = db
+        .get_spend_reservation_states(Some(std::slice::from_ref(&rid)))
+        .unwrap();
+    let state = states.get(&rid).unwrap_or_else(|| {
+        panic!("24-restart-outstanding-reservation: {rid} missing after restart")
+    });
+
+    // TRAP (task brief): the fixture's expected value is a Python dict-REPR
+    // STRING, not a JSON object: `str({'status': ..., 'reserved_sats': ...})`
+    // — single quotes, `", "` between pairs, in THIS key order. Reproduced
+    // exactly, not re-modeled as a JSON object.
+    let state_repr = format!(
+        "{{'status': '{}', 'reserved_sats': {}}}",
+        state.status, state.reserved_sats
+    );
+    let mut state_after_restart = serde_json::Map::new();
+    state_after_restart.insert(rid.clone(), Value::String(state_repr));
+    let produced = json!({ "state_after_restart": Value::Object(state_after_restart) });
+    assert_canon_eq(
+        &produced,
+        &case["expected"],
+        "24-restart-outstanding-reservation",
     );
 }
 
