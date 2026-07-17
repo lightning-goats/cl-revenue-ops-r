@@ -1,0 +1,1105 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "label": "rank_first_largest__low_50__invert_False",
+   "capacity_rank": 0,
+   "rank_count": 5,
+   "neighbor_median": 50,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 1100000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 1100000,
+   "expected": "0.03"
+  },
+  {
+   "label": "rank_first_largest__low_50__invert_True",
+   "capacity_rank": 0,
+   "rank_count": 5,
+   "neighbor_median": 50,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 1100000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 1100000,
+   "expected": "0.07500000000000001"
+  },
+  {
+   "label": "rank_first_largest__mid_200__invert_False",
+   "capacity_rank": 0,
+   "rank_count": 5,
+   "neighbor_median": 200,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 1100000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 1100000,
+   "expected": "0.05"
+  },
+  {
+   "label": "rank_first_largest__mid_200__invert_True",
+   "capacity_rank": 0,
+   "rank_count": 5,
+   "neighbor_median": 200,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 1100000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 1100000,
+   "expected": "0.15000000000000002"
+  },
+  {
+   "label": "rank_first_largest__high_500__invert_False",
+   "capacity_rank": 0,
+   "rank_count": 5,
+   "neighbor_median": 500,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 1100000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 1100000,
+   "expected": "0.1"
+  },
+  {
+   "label": "rank_first_largest__high_500__invert_True",
+   "capacity_rank": 0,
+   "rank_count": 5,
+   "neighbor_median": 500,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 1100000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 1100000,
+   "expected": "0.2"
+  },
+  {
+   "label": "rank_mid__low_50__invert_False",
+   "capacity_rank": 2,
+   "rank_count": 5,
+   "neighbor_median": 50,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 925000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 925000,
+   "expected": "0.045000000000000005"
+  },
+  {
+   "label": "rank_mid__low_50__invert_True",
+   "capacity_rank": 2,
+   "rank_count": 5,
+   "neighbor_median": 50,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 925000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 925000,
+   "expected": "0.055"
+  },
+  {
+   "label": "rank_mid__mid_200__invert_False",
+   "capacity_rank": 2,
+   "rank_count": 5,
+   "neighbor_median": 200,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 925000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 925000,
+   "expected": "0.09000000000000001"
+  },
+  {
+   "label": "rank_mid__mid_200__invert_True",
+   "capacity_rank": 2,
+   "rank_count": 5,
+   "neighbor_median": 200,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 925000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 925000,
+   "expected": "0.11"
+  },
+  {
+   "label": "rank_mid__high_500__invert_False",
+   "capacity_rank": 2,
+   "rank_count": 5,
+   "neighbor_median": 500,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 925000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 925000,
+   "expected": "0.14"
+  },
+  {
+   "label": "rank_mid__high_500__invert_True",
+   "capacity_rank": 2,
+   "rank_count": 5,
+   "neighbor_median": 500,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 925000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 925000,
+   "expected": "0.16"
+  },
+  {
+   "label": "rank_last_smallest__low_50__invert_False",
+   "capacity_rank": 5,
+   "rank_count": 5,
+   "neighbor_median": 50,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 700000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 700000,
+   "expected": "0.07500000000000001"
+  },
+  {
+   "label": "rank_last_smallest__low_50__invert_True",
+   "capacity_rank": 5,
+   "rank_count": 5,
+   "neighbor_median": 50,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 700000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 700000,
+   "expected": "0.03"
+  },
+  {
+   "label": "rank_last_smallest__mid_200__invert_False",
+   "capacity_rank": 5,
+   "rank_count": 5,
+   "neighbor_median": 200,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 700000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 700000,
+   "expected": "0.15000000000000002"
+  },
+  {
+   "label": "rank_last_smallest__mid_200__invert_True",
+   "capacity_rank": 5,
+   "rank_count": 5,
+   "neighbor_median": 200,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 700000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 700000,
+   "expected": "0.05"
+  },
+  {
+   "label": "rank_last_smallest__high_500__invert_False",
+   "capacity_rank": 5,
+   "rank_count": 5,
+   "neighbor_median": 500,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 700000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 700000,
+   "expected": "0.2"
+  },
+  {
+   "label": "rank_last_smallest__high_500__invert_True",
+   "capacity_rank": 5,
+   "rank_count": 5,
+   "neighbor_median": 500,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 700000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c0",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c1",
+     "destination": "peer",
+     "fee_ppm": 101,
+     "base_fee_msat": 0,
+     "capacity_sats": 950000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c2",
+     "destination": "peer",
+     "fee_ppm": 102,
+     "base_fee_msat": 0,
+     "capacity_sats": 900000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c3",
+     "destination": "peer",
+     "fee_ppm": 103,
+     "base_fee_msat": 0,
+     "capacity_sats": 850000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c4",
+     "destination": "peer",
+     "fee_ppm": 104,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 700000,
+   "expected": "0.1"
+  },
+  {
+   "label": "no_competitor_data__invert_False",
+   "capacity_rank": 0,
+   "rank_count": 0,
+   "neighbor_median": 200,
+   "invert_rank": false,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 100000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 100000,
+   "expected": "0.1"
+  },
+  {
+   "label": "no_competitor_data__invert_True",
+   "capacity_rank": 0,
+   "rank_count": 0,
+   "neighbor_median": 200,
+   "invert_rank": true,
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 999,
+     "base_fee_msat": 0,
+     "capacity_sats": 100000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "our_capacity_sats": 100000,
+   "expected": "0.1"
+  }
+ ]
+}

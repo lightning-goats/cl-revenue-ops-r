@@ -1,0 +1,44 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "label": "exact_default_tuple",
+   "channel": {
+    "fee_per_millionth": 10,
+    "base_fee_millisatoshi": 1000
+   },
+   "expected": true
+  },
+  {
+   "label": "non_default_ppm",
+   "channel": {
+    "fee_per_millionth": 11,
+    "base_fee_millisatoshi": 1000
+   },
+   "expected": false
+  },
+  {
+   "label": "non_default_base",
+   "channel": {
+    "fee_per_millionth": 10,
+    "base_fee_millisatoshi": 999
+   },
+   "expected": false
+  },
+  {
+   "label": "post24x_field_name",
+   "channel": {
+    "fee_per_millionth": 10,
+    "fee_base_msat": 1000
+   },
+   "expected": true
+  },
+  {
+   "label": "missing_base_assumed_not_default",
+   "channel": {
+    "fee_per_millionth": 10
+   },
+   "expected": false
+  }
+ ]
+}
