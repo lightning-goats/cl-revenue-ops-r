@@ -265,3 +265,86 @@ fn journal_state_sink_writes_one_line_per_row_and_never_opens_production_db() {
     assert!(lines[0].contains("chan_a"));
     assert!(lines[1].contains("chan_b"));
 }
+
+/// Reviewer finding (Important, Phase 4b Task 4 review): `flush_batch` must
+/// never panic on an open/write failure — this is an offline-inspection
+/// journal for the dry-run plugin, and a disk-full or permission hiccup
+/// crashing the plugin would take down the Python-parity window the sink
+/// exists to serve. `revops_fees::journal::Journal::append`/`append_all`
+/// return `io::Result` precisely so callers can log loudly and continue;
+/// `JournalStateSink` must do the same internally, since `StateSink::
+/// flush_batch` (pre-existing trait, `revops-fees/src/cycle.rs`) returns
+/// `()` and can't propagate the error itself.
+#[test]
+fn journal_state_sink_flush_batch_does_not_panic_when_dir_unwritable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
+
+    // Make the containing directory read-only so opening the journal file
+    // for append (which must create it, since it doesn't exist yet) fails
+    // with a permission error instead of succeeding.
+    let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+    perms.set_mode(0o500);
+    std::fs::set_permissions(tmp.path(), perms).unwrap();
+
+    let cycle = ChannelCycleState::default();
+    let fee = ChannelFeeState::default();
+
+    // Must not panic even though the underlying open() will fail.
+    sink.flush_batch(&[("chan_a".to_string(), cycle, fee)]);
+
+    // Restore perms so the tempdir can be cleaned up.
+    let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(tmp.path(), perms).unwrap();
+}
+
+/// Reviewer finding (Minor): proves `flush_batch` appends (never
+/// truncates/overwrites) across repeated calls, matching "ONE flush per
+/// cycle" semantics over multiple dry-run cycles.
+#[test]
+fn journal_state_sink_flush_batch_appends_across_multiple_cycles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
+
+    let mut cycle1 = ChannelCycleState::default();
+    cycle1.last_fee_ppm = 100;
+    let mut fee1 = ChannelFeeState::default();
+    fee1.last_fee_ppm = 100;
+    sink.flush_batch(&[("chan_a".to_string(), cycle1, fee1)]);
+
+    let mut cycle2 = ChannelCycleState::default();
+    cycle2.last_fee_ppm = 200;
+    let mut fee2 = ChannelFeeState::default();
+    fee2.last_fee_ppm = 200;
+    sink.flush_batch(&[("chan_a".to_string(), cycle2, fee2)]);
+
+    let journal_path = tmp.path().join("fee_dryrun_state.jsonl");
+    let contents = std::fs::read_to_string(&journal_path).expect("journal file written");
+    let lines: Vec<&str> = contents.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "each cycle's flush_batch call must append a new line, not overwrite the previous one"
+    );
+    assert!(lines[0].contains("100"), "first cycle's row: {}", lines[0]);
+    assert!(lines[1].contains("200"), "second cycle's row: {}", lines[1]);
+}
+
+/// Reviewer finding (Minor): `rows.is_empty()` early return must not
+/// create or otherwise touch the journal file at all.
+#[test]
+fn journal_state_sink_flush_batch_empty_rows_is_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
+
+    sink.flush_batch(&[]);
+
+    let journal_path = tmp.path().join("fee_dryrun_state.jsonl");
+    assert!(
+        !journal_path.exists(),
+        "empty rows must not create/touch the journal file"
+    );
+}

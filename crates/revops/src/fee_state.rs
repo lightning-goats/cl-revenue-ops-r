@@ -155,12 +155,36 @@ impl StateSink for JournalStateSink {
             buf.push_str(&dumps_python(&line));
             buf.push('\n');
         }
-        let mut f = OpenOptions::new()
+        // This journal is offline-inspection-only (see the module doc
+        // comment) -- it must never crash the dry-run plugin. A disk-full
+        // or permission hiccup here is logged loudly to stderr (CLN routes
+        // plugin stderr into its own log) and swallowed, mirroring
+        // `revops_fees::journal::Journal::append`/`append_all`'s
+        // `io::Result` return, which exists precisely so callers can log
+        // and continue -- `StateSink::flush_batch`'s pre-existing `()`
+        // signature (`revops-fees/src/cycle.rs`) just means this sink has
+        // to do that logging itself instead of propagating the error.
+        let mut f = match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .unwrap_or_else(|e| panic!("open state journal {}: {e}", self.path.display()));
-        f.write_all(buf.as_bytes())
-            .unwrap_or_else(|e| panic!("write state journal {}: {e}", self.path.display()));
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "revops: state journal open failed ({}): {e}; dry-run state flush skipped \
+                     for this cycle",
+                    self.path.display()
+                );
+                return;
+            }
+        };
+        if let Err(e) = f.write_all(buf.as_bytes()) {
+            eprintln!(
+                "revops: state journal write failed ({}): {e}; dry-run state flush incomplete \
+                 for this cycle",
+                self.path.display()
+            );
+        }
     }
 }
