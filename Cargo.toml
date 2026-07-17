@@ -22,7 +22,13 @@ cln-rpc = "0.7"
 hex = "0.4"
 rusqlite = { version = "0.32", features = [] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: serde_json's default f64 parser does not always round-trip
+# repr(float)-precision literals to exact bits (P5-T2 finding; e.g.
+# "0.9500000000000001" mis-parsed to 0.95's bits). Byte-parity fixtures need
+# the exact parser, and hoisting it here keeps `-p <crate>` builds and
+# `--workspace` builds on the SAME parser (feature unification would otherwise
+# split them silently).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
