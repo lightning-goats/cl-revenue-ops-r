@@ -239,6 +239,20 @@ fn parse_cfg(v: &OValue) -> FeeCfgSnapshot {
     }
 }
 
+/// `neighbor_median_min_competitors` (Phase 4b Task 8a) is NOT a
+/// `FeeCfgSnapshot` field (see `CycleDeps::min_competitors`'s doc), so it
+/// is parsed separately from the same fixture `cfg` blob. Falls back to
+/// `market::MIN_COMPETITORS` (mirroring Python's own inline
+/// `getattr(cfg, 'neighbor_median_min_competitors', 3)` fallback-of-last-
+/// resort) when the fixture's `cfg` predates this field.
+fn parse_min_competitors(v: &OValue) -> usize {
+    v.get("neighbor_median_min_competitors")
+        .and_then(|x| x.as_i64())
+        .filter(|n| *n > 0)
+        .map(|n| n as usize)
+        .unwrap_or(revops_fees::market::MIN_COMPETITORS)
+}
+
 fn parse_policy(v: &OValue) -> Option<PeerPolicy> {
     match v {
         OValue::Null => None,
@@ -485,6 +499,7 @@ fn cycle_scenarios_replay_bit_for_bit() {
         let channel_id = gets(scn, "channel_id");
         let peer_id = gets(scn, "peer_id");
         let cfg = parse_cfg(scn.get("cfg").expect("cfg"));
+        let min_competitors = parse_min_competitors(scn.get("cfg").expect("cfg"));
 
         let mut policy = parse_policy(scn.get("policy").unwrap_or(&OValue::Null));
         if let Some(p) = &mut policy {
@@ -572,6 +587,7 @@ fn cycle_scenarios_replay_bit_for_bit() {
                     governed: None,
                     journal: None,
                     state_sink: None,
+                    min_competitors,
                 };
                 process_channel(
                     &mut state,
@@ -1180,6 +1196,11 @@ fn three_channel_synthetic_cycle_end_to_end() {
             governed: None,
             journal: Some(&journal),
             state_sink: Some(&sink),
+            // No gossip in `SyntheticEvidence` (`gossip_channels` returns
+            // empty) -- the neighbor-market path is always `None`
+            // regardless of this value, so the baked-default constant is
+            // fine here.
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
         };
         run_fee_cycle(&mut state, &mut deps)
     };

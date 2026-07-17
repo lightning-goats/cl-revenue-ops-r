@@ -44,10 +44,16 @@ pub struct GossipChannel {
 }
 
 /// `_get_neighbor_fee_median_live` / `_get_neighbor_fee_percentile_live`'s
-/// `neighbor_median_min_competitors` default (py `getattr(cfg,
-/// 'neighbor_median_min_competitors', 3)`). Task 8's pure functions take no
-/// `cfg` (that plumbing is a Wave-3 orchestrator concern), so the default is
-/// baked in here.
+/// inline getattr FALLBACK (py `getattr(cfg, 'neighbor_median_min_competitors',
+/// 3)` -- the "cfg has no such attribute at all" case, not the effective
+/// `Config.neighbor_median_min_competitors` dataclass default, which is `2`
+/// -- see `modules/config.py:620`; production runs with the DB-resolved
+/// value `2`, confirmed via `revenue-config get`). Task 8's pure functions
+/// originally baked this in as THE threshold; Task 8a (Phase 4b unblocker)
+/// reverses that -- every caller now threads an explicit `min_competitors`
+/// resolved from config. This constant survives only for callers that
+/// truly have no config to resolve (mirroring Python's own inline
+/// fallback-of-last-resort), never as the assumed effective default.
 pub const MIN_COMPETITORS: usize = 3;
 
 /// Gossip fee-ppm sanity range shared by every neighbor-fee consumer (py
@@ -79,12 +85,19 @@ pub fn is_cln_default_fee(ch: &GossipChannel) -> bool {
 /// exclusion. Weight = `(capacity_sats / 1_000_000) * (1 / age_days)`,
 /// `age_days = max(0.1, max(0, now - last_update_ts) / 86400)` when
 /// `last_update_ts > 0`, else a flat `30.0` (stale/unknown-age fallback).
-/// Requires `>= 3` surviving competitors (`MIN_COMPETITORS`), else `None`.
-/// Weighted median: sort ascending by fee, walk cumulative weight, return
-/// the fee at the point cumulative weight first reaches `>= 50%` of total.
-pub fn neighbor_fee_median(peer_channels: &[GossipChannel], our_id: &str, now: i64) -> Option<i64> {
+/// Requires `>= min_competitors` surviving competitors (py:
+/// `len(weighted_fees) >= min_competitors`, Task 8a: caller-resolved, not
+/// baked in), else `None`. Weighted median: sort ascending by fee, walk
+/// cumulative weight, return the fee at the point cumulative weight first
+/// reaches `>= 50%` of total.
+pub fn neighbor_fee_median(
+    peer_channels: &[GossipChannel],
+    our_id: &str,
+    min_competitors: usize,
+    now: i64,
+) -> Option<i64> {
     let weighted = collect_weighted_fees(peer_channels, our_id, now);
-    weighted_median(&weighted)
+    weighted_median(&weighted, min_competitors)
 }
 
 fn collect_weighted_fees(
@@ -116,8 +129,8 @@ fn collect_weighted_fees(
     weighted_fees
 }
 
-fn weighted_median(weighted_fees: &[(i64, f64)]) -> Option<i64> {
-    if weighted_fees.len() < MIN_COMPETITORS {
+fn weighted_median(weighted_fees: &[(i64, f64)], min_competitors: usize) -> Option<i64> {
+    if weighted_fees.len() < min_competitors {
         return None;
     }
     // Stable sort by fee ascending — matches Python's
@@ -146,14 +159,17 @@ fn weighted_median(weighted_fees: &[(i64, f64)]) -> Option<i64> {
 /// `_get_neighbor_fee_percentile_live` (py 3429-3482): `pct`-th nearest-rank
 /// percentile of the same gossip-derived competitor pool (own-channel,
 /// fee-range, and CLN-default filters identical to the median path, but
-/// UNWEIGHTED — plain sorted fee list). `now` is accepted for interface
-/// symmetry with `neighbor_fee_median` (the Python method reads no clock
-/// inside its own math; only its caller-side TTL cache does) and is
-/// intentionally unused here.
+/// UNWEIGHTED — plain sorted fee list). Requires `>= min_competitors`
+/// surviving competitors (py: `len(fees) < min_competitors`, Task 8a:
+/// caller-resolved, not baked in), else `None`. `now` is accepted for
+/// interface symmetry with `neighbor_fee_median` (the Python method reads
+/// no clock inside its own math; only its caller-side TTL cache does) and
+/// is intentionally unused here.
 pub fn neighbor_fee_percentile(
     peer_channels: &[GossipChannel],
     our_id: &str,
     pct: f64,
+    min_competitors: usize,
     _now: i64,
 ) -> Option<i64> {
     let mut fees: Vec<i64> = Vec::new();
@@ -170,7 +186,7 @@ pub fn neighbor_fee_percentile(
         fees.push(ch.fee_ppm);
     }
 
-    if fees.len() < MIN_COMPETITORS {
+    if fees.len() < min_competitors {
         return None;
     }
 
@@ -533,7 +549,10 @@ mod tests {
             ch("a", 100, 0, 1_000_000, 1_752_400_000 - 3600),
             ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
-        assert_eq!(neighbor_fee_median(&channels, "us", 1_752_400_000), None);
+        assert_eq!(
+            neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000),
+            None
+        );
     }
 
     #[test]
@@ -543,7 +562,22 @@ mod tests {
             ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
             ch("c", 300, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
-        assert!(neighbor_fee_median(&channels, "us", 1_752_400_000).is_some());
+        assert!(neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000).is_some());
+    }
+
+    /// Phase 4b Task 8a: production runs with the DB-resolved
+    /// `neighbor_median_min_competitors = 2` (not the baked `3`) -- the
+    /// SAME 2-competitor pool must resolve `Some` at threshold 2 but
+    /// `None` at threshold 3, proving the parameter is actually consulted
+    /// rather than shadowed by a hardcoded constant.
+    #[test]
+    fn neighbor_fee_median_min_competitors_is_caller_configurable() {
+        let channels = vec![
+            ch("a", 100, 0, 1_000_000, 1_752_400_000 - 3600),
+            ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
+        ];
+        assert!(neighbor_fee_median(&channels, "us", 2, 1_752_400_000).is_some());
+        assert_eq!(neighbor_fee_median(&channels, "us", 3, 1_752_400_000), None);
     }
 
     #[test]
@@ -554,7 +588,10 @@ mod tests {
             ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
         // Only 2 non-self competitors survive -> below MIN_COMPETITORS.
-        assert_eq!(neighbor_fee_median(&channels, "us", 1_752_400_000), None);
+        assert_eq!(
+            neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000),
+            None
+        );
     }
 
     #[test]
@@ -566,10 +603,13 @@ mod tests {
             ch("d", 200, 0, 1_000_000, 1_752_400_000 - 3600),
             ch("e", 300, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
-        assert!(neighbor_fee_median(&channels, "us", 1_752_400_000).is_some());
+        assert!(neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000).is_some());
         // Drop one of the surviving three -> below MIN_COMPETITORS.
         let channels2 = channels[..4].to_vec();
-        assert_eq!(neighbor_fee_median(&channels2, "us", 1_752_400_000), None);
+        assert_eq!(
+            neighbor_fee_median(&channels2, "us", MIN_COMPETITORS, 1_752_400_000),
+            None
+        );
     }
 
     #[test]
@@ -580,7 +620,10 @@ mod tests {
             ch("c", 200, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
         // Only 2 non-default competitors survive.
-        assert_eq!(neighbor_fee_median(&channels, "us", 1_752_400_000), None);
+        assert_eq!(
+            neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000),
+            None
+        );
     }
 
     #[test]
@@ -592,7 +635,7 @@ mod tests {
             ch("b", 200, 0, 3_000_000, 0),
             ch("c", 300, 0, 3_000_000, 0),
         ];
-        assert!(neighbor_fee_median(&channels, "us", 1_752_400_000).is_some());
+        assert!(neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000).is_some());
     }
 
     #[test]
@@ -602,7 +645,22 @@ mod tests {
             ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
         assert_eq!(
-            neighbor_fee_percentile(&channels, "us", 0.25, 1_752_400_000),
+            neighbor_fee_percentile(&channels, "us", 0.25, MIN_COMPETITORS, 1_752_400_000),
+            None
+        );
+    }
+
+    /// Phase 4b Task 8a: same configurable-threshold contrast as the
+    /// median's `neighbor_fee_median_min_competitors_is_caller_configurable`.
+    #[test]
+    fn neighbor_fee_percentile_min_competitors_is_caller_configurable() {
+        let channels = vec![
+            ch("a", 100, 0, 1_000_000, 1_752_400_000 - 3600),
+            ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
+        ];
+        assert!(neighbor_fee_percentile(&channels, "us", 0.5, 2, 1_752_400_000).is_some());
+        assert_eq!(
+            neighbor_fee_percentile(&channels, "us", 0.5, 3, 1_752_400_000),
             None
         );
     }
@@ -618,7 +676,7 @@ mod tests {
         ];
         // idx = round(0.25 * 4) = round(1.0) = 1 -> fees[1] = 200.
         assert_eq!(
-            neighbor_fee_percentile(&channels, "us", 0.25, 1_752_400_000),
+            neighbor_fee_percentile(&channels, "us", 0.25, MIN_COMPETITORS, 1_752_400_000),
             Some(200)
         );
     }
@@ -886,10 +944,12 @@ mod tests {
             let key = format!("neighbor_median:{peer_id}");
             let value = memo
                 .get_or_compute::<_, ()>(&key, || {
-                    Ok(match neighbor_fee_median(channels, our_id, now) {
-                        Some(v) => serde_json::json!(v),
-                        None => serde_json::Value::Null,
-                    })
+                    Ok(
+                        match neighbor_fee_median(channels, our_id, MIN_COMPETITORS, now) {
+                            Some(v) => serde_json::json!(v),
+                            None => serde_json::Value::Null,
+                        },
+                    )
                 })
                 .unwrap();
             value.as_i64()
@@ -900,7 +960,7 @@ mod tests {
             ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
             ch("c", 300, 0, 1_000_000, 1_752_400_000 - 3600),
         ];
-        let live = neighbor_fee_median(&channels, "us", 1_752_400_000);
+        let live = neighbor_fee_median(&channels, "us", MIN_COMPETITORS, 1_752_400_000);
 
         let mut memo = FrozenObservations::new();
         let frozen_first =

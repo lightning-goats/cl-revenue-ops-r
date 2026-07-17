@@ -313,9 +313,10 @@ pub struct PeerFeeHistory {
 /// Injected evidence: NO hidden clock/RNG/IO. Implementations read the
 /// production DB read-only + `revops-rpc` snapshots; tests script it.
 ///
-/// `neighbor_median_min_competitors` note: the market functions bake the
-/// default of 3 (`market::MIN_COMPETITORS`); a config override is not yet
-/// plumbed (diff-harness watch item).
+/// `neighbor_median_min_competitors` note (Phase 4b Task 8a): resolved
+/// per-cycle by the caller and threaded through `CycleDeps::min_competitors`
+/// -- NOT part of this evidence trait (it is config, not observed
+/// evidence) and NOT baked into the market functions as a constant.
 pub trait FeeEvidence {
     fn our_node_id(&self) -> String;
     fn channel_states(&self) -> Vec<ChannelStateRow>;
@@ -390,6 +391,15 @@ pub struct CycleDeps<'a> {
     pub governed: Option<&'a GovernedDeps<'a>>,
     pub journal: Option<&'a Journal>,
     pub state_sink: Option<&'a dyn StateSink>,
+    /// The per-cycle resolved `neighbor_median_min_competitors` (Phase 4b
+    /// Task 8a) -- NOT a `FeeCfgSnapshot` field (that struct is a frozen
+    /// 22-field contract, `crates/revops/src/fee_config.rs`'s module doc).
+    /// The caller (T6 scheduler in production; fixture replay in tests)
+    /// resolves this through the same 3-layer precedence as every other
+    /// config key and fails the CYCLE closed before ever constructing a
+    /// `CycleDeps` if the value is unresolvable -- by the time one exists,
+    /// this is always a validated positive competitor-count threshold.
+    pub min_competitors: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1792,7 +1802,8 @@ pub fn adjust_channel_fee(
             .filter(|r| r.active)
             .map(|r| r.to_gossip_channel(peer_id))
             .collect();
-        let neighbor_median = market::neighbor_fee_median(&active_channels, &our_id, now);
+        let neighbor_median =
+            market::neighbor_fee_median(&active_channels, &our_id, deps.min_competitors, now);
         let neighbor_market_usable = matches!(neighbor_median, Some(m) if m > floor_ppm);
 
         let median_pull_mode = cfg.market_fee_mode.as_str();
@@ -1843,8 +1854,13 @@ pub fn adjust_channel_fee(
                     post_pid = target;
                 }
             } else if mode == "competition_aware" {
-                let preserve_threshold =
-                    market::neighbor_fee_percentile(&active_channels, &our_id, 0.25, now);
+                let preserve_threshold = market::neighbor_fee_percentile(
+                    &active_channels,
+                    &our_id,
+                    0.25,
+                    deps.min_competitors,
+                    now,
+                );
                 let undercut_target = (median as f64 * (1.0 - undercut_pct)) as i64;
                 let exploring =
                     ts.thompson.posterior_std > rails::exploration_std_threshold(current_fee_ppm);

@@ -61,16 +61,17 @@ fn channels_from_json(v: &Value) -> Vec<GossipChannel> {
 fn neighbor_fee_median_matches_python() {
     let fx = fixture("median");
     let cases = fx["cases"].as_array().expect("cases array");
-    assert!(cases.len() >= 10, "expected the full median scenario set");
+    assert!(cases.len() >= 17, "expected the full median scenario set");
 
     for case in cases {
         let name = case["name"].as_str().expect("name");
         let our_id = case["our_id"].as_str().expect("our_id");
         let now = case["now"].as_i64().expect("now");
+        let min_competitors = case["min_competitors"].as_u64().expect("min_competitors") as usize;
         let channels = channels_from_json(&case["peer_channels"]);
         let expected = case["expected"].as_i64();
 
-        let actual = neighbor_fee_median(&channels, our_id, now);
+        let actual = neighbor_fee_median(&channels, our_id, min_competitors, now);
         assert_eq!(actual, expected, "case {name}");
     }
 }
@@ -80,7 +81,7 @@ fn neighbor_fee_percentile_matches_python() {
     let fx = fixture("percentile");
     let cases = fx["cases"].as_array().expect("cases array");
     assert!(
-        cases.len() >= 8,
+        cases.len() >= 16,
         "expected the full percentile scenario set"
     );
 
@@ -89,10 +90,11 @@ fn neighbor_fee_percentile_matches_python() {
         let our_id = case["our_id"].as_str().expect("our_id");
         let now = case["now"].as_i64().expect("now");
         let pct = parse_f(&case["pct"]);
+        let min_competitors = case["min_competitors"].as_u64().expect("min_competitors") as usize;
         let channels = channels_from_json(&case["peer_channels"]);
         let expected = case["expected"].as_i64();
 
-        let actual = neighbor_fee_percentile(&channels, our_id, pct, now);
+        let actual = neighbor_fee_percentile(&channels, our_id, pct, min_competitors, now);
         assert_eq!(actual, expected, "case {name}");
     }
 }

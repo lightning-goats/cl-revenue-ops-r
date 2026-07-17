@@ -199,8 +199,11 @@ fn scheduler_uses_one_clock_read_per_cycle() {
     );
 
     // The skip path still reads the clock exactly once (sequence point 1
-    // precedes the min-competitors gate).
-    let outcome = owner.run_cycle(prepared(json!(2), false), &mut clock);
+    // precedes the min-competitors gate). `json!(2)` is now a VALID
+    // threshold (Phase 4b Task 8a; production's own resolved value) --
+    // use a genuinely unresolvable value (missing/null) to exercise the
+    // skip path here instead.
+    let outcome = owner.run_cycle(prepared(Value::Null, false), &mut clock);
     assert!(
         matches!(outcome, CycleOutcome::SkippedMinCompetitors),
         "{outcome:?}"
@@ -310,17 +313,38 @@ fn dryrun_cycle_appends_decisions_to_journal_and_state_jsonl() {
 }
 
 // ---------------------------------------------------------------------------
-// T1 fail-closed rule: min competitors must equal the baked 3
+// Phase 4b Task 8a fail-closed rule: min competitors must resolve to ANY
+// positive integer (production runs 2, not the Task 8 baked 3) --
+// refusal is now reserved for genuinely unresolvable values.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cycle_skips_and_logs_when_min_competitors_not_3() {
+fn cycle_runs_with_any_resolvable_positive_min_competitors() {
     let fx = fixture();
     seed_channel_state(&fx.db_path);
     let mut owner = owner(&fx, StateLifecycle::RehydratePerCycle);
     let mut clock = || NOW;
 
-    for wrong in [json!(2), json!(4), json!("3"), Value::Null] {
+    // 2 is production's actual resolved value; 3 is the old Task 8 bake;
+    // 4 and 50 pin that this is a genuine threshold, not a two-value
+    // special case.
+    for ok in [json!(2), json!(3), json!(4), json!(50)] {
+        let outcome = owner.run_cycle(prepared(ok.clone(), true), &mut clock);
+        assert!(
+            matches!(outcome, CycleOutcome::Ran { .. }),
+            "min_competitors={ok} must run the cycle, got {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn cycle_skips_and_logs_when_min_competitors_unresolvable() {
+    let fx = fixture();
+    seed_channel_state(&fx.db_path);
+    let mut owner = owner(&fx, StateLifecycle::RehydratePerCycle);
+    let mut clock = || NOW;
+
+    for wrong in [json!("3"), Value::Null, json!(0), json!(-1), json!(2.5)] {
         let outcome = owner.run_cycle(prepared(wrong.clone(), true), &mut clock);
         assert!(
             matches!(outcome, CycleOutcome::SkippedMinCompetitors),
@@ -338,8 +362,8 @@ fn cycle_skips_and_logs_when_min_competitors_not_3() {
         "skipped cycles must not flush state"
     );
 
-    // The exact resolved value 3 passes.
-    let outcome = owner.run_cycle(prepared(json!(3), true), &mut clock);
+    // A subsequent cycle with a resolvable value still runs cleanly.
+    let outcome = owner.run_cycle(prepared(json!(2), true), &mut clock);
     assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
 }
 

@@ -371,9 +371,10 @@ pub async fn resolve_fee_cfg(
 /// `Config` default of `2`), returned as a typed `serde_json::Value` (the
 /// fixture types the field `int`, so a raw override/option string like
 /// `"3"` comes back as JSON `3`). NOT routed through `FeeCfgSnapshot` --
-/// the struct is a frozen 22-field contract (see
-/// [`neighbor_median_min_competitors_ok`]); the T6 scheduler resolves this
-/// each cycle and fails closed on anything other than the baked `3`.
+/// the struct is a frozen 22-field contract (see [`resolve_min_competitors`]);
+/// the T6 scheduler resolves this each cycle and validates the result
+/// through [`resolve_min_competitors`] before threading it into the
+/// cycle's `CycleDeps::min_competitors`.
 pub async fn resolve_neighbor_median_min_competitors(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
@@ -390,15 +391,32 @@ pub async fn resolve_neighbor_median_min_competitors(
     }
 }
 
-/// `neighbor_median_min_competitors` is VERIFY==3, not plumbed as a
-/// `FeeCfgSnapshot` field: the market functions bake `market::
-/// MIN_COMPETITORS = 3` and the struct is a frozen 22-field contract (do
-/// not add a field for it). Callers (the T6 scheduler) resolve this key
-/// each cycle through the SAME 3-layer precedence as every other config
-/// key (a plain `serde_json::Value`, not routed through `FeeCfgSnapshot`)
-/// and call this to fail closed: if it resolves to anything other than the
-/// baked `3`, the cycle must be skipped rather than silently running with
-/// a mismatched competitor count.
-pub fn neighbor_median_min_competitors_ok(resolved: &serde_json::Value) -> bool {
-    resolved == &serde_json::json!(3)
+/// Validates [`resolve_neighbor_median_min_competitors`]'s output into the
+/// usable competitor-count threshold `market::neighbor_fee_median`/
+/// `neighbor_fee_percentile` now take as an explicit parameter (Phase 4b
+/// Task 8a -- replaces the old Task 8 verify==3 gate, since production
+/// runs with the DB-resolved value `2`, not the baked `3`; changing
+/// production to `3` is out of scope, a phase-global constraint).
+///
+/// `Ok(n)` for any JSON integer `n > 0`. `Err` (never silently defaulted --
+/// the T6 scheduler's fail-closed rule for the dry-run window) when the
+/// resolved value is missing, non-integer (including a numeric STRING --
+/// `resolve_neighbor_median_min_competitors` already runs the value
+/// through `config_types::typed_value`, so a well-formed override/option
+/// always comes back as a genuine JSON number; a JSON string surviving to
+/// here means the typed conversion itself failed), or non-positive. This
+/// is intentionally stricter than Python's own inline `int(getattr(cfg,
+/// ..., 3) or 3)` (which would coerce a falsy/negative reading rather than
+/// refuse) -- the dry-run window prefers a loud skip over silently running
+/// with a nonsensical competitor-count gate.
+pub fn resolve_min_competitors(resolved: &serde_json::Value) -> Result<usize, String> {
+    match resolved.as_i64() {
+        Some(n) if n > 0 => Ok(n as usize),
+        Some(n) => Err(format!(
+            "neighbor_median_min_competitors resolved to non-positive value {n}"
+        )),
+        None => Err(format!(
+            "neighbor_median_min_competitors resolved to a non-integer value: {resolved}"
+        )),
+    }
 }

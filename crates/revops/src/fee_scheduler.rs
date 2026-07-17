@@ -17,7 +17,9 @@
 //!     "Cycle triggering" below) and then performs the ASYNC half of the
 //!     cycle -- `fee_config::resolve_fee_cfg` (T1, per cycle so runtime
 //!     `revenue-config set` changes on the Python side stay visible), the
-//!     `neighbor_median_min_competitors` resolution (T1's verify==3 rule),
+//!     `neighbor_median_min_competitors` resolution (Phase 4b Task 8a:
+//!     any resolvable positive-integer threshold, fail-closed only on an
+//!     unresolvable value),
 //!     and `fee_evidence::prefetch_rpc` (T2) -- and sends the prepared
 //!     inputs to the owner thread as one [`CycleMsg::RunPrepared`]
 //!     message.
@@ -412,8 +414,10 @@ pub struct PreparedCycle {
     /// T1: freshly resolved 22-field snapshot (per cycle, so DB overrides
     /// written by Python's `revenue-config set` stay visible).
     pub cfg: FeeCfgSnapshot,
-    /// T1 verify==3 rule: the typed per-cycle resolution of
-    /// `neighbor_median_min_competitors` (NOT a `FeeCfgSnapshot` field).
+    /// The typed per-cycle resolution of `neighbor_median_min_competitors`
+    /// (NOT a `FeeCfgSnapshot` field) -- validated by
+    /// [`fee_config::resolve_min_competitors`] in [`CycleOwner::run_cycle`]
+    /// before the cycle proceeds (Phase 4b Task 8a).
     pub min_competitors: serde_json::Value,
     /// T2: the cycle's frozen RPC prefetch.
     pub rpc: RpcPrefetch,
@@ -447,8 +451,11 @@ pub async fn prepare_cycle(
 pub enum CycleOutcome {
     /// Ran to completion; `decisions` FeeDecision lines appended.
     Ran { decisions: usize },
-    /// T1 fail-closed rule: `neighbor_median_min_competitors` resolved to
-    /// something other than the baked 3.
+    /// Fail-closed rule (Phase 4b Task 8a): `neighbor_median_min_competitors`
+    /// resolved to something unusable -- missing, non-integer, or
+    /// non-positive. Any resolvable positive integer (2, 3, or otherwise)
+    /// now proceeds; this variant is for genuinely unresolvable values
+    /// only.
     SkippedMinCompetitors,
     /// `build_evidence_snapshot` failed (DB open/read error).
     SkippedEvidence,
@@ -549,8 +556,10 @@ impl CycleOwner {
     ///
     /// 1. `clock()` EXACTLY once; the value feeds every downstream
     ///    consumer (evidence snapshot windows, `CycleDeps::now`).
-    /// 2. Fail closed if `min_competitors != 3` (T1 rule; the market
-    ///    functions bake `MIN_COMPETITORS = 3`).
+    /// 2. Fail closed if `neighbor_median_min_competitors` is unresolvable
+    ///    (Phase 4b Task 8a; any resolvable positive integer threads
+    ///    through to `CycleDeps::min_competitors` instead of the old
+    ///    baked `MIN_COMPETITORS = 3` verify gate).
     /// 3. Build the frozen evidence snapshot; on error log + skip (never
     ///    panic).
     /// 4. Lifecycle hydration (per-cycle, or once for `SeedOnce`) over
@@ -572,15 +581,20 @@ impl CycleOwner {
         // successfully; only the min-competitors/evidence gates failed.
         self.last_profile = prepared.cfg.fee_profile.clone();
 
-        // (2) T1 fail-closed verify==3 gate.
-        if !fee_config::neighbor_median_min_competitors_ok(&prepared.min_competitors) {
-            eprintln!(
-                "revops: fee cycle disabled: neighbor_median_min_competitors={} != baked 3 \
-                 (skipping cycle)",
-                prepared.min_competitors
-            );
-            return CycleOutcome::SkippedMinCompetitors;
-        }
+        // (2) Fail-closed gate: refuse only when the resolved value is
+        // genuinely unusable. Any resolvable positive integer (production
+        // runs 2, not the Task 8 baked 3) proceeds.
+        let min_competitors = match fee_config::resolve_min_competitors(&prepared.min_competitors) {
+            Ok(n) => n,
+            Err(reason) => {
+                eprintln!(
+                    "revops: fee cycle disabled: neighbor_median_min_competitors unresolvable \
+                     (value={}): {reason} (skipping cycle)",
+                    prepared.min_competitors
+                );
+                return CycleOutcome::SkippedMinCompetitors;
+            }
+        };
 
         // (3) Per-cycle-frozen evidence (read-only DB + prefetched RPC).
         let snapshot = match build_evidence_snapshot(&self.db_path, prepared.rpc, now) {
@@ -622,6 +636,7 @@ impl CycleOwner {
             governed: Some(&governed),
             journal: None,
             state_sink: self.state_sink.as_ref().map(|s| s as &dyn StateSink),
+            min_competitors,
         };
         let decisions = run_fee_cycle(&mut self.state, &mut deps);
 

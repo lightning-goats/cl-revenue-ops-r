@@ -129,15 +129,30 @@ async fn resolve_fee_cfg_enable_dynamic_htlcmax_default_is_bool_false() {
     assert_eq!(cfg.enable_dynamic_htlcmax, serde_json::Value::Bool(false));
 }
 
+/// Phase 4b Task 8a: replaces the old verify==3 gate. Production runs
+/// `neighbor_median_min_competitors = 2` (a DB-resolved value, verified via
+/// `revenue-config get`), so the gate must accept ANY resolvable positive
+/// integer threshold, not just the baked `3`.
 #[test]
-fn neighbor_median_min_competitors_ok_true_only_for_3() {
-    use revops::fee_config::neighbor_median_min_competitors_ok;
-    assert!(neighbor_median_min_competitors_ok(&serde_json::json!(3)));
-    assert!(!neighbor_median_min_competitors_ok(&serde_json::json!(4)));
-    assert!(!neighbor_median_min_competitors_ok(&serde_json::json!("3")));
-    assert!(!neighbor_median_min_competitors_ok(
-        &serde_json::Value::Null
-    ));
+fn resolve_min_competitors_accepts_any_positive_integer() {
+    use revops::fee_config::resolve_min_competitors;
+    assert_eq!(resolve_min_competitors(&serde_json::json!(2)), Ok(2));
+    assert_eq!(resolve_min_competitors(&serde_json::json!(3)), Ok(3));
+    assert_eq!(resolve_min_competitors(&serde_json::json!(4)), Ok(4));
+    assert_eq!(resolve_min_competitors(&serde_json::json!(50)), Ok(50));
+}
+
+/// Fail-closed stays for genuinely unresolvable values: missing, wrong
+/// type, or non-positive. Never silently default in the dry-run window
+/// path -- the T6 scheduler refuses the cycle instead.
+#[test]
+fn resolve_min_competitors_fails_closed_on_unresolvable_values() {
+    use revops::fee_config::resolve_min_competitors;
+    assert!(resolve_min_competitors(&serde_json::json!("3")).is_err());
+    assert!(resolve_min_competitors(&serde_json::Value::Null).is_err());
+    assert!(resolve_min_competitors(&serde_json::json!(0)).is_err());
+    assert!(resolve_min_competitors(&serde_json::json!(-1)).is_err());
+    assert!(resolve_min_competitors(&serde_json::json!(2.5)).is_err());
 }
 
 /// Table test: every one of the 22 `FeeCfgSnapshot` fields is plumbed
@@ -249,18 +264,21 @@ async fn all_22_fields_are_plumbed() {
 
 // ---------------------------------------------------------------------------
 // T6 consumer: per-cycle neighbor_median_min_competitors resolution
-// (verify==3, not plumbed -- the scheduler fails closed on anything != 3)
+// (Phase 4b Task 8a: any resolvable positive int passes; the scheduler
+// fails closed only on missing/invalid/non-positive values)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn neighbor_min_competitors_defaults_to_2_and_fails_the_gate() {
+async fn neighbor_min_competitors_defaults_to_2_and_passes_the_gate() {
     // Python `Config.neighbor_median_min_competitors` defaults to 2
-    // (fixtures/options.json default "2") -- an unconfigured node must
-    // therefore FAIL the ==3 gate, never silently pass it.
+    // (fixtures/options.json default "2", modules/config.py:620) -- this
+    // is production's actual resolved value (DB-override-verified via
+    // `revenue-config get`), so an unconfigured node must resolve
+    // cleanly, not fail closed.
     let v =
         revops::fee_config::resolve_neighbor_median_min_competitors(None, &HashMap::new()).await;
     assert_eq!(v, serde_json::json!(2));
-    assert!(!revops::fee_config::neighbor_median_min_competitors_ok(&v));
+    assert_eq!(revops::fee_config::resolve_min_competitors(&v), Ok(2));
 }
 
 #[tokio::test]
@@ -270,9 +288,21 @@ async fn neighbor_min_competitors_db_override_resolves_typed_and_passes_gate() {
         revops::fee_config::resolve_neighbor_median_min_competitors(Some(&handle), &HashMap::new())
             .await;
     // The raw DB string "3" must come back TYPED (the fixture types the
-    // field int), so the strict ==json!(3) gate can pass.
+    // field int), so the resolved-value gate can read it as an integer.
     assert_eq!(v, serde_json::json!(3));
-    assert!(revops::fee_config::neighbor_median_min_competitors_ok(&v));
+    assert_eq!(revops::fee_config::resolve_min_competitors(&v), Ok(3));
+}
+
+/// The actual production scenario: a DB override resolving to `2` (not
+/// the Task 8 baked `3`) must pass the gate cleanly.
+#[tokio::test]
+async fn neighbor_min_competitors_db_override_resolves_to_2_and_passes_gate() {
+    let (handle, _tmp) = fixture_db_with_override("neighbor-median-min-competitors", "2").await;
+    let v =
+        revops::fee_config::resolve_neighbor_median_min_competitors(Some(&handle), &HashMap::new())
+            .await;
+    assert_eq!(v, serde_json::json!(2));
+    assert_eq!(revops::fee_config::resolve_min_competitors(&v), Ok(2));
 }
 
 #[tokio::test]
@@ -284,5 +314,5 @@ async fn neighbor_min_competitors_listconfigs_layer_resolves_typed() {
     );
     let v = revops::fee_config::resolve_neighbor_median_min_competitors(None, &py).await;
     assert_eq!(v, serde_json::json!(3));
-    assert!(revops::fee_config::neighbor_median_min_competitors_ok(&v));
+    assert_eq!(revops::fee_config::resolve_min_competitors(&v), Ok(3));
 }
