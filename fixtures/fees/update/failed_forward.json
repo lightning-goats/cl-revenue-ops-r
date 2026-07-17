@@ -1,0 +1,136 @@
+{
+ "now": 1752400000,
+ "weight_cases": [
+  {
+   "amount_msat": 0,
+   "amount_sats": "0.0",
+   "expected_weight": "0.1"
+  },
+  {
+   "amount_msat": -5,
+   "amount_sats": "-0.005",
+   "expected_weight": "0.1"
+  },
+  {
+   "amount_msat": 1,
+   "amount_sats": "0.001",
+   "expected_weight": "0.1"
+  },
+  {
+   "amount_msat": 999,
+   "amount_sats": "0.999",
+   "expected_weight": "0.1"
+  },
+  {
+   "amount_msat": 123456,
+   "amount_sats": "123.456",
+   "expected_weight": "0.1697170733875924"
+  },
+  {
+   "amount_msat": 1000000,
+   "amount_sats": "1000.0",
+   "expected_weight": "0.2"
+  },
+  {
+   "amount_msat": 100000000,
+   "amount_sats": "100000.0",
+   "expected_weight": "0.2666666666666667"
+  },
+  {
+   "amount_msat": 1000000000,
+   "amount_sats": "1000000.0",
+   "expected_weight": "0.30000000000000004"
+  },
+  {
+   "amount_msat": 5000000000,
+   "amount_sats": "5000000.0",
+   "expected_weight": "0.30000000000000004"
+  },
+  {
+   "amount_msat": 123456789,
+   "amount_sats": "123456.789",
+   "expected_weight": "0.2697171659056424"
+  }
+ ],
+ "implied_fee_cases": [
+  {
+   "current_fee_ppm": 1,
+   "expected_implied_fee": 0
+  },
+  {
+   "current_fee_ppm": 2,
+   "expected_implied_fee": 1
+  },
+  {
+   "current_fee_ppm": 5,
+   "expected_implied_fee": 4
+  },
+  {
+   "current_fee_ppm": 100,
+   "expected_implied_fee": 80
+  },
+  {
+   "current_fee_ppm": 999,
+   "expected_implied_fee": 799
+  },
+  {
+   "current_fee_ppm": 1000,
+   "expected_implied_fee": 800
+  },
+  {
+   "current_fee_ppm": 2500,
+   "expected_implied_fee": 2000
+  },
+  {
+   "current_fee_ppm": 4999,
+   "expected_implied_fee": 3999
+  }
+ ],
+ "relevance_cases": [
+  {
+   "failcode": 4108,
+   "failreason": null,
+   "expected": true
+  },
+  {
+   "failcode": 4108,
+   "failreason": "TEMPORARY_CHANNEL_FAILURE",
+   "expected": true
+  },
+  {
+   "failcode": 16399,
+   "failreason": "WIRE_FEE_INSUFFICIENT",
+   "expected": false
+  },
+  {
+   "failcode": 0,
+   "failreason": null,
+   "expected": false
+  },
+  {
+   "failcode": null,
+   "failreason": "WIRE_FEE_INSUFFICIENT",
+   "expected": true
+  },
+  {
+   "failcode": null,
+   "failreason": "fee_insufficient (retry)",
+   "expected": true
+  },
+  {
+   "failcode": null,
+   "failreason": "TEMPORARY_CHANNEL_FAILURE",
+   "expected": false
+  },
+  {
+   "failcode": null,
+   "failreason": "",
+   "expected": false
+  },
+  {
+   "failcode": null,
+   "failreason": null,
+   "expected": false
+  }
+ ]
+}

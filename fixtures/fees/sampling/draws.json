@@ -1,0 +1,2290 @@
+{
+ "now": 1752400000,
+ "seeds": {
+  "seed_a": 4319832543551537554,
+  "seed_b": 5765673250567248567,
+  "seed_c": 5118819930338505120,
+  "seed_d": 537865611572143527
+ },
+ "cases": [
+  {
+   "name": "sparse_fresh_prior",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {},
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 132,
+    "last_sampled_fee": 132,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-1.1414513542810576",
+    "post_random": "0.009890605734797164"
+   }
+  },
+  {
+   "name": "sparse_min_std_clamp",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "prior_mean_fee": "50.0",
+    "prior_std_fee": "5.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 43,
+    "last_sampled_fee": 43,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-1.1414513542810576",
+    "post_random": "0.009890605734797164"
+   }
+  },
+  {
+   "name": "sparse_with_live_nudge",
+   "seed": 5765673250567248567,
+   "now": 1752400000,
+   "state": {
+    "posterior_bias": [
+     [
+      "300.0",
+      "0.5",
+      1752396400
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 290,
+    "last_sampled_fee": 290,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "0.667440945916533",
+    "post_random": "0.00634172661199206"
+   }
+  },
+  {
+   "name": "sparse_with_expired_nudge",
+   "seed": 5765673250567248567,
+   "now": 1752400000,
+   "state": {
+    "posterior_bias": [
+     [
+      "300.0",
+      "0.5",
+      1751536000
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 286,
+    "last_sampled_fee": 286,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "0.667440945916533",
+    "post_random": "0.00634172661199206"
+   }
+  },
+  {
+   "name": "sparse_multiplier_clamped_high",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {},
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "3.5",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 64,
+    "last_sampled_fee": 64,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-1.1414513542810576",
+    "post_random": "0.009890605734797164"
+   }
+  },
+  {
+   "name": "sparse_multiplier_clamped_low",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {},
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "0.3",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 149,
+    "last_sampled_fee": 149,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-1.1414513542810576",
+    "post_random": "0.009890605734797164"
+   }
+  },
+  {
+   "name": "sparse_multiplier_nan_fallback",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {},
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "nan",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 132,
+    "last_sampled_fee": 132,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-1.1414513542810576",
+    "post_random": "0.009890605734797164"
+   }
+  },
+  {
+   "name": "sparse_multiplier_inf_fallback",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {},
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "inf",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 132,
+    "last_sampled_fee": 132,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-1.1414513542810576",
+    "post_random": "0.009890605734797164"
+   }
+  },
+  {
+   "name": "sparse_multiplier_in_range",
+   "seed": 5118819930338505120,
+   "now": 1752400000,
+   "state": {},
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "1.3",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 167,
+    "last_sampled_fee": 167,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-0.9537056518653136",
+    "post_random": "0.3215659017841249"
+   }
+  },
+  {
+   "name": "sparse_gate_ignores_probes",
+   "seed": 5118819930338505120,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "180.0",
+      "0.0",
+      "1.0",
+      1752400000,
+      "normal",
+      "zero_probe"
+     ],
+     [
+      "179.0",
+      "0.0",
+      "1.0",
+      1752396400,
+      "normal",
+      "zero_probe"
+     ],
+     [
+      "178.0",
+      "0.0",
+      "1.0",
+      1752392800,
+      "normal",
+      "zero_probe"
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 175,
+    "last_sampled_fee": 175,
+    "last_sample_time": 1752400000,
+    "branch": "sparse_prior",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-0.9537056518653136",
+    "post_random": "0.3215659017841249"
+   }
+  },
+  {
+   "name": "sparse_gate_counts_congestion",
+   "seed": 5118819930338505120,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "400.0",
+      "90.0",
+      "1.0",
+      1752378400,
+      "peak",
+      "congestion"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "1.165660577514005",
+    "post_random": "0.6961204322262771"
+   }
+  },
+  {
+   "name": "poly_concave_cholesky_ok",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "poly_concave_with_live_nudge",
+   "seed": 5765673250567248567,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "posterior_bias": [
+     [
+      "600.0",
+      "0.4",
+      1752392800
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 280,
+    "last_sampled_fee": 280,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.0817891456545683",
+    "post_random": "0.6175098261875521"
+   }
+  },
+  {
+   "name": "poly_concave_boost_max",
+   "seed": 5118819930338505120,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "2.0",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "1.165660577514005",
+    "post_random": "0.6961204322262771"
+   }
+  },
+  {
+   "name": "poly_concave_omitted_kwarg",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "poly_cholesky_fallback_diag",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "1.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "-1.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "1.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "poly_cholesky_fallback",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "poly_cholesky_fallback_boosted",
+   "seed": 537865611572143527,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "1.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "-1.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "1.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "1.7",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 160,
+    "last_sampled_fee": 160,
+    "last_sample_time": 1752400000,
+    "branch": "poly_cholesky_fallback",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "-0.6204107814325769",
+    "post_random": "0.28073385518864424"
+   }
+  },
+  {
+   "name": "poly_non_concave_gauss_fallback",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "0.5",
+     "1.0",
+     "2.0"
+    ],
+    "posterior_precision": [
+     [
+      "10000.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "10000.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "10000.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "posterior_bias": [
+     [
+      "900.0",
+      "0.9",
+      1752396400
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 252,
+    "last_sampled_fee": 252,
+    "last_sample_time": 1752400000,
+    "branch": "non_concave_gauss_fallback",
+    "gauss_draws": 4,
+    "random_draws": 0,
+    "post_gauss": "-0.2560115970442919",
+    "post_random": "0.3797180596878936"
+   }
+  },
+  {
+   "name": "poly_range_too_narrow_gauss",
+   "seed": 5765673250567248567,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "200.0",
+    "last_fee_max": "203.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 281,
+    "last_sampled_fee": 281,
+    "last_sample_time": 1752400000,
+    "branch": "gauss_fallback_no_poly_draws",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "0.667440945916533",
+    "post_random": "0.00634172661199206"
+   }
+  },
+  {
+   "name": "poly_invert_fails_gauss",
+   "seed": 5118819930338505120,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "0.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "0.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 241,
+    "last_sampled_fee": 241,
+    "last_sample_time": 1752400000,
+    "branch": "gauss_fallback_no_poly_draws",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-0.9537056518653136",
+    "post_random": "0.3215659017841249"
+   }
+  },
+  {
+   "name": "gauss_fallback_min_std_boosted",
+   "seed": 537865611572143527,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "0.0",
+    "last_fee_max": "0.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "4.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "1.9",
+    "context_key": null
+   },
+   "expected": {
+    "fee": 250,
+    "last_sampled_fee": 250,
+    "last_sample_time": 1752400000,
+    "branch": "gauss_fallback_no_poly_draws",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-0.638780011294175",
+    "post_random": "0.8601714970991662"
+   }
+  },
+  {
+   "name": "clamp_to_floor",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 495,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 495,
+    "last_sampled_fee": 495,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "clamp_to_ceiling",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee",
+    "floor": 0,
+    "ceiling": 120,
+    "exploration_multiplier": null,
+    "context_key": null
+   },
+   "expected": {
+    "fee": 120,
+    "last_sampled_fee": 120,
+    "last_sample_time": 1752400000,
+    "branch": "poly_concave",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "ctx_offset_capped",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "400.0",
+       "0.001",
+       20,
+       1752396400
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 180,
+    "last_sampled_fee": 180,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_offset",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "ctx_offset_within_cap",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "230.0",
+       "0.001",
+       20,
+       1752396400
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 165,
+    "last_sampled_fee": 165,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_offset",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "ctx_legacy_3tuple_offset",
+   "seed": 5765673250567248567,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "contextual_posteriors": [
+     [
+      "low:normal:P",
+      [
+       "350.0",
+       "45.0",
+       12
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "low:normal:P"
+   },
+   "expected": {
+    "fee": 177,
+    "last_sampled_fee": 177,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_offset",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.0817891456545683",
+    "post_random": "0.6175098261875521"
+   }
+  },
+  {
+   "name": "ctx_count_below_min_passthrough",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "400.0",
+       "0.001",
+       4,
+       1752396400
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_passthrough",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "ctx_missing_key_passthrough",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0"
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "never:seen:P"
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_passthrough",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "ctx_nonfinite_mean_passthrough",
+   "seed": 4319832543551537554,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "nan",
+       "0.001",
+       20,
+       1752396400
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 159,
+    "last_sampled_fee": 159,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_passthrough",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.06107862509295155",
+    "post_random": "0.7173196997348433"
+   }
+  },
+  {
+   "name": "ctx_reference_falls_back_to_posterior_mean",
+   "seed": 5765673250567248567,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "0.0",
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "400.0",
+       "0.001",
+       20,
+       1752396400
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 181,
+    "last_sampled_fee": 181,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_offset",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "0.0817891456545683",
+    "post_random": "0.6175098261875521"
+   }
+  },
+  {
+   "name": "ctx_on_sparse_base",
+   "seed": 5118819930338505120,
+   "now": 1752400000,
+   "state": {
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "400.0",
+       "0.001",
+       20,
+       1752396400
+      ]
+     ]
+    ],
+    "charged_fee_mean": "150.0"
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": null,
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 198,
+    "last_sampled_fee": 198,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_offset",
+    "gauss_draws": 1,
+    "random_draws": 0,
+    "post_gauss": "-0.9537056518653136",
+    "post_random": "0.3215659017841249"
+   }
+  },
+  {
+   "name": "ctx_with_boost_forwarded",
+   "seed": 537865611572143527,
+   "now": 1752400000,
+   "state": {
+    "observations": [
+     [
+      "200.0",
+      "40.0",
+      "1.0",
+      1752396400,
+      "normal"
+     ],
+     [
+      "210.0",
+      "41.0",
+      "1.0",
+      1752392800,
+      "normal"
+     ],
+     [
+      "220.0",
+      "42.0",
+      "1.0",
+      1752389200,
+      "normal"
+     ],
+     [
+      "230.0",
+      "43.0",
+      "1.0",
+      1752385600,
+      "normal"
+     ],
+     [
+      "240.0",
+      "44.0",
+      "1.0",
+      1752382000,
+      "normal"
+     ]
+    ],
+    "posterior_coeffs": [
+     "-50.0",
+     "20.0",
+     "5.0"
+    ],
+    "posterior_precision": [
+     [
+      "100.0",
+      "0.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "100.0",
+      "0.0"
+     ],
+     [
+      "0.0",
+      "0.0",
+      "100.0"
+     ]
+    ],
+    "last_fee_min": "100.0",
+    "last_fee_max": "400.0",
+    "posterior_mean": "250.0",
+    "posterior_std": "40.0",
+    "charged_fee_mean": "220.0",
+    "contextual_posteriors": [
+     [
+      "mid:peak:P",
+      [
+       "400.0",
+       "0.001",
+       20,
+       1752396400
+      ]
+     ]
+    ]
+   },
+   "call": {
+    "fn": "sample_fee_contextual",
+    "floor": 0,
+    "ceiling": 5000,
+    "exploration_multiplier": "1.5",
+    "context_key": "mid:peak:P"
+   },
+   "expected": {
+    "fee": 180,
+    "last_sampled_fee": 180,
+    "last_sample_time": 1752400000,
+    "branch": "ctx_offset",
+    "gauss_draws": 3,
+    "random_draws": 0,
+    "post_gauss": "-0.6204107814325769",
+    "post_random": "0.28073385518864424"
+   }
+  }
+ ]
+}
