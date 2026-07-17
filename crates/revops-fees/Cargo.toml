@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 revops-core = { path = "../revops-core" }
 revops-econ = { path = "../revops-econ" }
+revops-analytics = { path = "../revops-analytics" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
