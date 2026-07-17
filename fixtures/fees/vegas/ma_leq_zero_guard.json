@@ -1,0 +1,18 @@
+{
+ "now": 1752400000,
+ "seed": 0,
+ "cycles": [
+  {
+   "current_sat_vb": "2.5",
+   "ma_sat_vb_input": "0.0",
+   "intensity": "0.0",
+   "consecutive_spikes": 1
+  },
+  {
+   "current_sat_vb": "2.5",
+   "ma_sat_vb_input": "-3.0",
+   "intensity": "0.075",
+   "consecutive_spikes": 2
+  }
+ ]
+}

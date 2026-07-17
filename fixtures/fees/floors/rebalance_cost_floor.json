@@ -1,0 +1,224 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "sink_returns_none",
+   "flow_state": "sink",
+   "recent_costs": [
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    }
+   ],
+   "peer_fallback": {
+    "confidence": "high",
+    "avg_fee_ppm": 500
+   },
+   "now": 1752400000,
+   "expected": null
+  },
+  {
+   "name": "dormant_returns_none",
+   "flow_state": "dormant",
+   "recent_costs": [
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    }
+   ],
+   "peer_fallback": {
+    "confidence": "high",
+    "avg_fee_ppm": 500
+   },
+   "now": 1752400000,
+   "expected": null
+  },
+  {
+   "name": "four_samples_integer_division_pin",
+   "flow_state": "source",
+   "recent_costs": [
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 150,
+     "amount_sats": 15000,
+     "timestamp": 1752398000
+    },
+    {
+     "cost_sats": 130,
+     "amount_sats": 13000,
+     "timestamp": 1752397000
+    },
+    {
+     "cost_sats": 120,
+     "amount_sats": 11000,
+     "timestamp": 1752396000
+    }
+   ],
+   "peer_fallback": null,
+   "now": 1752400000,
+   "expected": 12244
+  },
+  {
+   "name": "insufficient_samples_falls_to_peer_fallback_medium",
+   "flow_state": "router",
+   "recent_costs": [
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 150,
+     "amount_sats": 15000,
+     "timestamp": 1752398000
+    }
+   ],
+   "peer_fallback": {
+    "confidence": "medium",
+    "avg_fee_ppm": 77
+   },
+   "now": 1752400000,
+   "expected": 92
+  },
+  {
+   "name": "fallback_confidence_low_excluded_returns_none",
+   "flow_state": "source",
+   "recent_costs": [],
+   "peer_fallback": {
+    "confidence": "low",
+    "avg_fee_ppm": 500
+   },
+   "now": 1752400000,
+   "expected": null
+  },
+  {
+   "name": "fallback_avg_fee_ppm_zero_excluded_returns_none",
+   "flow_state": "source",
+   "recent_costs": [],
+   "peer_fallback": {
+    "confidence": "high",
+    "avg_fee_ppm": 0
+   },
+   "now": 1752400000,
+   "expected": null
+  },
+  {
+   "name": "samples_outside_window_excluded_falls_to_fallback",
+   "flow_state": "source",
+   "recent_costs": [
+    {
+     "cost_sats": 900,
+     "amount_sats": 1000,
+     "timestamp": 1748944000
+    },
+    {
+     "cost_sats": 900,
+     "amount_sats": 1000,
+     "timestamp": 1749376000
+    },
+    {
+     "cost_sats": 100,
+     "amount_sats": 10000,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 150,
+     "amount_sats": 15000,
+     "timestamp": 1752398000
+    }
+   ],
+   "peer_fallback": {
+    "confidence": "high",
+    "avg_fee_ppm": 123
+   },
+   "now": 1752400000,
+   "expected": 147
+  },
+  {
+   "name": "volume_zero_falls_through_to_fallback",
+   "flow_state": "source",
+   "recent_costs": [
+    {
+     "cost_sats": 10,
+     "amount_sats": 0,
+     "timestamp": 1752399000
+    },
+    {
+     "cost_sats": 10,
+     "amount_sats": 0,
+     "timestamp": 1752398000
+    },
+    {
+     "cost_sats": 10,
+     "amount_sats": 0,
+     "timestamp": 1752397000
+    },
+    {
+     "cost_sats": 10,
+     "amount_sats": 0,
+     "timestamp": 1752396000
+    }
+   ],
+   "peer_fallback": {
+    "confidence": "high",
+    "avg_fee_ppm": 55
+   },
+   "now": 1752400000,
+   "expected": 66
+  },
+  {
+   "name": "no_data_at_all_returns_none",
+   "flow_state": "source",
+   "recent_costs": [],
+   "peer_fallback": null,
+   "now": 1752400000,
+   "expected": null
+  }
+ ]
+}

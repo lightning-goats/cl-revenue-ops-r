@@ -1,0 +1,69 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "below_fee_threshold_returns_base_unchanged",
+   "current_fee": 499,
+   "base_ceiling": 1001,
+   "last_forward_ts": 1743760000,
+   "now": 1752400000,
+   "expected": 1001
+  },
+  {
+   "name": "no_forwards_recorded_returns_base",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": null,
+   "now": 1752400000,
+   "expected": 1001
+  },
+  {
+   "name": "zero_timestamp_sentinel_returns_base",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": 0,
+   "now": 1752400000,
+   "expected": 1001
+  },
+  {
+   "name": "just_under_moderate_2_99_days_no_reduction",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": 1752141664,
+   "now": 1752400000,
+   "expected": 1001
+  },
+  {
+   "name": "exactly_3_days_moderate_reduction",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": 1752140800,
+   "now": 1752400000,
+   "expected": 750
+  },
+  {
+   "name": "just_under_severe_6_99_days_moderate_reduction",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": 1751795776,
+   "now": 1752400000,
+   "expected": 750
+  },
+  {
+   "name": "exactly_7_days_severe_reduction",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": 1751795200,
+   "now": 1752400000,
+   "expected": 500
+  },
+  {
+   "name": "beyond_severe_10_days",
+   "current_fee": 600,
+   "base_ceiling": 1001,
+   "last_forward_ts": 1751536000,
+   "now": 1752400000,
+   "expected": 500
+  }
+ ]
+}
