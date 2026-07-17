@@ -363,6 +363,22 @@ impl KalmanFlowFilter {
     pub fn take_nan_recovery_count(&mut self) -> u32 {
         std::mem::take(&mut self.nan_recovery_count)
     }
+
+    /// Task 7 (`flow::apply_kalman_filter`) idiom: `if kf._has_nan():
+    /// kf._reset_state()` — the AUDIT FIX I-3 guard run after a
+    /// predict-only step that bypasses `update()`'s own after-the-fact NaN
+    /// check (`_apply_kalman_filter`'s `has_observation=False` branch sets
+    /// `kf.state.last_update` directly instead of calling `update()`).
+    /// Returns `true` iff a reset occurred, incrementing the same counter
+    /// `predict()`/`update()`'s internal guards use.
+    pub fn reset_if_nan(&mut self) -> bool {
+        if self.has_nan() {
+            self.reset_state();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 // =============================================================================
@@ -434,7 +450,12 @@ pub struct NetFlowEntry {
 /// no compensation is needed there; a plain `f64` fold is exact as long as
 /// every addend is itself an exact integer-valued float (true here, and
 /// covered by `volatility_cases_match_python`).
-fn neumaier_sum(values: impl Iterator<Item = f64>) -> f64 {
+///
+/// `pub(crate)`: Task 7's `flow::calculate_adaptive_decay` needs the exact
+/// same compensated-summation primitive for its own float-valued `sum()`
+/// genexpr (the `(x - mean_net) ** 2` variance term) — same CPython 3.12+
+/// rule, different call site. One implementation, two internal callers.
+pub(crate) fn neumaier_sum(values: impl Iterator<Item = f64>) -> f64 {
     let mut s = 0.0_f64;
     let mut c = 0.0_f64;
     for x in values {
