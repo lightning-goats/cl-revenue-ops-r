@@ -101,7 +101,7 @@ pub fn vegas_update(
 /// in the same fraction of cases; `.powf(0.5)` under this workspace's
 /// unoptimized (`opt-level = 0`) dev/test profile calls the real libm
 /// `pow()` and matches CPython exactly. A `--release` build of this crate
-/// would need a direct `libm`/FFI `pow()` binding to preserve parity — out
+/// would need the `std::hint::black_box(0.5)` operand pattern (T6 review adjudication: the libm crate reproduces the WRONG sqrt-identical bits, and extern-C FFI is still rewritten for powf(2.0) besides violating forbid(unsafe_code)); workspace-wide py_pow fix task owns the migration to preserve parity — out
 /// of scope for this dry-run-journal task, flagged for the cutover phase.
 pub fn vegas_floor_multiplier(s: &VegasReflexState) -> f64 {
     if s.intensity < 0.01 {
