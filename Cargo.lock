@@ -670,10 +670,12 @@ dependencies = [
 name = "revops-rebalance"
 version = "0.1.0"
 dependencies = [
+ "revops-db",
  "revops-econ",
  "revops-fees",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
