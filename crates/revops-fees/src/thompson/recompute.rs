@@ -64,7 +64,7 @@ use crate::mat3::{invert3, matvec3};
 /// accumulator loops (e.g. the regression's `rhs`/`Ln`/`ss`/`sw`
 /// accumulation) are NOT `sum()` and must NOT go through this — only calls
 /// that mirror a literal Python `sum(...)` builtin invocation do.
-fn py_sum(iter: impl IntoIterator<Item = f64>) -> f64 {
+pub(crate) fn py_sum(iter: impl IntoIterator<Item = f64>) -> f64 {
     let mut s = 0.0f64;
     let mut c = 0.0f64;
     for x in iter {
@@ -568,7 +568,13 @@ pub fn recompute_posterior(state: &mut GaussianThompsonState, now: i64) {
 
 /// `_blend_posterior_toward` (py 1226-1244): mean-only blend toward a
 /// target, `weight/(1+weight)` of the distance. Never touches `posterior_std`.
-fn blend_posterior_toward(state: &mut GaussianThompsonState, target_fee: f64, weight: f64) {
+/// `pub(crate)`: `dynamics::record_posterior_nudge` (Task 7) applies the
+/// same immediate blend — single definition, never re-duplicated.
+pub(crate) fn blend_posterior_toward(
+    state: &mut GaussianThompsonState,
+    target_fee: f64,
+    weight: f64,
+) {
     if weight <= 0.0 {
         return;
     }

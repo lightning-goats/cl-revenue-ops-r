@@ -184,7 +184,11 @@ fn seeded_draw_scenarios_match_python_bit_for_bit() {
             other => panic!("unknown fn {other}"),
         };
 
-        assert_eq!(fee, expected["fee"].as_i64().unwrap(), "{name}: sampled fee");
+        assert_eq!(
+            fee,
+            expected["fee"].as_i64().unwrap(),
+            "{name}: sampled fee"
+        );
         assert_eq!(
             state.last_sampled_fee,
             expected["last_sampled_fee"].as_i64().unwrap(),

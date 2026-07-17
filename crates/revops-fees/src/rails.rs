@@ -65,12 +65,12 @@ pub const KALMAN_DEMAND_FACTOR_MAX: f64 = 2.0;
 /// `UNDERCUT_EXPLORATION_STD_THRESHOLD` (py class body, Phase B.3 section).
 pub const UNDERCUT_EXPLORATION_STD_THRESHOLD: f64 = 100.0;
 
-/// `GaussianThompsonState.REL_MIN_STD_FRAC` (py line 343). Transcribed here
-/// rather than imported from `thompson` — Task 5 has no dependency on
-/// Task 3's state module (Wave-1 file disjointness); the two constants
-/// must be kept in sync, with `fee_controller.py` as the single source of
-/// truth.
-pub const REL_MIN_STD_FRAC: f64 = 0.04;
+/// `GaussianThompsonState.REL_MIN_STD_FRAC` (py line 343). Re-exported
+/// from its single definition in `thompson::recompute` (the constant's
+/// natural home — it is a `GaussianThompsonState` class constant). Task 5
+/// carried a temporary duplicate for Wave-1 file disjointness; reconciled
+/// at Task 7 per the T5 review note.
+pub use crate::thompson::recompute::REL_MIN_STD_FRAC;
 
 // ---------------------------------------------------------------------------
 // Diagnostics

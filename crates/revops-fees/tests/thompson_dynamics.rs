@@ -15,8 +15,8 @@ use revops_fees::mat3::{M3, V3};
 use revops_fees::thompson::dynamics::{
     apply_vegas_adjustment, consume_upward_probe, failed_forward_implied_fee,
     failed_forward_nudge_weight, is_fee_relevant_failure, is_meaningful_rate,
-    maybe_upward_probe_cap, real_observation_count, record_posterior_nudge,
-    supported_fee_ceiling, update_contextual, update_posterior, FEE_RELEVANT_FAILCODES,
+    maybe_upward_probe_cap, real_observation_count, record_posterior_nudge, supported_fee_ceiling,
+    update_contextual, update_posterior, FEE_RELEVANT_FAILCODES,
 };
 use revops_fees::thompson::{CtxPosterior, GaussianThompsonState, Observation, MIN_STD};
 use serde_json::Value;
@@ -193,10 +193,18 @@ fn assert_ctx_matches(actual: &CtxPosterior, expected: &Value, label: &str) {
 fn assert_snapshot(state: &GaussianThompsonState, expected: &Value, label: &str) {
     // Observations: full tuple pins.
     let exp_obs = expected["observations"].as_array().expect("observations");
-    assert_eq!(state.observations.len(), exp_obs.len(), "{label}: obs count");
+    assert_eq!(
+        state.observations.len(),
+        exp_obs.len(),
+        "{label}: obs count"
+    );
     for (i, (actual, exp)) in state.observations.iter().zip(exp_obs).enumerate() {
         let a = exp.as_array().unwrap();
-        assert_eq!(py_repr(actual.fee), a[0].as_str().unwrap(), "{label}: obs[{i}].fee");
+        assert_eq!(
+            py_repr(actual.fee),
+            a[0].as_str().unwrap(),
+            "{label}: obs[{i}].fee"
+        );
         assert_eq!(
             py_repr(actual.revenue_rate),
             a[1].as_str().unwrap(),
@@ -415,7 +423,11 @@ fn update_sequences_match_python_oracle_at_every_step() {
             match &checks["supported_fee_ceiling"] {
                 Value::Null => assert!(ceiling.is_none(), "{label}: ceiling None"),
                 Value::String(s) => {
-                    assert_eq!(py_repr(ceiling.expect("Some ceiling")), *s, "{label}: ceiling")
+                    assert_eq!(
+                        py_repr(ceiling.expect("Some ceiling")),
+                        *s,
+                        "{label}: ceiling"
+                    )
                 }
                 other => panic!("bad ceiling fixture {other:?}"),
             }
@@ -471,7 +483,12 @@ fn contextual_prune_preserves_python_stable_sort_order() {
         .collect();
     assert_eq!(actual_keys, expected_keys, "prune survivor order");
 
-    for (i, pair) in doc["expected_contexts"].as_array().unwrap().iter().enumerate() {
+    for (i, pair) in doc["expected_contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
         let p = pair.as_array().unwrap();
         let key = p[0].as_str().unwrap();
         let (_, actual) = &state.contextual_posteriors[i];
