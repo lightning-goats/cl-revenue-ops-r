@@ -669,6 +669,7 @@ dependencies = [
 name = "revops-rebalance"
 version = "0.1.0"
 dependencies = [
+ "revops-fees",
  "serde",
  "serde_json",
 ]

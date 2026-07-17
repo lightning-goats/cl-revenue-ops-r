@@ -1,0 +1,403 @@
+{
+ "bucket_boundaries": [
+  {
+   "amount_sats": -5,
+   "bucket": 0
+  },
+  {
+   "amount_sats": -1,
+   "bucket": 0
+  },
+  {
+   "amount_sats": 0,
+   "bucket": 0
+  },
+  {
+   "amount_sats": 1,
+   "bucket": 50000
+  },
+  {
+   "amount_sats": 49999,
+   "bucket": 50000
+  },
+  {
+   "amount_sats": 50000,
+   "bucket": 50000
+  },
+  {
+   "amount_sats": 50001,
+   "bucket": 50000
+  },
+  {
+   "amount_sats": 99999,
+   "bucket": 50000
+  },
+  {
+   "amount_sats": 100000,
+   "bucket": 100000
+  },
+  {
+   "amount_sats": 100001,
+   "bucket": 100000
+  },
+  {
+   "amount_sats": 249999,
+   "bucket": 100000
+  },
+  {
+   "amount_sats": 250000,
+   "bucket": 250000
+  },
+  {
+   "amount_sats": 250001,
+   "bucket": 250000
+  },
+  {
+   "amount_sats": 499999,
+   "bucket": 250000
+  },
+  {
+   "amount_sats": 500000,
+   "bucket": 500000
+  },
+  {
+   "amount_sats": 500001,
+   "bucket": 500000
+  },
+  {
+   "amount_sats": 999999,
+   "bucket": 500000
+  },
+  {
+   "amount_sats": 1000000,
+   "bucket": 1000000
+  },
+  {
+   "amount_sats": 1000001,
+   "bucket": 1000000
+  },
+  {
+   "amount_sats": 1999999,
+   "bucket": 1000000
+  },
+  {
+   "amount_sats": 2000000,
+   "bucket": 2000000
+  },
+  {
+   "amount_sats": 2000001,
+   "bucket": 2000000
+  },
+  {
+   "amount_sats": 4999999,
+   "bucket": 2000000
+  },
+  {
+   "amount_sats": 5000000,
+   "bucket": 5000000
+  },
+  {
+   "amount_sats": 5000001,
+   "bucket": 5000000
+  },
+  {
+   "amount_sats": 9999999,
+   "bucket": 5000000
+  },
+  {
+   "amount_sats": 10000000,
+   "bucket": 10000000
+  },
+  {
+   "amount_sats": 10000001,
+   "bucket": 10000000
+  },
+  {
+   "amount_sats": 15000000,
+   "bucket": 10000000
+  }
+ ],
+ "sequence": {
+  "init": {
+   "ttl_seconds": 500,
+   "max_observations": 4
+  },
+  "steps": [
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "111x1x0",
+     "direction": 0,
+     "amount_sats": 10000,
+     "failure_class": "liquidity",
+     "confidence": 0.9,
+     "observed_at": 1000
+    },
+    "result": {
+     "observation_id": "obs-1000-1",
+     "short_channel_id": "111x1x0",
+     "direction": 0,
+     "amount_bucket_sats": 50000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.9,
+     "observed_at": 1000,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "zero-amount",
+     "direction": 0,
+     "amount_sats": 0,
+     "failure_class": "liquidity",
+     "confidence": 0.5,
+     "observed_at": 1005
+    },
+    "result": null
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "neg-amount",
+     "direction": 0,
+     "amount_sats": -5,
+     "failure_class": "liquidity",
+     "confidence": 0.5,
+     "observed_at": 1006
+    },
+    "result": null
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "222x2x1",
+     "direction": 1,
+     "amount_sats": 60000,
+     "failure_class": "fee",
+     "confidence": 1.5,
+     "observed_at": 1010
+    },
+    "result": {
+     "observation_id": "obs-1010-2",
+     "short_channel_id": "222x2x1",
+     "direction": 1,
+     "amount_bucket_sats": 50000,
+     "outcome": "failure",
+     "failure_class": "fee",
+     "confidence": 1.5,
+     "observed_at": 1010,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "333x3x0",
+     "direction": 2,
+     "amount_sats": 200000,
+     "failure_class": "timeout",
+     "confidence": -0.3,
+     "observed_at": 1020
+    },
+    "result": {
+     "observation_id": "obs-1020-3",
+     "short_channel_id": "333x3x0",
+     "direction": 2,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "timeout",
+     "confidence": -0.3,
+     "observed_at": 1020,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "444x4x1",
+     "direction": 1,
+     "amount_sats": 5000000,
+     "failure_class": "not_a_real_class",
+     "confidence": 2.0,
+     "observed_at": 1030
+    },
+    "result": {
+     "observation_id": "obs-1030-4",
+     "short_channel_id": "444x4x1",
+     "direction": 1,
+     "amount_bucket_sats": 5000000,
+     "outcome": "failure",
+     "failure_class": "not_a_real_class",
+     "confidence": 2.0,
+     "observed_at": 1030,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "",
+     "direction": 0,
+     "amount_sats": 80000,
+     "failure_class": "liquidity",
+     "confidence": 0.4,
+     "observed_at": 1040
+    },
+    "result": {
+     "observation_id": "obs-1040-5",
+     "short_channel_id": "",
+     "direction": 0,
+     "amount_bucket_sats": 50000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.4,
+     "observed_at": 1040,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "555x5x0",
+     "direction": 0,
+     "amount_sats": 80000,
+     "failure_class": "liquidity",
+     "confidence": 0.4,
+     "observed_at": 1040
+    },
+    "result": {
+     "observation_id": "obs-1040-6",
+     "short_channel_id": "555x5x0",
+     "direction": 0,
+     "amount_bucket_sats": 50000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.4,
+     "observed_at": 1040,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "export",
+    "now": 1050,
+    "snapshot": {
+     "generated_at": 1050,
+     "ttl_seconds": 500,
+     "schema_version": 1,
+     "observer_member_id": "test-node",
+     "segment_observations": [
+      {
+       "observation_id": "obs-1040-6",
+       "short_channel_id": "555x5x0",
+       "direction": 0,
+       "amount_bucket_sats": 50000,
+       "outcome": "failure",
+       "failure_class": "liquidity",
+       "confidence": 0.4,
+       "observed_at": 1040,
+       "source_channel_id": "",
+       "dest_channel_id": "",
+       "route_policy": "",
+       "router_kind": "",
+       "correlation_id": ""
+      },
+      {
+       "observation_id": "obs-1030-4",
+       "short_channel_id": "444x4x1",
+       "direction": 1,
+       "amount_bucket_sats": 5000000,
+       "outcome": "failure",
+       "failure_class": "unknown",
+       "confidence": 1.0,
+       "observed_at": 1030,
+       "source_channel_id": "",
+       "dest_channel_id": "",
+       "route_policy": "",
+       "router_kind": "",
+       "correlation_id": ""
+      }
+     ]
+    }
+   },
+   {
+    "op": "record",
+    "args": {
+     "short_channel_id": "666x6x0",
+     "direction": 0,
+     "amount_sats": 300000,
+     "failure_class": "liquidity",
+     "confidence": 0.7,
+     "observed_at": 1600
+    },
+    "result": {
+     "observation_id": "obs-1600-7",
+     "short_channel_id": "666x6x0",
+     "direction": 0,
+     "amount_bucket_sats": 250000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.7,
+     "observed_at": 1600,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   },
+   {
+    "op": "export",
+    "now": 1600,
+    "snapshot": {
+     "generated_at": 1600,
+     "ttl_seconds": 500,
+     "schema_version": 1,
+     "observer_member_id": "test-node",
+     "segment_observations": [
+      {
+       "observation_id": "obs-1600-7",
+       "short_channel_id": "666x6x0",
+       "direction": 0,
+       "amount_bucket_sats": 250000,
+       "outcome": "failure",
+       "failure_class": "liquidity",
+       "confidence": 0.7,
+       "observed_at": 1600,
+       "source_channel_id": "",
+       "dest_channel_id": "",
+       "route_policy": "",
+       "router_kind": "",
+       "correlation_id": ""
+      }
+     ]
+    }
+   }
+  ]
+ }
+}
