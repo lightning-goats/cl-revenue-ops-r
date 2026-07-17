@@ -758,7 +758,7 @@ fn fee_debug_query_summary_includes_last_decision_and_channel_map() {
 
     let value = owner.fee_debug(&FeeDebugQuery::Summary);
     assert_eq!(
-        value["last_decision_summary"],
+        value["last_cycle_decision"],
         json!({
             "action": "hold",
             "reason": "not_run",
@@ -955,7 +955,7 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     let value = reply_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("owner thread replied");
-    assert!(value.get("last_decision_summary").is_some(), "{value:?}");
+    assert!(value.get("last_cycle_decision").is_some(), "{value:?}");
     assert!(value.get("channels").is_some(), "{value:?}");
 
     handle.tx.send(CycleMsg::Shutdown).ok();

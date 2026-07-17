@@ -703,7 +703,7 @@ impl CycleOwner {
                 }
                 let d = &self.state.last_decision_summary;
                 serde_json::json!({
-                    "last_decision_summary": {
+                    "last_cycle_decision": {
                         "action": d.action,
                         "reason": d.reason,
                         "dominant_input": d.dominant_input,
