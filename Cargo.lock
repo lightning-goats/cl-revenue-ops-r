@@ -592,6 +592,7 @@ dependencies = [
  "cln-rpc",
  "revops-core",
  "revops-db",
+ "revops-fees",
  "revops-rpc",
  "rusqlite",
  "serde",
