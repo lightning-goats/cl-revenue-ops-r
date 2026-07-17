@@ -21,3 +21,8 @@ tempfile.workspace = true
 # cycle only (fine in Cargo: dev-deps never build the library target).
 revops-analytics = { path = "../revops-analytics" }
 revops-db = { path = "../revops-db" }
+# Phase 4 Task 12 (conformance un-defer flip, scenarios 08-13): the fee
+# controller replays live in revops-fees. Dev-only, same cycle-is-fine
+# reasoning as above — revops-fees depends on revops-econ as a regular
+# dependency; this is a dev-dependency cycle, not a build-graph cycle.
+revops-fees = { path = "../revops-fees" }
