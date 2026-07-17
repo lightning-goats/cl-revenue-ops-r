@@ -14,9 +14,14 @@ license.workspace = true
 # BTreeMap-backed Object won't do).
 revops-fees = { path = "../revops-fees" }
 revops-econ = { path = "../revops-econ" }
+# engine.rs (T7) consumes the MERGED unified budget rail's request type
+# (`revops_db::budget::ReserveRequest`) — the no-double-spend property is
+# foil-proven in Phase 3 and must be consumed, never reimplemented.
+revops-db = { path = "../revops-db" }
 serde.workspace = true
 # serde_json's float_roundtrip feature is enabled at the workspace root (see
 # root Cargo.toml) — golden-parity fixtures here depend on exact f64 parsing.
 serde_json.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true

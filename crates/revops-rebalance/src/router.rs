@@ -716,6 +716,27 @@ impl<'a> CycleRouter<'a> {
     /// middle search cannot route through our own endpoints
     /// (`rebalance_router_v3.py:394-403`).
     pub fn price_pair(&mut self, pair: &PlannedPairCtx, exclude: &[String]) -> RouteResult {
+        match self.try_price_pair(pair, exclude) {
+            Ok(result) => result,
+            Err(e) => RouteResult::fail(e.message),
+        }
+    }
+
+    /// Like [`CycleRouter::price_pair`], but preserving the Python
+    /// EXCEPTION path as `Err`: `_exclude_layer` build failures RAISE out
+    /// of the Python `price_pair` (`rebalance_router_v3.py:675-711`), and
+    /// the engine wraps that path as `route_pricing_failed: {e}` — a
+    /// DIFFERENT format from the failed-`RouteResult` wrap
+    /// `route_pricing_failed: {err} ({route_label})`
+    /// (`rebalance_engine_v2.py:3314` vs `:3336`, a v2.18.1 parity
+    /// contract). T7 (engine) added this non-breaking sibling so the
+    /// distinction survives the seam; `price_pair`'s frozen signature is
+    /// unchanged and simply flattens the `Err` arm.
+    pub fn try_price_pair(
+        &mut self,
+        pair: &PlannedPairCtx,
+        exclude: &[String],
+    ) -> Result<RouteResult, RpcFailure> {
         let rpc = self.rpc;
 
         let Some(final_hop_policy) = get_final_hop_policy(
@@ -724,10 +745,10 @@ impl<'a> CycleRouter<'a> {
             &pair.dest_peer_id,
             &pair.dest_channel_id,
         ) else {
-            return RouteResult::fail(format!(
+            return Ok(RouteResult::fail(format!(
                 "cannot determine final-hop fee for peer {}",
                 pair.dest_peer_id
-            ));
+            )));
         };
         let final_hop_fee_ppm = final_hop_policy.fee_ppm;
         let final_hop_fee_base_msat = final_hop_policy.fee_base_msat;
@@ -762,22 +783,21 @@ impl<'a> CycleRouter<'a> {
             }
         }
         if !middle_excludes.is_empty() {
-            match self.exclude_layer(&middle_excludes) {
-                Ok(layer_name) => layers.push(layer_name),
-                // Python raises out of price_pair here; the engine wraps it
-                // as `route_pricing_failed: {e}` (T7). Surface the message.
-                Err(e) => return RouteResult::fail(e.message),
-            }
+            // Python raises out of price_pair here; the engine wraps it as
+            // `route_pricing_failed: {e}` (T7, via `try_price_pair`'s `Err`
+            // arm — `price_pair` flattens it to a failed RouteResult).
+            let layer_name = self.exclude_layer(&middle_excludes)?;
+            layers.push(layer_name);
         }
 
-        self.price_pair_inner(
+        Ok(self.price_pair_inner(
             pair,
             route_amount_msat,
             final_hop_fee_ppm,
             final_hop_fee_base_msat,
             required_final_cltv,
             layers,
-        )
+        ))
     }
 
     /// `_price_pair_inner` (`rebalance_router_v3.py:436-586`).

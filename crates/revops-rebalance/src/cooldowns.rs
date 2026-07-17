@@ -119,6 +119,15 @@ impl PairFutility {
         self.prune(&key, now) >= Self::THRESHOLD
     }
 
+    /// In-window failure count for a pair (py `_failure_count` /
+    /// `len(_prune_pair_failures(key))`, `rebalance_engine_v2.py:346-347`).
+    /// Added by T7 (engine): the audit skip detail and the sats-EV
+    /// failure-penalty fold both need the raw count, not just the boolean.
+    pub fn fresh_failure_count(&mut self, source: &str, dest: &str, now: f64) -> usize {
+        let key = (source.to_string(), dest.to_string());
+        self.prune(&key, now)
+    }
+
     /// Port of `_record_pair_failure`.
     pub fn record_failure(&mut self, source: &str, dest: &str, now: f64) {
         self.failures
