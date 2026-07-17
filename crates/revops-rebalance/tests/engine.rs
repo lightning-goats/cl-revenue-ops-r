@@ -1318,8 +1318,9 @@ fn zero_budget_blocks_auto_rebalance() {
 }
 
 /// The sats-EV hold-margin gate rejects priced pairs below the margin
-/// (audit F2), with the failure penalty folded from the in-memory pair
-/// tracker (T6 interface note).
+/// (audit F2). The failure penalty is passed to `sats_ev_gate` as a
+/// separate term (`failure_penalty_sats`) and subtracted in Python's exact
+/// left-to-right order — never folded into the activity penalty.
 #[test]
 fn ev_gate_below_hold_margin_skips_pair() {
     let config = EngineConfig {
