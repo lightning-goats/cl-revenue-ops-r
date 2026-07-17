@@ -590,6 +590,7 @@ dependencies = [
  "anyhow",
  "cln-plugin",
  "cln-rpc",
+ "revops-analytics",
  "revops-core",
  "revops-db",
  "revops-fees",
