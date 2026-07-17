@@ -10,17 +10,20 @@ use revops_econ::pyfloat::py_repr;
 use revops_fees::mat3::{M3, V3};
 use revops_fees::thompson::recompute::{
     apply_dts_discount, earning_region_fee, effective_positive_rate_ref, positive_revenue_mass,
-    recompute_posterior_core, recompute_posterior_legacy, GtsCore, Observation, BIAS_DECAY_HOURS,
-    BIAS_MIN_WEIGHT, CONGESTION_OBS_FLAG, CTX_CONFIDENCE_COUNT, CTX_OFFSET_CAP_FRAC,
-    CTX_PRECISION_DECAY, DECAY_HOURS, DISCOUNT_WEIGHT_FLOOR, EXPLORATION_BOOST_MAX,
-    EXPLORATION_BOOST_MIN, MAX_BIAS_NUDGES, MAX_OBSERVATIONS, MEANINGFUL_GAP_EMA_ALPHA,
-    MIN_OBSERVATIONS, MIN_PRECISION, MIN_STD, NUDGE_DEDUP_TOLERANCE, POSITIVE_RATE_EMA_ALPHA,
+    recompute_posterior_core, recompute_posterior_legacy, BIAS_DECAY_HOURS, BIAS_MIN_WEIGHT,
+    CTX_CONFIDENCE_COUNT, CTX_OFFSET_CAP_FRAC, CTX_PRECISION_DECAY, DECAY_HOURS,
+    DISCOUNT_WEIGHT_FLOOR, MAX_OBSERVATIONS, MEANINGFUL_GAP_EMA_ALPHA, MIN_OBSERVATIONS,
+    MIN_PRECISION, NUDGE_DEDUP_TOLERANCE, POSITIVE_RATE_EMA_ALPHA,
     POSITIVE_RATE_REF_HALF_LIFE_HOURS, REL_MIN_STD_FRAC, SECONDARY_EXPLORE_BOOST,
     SUPPORTED_CEILING_FLOOR_ESCAPE, SUPPORTED_CEILING_HEADROOM, SUPPORTED_CEILING_MASS_QUANTILE,
     SUPPORTED_CEILING_MIN_WEIGHT, TRICKLE_RESET_FRAC, UPWARD_PROBE_INTERVAL_HOURS,
-    UPWARD_PROBE_MIN_STD, UPWARD_PROBE_STRETCH, WEIGHT_SCHEME, ZERO_PROBE_FLAG,
-    ZERO_PROBE_FLOOR_FRAC, ZERO_PROBE_STEP_FRAC, ZERO_REGIME_ANCHOR_HALF_LIFE_HOURS,
-    ZERO_REGIME_REL_STD, ZERO_REGIME_STREAK_OVERRIDE, ZERO_REVENUE_STREAK_THRESHOLD,
+    UPWARD_PROBE_MIN_STD, UPWARD_PROBE_STRETCH, ZERO_PROBE_FLOOR_FRAC, ZERO_PROBE_STEP_FRAC,
+    ZERO_REGIME_ANCHOR_HALF_LIFE_HOURS, ZERO_REGIME_REL_STD, ZERO_REGIME_STREAK_OVERRIDE,
+    ZERO_REVENUE_STREAK_THRESHOLD,
+};
+use revops_fees::thompson::{
+    GaussianThompsonState, Observation, CONGESTION_OBS_FLAG, EXPLORATION_BOOST_MAX,
+    EXPLORATION_BOOST_MIN, MAX_BIAS_NUDGES, MIN_STD, WEIGHT_SCHEME, ZERO_PROBE_FLAG,
     ZERO_REVENUE_WEIGHT_FACTOR,
 };
 use serde_json::Value;
@@ -69,6 +72,9 @@ fn parse_obs(v: &Value) -> Observation {
     let flag = a.get(5).and_then(|v| v.as_str()).map(|s| s.to_string());
     Observation {
         fee,
+        // Serialization typing is irrelevant to recompute (it only reads
+        // the f64); fixtures carry canonical int-typed fees.
+        fee_is_int: true,
         revenue_rate,
         weight,
         ts,
@@ -98,7 +104,7 @@ fn recompute_posterior_core_matches_python_oracle() {
         let input = &case["input"];
         let expected = &case["expected"];
 
-        let mut state = GtsCore {
+        let mut state = GaussianThompsonState {
             prior_mean_fee: parse_f(&input["prior_mean_fee"]),
             prior_std_fee: parse_f(&input["prior_std_fee"]),
             prior_coeffs: parse_v3(&input["prior_coeffs"]),
@@ -113,7 +119,7 @@ fn recompute_posterior_core_matches_python_oracle() {
                 .iter()
                 .map(parse_obs)
                 .collect(),
-            ..GtsCore::default()
+            ..GaussianThompsonState::default()
         };
 
         recompute_posterior_core(&mut state, now);
@@ -189,9 +195,9 @@ fn positive_revenue_mass_and_earning_region_fee_match_python_oracle() {
             .iter()
             .map(parse_obs)
             .collect();
-        let mut state = GtsCore {
+        let mut state = GaussianThompsonState {
             observations,
-            ..GtsCore::default()
+            ..GaussianThompsonState::default()
         };
 
         let masses = positive_revenue_mass(&state, now);
@@ -243,10 +249,10 @@ fn effective_positive_rate_ref_matches_python_oracle() {
     for case in cases {
         let name = case["name"].as_str().expect("name");
         let now = case["now"].as_i64().expect("now");
-        let state = GtsCore {
+        let state = GaussianThompsonState {
             positive_rate_ref: parse_f(&case["positive_rate_ref"]),
             positive_rate_ref_ts: case["positive_rate_ref_ts"].as_i64().expect("ts"),
-            ..GtsCore::default()
+            ..GaussianThompsonState::default()
         };
         let actual = effective_positive_rate_ref(&state, now);
         assert_eq!(
@@ -276,9 +282,9 @@ fn discount_sequences_match_python_oracle_at_every_step() {
             .iter()
             .map(parse_obs)
             .collect();
-        let mut state = GtsCore {
+        let mut state = GaussianThompsonState {
             observations,
-            ..GtsCore::default()
+            ..GaussianThompsonState::default()
         };
 
         for (i, step) in seq["steps"].as_array().expect("steps").iter().enumerate() {
@@ -345,9 +351,9 @@ fn discount_sequences_match_python_oracle_at_every_step() {
 fn discount_noop_guard_outside_open_unit_interval() {
     // apply_dts_discount is a documented no-op for gamma outside (0, 1) —
     // exercised directly (independent of fixtures) since it's a pure guard.
-    let mut state = GtsCore {
+    let mut state = GaussianThompsonState {
         observations: vec![Observation::new(100.0, 50.0, 1.0, 0, "all")],
-        ..GtsCore::default()
+        ..GaussianThompsonState::default()
     };
     let before = state.clone();
     for gamma in [1.0, 0.0, -0.5, 1.5, f64::NAN] {
@@ -371,11 +377,11 @@ fn discount_noop_guard_outside_open_unit_interval() {
 
 #[test]
 fn legacy_fallback_empty_state_resets_to_prior_when_weighted_obs_is_none() {
-    let mut state = GtsCore {
+    let mut state = GaussianThompsonState {
         prior_mean_fee: 321.0,
         prior_std_fee: 45.0,
         observations: Vec::new(),
-        ..GtsCore::default()
+        ..GaussianThompsonState::default()
     };
     recompute_posterior_legacy(&mut state, None, 1_752_400_000);
     assert_eq!(state.posterior_mean, 321.0);

@@ -5,15 +5,20 @@
 //! read-only helpers those paths need: `_positive_revenue_mass`,
 //! `_earning_region_fee`, `_effective_positive_rate_ref` (py 851-900).
 //!
-//! # Struct ownership (Phase 4 Task 2 / Task 3 seam)
+//! # Struct ownership (Phase 4 Task 2 / Task 3 seam — RESOLVED at merge)
 //!
-//! [`GtsCore`] is the pure numeric field bundle this module needs — the
-//! subset of `GaussianThompsonState` touched by posterior recompute and
-//! discounting. Task 3 owns `thompson/mod.rs` and the FULL
-//! `GaussianThompsonState` (serde, contextual posteriors, bias-nudge
-//! bookkeeping, blob-compat retired fields); it re-exports/embeds this
-//! struct rather than this module reaching into Task 3's file. Both tasks
-//! compile independently against the Task-1 stub module layout.
+//! While Tasks 2 and 3 developed in parallel, this module carried a
+//! standalone `GtsCore` "pure numeric field bundle" so both branches
+//! compiled independently. At the integration merge GtsCore was DROPPED
+//! (not embedded): its field subset was name-and-type-identical to the
+//! corresponding fields of [`GaussianThompsonState`] (owned by
+//! `thompson/mod.rs`, Task 3), so every function here now takes
+//! `&mut GaussianThompsonState` directly — exactly the signatures the
+//! Phase 4 plan's Task 2 interface block declares. This matches Python,
+//! where these are methods on `GaussianThompsonState` itself, and means
+//! recompute simply never touches the serde/contextual/blob-compat fields.
+//! The canonical [`Observation`] (with `fee_is_int` + `OValue` extras)
+//! also lives in `thompson/mod.rs`; this module re-uses it.
 //!
 //! # THE discounting order-of-operations (read before touching anything here)
 //!
@@ -45,7 +50,8 @@
 //!    `new_sigma2 = ss / max(sw - 3.0, 1.0)`, `noise_variance =
 //!    max(10.0, 0.7*new_sigma2 + 0.3*noise_variance)`.
 
-use crate::mat3::{invert3, matvec3, M3, V3};
+use super::{GaussianThompsonState, CONGESTION_OBS_FLAG, MIN_STD, ZERO_PROBE_FLAG};
+use crate::mat3::{invert3, matvec3};
 
 /// CPython 3.12+ `sum()` for floats: Neumaier (improved Kahan-Babuska)
 /// compensated summation, NOT naive left-fold. This is a real, verified
@@ -74,12 +80,18 @@ fn py_sum(iter: impl IntoIterator<Item = f64>) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Constants — full transcription of `GaussianThompsonState`'s class body
+// Constants — transcription of `GaussianThompsonState`'s class body
 // (`fee_controller.py:258-383`) plus `MIN_PRECISION` (1663) and
 // `DISCOUNT_WEIGHT_FLOOR` (1670). Every constant is load-bearing (Global
 // Constraints: "Many constants encode named production incidents") — not
 // tunable. `pub` (not `pub(crate)`) so the pinned-constants integration
 // test (a separate crate) can see them.
+//
+// The constants ALSO needed by serde's from_dict (`MIN_STD`,
+// `WEIGHT_SCHEME`, `ZERO_REVENUE_WEIGHT_FACTOR`, `MAX_BIAS_NUDGES`,
+// `EXPLORATION_BOOST_MIN`/`MAX`, `CONGESTION_OBS_FLAG`, `ZERO_PROBE_FLAG`)
+// have their single definition in `thompson/mod.rs` (they were duplicated
+// here during parallel Task 2/3 development; collapsed at the merge).
 // ---------------------------------------------------------------------------
 
 /// Security: bounded memory per channel (py 258).
@@ -88,12 +100,6 @@ pub const MAX_OBSERVATIONS: i64 = 200;
 pub const DECAY_HOURS: f64 = 168.0;
 /// Minimum genuine observations before trusting the posterior (py 260).
 pub const MIN_OBSERVATIONS: i64 = 5;
-/// Never let uncertainty go below 10 ppm (py 261).
-pub const MIN_STD: f64 = 10.0;
-/// Current observation-weighting scheme tag (py 275).
-pub const WEIGHT_SCHEME: &str = "exposure_v2";
-/// Legacy (migration-only) zero-window weight factor (py 276).
-pub const ZERO_REVENUE_WEIGHT_FACTOR: f64 = 0.15;
 /// Trickle guard fraction of the positive-rate reference (py 284).
 pub const TRICKLE_RESET_FRAC: f64 = 0.10;
 /// Positive-rate EMA alpha (py 285).
@@ -116,8 +122,6 @@ pub const SUPPORTED_CEILING_MASS_QUANTILE: f64 = 0.90;
 pub const SUPPORTED_CEILING_MIN_WEIGHT: f64 = 1e-3;
 /// Floor-escape headroom multiplier (py 325).
 pub const SUPPORTED_CEILING_FLOOR_ESCAPE: f64 = 2.0;
-/// 6th tuple element marking a congestion-window observation (py 326).
-pub const CONGESTION_OBS_FLAG: &str = "congestion";
 /// SL-4 relative uncertainty floor fraction for the legacy path (py 343).
 pub const REL_MIN_STD_FRAC: f64 = 0.04;
 /// Consecutive zero-revenue windows before directional probing (py 344).
@@ -126,8 +130,6 @@ pub const ZERO_REVENUE_STREAK_THRESHOLD: i64 = 4;
 pub const ZERO_PROBE_STEP_FRAC: f64 = 0.9;
 /// Cap on cumulative downward zero-probe influence (py 346).
 pub const ZERO_PROBE_FLOOR_FRAC: f64 = 0.3;
-/// 6th tuple element marking an injected zero-revenue probe (py 347).
-pub const ZERO_PROBE_FLAG: &str = "zero_probe";
 /// Minimum relative uncertainty when all revenue is zero (py 348).
 pub const ZERO_REGIME_REL_STD: f64 = 0.15;
 /// Consecutive zero windows after which the market is presumed to have
@@ -137,8 +139,6 @@ pub const ZERO_REGIME_STREAK_OVERRIDE: i64 = 24;
 pub const ZERO_REGIME_ANCHOR_HALF_LIFE_HOURS: f64 = 24.0;
 /// Slightly wider prior for secondary contexts (py 357).
 pub const SECONDARY_EXPLORE_BOOST: f64 = 1.25;
-/// Security: bounded out-of-band nudge memory (py 358).
-pub const MAX_BIAS_NUDGES: i64 = 50;
 /// Advisory nudge half-life, hours (py 359).
 pub const BIAS_DECAY_HOURS: f64 = 24.0;
 /// Below this decayed weight a nudge is pruned (py 360).
@@ -151,10 +151,6 @@ pub const CTX_OFFSET_CAP_FRAC: f64 = 0.20;
 pub const CTX_CONFIDENCE_COUNT: f64 = 10.0;
 /// Per-update contextual precision decay (py 376).
 pub const CTX_PRECISION_DECAY: f64 = 0.98;
-/// Minimum exploration-multiplier clamp (py 381).
-pub const EXPLORATION_BOOST_MIN: f64 = 0.75;
-/// Maximum exploration-multiplier clamp (py 382).
-pub const EXPLORATION_BOOST_MAX: f64 = 2.0;
 
 /// Minimum posterior precision (max std ~= 200 ppm), py 1663.
 pub const MIN_PRECISION: f64 = 0.000025;
@@ -163,150 +159,13 @@ pub const MIN_PRECISION: f64 = 0.000025;
 pub const DISCOUNT_WEIGHT_FLOOR: f64 = 0.05;
 
 // ---------------------------------------------------------------------------
-// Observation — the tuple `(fee, revenue_rate, weight, ts, time_bucket[,
-// flag[, ...extra]])` (py: `List[Tuple[int, float, float, int, str]]` plus
-// the 6th-element flag convention). `extra` preserves any elements beyond
-// the 6th verbatim (lossless — Task 9's blob round-trip needs this).
-// ---------------------------------------------------------------------------
-
-/// A single stored fee/revenue observation window.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Observation {
-    pub fee: f64,
-    pub revenue_rate: f64,
-    pub weight: f64,
-    pub ts: i64,
-    pub time_bucket: String,
-    /// 6th tuple element: `"zero_probe"` or `"congestion"` (or unset).
-    pub flag: Option<String>,
-    /// Elements beyond the 6th, preserved verbatim for lossless round-trip.
-    pub extra: Vec<serde_json::Value>,
-}
-
-impl Observation {
-    /// Construct a plain 5-tuple-equivalent observation (no flag/extra).
-    pub fn new(
-        fee: f64,
-        revenue_rate: f64,
-        weight: f64,
-        ts: i64,
-        time_bucket: impl Into<String>,
-    ) -> Self {
-        Self {
-            fee,
-            revenue_rate,
-            weight,
-            ts,
-            time_bucket: time_bucket.into(),
-            flag: None,
-            extra: Vec::new(),
-        }
-    }
-
-    /// Construct a 6-tuple-equivalent observation with a flag (`"zero_probe"`
-    /// or `"congestion"`).
-    pub fn with_flag(
-        fee: f64,
-        revenue_rate: f64,
-        weight: f64,
-        ts: i64,
-        time_bucket: impl Into<String>,
-        flag: impl Into<String>,
-    ) -> Self {
-        Self {
-            fee,
-            revenue_rate,
-            weight,
-            ts,
-            time_bucket: time_bucket.into(),
-            flag: Some(flag.into()),
-            extra: Vec::new(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GtsCore — the pure numeric field bundle Task 2's functions operate on.
-// Field set mirrors the subset of `GaussianThompsonState` (py 384-462)
-// that posterior recompute/discount touch; Task 3's full struct embeds or
-// re-exports this rather than duplicating it.
-// ---------------------------------------------------------------------------
-
-/// Pure numeric core of `GaussianThompsonState` — the fields
-/// `recompute_posterior_core`/`recompute_posterior_legacy`/
-/// `apply_dts_discount` and their read-only helpers need.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GtsCore {
-    pub prior_mean_fee: f64,
-    pub prior_std_fee: f64,
-    pub observations: Vec<Observation>,
-
-    pub posterior_mean: f64,
-    pub posterior_std: f64,
-    pub posterior_coeffs: V3,
-    pub posterior_precision: M3,
-    pub noise_variance: f64,
-
-    /// Fixed prior for the polynomial regression (py `_prior_coeffs`) —
-    /// never modified by recompute.
-    pub prior_coeffs: V3,
-    /// Fixed prior precision (py `_prior_precision`) — never modified by
-    /// recompute.
-    pub prior_precision: M3,
-
-    /// Fee range from the last recompute (py `_last_fee_min`/`_last_fee_max`).
-    pub last_fee_min: f64,
-    pub last_fee_max: f64,
-
-    /// Weighted mean of charged fees across observations (py
-    /// `charged_fee_mean`).
-    pub charged_fee_mean: f64,
-
-    pub zero_revenue_streak: i64,
-    pub zero_run_start_fee: f64,
-    pub zero_run_start_ts: i64,
-
-    pub positive_rate_ref: f64,
-    pub positive_rate_ref_ts: i64,
-
-    /// Durable out-of-band posterior nudges: `(target_fee, weight, ts)`.
-    pub posterior_bias: Vec<(f64, f64, i64)>,
-}
-
-impl Default for GtsCore {
-    fn default() -> Self {
-        Self {
-            prior_mean_fee: 200.0,
-            prior_std_fee: 100.0,
-            observations: Vec::new(),
-            posterior_mean: 200.0,
-            posterior_std: 100.0,
-            posterior_coeffs: [0.0, 1.0, 0.0],
-            posterior_precision: [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]],
-            noise_variance: 1000.0,
-            prior_coeffs: [0.0, 1.0, 0.0],
-            prior_precision: [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]],
-            last_fee_min: 0.0,
-            last_fee_max: 0.0,
-            charged_fee_mean: 0.0,
-            zero_revenue_streak: 0,
-            zero_run_start_fee: 0.0,
-            zero_run_start_ts: 0,
-            positive_rate_ref: 0.0,
-            positive_rate_ref_ts: 0,
-            posterior_bias: Vec::new(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Read-only helpers (py 851-900).
 // ---------------------------------------------------------------------------
 
 /// `_effective_positive_rate_ref` (py 851-858): positive-rate reference
 /// with 7-day half-life decay applied. `age_hours` IS clamped to >= 0 here
 /// (py 855 `max(0.0, ...)`, unlike the core recompute's own age formula).
-pub fn effective_positive_rate_ref(state: &GtsCore, now: i64) -> f64 {
+pub fn effective_positive_rate_ref(state: &GaussianThompsonState, now: i64) -> f64 {
     if state.positive_rate_ref <= 0.0 || state.positive_rate_ref_ts <= 0 {
         return 0.0;
     }
@@ -320,7 +179,7 @@ pub fn effective_positive_rate_ref(state: &GtsCore, now: i64) -> f64 {
 /// explicitly. Winsorizes: when >= 4 masses survive, caps any single
 /// window's mass at 3x the median so one unreplicated whale window cannot
 /// dominate the region statistics.
-pub fn positive_revenue_mass(state: &GtsCore, now: i64) -> Vec<(f64, f64)> {
+pub fn positive_revenue_mass(state: &GaussianThompsonState, now: i64) -> Vec<(f64, f64)> {
     let mut masses: Vec<(f64, f64)> = Vec::new();
     for obs in &state.observations {
         if obs.revenue_rate <= 0.0 {
@@ -351,7 +210,7 @@ pub fn positive_revenue_mass(state: &GtsCore, now: i64) -> Vec<(f64, f64)> {
 
 /// `_earning_region_fee` (py 894-900): revenue-mass-weighted mean fee over
 /// earning windows, or `None` if no positive mass exists.
-pub fn earning_region_fee(state: &GtsCore, now: i64) -> Option<f64> {
+pub fn earning_region_fee(state: &GaussianThompsonState, now: i64) -> Option<f64> {
     let masses = positive_revenue_mass(state, now);
     let total: f64 = py_sum(masses.iter().map(|(_, m)| *m));
     if total <= 0.0 {
@@ -370,7 +229,7 @@ pub fn earning_region_fee(state: &GtsCore, now: i64) -> Option<f64> {
 /// the weighted list from `state.observations` using `now` (py 1593-1605,
 /// `age_hours` NOT clamped, matching the core recompute's own formula).
 pub fn recompute_posterior_legacy(
-    state: &mut GtsCore,
+    state: &mut GaussianThompsonState,
     weighted_obs: Option<&[(f64, f64, f64)]>,
     now: i64,
 ) {
@@ -433,7 +292,7 @@ pub fn recompute_posterior_legacy(
 /// regression `R(F) = a*F^2 + b*F + c`, with the zero-revenue-regime
 /// anchor and legacy Normal-Normal fallbacks. See the module doc comment
 /// for the discounting order-of-operations this feeds.
-pub fn recompute_posterior_core(state: &mut GtsCore, now: i64) {
+pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
     if state.observations.is_empty() {
         state.posterior_mean = state.prior_mean_fee;
         state.posterior_std = state.prior_std_fee;
@@ -702,14 +561,14 @@ pub fn recompute_posterior_core(state: &mut GtsCore, now: i64) {
 /// `_recompute_posterior` (py 1296-1305): core rebuild, then re-apply
 /// durable out-of-band nudges (`posterior_bias`) with decay so they are
 /// not lost by the recompute.
-pub fn recompute_posterior(state: &mut GtsCore, now: i64) {
+pub fn recompute_posterior(state: &mut GaussianThompsonState, now: i64) {
     recompute_posterior_core(state, now);
     apply_posterior_bias(state, now);
 }
 
 /// `_blend_posterior_toward` (py 1226-1244): mean-only blend toward a
 /// target, `weight/(1+weight)` of the distance. Never touches `posterior_std`.
-fn blend_posterior_toward(state: &mut GtsCore, target_fee: f64, weight: f64) {
+fn blend_posterior_toward(state: &mut GaussianThompsonState, target_fee: f64, weight: f64) {
     if weight <= 0.0 {
         return;
     }
@@ -720,7 +579,7 @@ fn blend_posterior_toward(state: &mut GtsCore, target_fee: f64, weight: f64) {
 /// `_apply_posterior_bias` (py 1275-1294): re-apply recorded nudges after a
 /// posterior rebuild, with time decay; expired nudges (decayed weight below
 /// [`BIAS_MIN_WEIGHT`]) are pruned.
-fn apply_posterior_bias(state: &mut GtsCore, now: i64) {
+fn apply_posterior_bias(state: &mut GaussianThompsonState, now: i64) {
     if state.posterior_bias.is_empty() {
         return;
     }
@@ -747,7 +606,7 @@ fn apply_posterior_bias(state: &mut GtsCore, now: i64) {
 /// and persistently discounts every stored observation's base weight. See
 /// the module doc comment for the full order-of-operations contract this
 /// feeds into. No-op when `gamma` is not strictly inside `(0.0, 1.0)`.
-pub fn apply_dts_discount(state: &mut GtsCore, gamma: f64) {
+pub fn apply_dts_discount(state: &mut GaussianThompsonState, gamma: f64) {
     if !(0.0 < gamma && gamma < 1.0) {
         return;
     }

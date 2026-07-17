@@ -20,10 +20,13 @@ use crate::mat3::{M3, V3};
 use crate::pyjson::OValue;
 
 // ---------------------------------------------------------------------------
-// Class-level constants needed by serde's from_dict (py 258-276). The full
-// constant family (SUPPORTED_CEILING_*, ZERO_*, CTX_*, ...) is owned by
-// Task 2/7 (recompute/dynamics/sampling); only the ones `serde.rs` touches
-// are transcribed here.
+// Class-level constants needed by serde's from_dict (py 258-276). These 8
+// are the SINGLE definitions (they were briefly duplicated in recompute.rs
+// during parallel Task 2/3 development; collapsed here at the integration
+// merge — recompute.rs imports the ones it uses). The rest of the constant
+// family (SUPPORTED_CEILING_*, ZERO_REGIME_*, CTX_*, ...) lives in
+// `recompute.rs` (Task 2), with dynamics/sampling additions to follow
+// (Task 7).
 // ---------------------------------------------------------------------------
 
 /// `MIN_STD` (py 261): never let uncertainty go below 10 ppm. Used by
@@ -97,6 +100,56 @@ pub struct Observation {
     pub time_bucket: String,
     pub flag: Option<String>,
     pub extra: Vec<OValue>,
+}
+
+impl Observation {
+    /// Construct a plain 5-tuple-equivalent observation (no flag/extra).
+    ///
+    /// `fee_is_int` defaults to `true`: Python appends observations as
+    /// `(int(fee_ppm), ...)` tuples (`fee_controller.py:799-825`), so a
+    /// freshly recorded observation always serializes its fee as a bare
+    /// integer. Float-typed fees only ever arrive via `from_dict` on legacy
+    /// blobs, where `serde.rs` sets the flag from the source JSON instead.
+    pub fn new(
+        fee: f64,
+        revenue_rate: f64,
+        weight: f64,
+        ts: i64,
+        time_bucket: impl Into<String>,
+    ) -> Self {
+        Self {
+            fee,
+            fee_is_int: true,
+            revenue_rate,
+            weight,
+            ts,
+            time_bucket: time_bucket.into(),
+            flag: None,
+            extra: Vec::new(),
+        }
+    }
+
+    /// Construct a 6-tuple-equivalent observation with a flag (`"zero_probe"`
+    /// or `"congestion"`). `fee_is_int` defaults to `true` (see [`Self::new`]).
+    pub fn with_flag(
+        fee: f64,
+        revenue_rate: f64,
+        weight: f64,
+        ts: i64,
+        time_bucket: impl Into<String>,
+        flag: impl Into<String>,
+    ) -> Self {
+        Self {
+            fee,
+            fee_is_int: true,
+            revenue_rate,
+            weight,
+            ts,
+            time_bucket: time_bucket.into(),
+            flag: Some(flag.into()),
+            extra: Vec::new(),
+        }
+    }
 }
 
 /// A contextual posterior: `(mean, precision, count, last_update)` — the
