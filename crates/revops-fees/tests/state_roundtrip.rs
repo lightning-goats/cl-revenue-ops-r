@@ -296,6 +296,23 @@ fn non_ascii_last_context_key_round_trips() {
     assert_eq!(c["fee_state_pinned"]["last_context_key"], "café:☃:P");
 }
 
+#[test]
+fn unrecognized_algorithm_version_discards_persisted_thompson_state() {
+    let fx = fixture("blobs.json");
+    let c = case(&fx, "unrecognized_algorithm_version_populated_thompson");
+    assert_blob_case(c);
+    // The whole point of this case (mirrors `from_v2_dict`, py 2181-2187):
+    // an unrecognized `algorithm_version` with an otherwise POPULATED
+    // persisted thompson_state must still be discarded in favor of a fresh
+    // `GaussianThompsonState()` -- NOT retained. `missing_pid_state` can't
+    // prove this because its thompson_state is already at fresh defaults
+    // (resetting a fresh state to a fresh state is unobservable); here the
+    // input has a real observation + posterior, so a stale-state bug would
+    // surface as `thompson_observations_count != 0`.
+    assert_eq!(c["fee_state_pinned"]["algorithm_version"], "dts_pid_v1");
+    assert_eq!(c["fee_state_pinned"]["thompson_observations_count"], 0);
+}
+
 // ---------------------------------------------------------------------------
 // merge_matrix: explicit-shared-field resolution (9 cases).
 // ---------------------------------------------------------------------------

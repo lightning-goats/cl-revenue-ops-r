@@ -700,13 +700,31 @@ const FEE_STATE_KNOWN_VERSIONS: &[&str] = &["thompson_aimd_v1", "dts_pid_v1"];
 /// least, which is Python-truthy, so the "legacy fields from main table"
 /// block (py 2213-2222) always applies in production; this port applies it
 /// unconditionally to match.
+///
+/// `thompson_state` is gated on the SAME known-version check (py
+/// 2174-2183): an unrecognized `algorithm_version` is a migration-safety
+/// net that discards whatever `thompson_state` was persisted and starts
+/// from a fresh [`GaussianThompsonState::default`] — it must NOT be loaded
+/// via [`gts_from_dict`] in that case, even though a value is present.
 pub fn load_fee_state(env: &V2StateEnvelope, row: &FeeStrategyRow) -> ChannelFeeState {
     let d = env.fee_state.as_ovalue();
     let empty = OValue::obj(vec![]);
     let mut state = ChannelFeeState::default();
 
     let orig_version = d.get("algorithm_version").and_then(OValue::as_str);
-    state.thompson = gts_from_dict(d.get("thompson_state").unwrap_or(&empty));
+    let known_version = orig_version
+        .map(|v| FEE_STATE_KNOWN_VERSIONS.contains(&v))
+        .unwrap_or(false);
+    // `from_v2_dict` (py 2174-2183): only a KNOWN `algorithm_version` loads
+    // the persisted `thompson_state` — anything else (missing, or an
+    // unrecognized future value) is the migration-safety-net path and gets
+    // a fresh `GaussianThompsonState()` instead, discarding whatever was
+    // persisted.
+    state.thompson = if known_version {
+        gts_from_dict(d.get("thompson_state").unwrap_or(&empty))
+    } else {
+        GaussianThompsonState::default()
+    };
     state.algorithm_version = orig_version
         .map(|s| s.to_string())
         .unwrap_or_else(|| "migrated".to_string());
@@ -766,10 +784,7 @@ pub fn load_fee_state(env: &V2StateEnvelope, row: &FeeStrategyRow) -> ChannelFee
     state.forward_count_since_update = row.forward_count_since_update;
     state.last_volume_sats = row.last_volume_sats;
 
-    if !orig_version
-        .map(|v| FEE_STATE_KNOWN_VERSIONS.contains(&v))
-        .unwrap_or(false)
-    {
+    if !known_version {
         state.algorithm_version = "dts_pid_v1".to_string();
     }
 
