@@ -1,0 +1,379 @@
+//! Per-cycle `FeeCfgSnapshot` resolver (Phase 4b Task 1).
+//!
+//! `revops_fees::cycle::FeeCfgSnapshot` is a frozen 22-field contract whose
+//! `Default` mirrors Python's `Config` dataclass defaults (drift-guard
+//! tested in `revops-fees`' own `tests/cycle.rs`). This module resolves a
+//! LIVE snapshot of those 22 fields every fee cycle, using the exact
+//! 3-layer precedence `revenue-r-config`'s handler already implements
+//! (`crate::config_resolve`, `main.rs`'s `revenue-r-config` rpcmethod):
+//!
+//!   (a) DB override   -- `revops_db::queries::config_override` +
+//!                         `config_resolve::validate_override`. Applied
+//!                         LAST in Python (`Config.load_overrides`), so it
+//!                         wins over everything else.
+//!   (b) listconfigs    -- the init-cached `python_option_values` map
+//!                         (`State`'s single `listconfigs` snapshot,
+//!                         `config_resolve::fetch_python_option_values`).
+//!   (c) struct default -- `FeeCfgSnapshot::default()`'s field value. This
+//!                         layer is NOT the Rust plugin's own registered
+//!                         shadow option (unlike `revenue-r-config`'s
+//!                         layer (c)) -- `resolve_fee_cfg` has no `Plugin`
+//!                         handle, only `db`/`python_option_values`, so the
+//!                         frozen, Python-verified struct default IS the
+//!                         fixture-default layer here.
+//!
+//! **DB-override-only keys** (`paused`, `authority_level`,
+//! `econ_governor_fees_enabled` -- ledger note "17 PUBLIC_RUNTIME_KEYS", no
+//! CLN option exists for any of the three) skip layer (b) ENTIRELY: (a) ->
+//! (c), never consulting `python_option_values` even if a (fake/stale) map
+//! entry happens to exist for one of them.
+//!
+//! `enable_dynamic_htlcmax` is the one field that is NOT converted through
+//! `config_types::typed_value`'s type-driven coercion: it keeps whatever
+//! RAW resolved value each layer produced (a genuine bool vs. a string like
+//! `"false"`, which Python's own narrow truthiness check
+//! (`admission::is_enabled`) treats differently -- a non-empty string is
+//! not automatically false). Coercing it here would destroy that
+//! distinction before it ever reaches `admission::HtlcmaxCfg`.
+//!
+//! The scheduler (T6) calls [`resolve_fee_cfg`] at the top of EVERY cycle
+//! -- per-cycle resolution is what makes a runtime `revenue-config set`
+//! change on the Python side (which lands in `config_overrides`, layer (a))
+//! visible to the Rust controller without a restart.
+
+use crate::config_resolve::{self};
+use crate::config_types;
+use crate::rpc_status::option_value_to_json;
+use cln_plugin::options::Value as OptValue;
+use revops_db::actor::DbHandle;
+use revops_db::queries;
+use revops_fees::cycle::FeeCfgSnapshot;
+use std::collections::HashMap;
+
+/// `revenue-r-config` suffixes with NO Python option counterpart at all --
+/// layer (b) (`python_option_values`) must never be consulted for these,
+/// even if the caller's map happens to contain a matching entry. See the
+/// module doc comment.
+const DB_OVERRIDE_ONLY_SUFFIXES: [&str; 3] =
+    ["paused", "authority-level", "econ-governor-fees-enabled"];
+
+fn is_db_override_only(suffix: &str) -> bool {
+    DB_OVERRIDE_ONLY_SUFFIXES.contains(&suffix)
+}
+
+/// Layer (a): the raw, already-validated DB override string for `suffix`
+/// (a `revenue-r-config` suffix, e.g. `"max-fee-ppm"`), or `None` if no row
+/// exists, the row fails `validate_override`, `suffix` is
+/// `config_resolve::is_immutable_key` (mirrors `revenue-r-config`'s own
+/// skip, though none of `FeeCfgSnapshot`'s 22 fields are immutable today),
+/// or there is no DB handle at all (e.g. tests, or a plugin that hasn't
+/// finished init).
+async fn db_layer(db: Option<&DbHandle>, suffix: &str) -> Option<String> {
+    if config_resolve::is_immutable_key(suffix) {
+        return None;
+    }
+    let handle = db?;
+    let field = config_resolve::db_override_key(suffix);
+    let raw = match queries::config_override(handle, &field).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("revops: fee_config db_override query failed for {field}: {e}");
+            None
+        }
+    }?;
+    config_resolve::validate_override(&field, &raw)
+}
+
+/// Layer (b): the cached `listconfigs` value for `suffix`, or `None` for a
+/// [`DB_OVERRIDE_ONLY_SUFFIXES`] key (skip entirely -- no CLN option to
+/// look up), a `config_resolve::SELF_ONLY_KEYS`-style key (none of
+/// `FeeCfgSnapshot`'s fields are, but `python_option_name` still handles
+/// it), or a suffix with nothing in the map (the common case for
+/// `high-liquidity-threshold`/`base-fee-msat`, which Python never
+/// registers as a CLN option at all -- `listconfigs` never reports them,
+/// so this naturally falls through to (c) without special-casing).
+fn python_layer(
+    suffix: &str,
+    python_option_values: &HashMap<String, OptValue>,
+) -> Option<OptValue> {
+    if is_db_override_only(suffix) {
+        return None;
+    }
+    let name = config_resolve::python_option_name(suffix)?;
+    python_option_values.get(&name).cloned()
+}
+
+/// (a) or (b), whichever resolves first -- `None` means "fall through to
+/// the struct default" (layer (c), handled by each typed `resolve_*`
+/// helper below).
+async fn resolve_raw(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+) -> Option<OptValue> {
+    match db_layer(db, suffix).await {
+        Some(raw) => Some(OptValue::String(raw)),
+        None => python_layer(suffix, python_option_values),
+    }
+}
+
+async fn resolve_int(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+    default: i64,
+) -> i64 {
+    let field = config_resolve::db_override_key(suffix);
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => config_types::typed_value(&field, &raw)
+            .as_i64()
+            .unwrap_or(default),
+        None => default,
+    }
+}
+
+async fn resolve_float(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+    default: f64,
+) -> f64 {
+    let field = config_resolve::db_override_key(suffix);
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => config_types::typed_value(&field, &raw)
+            .as_f64()
+            .unwrap_or(default),
+        None => default,
+    }
+}
+
+async fn resolve_bool(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+    default: bool,
+) -> bool {
+    let field = config_resolve::db_override_key(suffix);
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => config_types::typed_value(&field, &raw)
+            .as_bool()
+            .unwrap_or(default),
+        None => default,
+    }
+}
+
+async fn resolve_string(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+    default: String,
+) -> String {
+    let field = config_resolve::db_override_key(suffix);
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => config_types::typed_value(&field, &raw)
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or(default),
+        None => default,
+    }
+}
+
+async fn resolve_string_opt(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+    default: Option<String>,
+) -> Option<String> {
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => {
+            let field = config_resolve::db_override_key(suffix);
+            config_types::typed_value(&field, &raw)
+                .as_str()
+                .map(str::to_string)
+                .or(default)
+        }
+        None => default,
+    }
+}
+
+/// `enable_dynamic_htlcmax` only: resolves like every other field, but
+/// converts the winning raw `OptValue` straight to JSON via
+/// `option_value_to_json` (a `String`/`Integer`/`Boolean` -> matching JSON
+/// scalar, no field-type-driven coercion) rather than
+/// `config_types::typed_value`, which would collapse a DB override string
+/// like `"false"` into `Value::Bool(false)` and destroy the raw/typed
+/// distinction `admission::is_enabled` depends on.
+async fn resolve_raw_json(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    suffix: &str,
+    default: serde_json::Value,
+) -> serde_json::Value {
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => option_value_to_json(Some(&raw)),
+        None => default,
+    }
+}
+
+/// Resolve a live `FeeCfgSnapshot` for the current cycle. See the module
+/// doc comment for the 3-layer precedence and the DB-override-only /
+/// raw-passthrough exceptions.
+pub async fn resolve_fee_cfg(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+) -> FeeCfgSnapshot {
+    let default = FeeCfgSnapshot::default();
+    FeeCfgSnapshot {
+        min_fee_ppm: resolve_int(db, python_option_values, "min-fee-ppm", default.min_fee_ppm)
+            .await,
+        max_fee_ppm: resolve_int(db, python_option_values, "max-fee-ppm", default.max_fee_ppm)
+            .await,
+        min_fee_ppm_saturated: resolve_int(
+            db,
+            python_option_values,
+            "min-fee-ppm-saturated",
+            default.min_fee_ppm_saturated,
+        )
+        .await,
+        fee_interval: resolve_int(
+            db,
+            python_option_values,
+            "fee-interval",
+            default.fee_interval,
+        )
+        .await,
+        flow_interval: resolve_int(
+            db,
+            python_option_values,
+            "flow-interval",
+            default.flow_interval,
+        )
+        .await,
+        htlc_congestion_threshold: resolve_float(
+            db,
+            python_option_values,
+            "htlc-congestion-threshold",
+            default.htlc_congestion_threshold,
+        )
+        .await,
+        market_fee_mode: resolve_string(
+            db,
+            python_option_values,
+            "market-fee-mode",
+            default.market_fee_mode.clone(),
+        )
+        .await,
+        drain_fee_discount_max: resolve_float(
+            db,
+            python_option_values,
+            "drain-fee-discount-max",
+            default.drain_fee_discount_max,
+        )
+        .await,
+        high_liquidity_threshold: resolve_float(
+            db,
+            python_option_values,
+            "high-liquidity-threshold",
+            default.high_liquidity_threshold,
+        )
+        .await,
+        fee_profile: resolve_string(
+            db,
+            python_option_values,
+            "fee-profile",
+            default.fee_profile.clone(),
+        )
+        .await,
+        base_fee_msat: resolve_int(
+            db,
+            python_option_values,
+            "base-fee-msat",
+            default.base_fee_msat,
+        )
+        .await,
+        enable_vegas_reflex: resolve_bool(
+            db,
+            python_option_values,
+            "vegas-reflex",
+            default.enable_vegas_reflex,
+        )
+        .await,
+        enable_dynamic_htlcmax: resolve_raw_json(
+            db,
+            python_option_values,
+            "enable-dynamic-htlcmax",
+            default.enable_dynamic_htlcmax.clone(),
+        )
+        .await,
+        htlcmax_source_pct: resolve_float(
+            db,
+            python_option_values,
+            "htlcmax-source-pct",
+            default.htlcmax_source_pct,
+        )
+        .await,
+        htlcmax_sink_pct: resolve_float(
+            db,
+            python_option_values,
+            "htlcmax-sink-pct",
+            default.htlcmax_sink_pct,
+        )
+        .await,
+        htlcmax_balanced_pct: resolve_float(
+            db,
+            python_option_values,
+            "htlcmax-balanced-pct",
+            default.htlcmax_balanced_pct,
+        )
+        .await,
+        paused: resolve_bool(db, python_option_values, "paused", default.paused).await,
+        node_drain_bias_enabled: resolve_bool(
+            db,
+            python_option_values,
+            "node-drain-bias-enabled",
+            default.node_drain_bias_enabled,
+        )
+        .await,
+        receivable_ratio_target: resolve_float(
+            db,
+            python_option_values,
+            "receivable-ratio-target",
+            default.receivable_ratio_target,
+        )
+        .await,
+        receivable_ratio_floor: resolve_float(
+            db,
+            python_option_values,
+            "receivable-ratio-floor",
+            default.receivable_ratio_floor,
+        )
+        .await,
+        econ_governor_fees_enabled: resolve_bool(
+            db,
+            python_option_values,
+            "econ-governor-fees-enabled",
+            default.econ_governor_fees_enabled,
+        )
+        .await,
+        authority_level: resolve_string_opt(
+            db,
+            python_option_values,
+            "authority-level",
+            default.authority_level.clone(),
+        )
+        .await,
+    }
+}
+
+/// `neighbor_median_min_competitors` is VERIFY==3, not plumbed as a
+/// `FeeCfgSnapshot` field: the market functions bake `market::
+/// MIN_COMPETITORS = 3` and the struct is a frozen 22-field contract (do
+/// not add a field for it). Callers (the T6 scheduler) resolve this key
+/// each cycle through the SAME 3-layer precedence as every other config
+/// key (a plain `serde_json::Value`, not routed through `FeeCfgSnapshot`)
+/// and call this to fail closed: if it resolves to anything other than the
+/// baked `3`, the cycle must be skipped rather than silently running with
+/// a mismatched competitor count.
+pub fn neighbor_median_min_competitors_ok(resolved: &serde_json::Value) -> bool {
+    resolved == &serde_json::json!(3)
+}
