@@ -644,6 +644,7 @@ dependencies = [
  "revops-core",
  "revops-db",
  "revops-fees",
+ "revops-rebalance",
  "rusqlite",
  "serde",
  "serde_json",

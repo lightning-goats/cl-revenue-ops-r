@@ -26,3 +26,10 @@ revops-db = { path = "../revops-db" }
 # reasoning as above — revops-fees depends on revops-econ as a regular
 # dependency; this is a dev-dependency cycle, not a build-graph cycle.
 revops-fees = { path = "../revops-fees" }
+# Phase 5 Task 9 (conformance un-defer flip, scenarios 03/14/15/17): the
+# rebalance-mode replays (planner pairing/scoring, MODES table, sats-EV
+# subtraction-order pin) live in revops-rebalance. Dev-only, same
+# cycle-is-fine reasoning as above — revops-rebalance depends on
+# revops-econ as a regular dependency (T7's budget-rail seam); this is a
+# dev-dependency cycle, not a build-graph cycle.
+revops-rebalance = { path = "../revops-rebalance" }

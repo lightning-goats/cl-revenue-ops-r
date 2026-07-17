@@ -14,14 +14,21 @@
 //! (`_arb_wire`, `_decision_wire`, `_env`, pinned `NOW = 1_752_400_000`) and
 //! the schema gate mirrored from `tools/conformance/validate_fixtures.py`.
 //!
-//! 33 econ-core/analytics/budget-rail/fee-controller scenarios are replayed
-//! byte-identically (Step 2; Phase 3 Task 10 added 9 to the original Phase 2
-//! Task 9 count of 18, and Phase 4 Task 12 added 6 more — the fee-stage
-//! rails/DTS-PID scenarios 08-12 plus the admission scenario 13, all
-//! replayed through the real merged `revops-fees` modules); the other 7 are
-//! schema-gated only, via the pinned, test-enforced [`DEFERRED`] skip list
-//! (Step 3) — every scenario directory must be either replayed or deferred,
-//! so adding scenario 41 breaks the build until triaged.
+//! 37 econ-core/analytics/budget-rail/fee-controller/rebalance-mode
+//! scenarios are replayed byte-identically (Step 2; Phase 3 Task 10 added 9
+//! to the original Phase 2 Task 9 count of 18, Phase 4 Task 12 added 6 more
+//! — the fee-stage rails/DTS-PID scenarios 08-12 plus the admission
+//! scenario 13, all replayed through the real merged `revops-fees`
+//! modules — and Phase 5 Task 9 added 4 more — scenarios 03/14/15/17,
+//! replayed through the real merged `revops-rebalance` planner and MODES
+//! table); the other 3 are schema-gated only, via the pinned,
+//! test-enforced [`DEFERRED`] skip list (Step 3) — every scenario
+//! directory must be either replayed or deferred, so adding scenario 41
+//! breaks the build until triaged. Scenario 16 (structural-drain) is NOT a
+//! clean 40/2 corpus closure: its `expected` is pure Boltz capital-stack
+//! output (Phase 6) with no Phase-5-owned planner slice to replay — see
+//! [`DEFERRED`]'s note. This is a deliberate, logged exception to the
+//! phase plan's target count, not an oversight.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -53,6 +60,10 @@ use revops_fees::profiles::FeeProfileSettings;
 use revops_fees::rails::apply_damped_fee_target;
 use revops_fees::thompson::dynamics::update_posterior;
 use revops_fees::thompson::GaussianThompsonState;
+use revops_rebalance::ev::{sats_ev_gate, EvInputs};
+use revops_rebalance::modes::mode;
+use revops_rebalance::planner::{plan, PlannedPair, PlannerChannel};
+use revops_rebalance::types::{DrainDemand, SkipRecord};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -211,12 +222,16 @@ fn forty_scenarios_present_and_schema_gated() {
 // Step 3: pinned replay / deferred partition
 // ---------------------------------------------------------------------------
 
-/// The 33 econ-core/analytics/budget-rail/fee-controller scenarios replayed
-/// byte-identically in this file (18 from Phase 2 Task 9 + 9 flipped in
-/// Phase 3 Task 10 + 6 flipped in Phase 4 Task 12).
+/// The 37 econ-core/analytics/budget-rail/fee-controller/rebalance-mode
+/// scenarios replayed byte-identically in this file: 18 from Phase 2 Task
+/// 9, 9 flipped in Phase 3 Task 10, 6 flipped in Phase 4 Task 12, and 4
+/// flipped in Phase 5 Task 9 (scenarios 03/14/15/17, via the real merged
+/// `revops-rebalance` planner and MODES table — 16 stays deferred, see
+/// [`DEFERRED`]'s note).
 const REPLAYED: &[&str] = &[
     "01-ordinary-profitable-channel",
     "02-source-gateway-protection",
+    "03-sink-depletion",
     "04-balanced-channel",
     "05-underwater-classification",
     "06-stagnant-candidate",
@@ -227,6 +242,9 @@ const REPLAYED: &[&str] = &[
     "11-fee-cooldown",
     "12-dts-pid-components",
     "13-dynamic-htlcmax",
+    "14-hot-channel-priority",
+    "15-normal-rebalance",
+    "17-manual-diagnostic-rebalance",
     "18-conflicting-close-rebalance",
     "19-protected-close-rejection",
     "20-open-vs-lnplus",
@@ -250,21 +268,21 @@ const REPLAYED: &[&str] = &[
     "40-sanitized-production-decisions",
 ];
 
-/// Explicit, never-silent skip list: the 7 scenarios owned by later phases.
-/// Adding scenario 41 without triaging it into either this list or
-/// [`REPLAYED`] fails [`all_scenarios_replayed_or_deferred`].
+/// Explicit, never-silent skip list: the 3 scenarios owned by later phases
+/// (or with no code path at all). Adding scenario 41 without triaging it
+/// into either this list or [`REPLAYED`] fails
+/// [`all_scenarios_replayed_or_deferred`].
 ///
 /// Phase 3 Task 10 re-tag (deliberate, logged per the conflict-rules-flip
 /// convention): scenarios 08-12's owner strings said "Phase 3: fee_stage
 /// controller" — that numbering predated the port phase plan. Re-tagged to
 /// "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)".
-/// 13-17 stay Phase 4/5 as already written. Scenario 19 ("Phase 3-5:
-/// close-protection gate") left this list entirely — the pure gate
-/// (`policy_close_block`) now replays; the *live* close-protection golden
-/// suite still rides Phase 6 capacity work. Scenario 39 stays deferred
-/// (prose-only, no code path).
+/// Scenario 19 ("Phase 3-5: close-protection gate") left this list
+/// entirely — the pure gate (`policy_close_block`) now replays; the *live*
+/// close-protection golden suite still rides Phase 6 capacity work.
+/// Scenario 39 stays deferred (prose-only, no code path).
 ///
-/// Phase 4 Task 12 ownership audit (this flip): 08-12 (`fee_stage`
+/// Phase 4 Task 12 ownership audit: 08-12 (`fee_stage`
 /// rails/rate_limit/deadband/cooldown/DTS-PID) and 13 (`admission`
 /// dynamic-htlcmax) are genuinely phase-4-owned — every function they
 /// replay (`revops_fees::floors::calculate_floor`,
@@ -272,25 +290,31 @@ const REPLAYED: &[&str] = &[
 /// `revops_fees::thompson::dynamics::update_posterior`,
 /// `revops_fees::pid::calculate_multiplier`,
 /// `revops_fees::admission::compute_htlcmax_msat`) is implemented by this
-/// plan, so they move to [`REPLAYED`]. 14-17 (`rebalance_mode` planner) are
-/// RELABELED here from stale "Phase 4" strings to "Phase 5: rebalance stack
-/// (planner)" — they replay planner/priority logic that lives in the
-/// rebalance stack, genuinely Phase 5 scope (16 keeps its Boltz note); this
-/// task does not replay them, only corrects the ownership label.
+/// plan, so they moved to [`REPLAYED`].
+///
+/// Phase 5 Task 9 flip (this flip, gate task): 03/14/15/17
+/// (`rebalance_mode` planner + MODES table) were RELABELED in Phase 4 Task
+/// 12 to "Phase 5: rebalance stack" without being replayed — this task
+/// closes that out for real, moving all four to [`REPLAYED`] via
+/// `revops_rebalance::planner::plan` (03, 15) and
+/// `revops_rebalance::modes::mode` (14, 17). 16 (structural-drain) does
+/// NOT move: its `expected` is pure Boltz capital-stack output (Phase 6)
+/// with no Phase-5-owned `drain_demand` residual present to replay against
+/// — see its entry below for the full provenance trace. This is why the
+/// corpus lands at 37 replayed / 3 deferred rather than the plan's target
+/// 38/2 (logged honestly, not silently fudged — Task 9 brief's
+/// gate-honesty rule).
 const DEFERRED: &[(&str, &str)] = &[
-    ("03-sink-depletion", "Phase 5: rebalance stack (planner)"),
-    (
-        "14-hot-channel-priority",
-        "Phase 5: rebalance stack (planner, priorities)",
-    ),
-    ("15-normal-rebalance", "Phase 5: rebalance stack (planner)"),
     (
         "16-structural-drain",
-        "Phase 5: rebalance stack (planner, Boltz)",
-    ),
-    (
-        "17-manual-diagnostic-rebalance",
-        "Phase 5: rebalance stack (planner)",
+        "Phase 6: Boltz loop-out execution (capital stack) — this scenario's \
+         `expected` is a pure Boltz cycle_dry_run plan/execution wire \
+         (executed/plan/recommendations/budget), sourced from \
+         tests/golden/fixtures/boltz/cycle_dry_run_executable_balance_plan.json; \
+         it carries NO `drain_demand` key, so there is no Phase-5-owned \
+         planner slice in THIS scenario's expectations to replay against \
+         T2's PlanOutput — deferring the whole case, not a silent partial \
+         pass (gate-honesty rule, Task 9 brief).",
     ),
     (
         "28-lnplus-state-divergence",
@@ -304,8 +328,8 @@ const DEFERRED: &[(&str, &str)] = &[
 
 #[test]
 fn all_scenarios_replayed_or_deferred() {
-    assert_eq!(REPLAYED.len(), 33, "expected exactly 33 replayed scenarios");
-    assert_eq!(DEFERRED.len(), 7, "expected exactly 7 deferred scenarios");
+    assert_eq!(REPLAYED.len(), 37, "expected exactly 37 replayed scenarios");
+    assert_eq!(DEFERRED.len(), 3, "expected exactly 3 deferred scenarios");
 
     let mut dirs: Vec<String> = std::fs::read_dir(fixtures_root())
         .unwrap()
@@ -746,6 +770,455 @@ fn scenario_13_dynamic_htlcmax() {
         .expect("htlcmax valve enabled and capacity > 0");
     let produced = json!({"htlcmax_msat": htlcmax_msat});
     assert_canon_eq(&produced, &case["expected"], "13-dynamic-htlcmax");
+}
+
+// --- rebalance mode (03, 14, 15, 17) ---
+//
+// Phase 5 Task 9 (conformance un-defer flip): these four scenarios replay
+// through the REAL merged `revops-rebalance` modules — the planner
+// (`revops_rebalance::planner::plan`) and the MODES table
+// (`revops_rebalance::modes::mode`) — not reimplementations. 16 stays
+// deferred (see DEFERRED's note): its `expected` is pure Boltz
+// execution/plan output with no Phase-5-owned `drain_demand` slice.
+
+/// Direct recipe port of `tests/golden/test_golden_rebalance_planner.py`'s
+/// `_ch(cid, local_ratio, **over)` helper (real-Python `ChannelState`
+/// defaults this replay does not vary): `capacity_sats=2_000_000`,
+/// `actual_inbound_fee_ppm=100`, `local_out_fee_ppm=250`, `is_active=True`
+/// (feeds `dest_fee_history_validated`), `remaining_budget_sats=5_000`,
+/// and every other `ChannelState` field at ITS dataclass default
+/// (`rebalance_state_v2.py`: `dest_urgency=source_drain_score=0.0`,
+/// `activity_out_sats=activity_in_sats=0`,
+/// `historical_direct_fee_ppm=historical_sourced_fee_ppm=0.0`,
+/// `budget_source="none"`, `realized_utilization=0.5`,
+/// `utilization_is_realized=False`). `target_band_low=0.35`/
+/// `target_band_high=0.65` are `RebalancePlanner()`'s own constructor
+/// defaults (both golden cases construct the planner with no override).
+struct PlannerRecipeChannel {
+    id: &'static str,
+    local_ratio: f64,
+    value_class: &'static str,
+    capacity_sats: i64,
+    remaining_budget_sats: i64,
+}
+
+fn recipe_planner_channel(r: &PlannerRecipeChannel) -> PlannerChannel {
+    let first = r.id.chars().next().expect("non-empty channel id");
+    PlannerChannel {
+        channel_id: r.id.to_string(),
+        peer_id: format!("02{}", first.to_string().repeat(64)),
+        capacity_sats: r.capacity_sats,
+        spendable_sats: py_round(r.local_ratio * r.capacity_sats as f64, 0) as i64,
+        receivable_sats: r.capacity_sats
+            - py_round(r.local_ratio * r.capacity_sats as f64, 0) as i64,
+        band_low: 0.35,
+        band_high: 0.65,
+        inbound_ppm: 100,
+        value_class: r.value_class.to_string(),
+        urgency: 0.0,
+        drain: 0.0,
+        capex_remaining_sats: r.remaining_budget_sats,
+    }
+}
+
+/// Value-class score table (py `_VALUE_SCORES`, `rebalance_planner_v2.py`
+/// ~23-28), reproduced here (not imported — it is a private `planner.rs`
+/// helper) purely to reconstruct `score_decomposition.inputs.value_score`,
+/// an echo field the planner's real `PairCandidate` dataclass carries that
+/// T2's reduced `PlannedPair` does not expose.
+fn recipe_value_score(value_class: &str) -> i64 {
+    match value_class {
+        "profitable" => 2,
+        "active" | "funded" => 1,
+        _ => 0,
+    }
+}
+
+/// Direct port of `rebalance_planner_v2.py`'s `_bootstrap_score_decomposition`
+/// (module-level pure function, NOT the engine's `_build_score_decomposition`
+/// — this is the planner's own pre-route explainability annotation, stage
+/// `"planner_pre_route"`). Every argument here is either a T2 `PlannedPair`
+/// output (`amount_sats`/`pair_budget_sats`/`score`) or directly derivable
+/// from the SAME recipe inputs `plan()` consumed (value_score/imbalance_score/
+/// the four additive terms/local ratios) — no planner internals are
+/// reimplemented, only this genuinely-separate annotation function.
+#[allow(clippy::too_many_arguments)]
+fn bootstrap_score_decomposition(
+    value_score: i64,
+    imbalance_score: f64,
+    pair_score: f64,
+    amount_sats: i64,
+    pair_budget_sats: i64,
+    source_local_ratio: f64,
+    dest_local_ratio: f64,
+    dest_urgency_term: f64,
+    source_drain_term: f64,
+    dest_value_term: f64,
+    cheap_return_term: f64,
+) -> Value {
+    let p_success = 0.5;
+    let expected_future_value = py_round(pair_score, 6);
+    let final_score = py_round(p_success * expected_future_value, 6);
+    json!({
+        "model_version": "v2-bootstrap-explainability",
+        "score_units": "planner_score_minus_budget_share",
+        "stage": "planner_pre_route",
+        "p_success": p_success,
+        "expected_future_value": expected_future_value,
+        "expected_fee": 0.0,
+        "source_opportunity_cost": 0.0,
+        "failure_penalty": 0.0,
+        "capital_risk_penalty": 0.0,
+        "do_nothing_score": 0.0,
+        "final_score": final_score,
+        "beats_do_nothing": final_score > 0.0,
+        "rejection_reason": "",
+        "inputs": {
+            "value_score": value_score,
+            "imbalance_score": py_round(imbalance_score, 6),
+            "amount_sats": amount_sats,
+            "pair_budget_sats": pair_budget_sats,
+            "source_local_ratio": py_round(source_local_ratio, 6),
+            "dest_local_ratio": py_round(dest_local_ratio, 6),
+            "dest_urgency_term": py_round(dest_urgency_term, 6),
+            "source_drain_term": py_round(source_drain_term, 6),
+            "dest_value_term": py_round(dest_value_term, 6),
+            "cheap_return_term": py_round(cheap_return_term, 6),
+        },
+    })
+}
+
+/// Assembles the full `PairCandidate` wire shape for one selected pair —
+/// T2's `PlannedPair` output plus the recipe's known `ChannelState` echo
+/// fields (source/dest capacity, value class, out fee ppm, and every
+/// zero/default-valued descriptive field the reduced `PlannerChannel` does
+/// not carry — all constants at THIS recipe's inputs, see
+/// `PlannerRecipeChannel`'s doc comment) plus the `score_decomposition`
+/// annotation and the pre-route dataclass-default fields
+/// (`reason_code="ev_positive"`, `rejection_reason=""`, `route=None`,
+/// `route_cost_sats=None`, `route_decision=None` —
+/// `rebalance_types_v2.py`'s `PairCandidate` field defaults).
+#[allow(clippy::too_many_arguments)]
+fn selected_pair_wire(
+    src: &PlannerRecipeChannel,
+    dest: &PlannerRecipeChannel,
+    pair: &PlannedPair,
+    dest_urgency_term: f64,
+    source_drain_term: f64,
+) -> Value {
+    let src_ratio = src.local_ratio;
+    let dest_ratio = dest.local_ratio;
+    let dest_value_term = recipe_value_score(dest.value_class) as f64 * 0.20;
+    let inbound_ppm_clamped = 100i64.clamp(0, 5_000);
+    let cheap_return_term = ((5_000 - inbound_ppm_clamped) as f64 / 50_000.0).max(0.0);
+    let src_imbalance = (src_ratio - 0.65_f64).max(0.0);
+    let dest_imbalance = (0.35_f64 - dest_ratio).max(0.0);
+    let imbalance_score = (src_imbalance + dest_imbalance) / 2.0;
+
+    json!({
+        "amount_sats": pair.amount_sats,
+        "dest_activity_in_sats": 0,
+        "dest_budget_source": "none",
+        "dest_capacity_sats": dest.capacity_sats,
+        "dest_channel_id": dest.id,
+        "dest_fee_history_validated": true,
+        "dest_historical_direct_fee_ppm": 0.0,
+        "dest_historical_sourced_fee_ppm": 0.0,
+        "dest_local_ratio": dest_ratio,
+        "dest_out_fee_ppm": 250,
+        "dest_peer_id": format!("02{}", dest.id.chars().next().unwrap().to_string().repeat(64)),
+        "dest_realized_utilization": 0.5,
+        "dest_utilization_is_realized": false,
+        "dest_value_class": dest.value_class,
+        "pair_budget_sats": pair.pair_budget_sats,
+        "reason_code": "ev_positive",
+        "rejection_reason": "",
+        "route": null,
+        "route_cost_sats": null,
+        "route_decision": null,
+        "score": pair.score,
+        "score_decomposition": bootstrap_score_decomposition(
+            recipe_value_score(dest.value_class),
+            imbalance_score,
+            pair.score,
+            pair.amount_sats,
+            pair.pair_budget_sats,
+            src_ratio,
+            dest_ratio,
+            dest_urgency_term,
+            source_drain_term,
+            dest_value_term,
+            cheap_return_term,
+        ),
+        "source_activity_out_sats": 0,
+        "source_budget_source": "none",
+        "source_capacity_sats": src.capacity_sats,
+        "source_channel_id": src.id,
+        "source_historical_direct_fee_ppm": 0.0,
+        "source_historical_sourced_fee_ppm": 0.0,
+        "source_local_ratio": src_ratio,
+        "source_out_fee_ppm": 250,
+        "source_peer_id": format!("02{}", src.id.chars().next().unwrap().to_string().repeat(64)),
+        "source_realized_utilization": 0.5,
+        "source_utilization_is_realized": false,
+        "source_value_class": src.value_class,
+    })
+}
+
+fn skip_record_wire(s: &SkipRecord) -> Value {
+    json!({
+        "channel_id": s.channel_id,
+        "reason": s.reason,
+        "value_class": s.value_class,
+        "remaining_budget_sats": s.remaining_budget_sats,
+        "detail": s.detail,
+    })
+}
+
+/// `paired_count` (over-local channels successfully paired) and
+/// `over_local_count` (all over-local channels, paired or residual) are
+/// DERIVED from the actual `plan()` result, not hardcoded: every selected
+/// pair's source is a distinct over-local channel in both recipes this
+/// helper serves (each recipe has exactly one over-local channel), so
+/// `paired_count == pairs_len` and `over_local_count == pairs_len +
+/// entries.len()` (the residual `DrainDemand` entries `plan()` could not
+/// place).
+fn drain_demand_wire(entries: &[DrainDemand], pairs_len: usize) -> Value {
+    json!({
+        "entries": entries.iter().map(|e| json!({
+            "channel_id": e.channel_id,
+            "peer_id": e.peer_id,
+            "excess_sats": e.excess_sats,
+            "drain_score": e.drain_score,
+            "value_class": e.value_class,
+        })).collect::<Vec<_>>(),
+        "total_excess_sats": entries.iter().map(|e| e.excess_sats).sum::<i64>(),
+        "over_local_count": pairs_len + entries.len(),
+        "paired_count": pairs_len,
+    })
+}
+
+/// Deep structural equality that treats every JSON number the same way
+/// `canonical_json` cannot here: `canonical_json` categorically forbids
+/// non-integer numbers (`revops_core::canonical::CanonicalError::
+/// NonIntegerNumber` — see scenario 05/12's doc comments), and scenarios
+/// 03/15's `expected` is saturated with float leaves (scores, ratios, the
+/// whole `score_decomposition` subtree). Integers compare by exact value;
+/// floats compare via `py_repr` string equality (still bit-for-bit on the
+/// rounded decimal string, never epsilon — Global Constraints: byte-parity
+/// discipline); objects compare by exact key SET (not order — JSON object
+/// order is not semantic) with recursive per-key comparison; arrays compare
+/// element-wise in order (planner pair/skip lists are order-sensitive).
+fn assert_deep_eq_pyfloat(produced: &Value, expected: &Value, path: &str) {
+    match (produced, expected) {
+        (Value::Number(p), Value::Number(e)) => {
+            if p.is_i64() && e.is_i64() {
+                assert_eq!(p.as_i64(), e.as_i64(), "{path}: integer mismatch");
+            } else {
+                let pf = p
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("{path}: produced not numeric"));
+                let ef = e
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("{path}: expected not numeric"));
+                assert_eq!(
+                    py_repr(pf),
+                    py_repr(ef),
+                    "{path}: float mismatch (produced {pf}, expected {ef})"
+                );
+            }
+        }
+        (Value::Object(p), Value::Object(e)) => {
+            let pk: BTreeSet<&String> = p.keys().collect();
+            let ek: BTreeSet<&String> = e.keys().collect();
+            assert_eq!(pk, ek, "{path}: object key set mismatch");
+            for k in pk {
+                assert_deep_eq_pyfloat(&p[k], &e[k], &format!("{path}.{k}"));
+            }
+        }
+        (Value::Array(p), Value::Array(e)) => {
+            assert_eq!(p.len(), e.len(), "{path}: array length mismatch");
+            for (i, (pv, ev)) in p.iter().zip(e.iter()).enumerate() {
+                assert_deep_eq_pyfloat(pv, ev, &format!("{path}[{i}]"));
+            }
+        }
+        _ => assert_eq!(produced, expected, "{path}: mismatch"),
+    }
+}
+
+#[test]
+fn scenario_03_sink_depletion() {
+    let case = case_json("03-sink-depletion");
+
+    // Recipe pinned to `test_golden_rebalance_planner.py::SCENARIOS
+    // ["profitable_dest_preferred"]` (golden generator: `test_golden_plan`,
+    // sourcing `tests/golden/fixtures/rebalance/
+    // plan_profitable_dest_preferred.json`, which `tools/conformance/
+    // generate_scenarios.py::s03` copies verbatim as `expected`).
+    let aaa = PlannerRecipeChannel {
+        id: "aaa",
+        local_ratio: 0.92,
+        value_class: "active",
+        capacity_sats: 2_000_000,
+        remaining_budget_sats: 5_000,
+    };
+    let bbb = PlannerRecipeChannel {
+        id: "bbb",
+        local_ratio: 0.08,
+        value_class: "profitable",
+        capacity_sats: 2_000_000,
+        remaining_budget_sats: 5_000,
+    };
+    let ccc = PlannerRecipeChannel {
+        id: "ccc",
+        local_ratio: 0.08,
+        value_class: "neutral",
+        capacity_sats: 2_000_000,
+        remaining_budget_sats: 5_000,
+    };
+
+    let channels = [
+        recipe_planner_channel(&aaa),
+        recipe_planner_channel(&bbb),
+        recipe_planner_channel(&ccc),
+    ];
+    let result = plan(&channels, 2_000_000, 10, 0);
+
+    assert_eq!(result.pairs.len(), 1, "expected exactly one selected pair");
+    let pair = &result.pairs[0];
+    assert_eq!(pair.source, "aaa");
+    assert_eq!(pair.dest, "bbb");
+
+    let produced = json!({
+        "drain_demand": drain_demand_wire(&result.drain_demand, result.pairs.len()),
+        "selected": [selected_pair_wire(&aaa, &bbb, pair, 0.0, 0.0)],
+        "skipped": result.skips.iter().map(skip_record_wire).collect::<Vec<_>>(),
+    });
+    assert_deep_eq_pyfloat(&produced, &case["expected"], "03-sink-depletion");
+}
+
+#[test]
+fn scenario_14_hot_channel_priority() {
+    let case = case_json("14-hot-channel-priority");
+    let hot = mode("hot_protection").expect("hot_protection mode row");
+    let normal = mode("normal").expect("normal mode row");
+    let produced = json!({
+        "hot_protection_priority": hot.priority,
+        "normal_priority": normal.priority,
+        "hot_beats_normal": hot.priority > normal.priority,
+    });
+    assert_canon_eq(&produced, &case["expected"], "14-hot-channel-priority");
+}
+
+#[test]
+fn scenario_15_normal_rebalance() {
+    let case = case_json("15-normal-rebalance");
+
+    // Recipe pinned to `test_golden_rebalance_planner.py::SCENARIOS
+    // ["amount_bounded_by_chunk"]` (golden generator: `test_golden_plan`,
+    // sourcing `tests/golden/fixtures/rebalance/
+    // plan_amount_bounded_by_chunk.json`, which `tools/conformance/
+    // generate_scenarios.py::s15` copies verbatim as `expected`).
+    let aaa = PlannerRecipeChannel {
+        id: "aaa",
+        local_ratio: 1.00,
+        value_class: "active",
+        capacity_sats: 50_000_000,
+        remaining_budget_sats: 100_000,
+    };
+    let bbb = PlannerRecipeChannel {
+        id: "bbb",
+        local_ratio: 0.00,
+        value_class: "active",
+        capacity_sats: 50_000_000,
+        remaining_budget_sats: 100_000,
+    };
+
+    let channels = [recipe_planner_channel(&aaa), recipe_planner_channel(&bbb)];
+    let result = plan(&channels, 2_000_000, 10, 0);
+
+    assert_eq!(result.pairs.len(), 1, "expected exactly one selected pair");
+    let pair = &result.pairs[0];
+    assert_eq!(pair.source, "aaa");
+    assert_eq!(pair.dest, "bbb");
+    assert!(
+        result.skips.is_empty(),
+        "expected no skips (both channels pair with each other)"
+    );
+
+    let produced = json!({
+        "drain_demand": drain_demand_wire(&result.drain_demand, result.pairs.len()),
+        "selected": [selected_pair_wire(&aaa, &bbb, pair, 0.0, 0.0)],
+        "skipped": Vec::<Value>::new(),
+    });
+    assert_deep_eq_pyfloat(&produced, &case["expected"], "15-normal-rebalance");
+}
+
+#[test]
+fn scenario_17_manual_diagnostic_rebalance() {
+    let case = case_json("17-manual-diagnostic-rebalance");
+    let manual = mode("manual").expect("manual mode row");
+    let diagnostic = mode("diagnostic").expect("diagnostic mode row");
+    let produced = json!({
+        "manual": {
+            "priority": manual.priority,
+            "operator_directed": true,
+        },
+        "diagnostic": {
+            "priority": diagnostic.priority,
+            "bounded_spend": true,
+        },
+    });
+    assert_canon_eq(
+        &produced,
+        &case["expected"],
+        "17-manual-diagnostic-rebalance",
+    );
+}
+
+/// Task 9 (T7-review ledgered obligation), pinned alongside scenario 17
+/// per the phase plan's brief: the sats-EV gate's `failure_penalty_sats`
+/// term must subtract in Python's EXACT left-to-right sequence
+/// (`rebalance_engine_v2.py:556-562`), not folded into
+/// `activity_penalty_sats` beforehand — floating-point subtraction is not
+/// associative, and a 20_000-case randomized sweep against the real Python
+/// function found the two orderings disagree in ~0.4% of cases after
+/// `round(_, 6)` (see `revops_rebalance::ev`'s module doc comment). This
+/// case (`fixtures/rebalance/ev.json`'s `failure_penalty_fold_cases`,
+/// case_id `adversarial_sequence_vs_fold_disagreement`, generated by
+/// `tools/port/gen_rebalance_fixtures.py::_gen_ev_failure_penalty_fold_cases`
+/// in the port repo, branch `phase5-t9-gen`) is a hand-picked, REAL
+/// divergence: the buggy fold order previously in `engine.rs` produced
+/// `-323645.610578`; the fixed sequential order (and real Python) produce
+/// `-323645.610579`. `tests/ev.rs` in `revops-rebalance` replays the full
+/// 201-case set; this is the scenario-17-adjacent single-case pin the T7
+/// review specifically called for.
+#[test]
+fn scenario_17_ev_failure_penalty_subtraction_order_pin() {
+    let ev_inputs = EvInputs {
+        probability_ppm: 0,
+        dest_attempts: 2,
+        dest_success_rate: 0.512_045_483_065_97,
+        efv_sats: 2121.243,
+        fee_sats: 215_427,
+        source_opportunity_sats: 1377.7473285,
+        failure_penalty_sats: 107_713.5,
+        activity_penalty_sats: 187.98475,
+        hold_margin_sats: 0.0,
+    };
+    let verdict = sats_ev_gate(&ev_inputs);
+
+    // Real Python's `_build_score_decomposition` output for these exact
+    // inputs (sequential subtraction) — NOT what the pre-fix folded order
+    // produced (`-323645.610578`).
+    assert_eq!(
+        py_repr(verdict.final_score_sats),
+        py_repr(-323_645.610579_f64),
+        "sats_ev_gate must subtract failure_penalty_sats and \
+         activity_penalty_sats as SEPARATE sequential terms, matching \
+         Python's exact left-to-right order — a folded (activity + \
+         failure) subtraction diverges here"
+    );
 }
 
 // --- arbitration (18, 20, 21, 31, 35, 38) ---

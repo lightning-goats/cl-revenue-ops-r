@@ -29,16 +29,41 @@
 //! still exported `pub` from this module as the frozen contract values a
 //! future caller (T7's `engine.rs`) needs to perform that reduction itself.
 //!
-//! [`EvInputs`] also carries no `failure_count`: every fixture case is
-//! driven with an EMPTY in-cycle failure history, so the real formula's
-//! `failure_penalty_sats` term (`failure_count * expected_fee_sats *
-//! FAILURE_COST_RATE`) is always exactly `0.0` and drops out, leaving the
-//! reduced 4-term formula this module implements (`p*efv - fee -
-//! source_opp - activity_penalty`) byte-identical to the real 5-term one
-//! for every fixture case. [`FAILURE_COST_RATE`] is still exported `pub` as
-//! the frozen constant a future caller combines with `cooldowns.rs`'s
-//! failure-count trackers to fold a failure penalty into `fee_sats` (or a
-//! sibling term) before calling [`sats_ev_gate`].
+//! ## Phase 5 Task 9 fix: `failure_penalty_sats` is a distinct term
+//!
+//! Earlier revisions of this module took no `failure_count`/
+//! `failure_penalty_sats` input (every T6 fixture case used an EMPTY
+//! in-cycle failure history, so the real formula's `failure_penalty_sats`
+//! term — `failure_count * expected_fee_sats * FAILURE_COST_RATE` — was
+//! always exactly `0.0` and dropped out). T7's `engine.rs` then computed a
+//! real nonzero `failure_penalty_sats` itself but FOLDED it into
+//! `activity_penalty_sats` (one combined term) before calling
+//! [`sats_ev_gate`], flagged at the time as an unpinned last-ULP risk vs.
+//! Python's actual left-to-right sequential subtraction
+//! (`rebalance_engine_v2.py:556-562`):
+//!
+//! ```text
+//! final_score_sats = round(
+//!     p_success * expected_future_value_sats
+//!     - expected_fee_sats
+//!     - source_opportunity_sats
+//!     - failure_penalty_sats
+//!     - activity_penalty_sats,
+//!     6,
+//! )
+//! ```
+//!
+//! Task 9 (conformance gate, T7-review ledgered obligation) checked this:
+//! a 20_000-case randomized sweep driving the REAL Python function found
+//! the fold-then-subtract order disagrees with Python's sequential order
+//! in ~0.4% of cases after `round(_, 6)` — a real divergence, not a
+//! hypothetical one (`tools/port/gen_rebalance_fixtures.py::
+//! _gen_ev_failure_penalty_fold_cases`, port repo). [`EvInputs`] now
+//! carries `failure_penalty_sats` as its OWN field, and [`sats_ev_gate`]
+//! subtracts all five terms in the exact same sequence as Python, pinned
+//! by `fixtures/rebalance/ev.json`'s `failure_penalty_fold_cases` (see
+//! `tests/ev.rs`) and re-exercised from the conformance suite's scenario
+//! 17 replay (`crates/revops-econ/tests/conformance.rs`).
 //!
 //! `sats_ev_gate` also does not implement Python's third `p_success` branch
 //! (`rejection_reason == "no_route"` forcing `p_success = 0.05`): `EvInputs`
@@ -97,6 +122,13 @@ pub struct EvInputs {
     pub fee_sats: i64,
     /// Already-computed `source_opportunity_sats`.
     pub source_opportunity_sats: f64,
+    /// Already-computed `failure_penalty_sats` (`failure_count *
+    /// expected_fee_sats * FAILURE_COST_RATE`, py `rebalance_engine_v2.py`
+    /// ~537-539) — a term DISTINCT from `activity_penalty_sats` (Task 9
+    /// fix; see module doc comment). Subtracted in Python's exact
+    /// sequential position: after `source_opportunity_sats`, before
+    /// `activity_penalty_sats`.
+    pub failure_penalty_sats: f64,
     /// Already-computed `activity_penalty_sats` (feature #1, capped soft
     /// penalty for channels already being helpfully moved by live flow).
     pub activity_penalty_sats: f64,
@@ -110,7 +142,8 @@ pub struct EvInputs {
 pub struct EvVerdict {
     pub pass: bool,
     /// `round(p_success * efv_sats - fee_sats - source_opportunity_sats -
-    /// activity_penalty_sats, 6)` (py `final_score_sats`).
+    /// failure_penalty_sats - activity_penalty_sats, 6)` (py
+    /// `final_score_sats`, exact term sequence).
     pub final_score_sats: f64,
     /// `Some(BELOW_HOLD_MARGIN)` when rejected, `None` when passing.
     pub reject_reason: Option<&'static str>,
@@ -135,15 +168,19 @@ fn p_success(probability_ppm: i64, dest_attempts: i64, dest_success_rate: f64) -
 }
 
 /// Port of the sats-EV do-nothing gate: py `_build_score_decomposition`'s
-/// `final_score_sats` formula (reduced per the module doc comment) plus the
-/// inline hold-margin check at `rebalance_engine_v2.py:1468-1472`
+/// `final_score_sats` formula (all five terms, subtracted in Python's exact
+/// left-to-right sequence — see module doc comment) plus the inline
+/// hold-margin check at `rebalance_engine_v2.py:1468-1472`
 /// (`final_score_present and route_cost_sats > 0 and final_score <
 /// hold_margin` → reject `"below_hold_margin"`). Zero-cost routes
 /// (`fee_sats <= 0`) ALWAYS pass — the zero-budget equalization invariant.
 pub fn sats_ev_gate(i: &EvInputs) -> EvVerdict {
     let p = p_success(i.probability_ppm, i.dest_attempts, i.dest_success_rate);
-    let raw =
-        p * i.efv_sats - i.fee_sats as f64 - i.source_opportunity_sats - i.activity_penalty_sats;
+    let raw = p * i.efv_sats
+        - i.fee_sats as f64
+        - i.source_opportunity_sats
+        - i.failure_penalty_sats
+        - i.activity_penalty_sats;
     let final_score_sats = py_round(raw, 6);
     let rejected = i.fee_sats > 0 && final_score_sats < i.hold_margin_sats;
     EvVerdict {

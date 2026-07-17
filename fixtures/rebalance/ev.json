@@ -9398,5 +9398,3424 @@
    "ev_max_sats": 1000,
    "expected": 1000
   }
+ ],
+ "failure_penalty_fold_cases": [
+  {
+   "case_id": "adversarial_sequence_vs_fold_disagreement",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.51204548306597,
+    "efv_sats": 2121.243,
+    "fee_sats": 215427,
+    "source_opportunity_sats": 1377.7473285,
+    "failure_penalty_sats": 107713.5,
+    "activity_penalty_sats": 187.98475,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -323645.610579
+   }
+  },
+  {
+   "case_id": "random_fold_0",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.8975336079829104,
+    "efv_sats": 509.2953721566698,
+    "fee_sats": 272725,
+    "source_opportunity_sats": 623.892568,
+    "failure_penalty_sats": 340906.25,
+    "activity_penalty_sats": 254.647686,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -614153.911555
+   }
+  },
+  {
+   "case_id": "random_fold_1",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.46692047897225464,
+    "efv_sats": 517.627,
+    "fee_sats": 180304,
+    "source_opportunity_sats": 525.391405,
+    "failure_penalty_sats": 225380.0,
+    "activity_penalty_sats": 258.8135,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -406217.952832
+   }
+  },
+  {
+   "case_id": "random_fold_2",
+   "inputs": {
+    "probability_ppm": 137583,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.301144760018494,
+    "efv_sats": 309.7885909415694,
+    "fee_sats": 231411,
+    "source_opportunity_sats": 95.03758,
+    "failure_penalty_sats": 462822.0,
+    "activity_penalty_sats": 154.894295,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -694440.310231
+   }
+  },
+  {
+   "case_id": "random_fold_3",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.9442186502681295,
+    "efv_sats": 284.6795,
+    "fee_sats": 19986,
+    "source_opportunity_sats": 382.75158775,
+    "failure_penalty_sats": 14989.5,
+    "activity_penalty_sats": 142.33975,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -35295.021616
+   }
+  },
+  {
+   "case_id": "random_fold_4",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.7010636670509018,
+    "efv_sats": 826.28908675,
+    "fee_sats": 189542,
+    "source_opportunity_sats": 168.155084,
+    "failure_penalty_sats": 379084.0,
+    "activity_penalty_sats": 413.144543,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -568711.086727
+   }
+  },
+  {
+   "case_id": "random_fold_5",
+   "inputs": {
+    "probability_ppm": 843722,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.9148037674634424,
+    "efv_sats": 4581.837901999999,
+    "fee_sats": 74458,
+    "source_opportunity_sats": 1322.0561845,
+    "failure_penalty_sats": 55843.5,
+    "activity_penalty_sats": 1832.251993,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -129590.010739
+   }
+  },
+  {
+   "case_id": "random_fold_6",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.9779075572891223,
+    "efv_sats": 404.4431565,
+    "fee_sats": 234943,
+    "source_opportunity_sats": 255.0461995,
+    "failure_penalty_sats": 234943.0,
+    "activity_penalty_sats": 202.221578,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -470044.402979
+   }
+  },
+  {
+   "case_id": "random_fold_7",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.28459048285666766,
+    "efv_sats": 15.388447943409629,
+    "fee_sats": 7665,
+    "source_opportunity_sats": 517.50848625,
+    "failure_penalty_sats": 13413.75,
+    "activity_penalty_sats": 5.945118,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -21594.50938
+   }
+  },
+  {
+   "case_id": "random_fold_8",
+   "inputs": {
+    "probability_ppm": 90495,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.5796461661997951,
+    "efv_sats": 2432.3711155,
+    "fee_sats": 231361,
+    "source_opportunity_sats": 3303.0431505,
+    "failure_penalty_sats": 404881.75,
+    "activity_penalty_sats": 370.471149,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -639696.146875
+   }
+  },
+  {
+   "case_id": "random_fold_9",
+   "inputs": {
+    "probability_ppm": 650964,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.8838636830123467,
+    "efv_sats": 127.1979700410962,
+    "fee_sats": 116929,
+    "source_opportunity_sats": 75.8312445,
+    "failure_penalty_sats": 58464.5,
+    "activity_penalty_sats": 63.598985,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -175450.12893
+   }
+  },
+  {
+   "case_id": "random_fold_10",
+   "inputs": {
+    "probability_ppm": 456911,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.8759594404070872,
+    "efv_sats": 2963.6567830000004,
+    "fee_sats": 41521,
+    "source_opportunity_sats": 2424.015629,
+    "failure_penalty_sats": 41521.0,
+    "activity_penalty_sats": 1107.296476,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -85219.184721
+   }
+  },
+  {
+   "case_id": "random_fold_11",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.8744701647131587,
+    "efv_sats": 1555.6065,
+    "fee_sats": 383148,
+    "source_opportunity_sats": 2224.517295,
+    "failure_penalty_sats": 383148.0,
+    "activity_penalty_sats": 746.2885,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -768197.738434
+   }
+  },
+  {
+   "case_id": "random_fold_12",
+   "inputs": {
+    "probability_ppm": 966945,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.874655379715852,
+    "efv_sats": 1894.553,
+    "fee_sats": 80841,
+    "source_opportunity_sats": 348.597752,
+    "failure_penalty_sats": 40420.5,
+    "activity_penalty_sats": 700.07475,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -120478.243951
+   }
+  },
+  {
+   "case_id": "random_fold_13",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.7594100356902002,
+    "efv_sats": 1906.766034,
+    "fee_sats": 18172,
+    "source_opportunity_sats": 662.6086335,
+    "failure_penalty_sats": 18172.0,
+    "activity_penalty_sats": 953.383017,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -37006.608633
+   }
+  },
+  {
+   "case_id": "random_fold_14",
+   "inputs": {
+    "probability_ppm": 329579,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.6138615841671264,
+    "efv_sats": 215.1845115,
+    "fee_sats": 256993,
+    "source_opportunity_sats": 47.394102,
+    "failure_penalty_sats": 256993.0,
+    "activity_penalty_sats": 107.592256,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -514070.066062
+   }
+  },
+  {
+   "case_id": "random_fold_15",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.9849734466002926,
+    "efv_sats": 852.0010916200229,
+    "fee_sats": 252419,
+    "source_opportunity_sats": 55.390459,
+    "failure_penalty_sats": 378628.5,
+    "activity_penalty_sats": 353.49175,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -630823.78271
+   }
+  },
+  {
+   "case_id": "random_fold_16",
+   "inputs": {
+    "probability_ppm": 618156,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.17816911245853706,
+    "efv_sats": 1845.50027025,
+    "fee_sats": 97402,
+    "source_opportunity_sats": 621.8163315,
+    "failure_penalty_sats": 146103.0,
+    "activity_penalty_sats": 922.750135,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -243908.759401
+   }
+  },
+  {
+   "case_id": "random_fold_17",
+   "inputs": {
+    "probability_ppm": 28345,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.6824566542942699,
+    "efv_sats": 732.8773215,
+    "fee_sats": 368201,
+    "source_opportunity_sats": 59.6366785,
+    "failure_penalty_sats": 736402.0,
+    "activity_penalty_sats": 366.438661,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1104992.431473
+   }
+  },
+  {
+   "case_id": "random_fold_18",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.27465720202792077,
+    "efv_sats": 2377.3965,
+    "fee_sats": 353121,
+    "source_opportunity_sats": 2186.01608175,
+    "failure_penalty_sats": 264840.75,
+    "activity_penalty_sats": 416.60925,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -619643.541671
+   }
+  },
+  {
+   "case_id": "random_fold_19",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.9609800434916973,
+    "efv_sats": 4102.957383798699,
+    "fee_sats": 267612,
+    "source_opportunity_sats": 1103.73151125,
+    "failure_penalty_sats": 133806.0,
+    "activity_penalty_sats": 1480.731735,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -401005.293818
+   }
+  },
+  {
+   "case_id": "random_fold_20",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.9897126118107223,
+    "efv_sats": 724.2915,
+    "fee_sats": 107197,
+    "source_opportunity_sats": 523.6627545,
+    "failure_penalty_sats": 26799.25,
+    "activity_penalty_sats": 362.14575,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -134342.565413
+   }
+  },
+  {
+   "case_id": "random_fold_21",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.8476658921416306,
+    "efv_sats": 384.0315,
+    "fee_sats": 25678,
+    "source_opportunity_sats": 426.46698075,
+    "failure_penalty_sats": 44936.5,
+    "activity_penalty_sats": 192.01575,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -70974.209654
+   }
+  },
+  {
+   "case_id": "random_fold_22",
+   "inputs": {
+    "probability_ppm": 291264,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.883797884746607,
+    "efv_sats": 3347.6101865237583,
+    "fee_sats": 124456,
+    "source_opportunity_sats": 3158.462616,
+    "failure_penalty_sats": 248912.0,
+    "activity_penalty_sats": 1366.203123,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -376917.627406
+   }
+  },
+  {
+   "case_id": "random_fold_23",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.10313588038283883,
+    "efv_sats": 1722.90316275,
+    "fee_sats": 266412,
+    "source_opportunity_sats": 1071.3039645,
+    "failure_penalty_sats": 66603.0,
+    "activity_penalty_sats": 776.141558,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -334342.873165
+   }
+  },
+  {
+   "case_id": "random_fold_24",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.9208715446516222,
+    "efv_sats": 2617.1901719999996,
+    "fee_sats": 287150,
+    "source_opportunity_sats": 650.947596,
+    "failure_penalty_sats": 502512.5,
+    "activity_penalty_sats": 1164.273515,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -789618.37559
+   }
+  },
+  {
+   "case_id": "random_fold_25",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.526477741304926,
+    "efv_sats": 1452.8002609999999,
+    "fee_sats": 345168,
+    "source_opportunity_sats": 1646.9864345,
+    "failure_penalty_sats": 517752.0,
+    "activity_penalty_sats": 726.40013,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -864547.752999
+   }
+  },
+  {
+   "case_id": "random_fold_26",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.5577074660968588,
+    "efv_sats": 2326.3798209094275,
+    "fee_sats": 56810,
+    "source_opportunity_sats": 3185.7241005,
+    "failure_penalty_sats": 14202.5,
+    "activity_penalty_sats": 1163.18991,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -74131.099358
+   }
+  },
+  {
+   "case_id": "random_fold_27",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.39631609311407545,
+    "efv_sats": 2128.9795,
+    "fee_sats": 209512,
+    "source_opportunity_sats": 2665.482334,
+    "failure_penalty_sats": 366646.0,
+    "activity_penalty_sats": 612.34175,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -578481.70479
+   }
+  },
+  {
+   "case_id": "random_fold_28",
+   "inputs": {
+    "probability_ppm": 422226,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.5685908777945295,
+    "efv_sats": 1715.813715,
+    "fee_sats": 283915,
+    "source_opportunity_sats": 1748.652255,
+    "failure_penalty_sats": 425872.5,
+    "activity_penalty_sats": 516.452355,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -711328.143448
+   }
+  },
+  {
+   "case_id": "random_fold_29",
+   "inputs": {
+    "probability_ppm": 276017,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.013142943955418707,
+    "efv_sats": 1391.84418,
+    "fee_sats": 196390,
+    "source_opportunity_sats": 1339.1274,
+    "failure_penalty_sats": 343682.5,
+    "activity_penalty_sats": 695.92209,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -541723.376835
+   }
+  },
+  {
+   "case_id": "random_fold_30",
+   "inputs": {
+    "probability_ppm": 461954,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.7192712248639815,
+    "efv_sats": 1730.5975,
+    "fee_sats": 118814,
+    "source_opportunity_sats": 615.22741125,
+    "failure_penalty_sats": 29703.5,
+    "activity_penalty_sats": 297.77675,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -148631.047724
+   }
+  },
+  {
+   "case_id": "random_fold_31",
+   "inputs": {
+    "probability_ppm": 627842,
+    "dest_attempts": 5,
+    "dest_success_rate": 0.2360163673947825,
+    "efv_sats": 2364.97623175,
+    "fee_sats": 316825,
+    "source_opportunity_sats": 2460.59743875,
+    "failure_penalty_sats": 237618.75,
+    "activity_penalty_sats": 717.06054,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -556136.576571
+   }
+  },
+  {
+   "case_id": "random_fold_32",
+   "inputs": {
+    "probability_ppm": 239353,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.3422776326171204,
+    "efv_sats": 1208.812,
+    "fee_sats": 350364,
+    "source_opportunity_sats": 50.770104,
+    "failure_penalty_sats": 700728.0,
+    "activity_penalty_sats": 117.631,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1050971.068325
+   }
+  },
+  {
+   "case_id": "random_fold_33",
+   "inputs": {
+    "probability_ppm": 666151,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.6904192976087162,
+    "efv_sats": 3376.188018,
+    "fee_sats": 218901,
+    "source_opportunity_sats": 540.6125865,
+    "failure_penalty_sats": 109450.5,
+    "activity_penalty_sats": 1215.267627,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -327858.329189
+   }
+  },
+  {
+   "case_id": "random_fold_34",
+   "inputs": {
+    "probability_ppm": 336236,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.474969435651036,
+    "efv_sats": 848.9497059999999,
+    "fee_sats": 282421,
+    "source_opportunity_sats": 623.94088075,
+    "failure_penalty_sats": 141210.5,
+    "activity_penalty_sats": 424.474853,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -424394.46828
+   }
+  },
+  {
+   "case_id": "random_fold_35",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.18809237202088702,
+    "efv_sats": 808.125,
+    "fee_sats": 102243,
+    "source_opportunity_sats": 580.83984375,
+    "failure_penalty_sats": 25560.75,
+    "activity_penalty_sats": 404.0625,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -128384.589844
+   }
+  },
+  {
+   "case_id": "random_fold_36",
+   "inputs": {
+    "probability_ppm": 405069,
+    "dest_attempts": 11,
+    "dest_success_rate": 0.45733355565385636,
+    "efv_sats": 682.99064212513,
+    "fee_sats": 53281,
+    "source_opportunity_sats": 79.851601,
+    "failure_penalty_sats": 93241.75,
+    "activity_penalty_sats": 341.495321,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -146667.438586
+   }
+  },
+  {
+   "case_id": "random_fold_37",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 5,
+    "dest_success_rate": 0.8898988518651874,
+    "efv_sats": 2157.0225,
+    "fee_sats": 61128,
+    "source_opportunity_sats": 424.9334325,
+    "failure_penalty_sats": 76410.0,
+    "activity_penalty_sats": 696.2915,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -137160.203384
+   }
+  },
+  {
+   "case_id": "random_fold_38",
+   "inputs": {
+    "probability_ppm": 562792,
+    "dest_attempts": 5,
+    "dest_success_rate": 0.8651057357281,
+    "efv_sats": 1762.507,
+    "fee_sats": 126950,
+    "source_opportunity_sats": 666.227646,
+    "failure_penalty_sats": 158687.5,
+    "activity_penalty_sats": 52.65125,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -285364.454056
+   }
+  },
+  {
+   "case_id": "random_fold_39",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.980633892725465,
+    "efv_sats": 1953.712908,
+    "fee_sats": 304174,
+    "source_opportunity_sats": 922.744872,
+    "failure_penalty_sats": 76043.5,
+    "activity_penalty_sats": 765.103963,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -380458.982061
+   }
+  },
+  {
+   "case_id": "random_fold_40",
+   "inputs": {
+    "probability_ppm": 749941,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.22888329876948565,
+    "efv_sats": 2743.4466239187395,
+    "fee_sats": 362546,
+    "source_opportunity_sats": 3199.5590375,
+    "failure_penalty_sats": 453182.5,
+    "activity_penalty_sats": 730.153455,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -817600.789388
+   }
+  },
+  {
+   "case_id": "random_fold_41",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 11,
+    "dest_success_rate": 0.46542859519478375,
+    "efv_sats": 2859.0046965284823,
+    "fee_sats": 170370,
+    "source_opportunity_sats": 2220.407952,
+    "failure_penalty_sats": 85185.0,
+    "activity_penalty_sats": 907.343876,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -257302.669384
+   }
+  },
+  {
+   "case_id": "random_fold_42",
+   "inputs": {
+    "probability_ppm": 613377,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.36572349565606266,
+    "efv_sats": 1014.2812521513473,
+    "fee_sats": 307890,
+    "source_opportunity_sats": 2089.16435,
+    "failure_penalty_sats": 384862.5,
+    "activity_penalty_sats": 283.74125,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -694503.268808
+   }
+  },
+  {
+   "case_id": "random_fold_43",
+   "inputs": {
+    "probability_ppm": 632645,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.3475109452434195,
+    "efv_sats": 2326.7935,
+    "fee_sats": 300055,
+    "source_opportunity_sats": 2217.4342055,
+    "failure_penalty_sats": 600110.0,
+    "activity_penalty_sats": 135.09475,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -901045.494682
+   }
+  },
+  {
+   "case_id": "random_fold_44",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.0585369171126473,
+    "efv_sats": 115.002,
+    "fee_sats": 374614,
+    "source_opportunity_sats": 66.528657,
+    "failure_penalty_sats": 187307.0,
+    "activity_penalty_sats": 57.501,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -562012.913226
+   }
+  },
+  {
+   "case_id": "random_fold_45",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.13644561117640386,
+    "efv_sats": 1877.2093437475905,
+    "fee_sats": 107092,
+    "source_opportunity_sats": 606.18161125,
+    "failure_penalty_sats": 160638.0,
+    "activity_penalty_sats": 385.569349,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -268124.380136
+   }
+  },
+  {
+   "case_id": "random_fold_46",
+   "inputs": {
+    "probability_ppm": 372204,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.10555425826444953,
+    "efv_sats": 993.8391695591274,
+    "fee_sats": 386749,
+    "source_opportunity_sats": 937.92708975,
+    "failure_penalty_sats": 483436.25,
+    "activity_penalty_sats": 496.919585,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -871250.18576
+   }
+  },
+  {
+   "case_id": "random_fold_47",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.49039710030372385,
+    "efv_sats": 675.761,
+    "fee_sats": 213717,
+    "source_opportunity_sats": 443.6370965,
+    "failure_penalty_sats": 53429.25,
+    "activity_penalty_sats": 337.8805,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -267593.131729
+   }
+  },
+  {
+   "case_id": "random_fold_48",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.963224617040111,
+    "efv_sats": 651.5585,
+    "fee_sats": 276446,
+    "source_opportunity_sats": 394.1928925,
+    "failure_penalty_sats": 345557.5,
+    "activity_penalty_sats": 325.77925,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -622246.783924
+   }
+  },
+  {
+   "case_id": "random_fold_49",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.03375372757744044,
+    "efv_sats": 3286.267032853266,
+    "fee_sats": 179278,
+    "source_opportunity_sats": 3193.82657825,
+    "failure_penalty_sats": 224097.5,
+    "activity_penalty_sats": 708.89595,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -406401.193889
+   }
+  },
+  {
+   "case_id": "random_fold_50",
+   "inputs": {
+    "probability_ppm": 667626,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.20379578702683765,
+    "efv_sats": 2215.2535,
+    "fee_sats": 185049,
+    "source_opportunity_sats": 3264.17603225,
+    "failure_penalty_sats": 92524.5,
+    "activity_penalty_sats": 821.23125,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -280179.946449
+   }
+  },
+  {
+   "case_id": "random_fold_51",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.5904743804263145,
+    "efv_sats": 35.8455,
+    "fee_sats": 8038,
+    "source_opportunity_sats": 7.599246,
+    "failure_penalty_sats": 16076.0,
+    "activity_penalty_sats": 17.92275,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -24119.977696
+   }
+  },
+  {
+   "case_id": "random_fold_52",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.6248219837557829,
+    "efv_sats": 1265.7295,
+    "fee_sats": 177953,
+    "source_opportunity_sats": 1483.434974,
+    "failure_penalty_sats": 88976.5,
+    "activity_penalty_sats": 506.86875,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -268207.94354
+   }
+  },
+  {
+   "case_id": "random_fold_53",
+   "inputs": {
+    "probability_ppm": 351858,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.513788283837205,
+    "efv_sats": 2040.5785,
+    "fee_sats": 43337,
+    "source_opportunity_sats": 2077.308913,
+    "failure_penalty_sats": 65005.5,
+    "activity_penalty_sats": 322.25075,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -110024.065793
+   }
+  },
+  {
+   "case_id": "random_fold_54",
+   "inputs": {
+    "probability_ppm": 498224,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.7996868652727497,
+    "efv_sats": 4539.5282625,
+    "fee_sats": 243087,
+    "source_opportunity_sats": 945.6367965,
+    "failure_penalty_sats": 182315.25,
+    "activity_penalty_sats": 421.485075,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -424507.669942
+   }
+  },
+  {
+   "case_id": "random_fold_55",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.23896787205915615,
+    "efv_sats": 1566.284,
+    "fee_sats": 174701,
+    "source_opportunity_sats": 116.688158,
+    "failure_penalty_sats": 43675.25,
+    "activity_penalty_sats": 630.66925,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -218340.465408
+   }
+  },
+  {
+   "case_id": "random_fold_56",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.3682001768171945,
+    "efv_sats": 680.44058225,
+    "fee_sats": 129081,
+    "source_opportunity_sats": 273.1802645,
+    "failure_penalty_sats": 64540.5,
+    "activity_penalty_sats": 340.220291,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -193939.521239
+   }
+  },
+  {
+   "case_id": "random_fold_57",
+   "inputs": {
+    "probability_ppm": 5839,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.3415711274615353,
+    "efv_sats": 1279.2995,
+    "fee_sats": 180924,
+    "source_opportunity_sats": 1018.322402,
+    "failure_penalty_sats": 180924.0,
+    "activity_penalty_sats": 170.917,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -362973.274427
+   }
+  },
+  {
+   "case_id": "random_fold_58",
+   "inputs": {
+    "probability_ppm": 562199,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.33369763019856125,
+    "efv_sats": 501.05,
+    "fee_sats": 271210,
+    "source_opportunity_sats": 635.080875,
+    "failure_penalty_sats": 542420.0,
+    "activity_penalty_sats": 250.525,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -814233.916066
+   }
+  },
+  {
+   "case_id": "random_fold_59",
+   "inputs": {
+    "probability_ppm": 119712,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.00723539371182591,
+    "efv_sats": 663.01208,
+    "fee_sats": 27293,
+    "source_opportunity_sats": 260.97284,
+    "failure_penalty_sats": 27293.0,
+    "activity_penalty_sats": 331.50604,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -55099.108378
+   }
+  },
+  {
+   "case_id": "random_fold_60",
+   "inputs": {
+    "probability_ppm": 966404,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.5266776048750764,
+    "efv_sats": 1189.8985,
+    "fee_sats": 267526,
+    "source_opportunity_sats": 947.159206,
+    "failure_penalty_sats": 66881.5,
+    "activity_penalty_sats": 188.493,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -334393.229536
+   }
+  },
+  {
+   "case_id": "random_fold_61",
+   "inputs": {
+    "probability_ppm": 588588,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.4642845931483529,
+    "efv_sats": 1945.319,
+    "fee_sats": 70704,
+    "source_opportunity_sats": 384.2005025,
+    "failure_penalty_sats": 106056.0,
+    "activity_penalty_sats": 452.0085,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -176451.217583
+   }
+  },
+  {
+   "case_id": "random_fold_62",
+   "inputs": {
+    "probability_ppm": 165409,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.11255776521198269,
+    "efv_sats": 465.5604958422184,
+    "fee_sats": 157961,
+    "source_opportunity_sats": 152.0798475,
+    "failure_penalty_sats": 39490.25,
+    "activity_penalty_sats": 134.490195,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -197660.812146
+   }
+  },
+  {
+   "case_id": "random_fold_63",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.16024505228166608,
+    "efv_sats": 761.5653475435979,
+    "fee_sats": 147585,
+    "source_opportunity_sats": 672.88872,
+    "failure_penalty_sats": 295170.0,
+    "activity_penalty_sats": 196.707952,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -443373.186796
+   }
+  },
+  {
+   "case_id": "random_fold_64",
+   "inputs": {
+    "probability_ppm": 451376,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.9587691703558273,
+    "efv_sats": 894.8558856011341,
+    "fee_sats": 235343,
+    "source_opportunity_sats": 106.85225325,
+    "failure_penalty_sats": 470686.0,
+    "activity_penalty_sats": 447.427943,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -706179.363726
+   }
+  },
+  {
+   "case_id": "random_fold_65",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.28054521377375663,
+    "efv_sats": 1310.7135,
+    "fee_sats": 382756,
+    "source_opportunity_sats": 1648.877583,
+    "failure_penalty_sats": 287067.0,
+    "activity_penalty_sats": 655.35675,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -671615.698758
+   }
+  },
+  {
+   "case_id": "random_fold_66",
+   "inputs": {
+    "probability_ppm": 990115,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.5219769202632449,
+    "efv_sats": 1909.8678759455183,
+    "fee_sats": 156108,
+    "source_opportunity_sats": 1454.158745,
+    "failure_penalty_sats": 156108.0,
+    "activity_penalty_sats": 457.372,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -312236.761548
+   }
+  },
+  {
+   "case_id": "random_fold_67",
+   "inputs": {
+    "probability_ppm": 561669,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.7108920665580203,
+    "efv_sats": 893.5725,
+    "fee_sats": 342773,
+    "source_opportunity_sats": 916.35859875,
+    "failure_penalty_sats": 257079.75,
+    "activity_penalty_sats": 404.117,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -600671.333626
+   }
+  },
+  {
+   "case_id": "random_fold_68",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.9812126228868315,
+    "efv_sats": 2194.136132464164,
+    "fee_sats": 87984,
+    "source_opportunity_sats": 1551.405336,
+    "failure_penalty_sats": 109980.0,
+    "activity_penalty_sats": 592.929257,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -198483.343525
+   }
+  },
+  {
+   "case_id": "random_fold_69",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.19600510732030096,
+    "efv_sats": 938.1925545,
+    "fee_sats": 373798,
+    "source_opportunity_sats": 604.79161,
+    "failure_penalty_sats": 373798.0,
+    "activity_penalty_sats": 469.096277,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -748343.394482
+   }
+  },
+  {
+   "case_id": "random_fold_70",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.3537183745301745,
+    "efv_sats": 870.2966606898924,
+    "fee_sats": 197938,
+    "source_opportunity_sats": 210.53795525,
+    "failure_penalty_sats": 346391.5,
+    "activity_penalty_sats": 435.14833,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -544603.69216
+   }
+  },
+  {
+   "case_id": "random_fold_71",
+   "inputs": {
+    "probability_ppm": 764141,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.9147262898452759,
+    "efv_sats": 954.4233751515914,
+    "fee_sats": 350246,
+    "source_opportunity_sats": 349.880059,
+    "failure_penalty_sats": 87561.5,
+    "activity_penalty_sats": 477.211688,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -437905.277715
+   }
+  },
+  {
+   "case_id": "random_fold_72",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.7165725592066,
+    "efv_sats": 561.254,
+    "fee_sats": 40872,
+    "source_opportunity_sats": 380.530212,
+    "failure_penalty_sats": 10218.0,
+    "activity_penalty_sats": 280.627,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -51409.754104
+   }
+  },
+  {
+   "case_id": "random_fold_73",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.4096184611395166,
+    "efv_sats": 1078.196,
+    "fee_sats": 195099,
+    "source_opportunity_sats": 208.091828,
+    "failure_penalty_sats": 390198.0,
+    "activity_penalty_sats": 539.098,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -585553.816335
+   }
+  },
+  {
+   "case_id": "random_fold_74",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.35921118025620713,
+    "efv_sats": 888.549,
+    "fee_sats": 359793,
+    "source_opportunity_sats": 1032.0496635,
+    "failure_penalty_sats": 449741.25,
+    "activity_penalty_sats": 238.6965,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -810360.721663
+   }
+  },
+  {
+   "case_id": "random_fold_75",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.9040940314966823,
+    "efv_sats": 1377.8935,
+    "fee_sats": 279615,
+    "source_opportunity_sats": 1286.952529,
+    "failure_penalty_sats": 69903.75,
+    "activity_penalty_sats": 590.348,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -350428.704509
+   }
+  },
+  {
+   "case_id": "random_fold_76",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.9646702834202117,
+    "efv_sats": 541.500806,
+    "fee_sats": 60198,
+    "source_opportunity_sats": 431.76144,
+    "failure_penalty_sats": 75247.5,
+    "activity_penalty_sats": 270.750403,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -135751.451774
+   }
+  },
+  {
+   "case_id": "random_fold_77",
+   "inputs": {
+    "probability_ppm": 105677,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.6516694545784382,
+    "efv_sats": 964.207,
+    "fee_sats": 8003,
+    "source_opportunity_sats": 1361.9423875,
+    "failure_penalty_sats": 8003.0,
+    "activity_penalty_sats": 100.19775,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -17366.245634
+   }
+  },
+  {
+   "case_id": "random_fold_78",
+   "inputs": {
+    "probability_ppm": 460028,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.2012365380696527,
+    "efv_sats": 3845.99676225,
+    "fee_sats": 327922,
+    "source_opportunity_sats": 115.762332,
+    "failure_penalty_sats": 327922.0,
+    "activity_penalty_sats": 1787.810602,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -655978.306735
+   }
+  },
+  {
+   "case_id": "random_fold_79",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.8667492693995961,
+    "efv_sats": 800.0025,
+    "fee_sats": 156798,
+    "source_opportunity_sats": 1066.00333125,
+    "failure_penalty_sats": 117598.5,
+    "activity_penalty_sats": 400.00125,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -275315.803165
+   }
+  },
+  {
+   "case_id": "random_fold_80",
+   "inputs": {
+    "probability_ppm": 624090,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.4522744845727107,
+    "efv_sats": 1551.393,
+    "fee_sats": 162111,
+    "source_opportunity_sats": 522.0437445,
+    "failure_penalty_sats": 283694.25,
+    "activity_penalty_sats": 175.73375,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -445534.818637
+   }
+  },
+  {
+   "case_id": "random_fold_81",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.9096458202395552,
+    "efv_sats": 1825.998,
+    "fee_sats": 192174,
+    "source_opportunity_sats": 860.958057,
+    "failure_penalty_sats": 96087.0,
+    "activity_penalty_sats": 507.861,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -288342.813833
+   }
+  },
+  {
+   "case_id": "random_fold_82",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.3726884605675014,
+    "efv_sats": 755.9689111513973,
+    "fee_sats": 307648,
+    "source_opportunity_sats": 1431.254465,
+    "failure_penalty_sats": 153824.0,
+    "activity_penalty_sats": 87.330333,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -462660.722125
+   }
+  },
+  {
+   "case_id": "random_fold_83",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.3906579717632378,
+    "efv_sats": 1051.7435,
+    "fee_sats": 2045,
+    "source_opportunity_sats": 139.8818855,
+    "failure_penalty_sats": 511.25,
+    "activity_penalty_sats": 525.87175,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -2753.631769
+   }
+  },
+  {
+   "case_id": "random_fold_84",
+   "inputs": {
+    "probability_ppm": 447259,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.7632676929291714,
+    "efv_sats": 1089.228,
+    "fee_sats": 24460,
+    "source_opportunity_sats": 447.672708,
+    "failure_penalty_sats": 30575.0,
+    "activity_penalty_sats": 544.614,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -55540.119682
+   }
+  },
+  {
+   "case_id": "random_fold_85",
+   "inputs": {
+    "probability_ppm": 779694,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.30398475295900906,
+    "efv_sats": 835.10358,
+    "fee_sats": 316242,
+    "source_opportunity_sats": 8.014926,
+    "failure_penalty_sats": 79060.5,
+    "activity_penalty_sats": 417.55179,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -395076.941465
+   }
+  },
+  {
+   "case_id": "random_fold_86",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.6148071884174291,
+    "efv_sats": 3047.302675308689,
+    "fee_sats": 98943,
+    "source_opportunity_sats": 2816.4190275,
+    "failure_penalty_sats": 148414.5,
+    "activity_penalty_sats": 1174.81635,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -249650.157914
+   }
+  },
+  {
+   "case_id": "random_fold_87",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.9868122416239241,
+    "efv_sats": 678.8112677465715,
+    "fee_sats": 75670,
+    "source_opportunity_sats": 227.3432945,
+    "failure_penalty_sats": 151340.0,
+    "activity_penalty_sats": 339.405634,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -227072.116477
+   }
+  },
+  {
+   "case_id": "random_fold_88",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.5570601322158185,
+    "efv_sats": 711.0785,
+    "fee_sats": 102361,
+    "source_opportunity_sats": 158.21496625,
+    "failure_penalty_sats": 76770.75,
+    "activity_penalty_sats": 355.53925,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -179289.964966
+   }
+  },
+  {
+   "case_id": "random_fold_89",
+   "inputs": {
+    "probability_ppm": 804180,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.5298485555676349,
+    "efv_sats": 295.8718013122761,
+    "fee_sats": 297257,
+    "source_opportunity_sats": 60.545843,
+    "failure_penalty_sats": 297257.0,
+    "activity_penalty_sats": 147.935901,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -594484.547559
+   }
+  },
+  {
+   "case_id": "random_fold_90",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.1125460921144471,
+    "efv_sats": 2123.8145170000003,
+    "fee_sats": 207398,
+    "source_opportunity_sats": 600.8068935,
+    "failure_penalty_sats": 207398.0,
+    "activity_penalty_sats": 880.537105,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -415626.876857
+   }
+  },
+  {
+   "case_id": "random_fold_91",
+   "inputs": {
+    "probability_ppm": 642584,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.14070516742484263,
+    "efv_sats": 1268.312589579239,
+    "fee_sats": 13088,
+    "source_opportunity_sats": 620.89560225,
+    "failure_penalty_sats": 13088.0,
+    "activity_penalty_sats": 547.51425,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -26529.412475
+   }
+  },
+  {
+   "case_id": "random_fold_92",
+   "inputs": {
+    "probability_ppm": 798154,
+    "dest_attempts": 11,
+    "dest_success_rate": 0.932044236983962,
+    "efv_sats": 706.9274768388868,
+    "fee_sats": 269476,
+    "source_opportunity_sats": 489.57285675,
+    "failure_penalty_sats": 336845.0,
+    "activity_penalty_sats": 179.33925,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -606425.675113
+   }
+  },
+  {
+   "case_id": "random_fold_93",
+   "inputs": {
+    "probability_ppm": 151921,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.8756945861066735,
+    "efv_sats": 383.14458,
+    "fee_sats": 302853,
+    "source_opportunity_sats": 242.093124,
+    "failure_penalty_sats": 227139.75,
+    "activity_penalty_sats": 191.57229,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -530368.207706
+   }
+  },
+  {
+   "case_id": "random_fold_94",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.8263360214436748,
+    "efv_sats": 591.7325,
+    "fee_sats": 344539,
+    "source_opportunity_sats": 556.22855,
+    "failure_penalty_sats": 516808.5,
+    "activity_penalty_sats": 295.86625,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -861807.176735
+   }
+  },
+  {
+   "case_id": "random_fold_95",
+   "inputs": {
+    "probability_ppm": 221513,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.11168703542715064,
+    "efv_sats": 2835.929565,
+    "fee_sats": 114094,
+    "source_opportunity_sats": 3329.875255,
+    "failure_penalty_sats": 171141.0,
+    "activity_penalty_sats": 1044.212757,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -288980.892746
+   }
+  },
+  {
+   "case_id": "random_fold_96",
+   "inputs": {
+    "probability_ppm": 185748,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.24530329792673045,
+    "efv_sats": 2388.1670395,
+    "fee_sats": 13190,
+    "source_opportunity_sats": 561.5917795,
+    "failure_penalty_sats": 3297.5,
+    "activity_penalty_sats": 1002.527146,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -17608.021674
+   }
+  },
+  {
+   "case_id": "random_fold_97",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.18046374182402358,
+    "efv_sats": 382.6332417616318,
+    "fee_sats": 21004,
+    "source_opportunity_sats": 268.9371045,
+    "failure_penalty_sats": 5251.0,
+    "activity_penalty_sats": 191.316621,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -26585.069702
+   }
+  },
+  {
+   "case_id": "random_fold_98",
+   "inputs": {
+    "probability_ppm": 810727,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.2455427989214095,
+    "efv_sats": 4251.1524872499995,
+    "fee_sats": 31297,
+    "source_opportunity_sats": 2716.739714,
+    "failure_penalty_sats": 15648.5,
+    "activity_penalty_sats": 707.942242,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -46923.657853
+   }
+  },
+  {
+   "case_id": "random_fold_99",
+   "inputs": {
+    "probability_ppm": 583255,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.550068130778326,
+    "efv_sats": 640.0817127370317,
+    "fee_sats": 339105,
+    "source_opportunity_sats": 761.144106,
+    "failure_penalty_sats": 678210.0,
+    "activity_penalty_sats": 320.040856,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1018022.854103
+   }
+  },
+  {
+   "case_id": "random_fold_100",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.7389804857859159,
+    "efv_sats": 1723.6275,
+    "fee_sats": 121537,
+    "source_opportunity_sats": 2270.0174175,
+    "failure_penalty_sats": 212689.75,
+    "activity_penalty_sats": 214.28475,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -335643.281749
+   }
+  },
+  {
+   "case_id": "random_fold_101",
+   "inputs": {
+    "probability_ppm": 593314,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.7338156270394045,
+    "efv_sats": 2480.296902429971,
+    "fee_sats": 312422,
+    "source_opportunity_sats": 560.3338,
+    "failure_penalty_sats": 234316.5,
+    "activity_penalty_sats": 1032.757152,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -546859.996076
+   }
+  },
+  {
+   "case_id": "random_fold_102",
+   "inputs": {
+    "probability_ppm": 829273,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.09531985337011284,
+    "efv_sats": 1818.597,
+    "fee_sats": 164699,
+    "source_opportunity_sats": 2334.1692495,
+    "failure_penalty_sats": 82349.5,
+    "activity_penalty_sats": 534.2755,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -248408.83136
+   }
+  },
+  {
+   "case_id": "random_fold_103",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.953645802534369,
+    "efv_sats": 1338.2555,
+    "fee_sats": 209354,
+    "source_opportunity_sats": 817.6741105,
+    "failure_penalty_sats": 366369.5,
+    "activity_penalty_sats": 575.4215,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -576143.920865
+   }
+  },
+  {
+   "case_id": "random_fold_104",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.018653683879588656,
+    "efv_sats": 589.1155,
+    "fee_sats": 192413,
+    "source_opportunity_sats": 332.8502575,
+    "failure_penalty_sats": 336722.75,
+    "activity_penalty_sats": 270.76075,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -529586.587545
+   }
+  },
+  {
+   "case_id": "random_fold_105",
+   "inputs": {
+    "probability_ppm": 723419,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.7087655945741659,
+    "efv_sats": 2364.494726,
+    "fee_sats": 380464,
+    "source_opportunity_sats": 1291.086918,
+    "failure_penalty_sats": 760928.0,
+    "activity_penalty_sats": 743.451399,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1141716.017907
+   }
+  },
+  {
+   "case_id": "random_fold_106",
+   "inputs": {
+    "probability_ppm": 267741,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.45514629384633265,
+    "efv_sats": 2160.231,
+    "fee_sats": 147083,
+    "source_opportunity_sats": 2841.7838805,
+    "failure_penalty_sats": 257395.25,
+    "activity_penalty_sats": 586.9135,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -407328.564972
+   }
+  },
+  {
+   "case_id": "random_fold_107",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.0875986690273477,
+    "efv_sats": 312.00752547347884,
+    "fee_sats": 181802,
+    "source_opportunity_sats": 411.096733,
+    "failure_penalty_sats": 318153.5,
+    "activity_penalty_sats": 156.003763,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -500430.932893
+   }
+  },
+  {
+   "case_id": "random_fold_108",
+   "inputs": {
+    "probability_ppm": 627869,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.3969168279292382,
+    "efv_sats": 1817.59932225,
+    "fee_sats": 315236,
+    "source_opportunity_sats": 1888.36798875,
+    "failure_penalty_sats": 394045.0,
+    "activity_penalty_sats": 693.172291,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -710721.326011
+   }
+  },
+  {
+   "case_id": "random_fold_109",
+   "inputs": {
+    "probability_ppm": 672217,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.4742778814171783,
+    "efv_sats": 171.856281,
+    "fee_sats": 343981,
+    "source_opportunity_sats": 63.04658,
+    "failure_penalty_sats": 515971.5,
+    "activity_penalty_sats": 85.92814,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -859985.950006
+   }
+  },
+  {
+   "case_id": "random_fold_110",
+   "inputs": {
+    "probability_ppm": 442229,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.32585273480347166,
+    "efv_sats": 665.6892830883589,
+    "fee_sats": 294166,
+    "source_opportunity_sats": 568.33793525,
+    "failure_penalty_sats": 514790.5,
+    "activity_penalty_sats": 332.844642,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -809563.295471
+   }
+  },
+  {
+   "case_id": "random_fold_111",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.3532079423245207,
+    "efv_sats": 997.319,
+    "fee_sats": 392668,
+    "source_opportunity_sats": 384.4664745,
+    "failure_penalty_sats": 98167.0,
+    "activity_penalty_sats": 498.6595,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -491292.665729
+   }
+  },
+  {
+   "case_id": "random_fold_112",
+   "inputs": {
+    "probability_ppm": 79492,
+    "dest_attempts": 12,
+    "dest_success_rate": 0.4279234490340712,
+    "efv_sats": 507.4195,
+    "fee_sats": 268581,
+    "source_opportunity_sats": 72.30727875,
+    "failure_penalty_sats": 268581.0,
+    "activity_penalty_sats": 253.70975,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -537447.681238
+   }
+  },
+  {
+   "case_id": "random_fold_113",
+   "inputs": {
+    "probability_ppm": 558064,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.05688134809564316,
+    "efv_sats": 2405.506,
+    "fee_sats": 90663,
+    "source_opportunity_sats": 1784.885452,
+    "failure_penalty_sats": 22665.75,
+    "activity_penalty_sats": 836.22225,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -114607.431402
+   }
+  },
+  {
+   "case_id": "random_fold_114",
+   "inputs": {
+    "probability_ppm": 478719,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.44865408268586404,
+    "efv_sats": 1012.2975,
+    "fee_sats": 75709,
+    "source_opportunity_sats": 437.31252,
+    "failure_penalty_sats": 75709.0,
+    "activity_penalty_sats": 265.60375,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -151636.310223
+   }
+  },
+  {
+   "case_id": "random_fold_115",
+   "inputs": {
+    "probability_ppm": 250632,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.636615298256499,
+    "efv_sats": 2443.41459775,
+    "fee_sats": 136143,
+    "source_opportunity_sats": 1452.6378655,
+    "failure_penalty_sats": 272286.0,
+    "activity_penalty_sats": 1143.749718,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -410412.989696
+   }
+  },
+  {
+   "case_id": "random_fold_116",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 12,
+    "dest_success_rate": 0.33256897881518055,
+    "efv_sats": 1093.2095,
+    "fee_sats": 253466,
+    "source_opportunity_sats": 602.3584345,
+    "failure_penalty_sats": 190099.5,
+    "activity_penalty_sats": 512.78425,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -444225.556526
+   }
+  },
+  {
+   "case_id": "random_fold_117",
+   "inputs": {
+    "probability_ppm": 235935,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.4521341273183499,
+    "efv_sats": 2255.483,
+    "fee_sats": 397467,
+    "source_opportunity_sats": 1519.0678005,
+    "failure_penalty_sats": 794934.0,
+    "activity_penalty_sats": 230.16075,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1193618.081169
+   }
+  },
+  {
+   "case_id": "random_fold_118",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.146526682775167,
+    "efv_sats": 994.5791741852145,
+    "fee_sats": 129854,
+    "source_opportunity_sats": 882.1538385,
+    "failure_penalty_sats": 227244.5,
+    "activity_penalty_sats": 497.289587,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -358156.432438
+   }
+  },
+  {
+   "case_id": "random_fold_119",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.06778984552351319,
+    "efv_sats": 1810.36218525,
+    "fee_sats": 62777,
+    "source_opportunity_sats": 887.43244375,
+    "failure_penalty_sats": 47082.75,
+    "activity_penalty_sats": 422.932423,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -110656.162234
+   }
+  },
+  {
+   "case_id": "random_fold_120",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.3160223897286758,
+    "efv_sats": 1600.288,
+    "fee_sats": 10838,
+    "source_opportunity_sats": 343.261776,
+    "failure_penalty_sats": 21676.0,
+    "activity_penalty_sats": 377.56275,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -32581.889107
+   }
+  },
+  {
+   "case_id": "random_fold_121",
+   "inputs": {
+    "probability_ppm": 562246,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.864230856339884,
+    "efv_sats": 1299.177,
+    "fee_sats": 229219,
+    "source_opportunity_sats": 236.450214,
+    "failure_penalty_sats": 286523.75,
+    "activity_penalty_sats": 338.152,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -515586.895142
+   }
+  },
+  {
+   "case_id": "random_fold_122",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.1570998665134058,
+    "efv_sats": 316.3155,
+    "fee_sats": 339167,
+    "source_opportunity_sats": 327.86101575,
+    "failure_penalty_sats": 678334.0,
+    "activity_penalty_sats": 158.15775,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1017883.093329
+   }
+  },
+  {
+   "case_id": "random_fold_123",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 5,
+    "dest_success_rate": 0.33028560497861403,
+    "efv_sats": 1001.4119195,
+    "fee_sats": 161301,
+    "source_opportunity_sats": 155.33585375,
+    "failure_penalty_sats": 120975.75,
+    "activity_penalty_sats": 500.70596,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -282517.062863
+   }
+  },
+  {
+   "case_id": "random_fold_124",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.22229762041592727,
+    "efv_sats": 153.5225,
+    "fee_sats": 112159,
+    "source_opportunity_sats": 182.15444625,
+    "failure_penalty_sats": 168238.5,
+    "activity_penalty_sats": 76.76125,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -280600.971228
+   }
+  },
+  {
+   "case_id": "random_fold_125",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 11,
+    "dest_success_rate": 0.04563403853272541,
+    "efv_sats": 1061.69788,
+    "fee_sats": 52857,
+    "source_opportunity_sats": 68.150592,
+    "failure_penalty_sats": 79285.5,
+    "activity_penalty_sats": 530.84894,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -132451.850281
+   }
+  },
+  {
+   "case_id": "random_fold_126",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.5854460232591419,
+    "efv_sats": 1989.7989825,
+    "fee_sats": 164596,
+    "source_opportunity_sats": 2063.98312575,
+    "failure_penalty_sats": 288043.0,
+    "activity_penalty_sats": 994.899491,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -454617.97292
+   }
+  },
+  {
+   "case_id": "random_fold_127",
+   "inputs": {
+    "probability_ppm": 711911,
+    "dest_attempts": 11,
+    "dest_success_rate": 0.08901742011559521,
+    "efv_sats": 1126.089,
+    "fee_sats": 232166,
+    "source_opportunity_sats": 168.3503055,
+    "failure_penalty_sats": 406290.5,
+    "activity_penalty_sats": 563.0445,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -638386.219659
+   }
+  },
+  {
+   "case_id": "random_fold_128",
+   "inputs": {
+    "probability_ppm": 181565,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.5190604561694567,
+    "efv_sats": 1729.3875,
+    "fee_sats": 350754,
+    "source_opportunity_sats": 1610.92445625,
+    "failure_penalty_sats": 263065.5,
+    "activity_penalty_sats": 561.417,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -615677.845215
+   }
+  },
+  {
+   "case_id": "random_fold_129",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.7257931378921202,
+    "efv_sats": 838.1576149468187,
+    "fee_sats": 285703,
+    "source_opportunity_sats": 545.949704,
+    "failure_penalty_sats": 499980.25,
+    "activity_penalty_sats": 419.078807,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -786134.574585
+   }
+  },
+  {
+   "case_id": "random_fold_130",
+   "inputs": {
+    "probability_ppm": 935303,
+    "dest_attempts": 13,
+    "dest_success_rate": 0.5825464238334316,
+    "efv_sats": 641.28229575,
+    "fee_sats": 119844,
+    "source_opportunity_sats": 11.391369,
+    "failure_penalty_sats": 179766.0,
+    "activity_penalty_sats": 320.641148,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -299342.239262
+   }
+  },
+  {
+   "case_id": "random_fold_131",
+   "inputs": {
+    "probability_ppm": 372806,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.08143757172379618,
+    "efv_sats": 1098.3395,
+    "fee_sats": 379183,
+    "source_opportunity_sats": 1307.024005,
+    "failure_penalty_sats": 758366.0,
+    "activity_penalty_sats": 353.3245,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1138799.880949
+   }
+  },
+  {
+   "case_id": "random_fold_132",
+   "inputs": {
+    "probability_ppm": 349085,
+    "dest_attempts": 12,
+    "dest_success_rate": 0.5599800952230993,
+    "efv_sats": 554.31,
+    "fee_sats": 299463,
+    "source_opportunity_sats": 674.318115,
+    "failure_penalty_sats": 524060.25,
+    "activity_penalty_sats": 277.155,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -824281.221809
+   }
+  },
+  {
+   "case_id": "random_fold_133",
+   "inputs": {
+    "probability_ppm": 871485,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.977801947627105,
+    "efv_sats": 837.968,
+    "fee_sats": 131242,
+    "source_opportunity_sats": 162.146808,
+    "failure_penalty_sats": 164052.5,
+    "activity_penalty_sats": 413.44775,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -295139.818016
+   }
+  },
+  {
+   "case_id": "random_fold_134",
+   "inputs": {
+    "probability_ppm": 130430,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.10388223982050415,
+    "efv_sats": 886.9887817437441,
+    "fee_sats": 241739,
+    "source_opportunity_sats": 1535.5402955,
+    "failure_penalty_sats": 120869.5,
+    "activity_penalty_sats": 385.093,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -364413.443349
+   }
+  },
+  {
+   "case_id": "random_fold_135",
+   "inputs": {
+    "probability_ppm": 166681,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.24033863127031663,
+    "efv_sats": 1046.706747973161,
+    "fee_sats": 365439,
+    "source_opportunity_sats": 1873.5825975,
+    "failure_penalty_sats": 456798.75,
+    "activity_penalty_sats": 231.9752,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -824168.84167
+   }
+  },
+  {
+   "case_id": "random_fold_136",
+   "inputs": {
+    "probability_ppm": 778616,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.3484285472943375,
+    "efv_sats": 1506.4495,
+    "fee_sats": 271396,
+    "source_opportunity_sats": 111.477263,
+    "failure_penalty_sats": 542792.0,
+    "activity_penalty_sats": 577.065,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -813703.596579
+   }
+  },
+  {
+   "case_id": "random_fold_137",
+   "inputs": {
+    "probability_ppm": 992458,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.2801649287770219,
+    "efv_sats": 1598.8485,
+    "fee_sats": 110622,
+    "source_opportunity_sats": 2373.49059825,
+    "failure_penalty_sats": 55311.0,
+    "activity_penalty_sats": 677.559,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -167401.189583
+   }
+  },
+  {
+   "case_id": "random_fold_138",
+   "inputs": {
+    "probability_ppm": 829076,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.42771023060647473,
+    "efv_sats": 647.9729599504931,
+    "fee_sats": 137031,
+    "source_opportunity_sats": 356.021991,
+    "failure_penalty_sats": 34257.75,
+    "activity_penalty_sats": 323.98648,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -171431.539641
+   }
+  },
+  {
+   "case_id": "random_fold_139",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.4421503048625338,
+    "efv_sats": 1558.3118555674687,
+    "fee_sats": 80170,
+    "source_opportunity_sats": 2009.3874255,
+    "failure_penalty_sats": 120255.0,
+    "activity_penalty_sats": 469.92925,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -202170.234681
+   }
+  },
+  {
+   "case_id": "random_fold_140",
+   "inputs": {
+    "probability_ppm": 945427,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.07994028538874298,
+    "efv_sats": 2138.9319875,
+    "fee_sats": 186388,
+    "source_opportunity_sats": 1672.0498795,
+    "failure_penalty_sats": 279582.0,
+    "activity_penalty_sats": 812.644181,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -466432.490008
+   }
+  },
+  {
+   "case_id": "random_fold_141",
+   "inputs": {
+    "probability_ppm": 114104,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.29937109657387595,
+    "efv_sats": 1226.9415,
+    "fee_sats": 179805,
+    "source_opportunity_sats": 1713.42380475,
+    "failure_penalty_sats": 89902.5,
+    "activity_penalty_sats": 511.9675,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -271792.892372
+   }
+  },
+  {
+   "case_id": "random_fold_142",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.9977286840330959,
+    "efv_sats": 1399.4285,
+    "fee_sats": 40332,
+    "source_opportunity_sats": 1189.514225,
+    "failure_penalty_sats": 20166.0,
+    "activity_penalty_sats": 674.39075,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -61313.922872
+   }
+  },
+  {
+   "case_id": "random_fold_143",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.500628505005542,
+    "efv_sats": 710.4351584683017,
+    "fee_sats": 260961,
+    "source_opportunity_sats": 1589.52828125,
+    "failure_penalty_sats": 260961.0,
+    "activity_penalty_sats": 355.217579,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -523511.305025
+   }
+  },
+  {
+   "case_id": "random_fold_144",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.38449615673058635,
+    "efv_sats": 1189.086,
+    "fee_sats": 238870,
+    "source_opportunity_sats": 436.989105,
+    "failure_penalty_sats": 119435.0,
+    "activity_penalty_sats": 286.22475,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -358502.342856
+   }
+  },
+  {
+   "case_id": "random_fold_145",
+   "inputs": {
+    "probability_ppm": 127725,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.07354149388155196,
+    "efv_sats": 1466.9845,
+    "fee_sats": 297972,
+    "source_opportunity_sats": 2132.26197075,
+    "failure_penalty_sats": 74493.0,
+    "activity_penalty_sats": 733.49225,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -375143.383625
+   }
+  },
+  {
+   "case_id": "random_fold_146",
+   "inputs": {
+    "probability_ppm": 188427,
+    "dest_attempts": 0,
+    "dest_success_rate": 0.671891072735228,
+    "efv_sats": 1213.02441,
+    "fee_sats": 391957,
+    "source_opportunity_sats": 674.478435,
+    "failure_penalty_sats": 685924.75,
+    "activity_penalty_sats": 606.512205,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1078934.174089
+   }
+  },
+  {
+   "case_id": "random_fold_147",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.8351349597244455,
+    "efv_sats": 181.65287603780138,
+    "fee_sats": 143951,
+    "source_opportunity_sats": 405.814955,
+    "failure_penalty_sats": 215926.5,
+    "activity_penalty_sats": 90.826438,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -360283.314955
+   }
+  },
+  {
+   "case_id": "random_fold_148",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.6123864851523104,
+    "efv_sats": 310.364218140012,
+    "fee_sats": 232932,
+    "source_opportunity_sats": 164.36198625,
+    "failure_penalty_sats": 174699.0,
+    "activity_penalty_sats": 155.182109,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -407795.361986
+   }
+  },
+  {
+   "case_id": "random_fold_149",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.834238944417833,
+    "efv_sats": 249.770524,
+    "fee_sats": 168122,
+    "source_opportunity_sats": 1.821876,
+    "failure_penalty_sats": 84061.0,
+    "activity_penalty_sats": 124.885262,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -252143.080358
+   }
+  },
+  {
+   "case_id": "random_fold_150",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.12244069195460194,
+    "efv_sats": 1047.361568,
+    "fee_sats": 163789,
+    "source_opportunity_sats": 1210.830984,
+    "failure_penalty_sats": 40947.25,
+    "activity_penalty_sats": 111.006784,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -205732.127538
+   }
+  },
+  {
+   "case_id": "random_fold_151",
+   "inputs": {
+    "probability_ppm": 914011,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.9296867319120237,
+    "efv_sats": 2191.0185,
+    "fee_sats": 43458,
+    "source_opportunity_sats": 446.967774,
+    "failure_penalty_sats": 54322.5,
+    "activity_penalty_sats": 888.18,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -97113.032764
+   }
+  },
+  {
+   "case_id": "random_fold_152",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.2712769762945585,
+    "efv_sats": 1019.2615,
+    "fee_sats": 274500,
+    "source_opportunity_sats": 1435.62982275,
+    "failure_penalty_sats": 274500.0,
+    "activity_penalty_sats": 324.1855,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -550366.748859
+   }
+  },
+  {
+   "case_id": "random_fold_153",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.18597746078138055,
+    "efv_sats": 1049.95368,
+    "fee_sats": 355361,
+    "source_opportunity_sats": 616.06512,
+    "failure_penalty_sats": 177680.5,
+    "activity_penalty_sats": 396.47205,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -533529.06033
+   }
+  },
+  {
+   "case_id": "random_fold_154",
+   "inputs": {
+    "probability_ppm": 588797,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.29488217140543493,
+    "efv_sats": 815.402984131003,
+    "fee_sats": 1146,
+    "source_opportunity_sats": 744.10080975,
+    "failure_penalty_sats": 2005.5,
+    "activity_penalty_sats": 407.701492,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -3823.195471
+   }
+  },
+  {
+   "case_id": "random_fold_155",
+   "inputs": {
+    "probability_ppm": 842538,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.7707693307102197,
+    "efv_sats": 1995.909,
+    "fee_sats": 8251,
+    "source_opportunity_sats": 712.539513,
+    "failure_penalty_sats": 10313.75,
+    "activity_penalty_sats": 550.41025,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -18146.070586
+   }
+  },
+  {
+   "case_id": "random_fold_156",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 17,
+    "dest_success_rate": 0.21707568738756167,
+    "efv_sats": 1927.91272725,
+    "fee_sats": 294803,
+    "source_opportunity_sats": 1526.0215545,
+    "failure_penalty_sats": 368503.75,
+    "activity_penalty_sats": 841.967034,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -664983.508916
+   }
+  },
+  {
+   "case_id": "random_fold_157",
+   "inputs": {
+    "probability_ppm": 975653,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.4300952314402554,
+    "efv_sats": 596.4615,
+    "fee_sats": 255191,
+    "source_opportunity_sats": 322.38744075,
+    "failure_penalty_sats": 318988.75,
+    "activity_penalty_sats": 298.23075,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -574218.428739
+   }
+  },
+  {
+   "case_id": "random_fold_158",
+   "inputs": {
+    "probability_ppm": 369525,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.17430012468492528,
+    "efv_sats": 1748.0325,
+    "fee_sats": 289893,
+    "source_opportunity_sats": 1276.93774125,
+    "failure_penalty_sats": 507312.75,
+    "activity_penalty_sats": 522.1915,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -798358.937532
+   }
+  },
+  {
+   "case_id": "random_fold_159",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.7784227820867125,
+    "efv_sats": 997.9237143664012,
+    "fee_sats": 369985,
+    "source_opportunity_sats": 1563.6790645,
+    "failure_penalty_sats": 92496.25,
+    "activity_penalty_sats": 124.111641,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -463531.1565
+   }
+  },
+  {
+   "case_id": "random_fold_160",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 18,
+    "dest_success_rate": 0.5042472877205503,
+    "efv_sats": 258.7475,
+    "fee_sats": 132416,
+    "source_opportunity_sats": 356.8128025,
+    "failure_penalty_sats": 99312.0,
+    "activity_penalty_sats": 129.37375,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -232084.263315
+   }
+  },
+  {
+   "case_id": "random_fold_161",
+   "inputs": {
+    "probability_ppm": 581674,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.039974807684136304,
+    "efv_sats": 821.826,
+    "fee_sats": 58237,
+    "source_opportunity_sats": 695.675709,
+    "failure_penalty_sats": 58237.0,
+    "activity_penalty_sats": 410.913,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -117102.553892
+   }
+  },
+  {
+   "case_id": "random_fold_162",
+   "inputs": {
+    "probability_ppm": 247670,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.05577507939373172,
+    "efv_sats": 2221.363616,
+    "fee_sats": 254965,
+    "source_opportunity_sats": 421.422848,
+    "failure_penalty_sats": 446188.75,
+    "activity_penalty_sats": 1110.681808,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -702135.689529
+   }
+  },
+  {
+   "case_id": "random_fold_163",
+   "inputs": {
+    "probability_ppm": 808178,
+    "dest_attempts": 12,
+    "dest_success_rate": 0.9702047899901275,
+    "efv_sats": 1824.4725,
+    "fee_sats": 321719,
+    "source_opportunity_sats": 139.57214625,
+    "failure_penalty_sats": 482578.5,
+    "activity_penalty_sats": 626.20025,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -803588.77386
+   }
+  },
+  {
+   "case_id": "random_fold_164",
+   "inputs": {
+    "probability_ppm": 49213,
+    "dest_attempts": 12,
+    "dest_success_rate": 0.16193032383149664,
+    "efv_sats": 821.6291329739504,
+    "fee_sats": 23370,
+    "source_opportunity_sats": 587.387216,
+    "failure_penalty_sats": 40897.5,
+    "activity_penalty_sats": 410.814566,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -65224.620325
+   }
+  },
+  {
+   "case_id": "random_fold_165",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.5249741187667624,
+    "efv_sats": 1519.174,
+    "fee_sats": 4150,
+    "source_opportunity_sats": 2226.349497,
+    "failure_penalty_sats": 2075.0,
+    "activity_penalty_sats": 338.90175,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -8011.694231
+   }
+  },
+  {
+   "case_id": "random_fold_166",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.734953393545228,
+    "efv_sats": 606.8097580749538,
+    "fee_sats": 236010,
+    "source_opportunity_sats": 541.07641875,
+    "failure_penalty_sats": 295012.5,
+    "activity_penalty_sats": 150.812,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -531339.697534
+   }
+  },
+  {
+   "case_id": "random_fold_167",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 7,
+    "dest_success_rate": 0.7736278042917166,
+    "efv_sats": 164.9745,
+    "fee_sats": 325276,
+    "source_opportunity_sats": 16.49745,
+    "failure_penalty_sats": 406595.0,
+    "activity_penalty_sats": 82.48725,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -731864.926645
+   }
+  },
+  {
+   "case_id": "random_fold_168",
+   "inputs": {
+    "probability_ppm": 562462,
+    "dest_attempts": 20,
+    "dest_success_rate": 0.9607687318828054,
+    "efv_sats": 585.8159576226699,
+    "fee_sats": 265008,
+    "source_opportunity_sats": 429.279032,
+    "failure_penalty_sats": 463764.0,
+    "activity_penalty_sats": 292.907979,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -729164.687796
+   }
+  },
+  {
+   "case_id": "random_fold_169",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 12,
+    "dest_success_rate": 0.7234303158994733,
+    "efv_sats": 396.65209063551043,
+    "fee_sats": 352587,
+    "source_opportunity_sats": 637.25701925,
+    "failure_penalty_sats": 705174.0,
+    "activity_penalty_sats": 198.326045,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -1058353.944968
+   }
+  },
+  {
+   "case_id": "random_fold_170",
+   "inputs": {
+    "probability_ppm": 507777,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.033281529271394494,
+    "efv_sats": 555.7885,
+    "fee_sats": 158558,
+    "source_opportunity_sats": 502.71069825,
+    "failure_penalty_sats": 39639.5,
+    "activity_penalty_sats": 277.89425,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -198695.888331
+   }
+  },
+  {
+   "case_id": "random_fold_171",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.6798825402725498,
+    "efv_sats": 1672.1165,
+    "fee_sats": 372607,
+    "source_opportunity_sats": 2016.572499,
+    "failure_penalty_sats": 372607.0,
+    "activity_penalty_sats": 519.62975,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -746763.751717
+   }
+  },
+  {
+   "case_id": "random_fold_172",
+   "inputs": {
+    "probability_ppm": 71242,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.6209068690126299,
+    "efv_sats": 1851.3155,
+    "fee_sats": 322468,
+    "source_opportunity_sats": 2239.16609725,
+    "failure_penalty_sats": 322468.0,
+    "activity_penalty_sats": 548.433,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -647591.707678
+   }
+  },
+  {
+   "case_id": "random_fold_173",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.6188173982278498,
+    "efv_sats": 1623.6325,
+    "fee_sats": 122823,
+    "source_opportunity_sats": 113.654275,
+    "failure_penalty_sats": 61411.5,
+    "activity_penalty_sats": 450.57375,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -183890.45388
+   }
+  },
+  {
+   "case_id": "random_fold_174",
+   "inputs": {
+    "probability_ppm": 815751,
+    "dest_attempts": 1,
+    "dest_success_rate": 0.17741848482011058,
+    "efv_sats": 1809.0784759169035,
+    "fee_sats": 92909,
+    "source_opportunity_sats": 1994.4994095,
+    "failure_penalty_sats": 185818.0,
+    "activity_penalty_sats": 850.347335,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -280096.089169
+   }
+  },
+  {
+   "case_id": "random_fold_175",
+   "inputs": {
+    "probability_ppm": 304005,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.14642154170901722,
+    "efv_sats": 1707.4685,
+    "fee_sats": 64204,
+    "source_opportunity_sats": 2158.240184,
+    "failure_penalty_sats": 112357.0,
+    "activity_penalty_sats": 430.9905,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -178631.151723
+   }
+  },
+  {
+   "case_id": "random_fold_176",
+   "inputs": {
+    "probability_ppm": 648175,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.6808167374336361,
+    "efv_sats": 1340.8201448483533,
+    "fee_sats": 57406,
+    "source_opportunity_sats": 174.982977,
+    "failure_penalty_sats": 43054.5,
+    "activity_penalty_sats": 461.5605,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -100227.95738
+   }
+  },
+  {
+   "case_id": "random_fold_177",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.10396409618911673,
+    "efv_sats": 691.716775732205,
+    "fee_sats": 12405,
+    "source_opportunity_sats": 823.2171675,
+    "failure_penalty_sats": 18607.5,
+    "activity_penalty_sats": 345.858388,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -31972.689507
+   }
+  },
+  {
+   "case_id": "random_fold_178",
+   "inputs": {
+    "probability_ppm": 511859,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.16026321895576967,
+    "efv_sats": 747.279,
+    "fee_sats": 156684,
+    "source_opportunity_sats": 839.941596,
+    "failure_penalty_sats": 274197.0,
+    "activity_penalty_sats": 373.6395,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -431712.079614
+   }
+  },
+  {
+   "case_id": "random_fold_179",
+   "inputs": {
+    "probability_ppm": 627834,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.6554958788522598,
+    "efv_sats": 1973.994,
+    "fee_sats": 186350,
+    "source_opportunity_sats": 22.700931,
+    "failure_penalty_sats": 279525.0,
+    "activity_penalty_sats": 429.5155,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -465087.875882
+   }
+  },
+  {
+   "case_id": "random_fold_180",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 3,
+    "dest_success_rate": 0.9744242916101594,
+    "efv_sats": 2421.85989,
+    "fee_sats": 194854,
+    "source_opportunity_sats": 128.74829875,
+    "failure_penalty_sats": 292281.0,
+    "activity_penalty_sats": 1210.929945,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -486689.253717
+   }
+  },
+  {
+   "case_id": "random_fold_181",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.6810907146248648,
+    "efv_sats": 696.7147695,
+    "fee_sats": 3545,
+    "source_opportunity_sats": 799.8362895,
+    "failure_penalty_sats": 1772.5,
+    "activity_penalty_sats": 348.357385,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -6054.252002
+   }
+  },
+  {
+   "case_id": "random_fold_182",
+   "inputs": {
+    "probability_ppm": 501729,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.7974484140096332,
+    "efv_sats": 1765.539802272836,
+    "fee_sats": 251548,
+    "source_opportunity_sats": 195.41129625,
+    "failure_penalty_sats": 125774.0,
+    "activity_penalty_sats": 450.314456,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -377081.903233
+   }
+  },
+  {
+   "case_id": "random_fold_183",
+   "inputs": {
+    "probability_ppm": 525492,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.615137138999746,
+    "efv_sats": 2019.0274780369177,
+    "fee_sats": 349476,
+    "source_opportunity_sats": 1861.82900475,
+    "failure_penalty_sats": 349476.0,
+    "activity_penalty_sats": 351.88125,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -700104.727467
+   }
+  },
+  {
+   "case_id": "random_fold_184",
+   "inputs": {
+    "probability_ppm": 189881,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.7290866676671279,
+    "efv_sats": 1757.5980060000002,
+    "fee_sats": 245555,
+    "source_opportunity_sats": 942.65637,
+    "failure_penalty_sats": 491110.0,
+    "activity_penalty_sats": 561.233832,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -737835.155735
+   }
+  },
+  {
+   "case_id": "random_fold_185",
+   "inputs": {
+    "probability_ppm": 771680,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.815591207855009,
+    "efv_sats": 1396.5615,
+    "fee_sats": 197252,
+    "source_opportunity_sats": 1801.564335,
+    "failure_penalty_sats": 147939.0,
+    "activity_penalty_sats": 500.1005,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -346414.966257
+   }
+  },
+  {
+   "case_id": "random_fold_186",
+   "inputs": {
+    "probability_ppm": 361486,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.2932818735411349,
+    "efv_sats": 2406.4165,
+    "fee_sats": 102470,
+    "source_opportunity_sats": 3496.5231745,
+    "failure_penalty_sats": 51235.0,
+    "activity_penalty_sats": 276.48025,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -156608.11755
+   }
+  },
+  {
+   "case_id": "random_fold_187",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 6,
+    "dest_success_rate": 0.7772549150601558,
+    "efv_sats": 824.701584,
+    "fee_sats": 248328,
+    "source_opportunity_sats": 722.3104245,
+    "failure_penalty_sats": 248328.0,
+    "activity_penalty_sats": 412.350792,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -497263.984141
+   }
+  },
+  {
+   "case_id": "random_fold_188",
+   "inputs": {
+    "probability_ppm": 683356,
+    "dest_attempts": 19,
+    "dest_success_rate": 0.03859058307280083,
+    "efv_sats": 2249.7795,
+    "fee_sats": 6558,
+    "source_opportunity_sats": 2785.227021,
+    "failure_penalty_sats": 8197.5,
+    "activity_penalty_sats": 180.37825,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -16183.704951
+   }
+  },
+  {
+   "case_id": "random_fold_189",
+   "inputs": {
+    "probability_ppm": 780457,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.9562799673493813,
+    "efv_sats": 1099.0144825,
+    "fee_sats": 300615,
+    "source_opportunity_sats": 1459.743638,
+    "failure_penalty_sats": 75153.75,
+    "activity_penalty_sats": 471.275397,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -376842.035489
+   }
+  },
+  {
+   "case_id": "random_fold_190",
+   "inputs": {
+    "probability_ppm": 635649,
+    "dest_attempts": 15,
+    "dest_success_rate": 0.5177164467240274,
+    "efv_sats": 996.0432932979559,
+    "fee_sats": 68083,
+    "source_opportunity_sats": 606.116608,
+    "failure_penalty_sats": 119145.25,
+    "activity_penalty_sats": 114.838912,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -187316.071597
+   }
+  },
+  {
+   "case_id": "random_fold_191",
+   "inputs": {
+    "probability_ppm": 536464,
+    "dest_attempts": 14,
+    "dest_success_rate": 0.934471079806683,
+    "efv_sats": 99.76427160293385,
+    "fee_sats": 4257,
+    "source_opportunity_sats": 244.1803545,
+    "failure_penalty_sats": 6385.5,
+    "activity_penalty_sats": 49.882136,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -10883.04255
+   }
+  },
+  {
+   "case_id": "random_fold_192",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 16,
+    "dest_success_rate": 0.8959952918503498,
+    "efv_sats": 1.4174247688043238,
+    "fee_sats": 299818,
+    "source_opportunity_sats": 242.919865,
+    "failure_penalty_sats": 599636.0,
+    "activity_penalty_sats": 0.708712,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -899696.639218
+   }
+  },
+  {
+   "case_id": "random_fold_193",
+   "inputs": {
+    "probability_ppm": 790338,
+    "dest_attempts": 5,
+    "dest_success_rate": 0.9190990519158997,
+    "efv_sats": 4266.0694065,
+    "fee_sats": 200525,
+    "source_opportunity_sats": 1221.16544825,
+    "failure_penalty_sats": 401050.0,
+    "activity_penalty_sats": 720.92284,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -600145.451526
+   }
+  },
+  {
+   "case_id": "random_fold_194",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 4,
+    "dest_success_rate": 0.9748077923181,
+    "efv_sats": 1854.2181202499999,
+    "fee_sats": 320357,
+    "source_opportunity_sats": 1294.88118075,
+    "failure_penalty_sats": 80089.25,
+    "activity_penalty_sats": 927.10906,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -401300.932575
+   }
+  },
+  {
+   "case_id": "random_fold_195",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 8,
+    "dest_success_rate": 0.3145509640668278,
+    "efv_sats": 1956.55,
+    "fee_sats": 225719,
+    "source_opportunity_sats": 2476.014025,
+    "failure_penalty_sats": 225719.0,
+    "activity_penalty_sats": 373.36975,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -453490.528931
+   }
+  },
+  {
+   "case_id": "random_fold_196",
+   "inputs": {
+    "probability_ppm": 797459,
+    "dest_attempts": 9,
+    "dest_success_rate": 0.44132326026694013,
+    "efv_sats": 1690.588,
+    "fee_sats": 87095,
+    "source_opportunity_sats": 1218.068654,
+    "failure_penalty_sats": 130642.5,
+    "activity_penalty_sats": 481.9065,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -218089.300538
+   }
+  },
+  {
+   "case_id": "random_fold_197",
+   "inputs": {
+    "probability_ppm": 761930,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.14734346691355715,
+    "efv_sats": 1736.5,
+    "fee_sats": 352655,
+    "source_opportunity_sats": 1133.06625,
+    "failure_penalty_sats": 88163.75,
+    "activity_penalty_sats": 500.8205,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -441129.545305
+   }
+  },
+  {
+   "case_id": "random_fold_198",
+   "inputs": {
+    "probability_ppm": 811643,
+    "dest_attempts": 2,
+    "dest_success_rate": 0.2414232855844498,
+    "efv_sats": 3100.086475,
+    "fee_sats": 71167,
+    "source_opportunity_sats": 1623.513495,
+    "failure_penalty_sats": 142334.0,
+    "activity_penalty_sats": 1424.01774,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -214032.367748
+   }
+  },
+  {
+   "case_id": "random_fold_199",
+   "inputs": {
+    "probability_ppm": 0,
+    "dest_attempts": 10,
+    "dest_success_rate": 0.23618549366889097,
+    "efv_sats": 1639.5919595,
+    "fee_sats": 164698,
+    "source_opportunity_sats": 1091.602919,
+    "failure_penalty_sats": 164698.0,
+    "activity_penalty_sats": 678.419901,
+    "hold_margin_sats": 0.0
+   },
+   "expected": {
+    "final_score_sats": -330562.500912
+   }
+  }
  ]
 }
