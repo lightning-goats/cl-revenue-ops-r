@@ -80,6 +80,7 @@ fn manifest_advertises_shadow_names() {
         .collect();
     assert!(opts.contains(&"revops-r-observer"), "options: {opts:?}");
     assert!(opts.contains(&"revops-r-db-path"), "options: {opts:?}");
+    assert!(opts.contains(&"revops-r-journal-dir"), "options: {opts:?}");
     let methods: Vec<&str> = result["rpcmethods"]
         .as_array()
         .unwrap()
@@ -121,9 +122,9 @@ fn manifest_registers_all_python_options_under_shadow_prefix() {
         .map(|o| o["name"].as_str().unwrap())
         .filter(|n| n.starts_with("revops-r-"))
         .collect();
-    // +2 for our own revops-r-observer and revops-r-observer-db-path (Task
-    // 2's own writable notification-ingestion db -- no Python analog).
-    assert_eq!(shadow.len(), expected + 2, "shadow options registered");
+    // +3 for our own revops-r-observer, revops-r-observer-db-path (Task 2),
+    // and revops-r-journal-dir (Task 3) -- no Python analogs.
+    assert_eq!(shadow.len(), expected + 3, "shadow options registered");
 }
 
 #[test]
@@ -147,18 +148,22 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         opt_names.contains(&"revenue-ops-observer-db-path"),
         "options: {opt_names:?}"
     );
+    assert!(
+        opt_names.contains(&"revenue-ops-journal-dir"),
+        "options: {opt_names:?}"
+    );
 
     let canonical: Vec<&&str> = opt_names
         .iter()
         .filter(|n| n.starts_with("revenue-ops-"))
         .collect();
-    // +2 for our own revenue-ops-observer and revenue-ops-observer-db-path
-    // (revenue-ops-db-path is registered exactly once, under the fixture's
-    // own canonical name -- see register_python_options' doc comment on
-    // the db-path skip).
+    // +3 for our own revenue-ops-observer, revenue-ops-observer-db-path,
+    // and revenue-ops-journal-dir (revenue-ops-db-path is registered exactly
+    // once, under the fixture's own canonical name -- see
+    // register_python_options' doc comment on the db-path skip).
     assert_eq!(
         canonical.len(),
-        expected + 2,
+        expected + 3,
         "canonical options registered"
     );
 

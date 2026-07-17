@@ -71,6 +71,7 @@ fn config_name_map() -> HashMap<String, String> {
     map.insert("observer".to_string(), opt_name("observer"));
     map.insert("db-path".to_string(), opt_name("db-path"));
     map.insert("observer-db-path".to_string(), opt_name("observer-db-path"));
+    map.insert("journal-dir".to_string(), opt_name("journal-dir"));
     for opt in options_table::load() {
         let suffix = opt
             .name
@@ -385,6 +386,15 @@ async fn main() -> Result<()> {
         "Path to the Rust plugin's OWN sqlite file (read-write). Never the production DB.",
     );
 
+    // Rust plugin's journal-dir for dry-run JSONL output (Task 3) -- empty
+    // default resolves to parent of observer-db-path at scheduler start.
+    let journal_dir_name = opt_name("journal-dir");
+    let journal_dir_opt = DefaultStringConfigOption::new_str_with_default(
+        &journal_dir_name,
+        "",
+        "Directory for fee-controller dry-run journal (JSONL). Empty = parent of observer-db-path.",
+    );
+
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
@@ -401,6 +411,7 @@ async fn main() -> Result<()> {
         .option(observer_opt.clone())
         .option(db_path_opt.clone())
         .option(observer_db_opt.clone())
+        .option(journal_dir_opt.clone())
         .subscribe(
             "forward_event",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
