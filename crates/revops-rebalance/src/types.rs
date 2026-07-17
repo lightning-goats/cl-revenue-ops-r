@@ -59,21 +59,37 @@ pub struct RebalanceCandidate {
     pub source_turnover_rate: f64,
 }
 
-/// Port of `modules/rebalance_execution.py`'s `ExecutionResult` dataclass,
-/// the frozen field subset needed by later tasks (Python also carries
-/// `attempts`, `fee_sats`, `fee_ppm`, `hops`, `parts`, `failure_data` —
-/// added by the owning task, T5, if/when the executor needs them).
+/// Port of `modules/rebalance_execution.py`'s `ExecutionResult` dataclass.
+/// T1 froze the core subset; the executor-owned fields (`attempts`,
+/// `fee_sats`, `fee_ppm`, `hops`, `parts`, `failure_data` — Python defaults
+/// `0`/`0`/`0`/`0`/`1`/`{}`) were added by T5 per T1's scope note.
+///
+/// `payment_hash` has no Python counterpart field: Python carries the hash
+/// inside `failure_data` on the pending path. The Rust field is `Some` ONLY
+/// when `payment_pending` (the engine's P4-007/P4-009 budget-hold key:
+/// HOLD only when `payment_pending && payment_hash`), `None` elsewhere.
+///
+/// `failure_data` mirrors Python's `Dict[str, object]` as a JSON object
+/// (`route_summary` always present once the executor has run; the terminal
+/// path merges CLN error details + `failure_class`; the pending path is
+/// exactly `{failure_class, payment_hash, invoice_label, route_summary}`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionResult {
     pub success: bool,
+    pub attempts: i64,
+    pub fee_sats: i64,
+    pub fee_msat: i64,
+    pub fee_ppm: i64,
+    pub hops: i64,
+    pub parts: i64,
     pub error: Option<String>,
     pub amount_sats: i64,
-    pub fee_msat: i64,
     pub payment_pending: bool,
     pub payment_hash: Option<String>,
     /// `"scid/dir"` formatted entries, e.g. `"123x456x0/1"`.
     pub excluded_channels: Vec<String>,
     pub route_type: &'static str,
+    pub failure_data: serde_json::Value,
 }
 
 /// Port of `rebalance_types_v2.py`'s `SkipRecord` dataclass (defaults:
