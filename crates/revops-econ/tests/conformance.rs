@@ -14,12 +14,14 @@
 //! (`_arb_wire`, `_decision_wire`, `_env`, pinned `NOW = 1_752_400_000`) and
 //! the schema gate mirrored from `tools/conformance/validate_fixtures.py`.
 //!
-//! 27 econ-core/analytics/budget-rail scenarios are replayed byte-identically
-//! (Step 2; Phase 3 Task 10 added 9 to the original Phase 2 Task 9 count of
-//! 18); the other 13 are schema-gated only, via the pinned, test-enforced
-//! [`DEFERRED`] skip list (Step 3) — every scenario directory must be either
-//! replayed or deferred, so adding scenario 41 breaks the build until
-//! triaged.
+//! 33 econ-core/analytics/budget-rail/fee-controller scenarios are replayed
+//! byte-identically (Step 2; Phase 3 Task 10 added 9 to the original Phase 2
+//! Task 9 count of 18, and Phase 4 Task 12 added 6 more — the fee-stage
+//! rails/DTS-PID scenarios 08-12 plus the admission scenario 13, all
+//! replayed through the real merged `revops-fees` modules); the other 7 are
+//! schema-gated only, via the pinned, test-enforced [`DEFERRED`] skip list
+//! (Step 3) — every scenario directory must be either replayed or deferred,
+//! so adding scenario 41 breaks the build until triaged.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -41,8 +43,16 @@ use revops_econ::intents::{
     from_wire, is_expired, make_intent, Explanation, IntentEnvelope, IntentFields,
 };
 use revops_econ::ledger::{EconLedger, LedgerState};
+use revops_econ::pyfloat::{py_repr, py_round};
 use revops_econ::reconcile::{reconcile, DbReservationState};
 use revops_econ::types::{EconResult, Micro, Msat, SignedMsat, UnixTime};
+use revops_fees::admission::{compute_htlcmax_msat, HtlcmaxCfg};
+use revops_fees::floors::calculate_floor;
+use revops_fees::pid::{calculate_multiplier, PidState};
+use revops_fees::profiles::FeeProfileSettings;
+use revops_fees::rails::apply_damped_fee_target;
+use revops_fees::thompson::dynamics::update_posterior;
+use revops_fees::thompson::GaussianThompsonState;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -201,8 +211,9 @@ fn forty_scenarios_present_and_schema_gated() {
 // Step 3: pinned replay / deferred partition
 // ---------------------------------------------------------------------------
 
-/// The 27 econ-core/analytics/budget-rail scenarios replayed byte-identically
-/// in this file (18 from Phase 2 Task 9 + 9 flipped in Phase 3 Task 10).
+/// The 33 econ-core/analytics/budget-rail/fee-controller scenarios replayed
+/// byte-identically in this file (18 from Phase 2 Task 9 + 9 flipped in
+/// Phase 3 Task 10 + 6 flipped in Phase 4 Task 12).
 const REPLAYED: &[&str] = &[
     "01-ordinary-profitable-channel",
     "02-source-gateway-protection",
@@ -210,6 +221,12 @@ const REPLAYED: &[&str] = &[
     "05-underwater-classification",
     "06-stagnant-candidate",
     "07-zombie-classification",
+    "08-fee-rail",
+    "09-fee-rate-limit",
+    "10-fee-deadband",
+    "11-fee-cooldown",
+    "12-dts-pid-components",
+    "13-dynamic-htlcmax",
     "18-conflicting-close-rebalance",
     "19-protected-close-rejection",
     "20-open-vs-lnplus",
@@ -233,7 +250,7 @@ const REPLAYED: &[&str] = &[
     "40-sanitized-production-decisions",
 ];
 
-/// Explicit, never-silent skip list: the 13 scenarios owned by later phases.
+/// Explicit, never-silent skip list: the 7 scenarios owned by later phases.
 /// Adding scenario 41 without triaging it into either this list or
 /// [`REPLAYED`] fails [`all_scenarios_replayed_or_deferred`].
 ///
@@ -246,44 +263,34 @@ const REPLAYED: &[&str] = &[
 /// (`policy_close_block`) now replays; the *live* close-protection golden
 /// suite still rides Phase 6 capacity work. Scenario 39 stays deferred
 /// (prose-only, no code path).
+///
+/// Phase 4 Task 12 ownership audit (this flip): 08-12 (`fee_stage`
+/// rails/rate_limit/deadband/cooldown/DTS-PID) and 13 (`admission`
+/// dynamic-htlcmax) are genuinely phase-4-owned — every function they
+/// replay (`revops_fees::floors::calculate_floor`,
+/// `revops_fees::rails::apply_damped_fee_target`,
+/// `revops_fees::thompson::dynamics::update_posterior`,
+/// `revops_fees::pid::calculate_multiplier`,
+/// `revops_fees::admission::compute_htlcmax_msat`) is implemented by this
+/// plan, so they move to [`REPLAYED`]. 14-17 (`rebalance_mode` planner) are
+/// RELABELED here from stale "Phase 4" strings to "Phase 5: rebalance stack
+/// (planner)" — they replay planner/priority logic that lives in the
+/// rebalance stack, genuinely Phase 5 scope (16 keeps its Boltz note); this
+/// task does not replay them, only corrects the ownership label.
 const DEFERRED: &[(&str, &str)] = &[
-    ("03-sink-depletion", "Phase 4: rebalance_mode planner"),
-    (
-        "08-fee-rail",
-        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
-    ),
-    (
-        "09-fee-rate-limit",
-        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
-    ),
-    (
-        "10-fee-deadband",
-        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
-    ),
-    (
-        "11-fee-cooldown",
-        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
-    ),
-    (
-        "12-dts-pid-components",
-        "Phase 4: fee controller (rails/rate-limit/deadband/cooldown/DTS-PID)",
-    ),
-    (
-        "13-dynamic-htlcmax",
-        "Phase 4: admission control (htlc_max)",
-    ),
+    ("03-sink-depletion", "Phase 5: rebalance stack (planner)"),
     (
         "14-hot-channel-priority",
-        "Phase 4: rebalance_mode planner (priorities)",
+        "Phase 5: rebalance stack (planner, priorities)",
     ),
-    ("15-normal-rebalance", "Phase 4: rebalance_mode planner"),
+    ("15-normal-rebalance", "Phase 5: rebalance stack (planner)"),
     (
         "16-structural-drain",
-        "Phase 4: rebalance_mode planner (Boltz)",
+        "Phase 5: rebalance stack (planner, Boltz)",
     ),
     (
         "17-manual-diagnostic-rebalance",
-        "Phase 4: rebalance_mode planner",
+        "Phase 5: rebalance stack (planner)",
     ),
     (
         "28-lnplus-state-divergence",
@@ -297,8 +304,8 @@ const DEFERRED: &[(&str, &str)] = &[
 
 #[test]
 fn all_scenarios_replayed_or_deferred() {
-    assert_eq!(REPLAYED.len(), 27, "expected exactly 27 replayed scenarios");
-    assert_eq!(DEFERRED.len(), 13, "expected exactly 13 deferred scenarios");
+    assert_eq!(REPLAYED.len(), 33, "expected exactly 33 replayed scenarios");
+    assert_eq!(DEFERRED.len(), 7, "expected exactly 7 deferred scenarios");
 
     let mut dirs: Vec<String> = std::fs::read_dir(fixtures_root())
         .unwrap()
@@ -546,6 +553,199 @@ fn scenario_07_zombie_classification() {
     let result = classify_channel(-0.40, 0, Some(NOW - 86_400 * 30), 200, 5, &ev);
     let produced = json!({"classification": result.as_name()});
     assert_canon_eq(&produced, &case["expected"], "07-zombie-classification");
+}
+
+// --- fee controller (08, 09, 10, 11, 12) + admission (13) ---
+//
+// Phase 4 Task 12 flip: these six scenarios replay through the REAL merged
+// `revops-fees` modules (ADR-001 rail stages + the DTS/PID controller +
+// the htlcmax admission valve) — not reimplementations.
+
+#[test]
+fn scenario_08_fee_rail_floor() {
+    let case = case_json("08-fee-rail");
+    let inputs = &case["inputs"];
+    let capacity_sats = inputs["capacity_sats"].as_i64().expect("capacity_sats int");
+    let opener = inputs["opener"].as_str().expect("opener string");
+    assert!(
+        inputs["chain_costs"].is_null(),
+        "08-fee-rail: this replay only covers the chain_costs=None input this fixture pins"
+    );
+
+    let floor_ppm = calculate_floor(capacity_sats, None, None, opener);
+    let produced = json!({"floor_ppm": floor_ppm});
+    assert_canon_eq(&produced, &case["expected"], "08-fee-rail");
+}
+
+/// The golden damping suite (`fixtures/golden/fee/damping_*.json`, replayed
+/// by `revops-fees`'s own `tests/rails.rs::golden_damping_scenarios_replay_exactly`)
+/// pins a CUSTOM profile — not either named [`FeeProfileSettings`] table —
+/// per `test_golden_fee_damping.py::PROFILE`: `wake_cycle_max_delta_ratio
+/// =0.50, normal_cycle_max_delta_ratio=0.15, wake_cycle_min_delta_ppm=25,
+/// normal_cycle_min_delta_ppm=10`. Conformance scenarios 09/10/11 are
+/// sourced from those exact same vendored golden files (see each case's
+/// `source` field) and their `expected` values match the goldens
+/// byte-for-byte, so this replay uses the identical profile — NOT
+/// `fee_profile("active")`, which produces different (wrong) capped deltas
+/// for these inputs. The other profile fields are irrelevant to
+/// `apply_damped_fee_target` (it only reads the four delta-cap fields), so
+/// they are zeroed here rather than guessing at unrelated values.
+const GOLDEN_DAMPING_PROFILE: FeeProfileSettings = FeeProfileSettings {
+    min_observation_hours: 0.0,
+    min_forwards_for_signal: 0,
+    dts_discount_gamma: 0.0,
+    dts_sparse_discount_gamma: 0.0,
+    normal_target_blend_ratio: 0.0,
+    wake_target_blend_ratio: 0.0,
+    sparse_target_blend_ratio: 0.0,
+    normal_cycle_max_delta_ratio: 0.15,
+    normal_cycle_min_delta_ppm: 10,
+    wake_cycle_max_delta_ratio: 0.50,
+    wake_cycle_min_delta_ppm: 25,
+};
+
+fn run_damping_scenario(dir: &str) {
+    let case = case_json(dir);
+    let inputs = &case["inputs"];
+    let current = inputs["current"].as_i64().expect("current int");
+    let target = inputs["target"].as_i64().expect("target int");
+    let woke = inputs["woke"].as_bool().expect("woke bool");
+
+    let (applied_fee_ppm, diag) =
+        apply_damped_fee_target(current, target, woke, &GOLDEN_DAMPING_PROFILE);
+    let produced = json!({
+        "applied_fee_ppm": applied_fee_ppm,
+        "diag": {
+            "cap_applied": diag.cap_applied,
+            "cap_reason": diag.cap_reason,
+            "max_delta_ppm": diag.max_delta_ppm,
+            "requested_delta_ppm": diag.requested_delta_ppm,
+            "wake_damping_applied": diag.wake_damping_applied,
+        },
+    });
+    assert_canon_eq(&produced, &case["expected"], dir);
+}
+
+#[test]
+fn scenario_09_fee_rate_limit_clamp() {
+    run_damping_scenario("09-fee-rate-limit");
+}
+
+#[test]
+fn scenario_10_fee_deadband_no_change() {
+    run_damping_scenario("10-fee-deadband");
+}
+
+#[test]
+fn scenario_11_fee_cooldown_wake_cycle() {
+    run_damping_scenario("11-fee-cooldown");
+}
+
+/// Documented exception (like scenario 05): `expected` is a JSON object of
+/// FLOAT leaves (`pid_ewma_error`/`pid_multiplier`/`posterior_mean`/
+/// `posterior_std`), and `canonical_json` categorically forbids
+/// non-integer numbers — so this scenario cannot go through
+/// [`assert_canon_eq`]. The generator (`tools/conformance/
+/// generate_scenarios.py:226-229`) computed every expected float as
+/// `round(x, 12)` before embedding it; comparison here is
+/// `py_repr(py_round(actual, 12)) == py_repr(expected_as_f64)` per field —
+/// still bit-for-bit on the rounded decimal string, no epsilon.
+#[test]
+fn scenario_12_dts_pid_components() {
+    let case = case_json("12-dts-pid-components");
+    let inputs = &case["inputs"];
+    let pid_inputs = &inputs["pid"];
+    let observations = inputs["dts_observations"]
+        .as_array()
+        .expect("dts_observations array");
+    assert_eq!(
+        pid_inputs["fresh_state"].as_bool(),
+        Some(true),
+        "12-dts-pid-components: this replay only covers the fresh_state=true case this fixture pins"
+    );
+
+    // Fresh PidState::default() already has last_update_time=0, which the
+    // ported calculate_multiplier treats as "dt=0" (py: `pid.last_update_time
+    // = -1` forces the same dt=0 branch) — no special-casing needed here.
+    let mut pid_state = PidState::default();
+    let pid_multiplier = calculate_multiplier(
+        &mut pid_state,
+        pid_inputs["current_outbound_ratio"]
+            .as_f64()
+            .expect("current_outbound_ratio float"),
+        pid_inputs["capacity_sats"]
+            .as_i64()
+            .expect("capacity_sats int"),
+        pid_inputs["flow_state"]
+            .as_str()
+            .expect("flow_state string"),
+        NOW,
+    );
+
+    let mut ts_state = GaussianThompsonState::default();
+    for obs in observations {
+        update_posterior(
+            &mut ts_state,
+            obs["fee"].as_f64().expect("fee float"),
+            obs["revenue_rate"].as_f64().expect("revenue_rate float"),
+            obs["hours"].as_f64().expect("hours float"),
+            "normal",
+            false,
+            NOW,
+        );
+    }
+
+    let checks: &[(&str, f64)] = &[
+        ("pid_ewma_error", pid_state.ewma_error),
+        ("pid_multiplier", pid_multiplier),
+        ("posterior_mean", ts_state.posterior_mean),
+        ("posterior_std", ts_state.posterior_std),
+    ];
+    for (field, actual) in checks {
+        let expected = case["expected"][field]
+            .as_f64()
+            .unwrap_or_else(|| panic!("12-dts-pid-components: expected.{field} is a JSON float"));
+        let produced_repr = py_repr(py_round(*actual, 12));
+        let expected_repr = py_repr(expected);
+        assert_eq!(
+            produced_repr, expected_repr,
+            "12-dts-pid-components: {field} mismatch (produced {produced_repr}, expected {expected_repr})"
+        );
+    }
+}
+
+#[test]
+fn scenario_13_dynamic_htlcmax() {
+    let case = case_json("13-dynamic-htlcmax");
+    let inputs = &case["inputs"];
+    let channel_info = &inputs["channel_info"];
+    let capacity_sats = channel_info["capacity"].as_i64().expect("capacity int");
+    let spendable_msat = channel_info["spendable_msat"]
+        .as_i64()
+        .expect("spendable_msat int");
+    let flow_state = inputs["flow_state"].as_str().expect("flow_state string");
+    assert!(
+        inputs["cfg_overrides"]
+            .as_object()
+            .expect("cfg_overrides object")
+            .is_empty(),
+        "13-dynamic-htlcmax: this replay only covers the empty-cfg_overrides case this fixture pins"
+    );
+
+    // `test_golden_htlcmax.py::_cfg` defaults (no overrides in this
+    // fixture's inputs) — same defaults `revops-fees`'s own golden
+    // admission suite pins.
+    let cfg = HtlcmaxCfg {
+        enable_dynamic_htlcmax: Value::Bool(true),
+        htlcmax_source_pct: 0.85,
+        htlcmax_sink_pct: 0.25,
+        htlcmax_balanced_pct: 0.50,
+    };
+
+    let htlcmax_msat = compute_htlcmax_msat(&cfg, capacity_sats, spendable_msat, flow_state)
+        .expect("htlcmax valve enabled and capacity > 0");
+    let produced = json!({"htlcmax_msat": htlcmax_msat});
+    assert_canon_eq(&produced, &case["expected"], "13-dynamic-htlcmax");
 }
 
 // --- arbitration (18, 20, 21, 31, 35, 38) ---
