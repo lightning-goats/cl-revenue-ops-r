@@ -4,7 +4,7 @@
 
 Usage: ./diff_read_rpcs.py [--node lnnode] [--window-days 30]
                             [--observer-db ~/.lightning/revops-r-observer.db]
-                            [--python-db ~/.lightning/revenue_ops.db]
+                            [--python-db /data/lightningd/.lightning/revenue_ops.db]
                             [--tolerance 2] [--since <unix-ts>]
 
 Runs four comparisons in sequence and exits with the WORST severity seen
@@ -639,8 +639,13 @@ def main(argv=None, cli_fn=cli, sqlite_fn=sqlite_query):
                     help="window_days passed to both revenue-dashboard and revenue-r-dashboard (default: 30)")
     ap.add_argument("--observer-db", default="~/.lightning/revops-r-observer.db",
                     help="Rust observer's own writable sqlite db, on --node (default: ~/.lightning/revops-r-observer.db)")
-    ap.add_argument("--python-db", default="~/.lightning/revenue_ops.db",
-                    help="Python plugin's production sqlite db, on --node (default: ~/.lightning/revenue_ops.db)")
+    ap.add_argument("--python-db", default="/data/lightningd/.lightning/revenue_ops.db",
+                    help="Python plugin's production sqlite db, on --node (default: "
+                         "/data/lightningd/.lightning/revenue_ops.db -- the CONFIRMED absolute "
+                         "path, not a `~`-relative guess: on lnnode $HOME/.lightning symlinks to "
+                         "/data/lightningd, not to the nested .lightning/ dir revenue_ops.db "
+                         "actually lives in, and sqlite_query()'s shlex.quote() suppresses "
+                         "remote tilde expansion anyway -- see docs/runbooks/observer-deploy.md)")
     ap.add_argument("--tolerance", type=int, default=2,
                     help="allowed row-count drift for the ingestion cross-check (default: 2)")
     ap.add_argument("--since", type=int, default=None,

@@ -5,7 +5,7 @@ recorded fee decisions, on lnnode (Phase 4 Task 11).
 
 Usage: ./diff_fee_decisions.py [--node lnnode]
                                 [--journal ~/.lightning/fee_dryrun_journal.jsonl]
-                                [--python-db ~/.lightning/revenue_ops.db]
+                                [--python-db /data/lightningd/.lightning/revenue_ops.db]
                                 [--since <unix-ts>] [--tolerance-ppm 0]
                                 [--live]
 
@@ -15,7 +15,23 @@ Step 2):
 
     ./tools/diff-harness/diff_fee_decisions.py --node lnnode \\
         --journal ~/.lightning/fee_dryrun_journal.jsonl \\
-        --python-db ~/.lightning/revenue_ops.db
+        --python-db /data/lightningd/.lightning/revenue_ops.db
+
+`--python-db`'s default is the CONFIRMED absolute production path
+(`docs/runbooks/observer-deploy.md`'s wiring table, cross-checked live via
+`lightning-cli revenue-config get db_path`), not a `~`-relative guess: on
+lnnode, `$HOME/.lightning` is a symlink to `/data/lightningd` (the
+top-level data dir), NOT to the nested `/data/lightningd/.lightning/`
+directory that actually holds `revenue_ops.db` -- so `~/.lightning/
+revenue_ops.db` silently resolves to the WRONG file even when tilde
+expansion happens at all. And it doesn't: `sqlite_json()` below hands ssh
+one already-`shlex.quote()`-d command string (needed so the free-text
+`reason` column's query text survives the remote shell), and quoting a
+leading `~` suppresses the remote shell's tilde expansion entirely, so a
+`~`-based default would try to open a literal path named `~` and fail.
+Using the confirmed absolute path sidesteps both problems at once; the
+same fix applies to `diff_read_rpcs.py`'s `sqlite_query()` default for
+the identical reason -- see that file's own default.
 
 `--journal`'s default path is this tool's best inference from
 `crates/revops-fees/src/journal.rs`'s `JOURNAL_FILE_NAME` constant
@@ -76,6 +92,22 @@ truth on both sides):
      timestamps and Rust `at` stamps, so both sides land in the same
      window when they belong together.
 
+     PAIRING WITHIN A CLUSTER, once formed, is NOT plain positional
+     zip -- a cluster can hold more than one same-channel event per side
+     (a controller cycle changing a channel's fee twice in one window is
+     untested-but-possible, and content-identical repeats are a real
+     failure mode: naive positional-by-time pairing can pair a real,
+     content-different drop against an unrelated identical-content row --
+     reporting a false interior field mismatch -- while blaming a
+     different, actually-matching row for the "miss"). `match_channel()`
+     below instead pairs in two passes: (1) greedy exact-content match on
+     `(old_fee_ppm, new_fee_ppm, reason)` -- safe regardless of order,
+     since rows sharing that key compare equal however they're paired;
+     then (2) whatever's left (deliberate mismatches, and any surplus past
+     a content group's overlap) is paired positionally in ascending-`ts`
+     order same as before. See `match_channel()`'s docstring and the
+     self-test "content-identical repeats do not absorb a real drop".
+
   3. On matched pairs, compare EXACTLY (tolerance-ppm applies only to
      the two fee fields, default 0): `new_fee_ppm`, `old_fee_ppm`
      (allowed to drift by `--tolerance-ppm`, default 0 -- sampling is
@@ -130,7 +162,14 @@ CYCLE_WINDOW_TOLERANCE_SECONDS = 120
 
 # Best-inferred default; see module docstring's `--journal` paragraph.
 DEFAULT_JOURNAL_PATH = "~/.lightning/fee_dryrun_journal.jsonl"
-DEFAULT_PYTHON_DB = "~/.lightning/revenue_ops.db"
+
+# CONFIRMED absolute production path (not a `~`-relative guess -- see the
+# module docstring's `--python-db` paragraph for why `~` is wrong here both
+# in principle, on lnnode, since `$HOME/.lightning` is a symlink that skips
+# the actual nested `.lightning` dir, and in practice, since sqlite_json()
+# must shlex.quote() the whole path, which suppresses remote tilde
+# expansion outright).
+DEFAULT_PYTHON_DB = "/data/lightningd/.lightning/revenue_ops.db"
 
 
 def read_journal(node, path):
@@ -254,11 +293,41 @@ def compare_pair(py_row, rs_dec, tolerance_ppm):
             "fields": fields, "py": py_row, "rs": rs_dec}
 
 
+def _content_key(row):
+    """The three fields `compare_pair()` actually judges (module docstring
+    point 3), as a tuple key. Rows sharing this key are content-identical
+    -- pairing any of them against any other of them can never manufacture
+    a spurious mismatch, which is what makes pass 1 below safe to do
+    order-independently."""
+    return (row["old_fee_ppm"], row["new_fee_ppm"], row["reason"])
+
+
 def match_channel(py_rows, rs_adjustments, tolerance_ppm):
     """Match one channel's Python `fee_changes` rows against its Rust
     adjustments, per (channel, cycle-window) -- module docstring points
     2 and 6. Both lists are already filtered to a single channel_id and
-    to non-manual/would-be-broadcast rows respectively by the caller."""
+    to non-manual/would-be-broadcast rows respectively by the caller.
+
+    Pairing within each cycle-window cluster is two-pass, content-aware
+    first (see the module docstring's "PAIRING WITHIN A CLUSTER" note):
+
+      pass 1 (greedy exact-content): group both sides of the cluster by
+      `_content_key()`; for every key present on both sides, pair off
+      `min(count)` rows from each. Order within a key doesn't matter --
+      by construction every such pair compares as a "match".
+
+      pass 2 (positional-by-time fallback): whatever's left after pass 1
+      (deliberate mismatches with no same-content counterpart, and any
+      surplus beyond a content group's overlap) is paired positionally in
+      ascending-`ts` order, same as the old behavior, so intentional
+      fee/reason mismatches are still caught and reported.
+
+    This keeps identical-content repeats in a cluster from "absorbing" an
+    unrelated, content-different real decision into an arbitrary interior
+    pairing (a false content mismatch) while blaming the wrong row for the
+    resulting miss -- see self-test "content-identical repeats do not
+    absorb a real drop".
+    """
     events = [{"ts": r["timestamp"], "side": "python", "row": r} for r in py_rows]
     events += [{"ts": d["at"], "side": "rust", "row": d} for d in rs_adjustments]
     clustered = cluster_by_time(events)
@@ -272,13 +341,37 @@ def match_channel(py_rows, rs_adjustments, tolerance_ppm):
     for idx in sorted(by_cluster):
         py_list = by_cluster[idx]["python"]
         rs_list = by_cluster[idx]["rust"]
-        n = min(len(py_list), len(rs_list))
-        for py_row, rs_dec in zip(py_list[:n], rs_list[:n]):
+
+        # -- pass 1: greedy exact-content matching (order-independent) --
+        py_by_key = {}
+        for r in py_list:
+            py_by_key.setdefault(_content_key(r), []).append(r)
+        rs_by_key = {}
+        for d in rs_list:
+            rs_by_key.setdefault(_content_key(d), []).append(d)
+
+        matched_py_ids = set()
+        matched_rs_ids = set()
+        for key, py_group in py_by_key.items():
+            rs_group = rs_by_key.get(key)
+            if not rs_group:
+                continue
+            n = min(len(py_group), len(rs_group))
+            for py_row, rs_dec in zip(py_group[:n], rs_group[:n]):
+                results.append(compare_pair(py_row, rs_dec, tolerance_ppm))
+                matched_py_ids.add(id(py_row))
+                matched_rs_ids.add(id(rs_dec))
+
+        # -- pass 2: positional-by-time fallback for the remainder --
+        py_remaining = [r for r in py_list if id(r) not in matched_py_ids]
+        rs_remaining = [d for d in rs_list if id(d) not in matched_rs_ids]
+        n = min(len(py_remaining), len(rs_remaining))
+        for py_row, rs_dec in zip(py_remaining[:n], rs_remaining[:n]):
             results.append(compare_pair(py_row, rs_dec, tolerance_ppm))
-        for extra in py_list[n:]:
+        for extra in py_remaining[n:]:
             results.append({"status": "mismatch", "kind": "rust_missed",
                            "channel_id": extra["channel_id"], "py": extra})
-        for extra in rs_list[n:]:
+        for extra in rs_remaining[n:]:
             results.append({"status": "mismatch", "kind": "rust_invented",
                            "channel_id": extra["channel_id"], "rs": extra})
     return results
@@ -583,6 +676,53 @@ def self_test():
     rc = report(results)
     print(f"[self-test] cycle-window clustering (50s apart, tolerance=120s): exit={rc} (expect 0)")
     ok = ok and rc == 0 and any(r["status"] == "match" for r in results)
+
+    # -- 8. multi-event pairing: two DISTINCT same-channel adjustments land
+    # in the same 120s cluster, appended out of time order on purpose, to
+    # prove pairing matches by content rather than depending on original
+    # list order or python/rust `ts` order lining up (Important-1 review:
+    # untested for >1 event per channel per window before this).
+    rs = [_rs_adjustment(at=1_700_000_000, new=110, reason="Policy: STATIC fee override"),
+         _rs_adjustment(at=1_700_000_090, new=130, reason="Policy: STATIC fee override (2)")]
+    py = [_py_row(timestamp=1_700_000_095, new=130, reason="Policy: STATIC fee override (2)"),
+         _py_row(timestamp=1_700_000_005, new=110, reason="Policy: STATIC fee override")]
+    results = diff_fee_decisions(_journal_fn_for(rs), _sqlite_fn_for(py), "node",
+                                "journal", "db", since_ts=0)
+    rc = report(results)
+    matched = [r for r in results if r["status"] == "match"]
+    print(f"[self-test] multi-event same-channel pairing (2 distinct events/120s window): "
+          f"exit={rc} matched_pairs={len(matched)} (expect 0, 2)")
+    ok = ok and rc == 0 and len(matched) == 2
+
+    # -- 9. content-identical drop case (Important-1 review, the specific
+    # scenario called out): 3 python rows, 2 CONTENT-IDENTICAL rust
+    # adjustments, all in one 120s cluster. The real, content-different
+    # drop (py_b) sits BETWEEN the two identical rust `at` stamps in time,
+    # which is exactly the shape that fooled plain positional-by-time zip:
+    # it would pair py_b against the second identical-content rust row
+    # (a false "reason"/"new_fee_ppm" mismatch) and then blame the THIRD,
+    # actually-matching python row for the miss instead. Content-aware
+    # matching must consume both identical-content rust rows against their
+    # identical-content python counterparts and flag ONLY py_b as missed.
+    rs = [_rs_adjustment(at=1_700_000_000, new=120, reason="Policy: STATIC fee override"),
+         _rs_adjustment(at=1_700_000_100, new=120, reason="Policy: STATIC fee override")]
+    py = [_py_row(timestamp=1_699_999_995, new=120, reason="Policy: STATIC fee override"),   # py_a
+         _py_row(timestamp=1_700_000_050, new=999, reason="Policy: REAL drop, no rust counterpart"),  # py_b
+         _py_row(timestamp=1_700_000_105, new=120, reason="Policy: STATIC fee override")]    # py_c
+    results = diff_fee_decisions(_journal_fn_for(rs), _sqlite_fn_for(py), "node",
+                                "journal", "db", since_ts=0)
+    rc = report(results)
+    matched = [r for r in results if r["status"] == "match"]
+    missed = [r for r in results if r["status"] == "mismatch" and r["kind"] == "rust_missed"]
+    invented = [r for r in results if r["status"] == "mismatch" and r["kind"] == "rust_invented"]
+    matched_clean = all(r["fields"] == [] for r in matched)
+    missed_is_py_b = len(missed) == 1 and missed[0]["py"]["new_fee_ppm"] == 999
+    print(f"[self-test] content-identical repeats do not absorb a real drop: exit={rc} "
+          f"matched_pairs={len(matched)} (content-consistent={matched_clean}) "
+          f"rust_missed={len(missed)} (is py_b={missed_is_py_b}) rust_invented={len(invented)} "
+          f"(expect 1, 2 (True), 1 (True), 0)")
+    ok = (ok and rc == 1 and len(matched) == 2 and matched_clean
+         and len(missed) == 1 and missed_is_py_b and len(invented) == 0)
 
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1
