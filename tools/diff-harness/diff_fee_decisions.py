@@ -133,6 +133,25 @@ truth on both sides):
      this exclusion every manual override in the window would be a
      guaranteed false-positive MISMATCH.
 
+  5b. NON-COMPARABLE (bootstrap) EXCLUSION (Phase 4b Task 8b / Design
+     Note 1 addendum): the Rust skip gate reads its pre-decision epoch
+     (`pre_last_update`/`pre_is_sleeping`) from Rust's OWN cross-cycle
+     memory of the PREVIOUS triggered cycle's hydration -- because the
+     freshly-flushed `last_update` Rust would otherwise load is the value
+     Python JUST WROTE for the cycle Rust is reproducing (the wrong epoch;
+     see `.superpowers/sdd/fee-window-diagnosis.md`, H1). On the FIRST
+     triggered cycle after a (re)start, or a channel's first appearance in
+     Python's state, that memory is empty -- Rust has no valid pre-decision
+     timestamp, so the gate is NON-COMPARABLE for that channel-cycle. Rust
+     flags it `trace.skip_gate_comparable = false` (see `is_non_comparable()`).
+     Such a Rust line is INFO (never rust_invented, even if it moved a fee),
+     and any Python `fee_changes` row for the SAME channel within one
+     cycle-window of it is INFO too ("python fee change in a rust
+     non-comparable window") -- NOT "rust missed a decision". Without this,
+     every channel's first observed cycle in the window would be a
+     guaranteed false-positive miss. Absence of the flag (the normal case)
+     leaves the row on the ordinary contract path below.
+
   6. Within a (channel, cycle-window) group, remaining unmatched rows
      after pairing are MISMATCHes in both directions: a leftover Python
      (non-manual) row means the Rust controller failed to make a
@@ -258,6 +277,21 @@ def is_adjustment(decision):
     against a Python `fee_changes` row -- see module docstring point 1.
     NEVER classify via `reason_code` alone."""
     return decision.get("would_broadcast") is True and decision.get("algorithm_values") is not None
+
+
+def is_non_comparable(decision):
+    """True iff a Rust journal line's skip gate ran on NO cached pre-decision
+    epoch (P4b T8b / Design Note 1 addendum): the first triggered cycle after
+    a (re)start, or a channel's first appearance in Python's state. The trace
+    carries `skip_gate_comparable: false` in exactly this case. Such a
+    channel-cycle is excluded from the pass/fail contract on BOTH sides (the
+    Rust line and any Python `fee_changes` row in the same cycle-window),
+    because Rust had no valid pre-decision timestamp to reproduce Python's
+    gate -- counting it as a miss/invention would be a timing artifact, not a
+    porting defect. Absence of the key (comparable) leaves the row on the
+    normal contract path."""
+    trace = decision.get("trace")
+    return isinstance(trace, dict) and trace.get("skip_gate_comparable") is False
 
 
 def cluster_by_time(events, tolerance_seconds=CYCLE_WINDOW_TOLERANCE_SECONDS):
@@ -433,12 +467,40 @@ def diff_fee_decisions(journal_fn, sqlite_fn, node, journal_path, python_db,
     if until_ts is not None:
         python_rows = [r for r in python_rows if r.get("timestamp", 0) <= until_ts]
 
-    skips = [d for d in decisions if not is_adjustment(d)]
-    adjustments = [d for d in decisions if is_adjustment(d)]
+    # P4b T8b: peel off non-comparable (bootstrap / first-appearance)
+    # channel-cycles BEFORE the skip/adjustment split, so a non-comparable
+    # skip never becomes a plain rust_skip INFO nor its Python counterpart a
+    # rust_missed, and a non-comparable adjustment never becomes rust_invented.
+    non_comparable = [d for d in decisions if is_non_comparable(d)]
+    comparable = [d for d in decisions if not is_non_comparable(d)]
+    nc_at_by_channel = {}
+    for d in non_comparable:
+        nc_at_by_channel.setdefault(d.get("channel_id"), []).append(d.get("at", 0))
+
+    def _in_noncomparable_window(channel_id, ts):
+        for at in nc_at_by_channel.get(channel_id, ()):
+            if abs(ts - at) <= CYCLE_WINDOW_TOLERANCE_SECONDS:
+                return True
+        return False
+
+    skips = [d for d in comparable if not is_adjustment(d)]
+    adjustments = [d for d in comparable if is_adjustment(d)]
     manual_rows = [r for r in python_rows if r.get("manual")]
-    algo_rows = [r for r in python_rows if not r.get("manual")]
+    algo_rows_all = [r for r in python_rows if not r.get("manual")]
+    # A Python algo row that falls in a Rust non-comparable window for the
+    # same channel is excluded from matching (INFO, not a miss).
+    algo_rows = [r for r in algo_rows_all
+                 if not _in_noncomparable_window(r["channel_id"], r.get("timestamp", 0))]
+    py_noncomparable = [r for r in algo_rows_all
+                        if _in_noncomparable_window(r["channel_id"], r.get("timestamp", 0))]
 
     results = []
+    for d in non_comparable:
+        results.append({"status": "info", "kind": "rust_noncomparable",
+                       "channel_id": d.get("channel_id"), "detail": d})
+    for r in py_noncomparable:
+        results.append({"status": "info", "kind": "python_noncomparable",
+                       "channel_id": r.get("channel_id"), "detail": r})
     for d in skips:
         results.append({"status": "info", "kind": "rust_skip",
                        "channel_id": d.get("channel_id"), "detail": d})
@@ -481,6 +543,14 @@ def report(results):
         if r["kind"] == "rust_skip":
             rows.append(("INFO", r["channel_id"] or "?",
                         f"rust skip (reason_code={r['detail'].get('reason_code')!r}, no python counterpart expected)"))
+        elif r["kind"] == "rust_noncomparable":
+            rows.append(("INFO", r["channel_id"] or "?",
+                        "rust skip-gate non-comparable (bootstrap/first-appearance: no cached "
+                        "pre-decision epoch; excluded from parity, P4b T8b)"))
+        elif r["kind"] == "python_noncomparable":
+            rows.append(("INFO", r["channel_id"] or "?",
+                        "python fee change in a rust non-comparable (bootstrap) window "
+                        "(excluded from parity, not a missed decision; P4b T8b)"))
         else:
             rows.append(("INFO", r["channel_id"] or "?",
                         "python manual fee change (no rust dry-run counterpart expected)"))
@@ -537,6 +607,28 @@ def _rs_skip(channel_id="123x1x0", peer_id="peer1", fee=100,
         "would_broadcast": False, "governed": None,
         "cycle_id": f"fee-cycle-{at}", "at": at,
     }
+
+
+def _rs_noncomparable_skip(channel_id="123x1x0", peer_id="peer1", fee=100,
+                           reason_code="skip_waiting_time", at=1_700_000_000):
+    # A bootstrap / first-appearance channel-cycle (P4b T8b): the Rust skip
+    # gate had no cached pre-decision epoch, so it is flagged
+    # skip_gate_comparable=false and MUST be excluded from the pass/fail
+    # contract (both the Rust line and any Python counterpart in-window).
+    d = _rs_skip(channel_id=channel_id, peer_id=peer_id, fee=fee,
+                 reason_code=reason_code, at=at)
+    d["trace"] = {"skip_reason": "waiting_time", "skip_gate_comparable": False}
+    return d
+
+
+def _rs_noncomparable_adjustment(channel_id="123x1x0", peer_id="peer1", old=100,
+                                 new=120, reason="raise", at=1_700_000_000):
+    # A bootstrap channel that DID move a fee: still non-comparable (the fresh
+    # fallback epoch means the decision is not a faithful replay of Python's).
+    d = _rs_adjustment(channel_id=channel_id, peer_id=peer_id, old=old, new=new,
+                       reason=reason, at=at)
+    d["trace"] = dict(d["trace"], skip_gate_comparable=False)
+    return d
 
 
 def _py_row(channel_id="123x1x0", peer_id="peer1", old=100, new=120,
@@ -624,6 +716,52 @@ def self_test():
           f"111x1x0={statuses_111} 222x1x0={statuses_222} "
           f"(expect 0, 111x1x0=={{'info'}}, 222x1x0=={{'match'}})")
     ok = ok and rc == 0 and statuses_111 == {"info"} and statuses_222 == {"match"}
+
+    # -- 4a2. bootstrap non-comparable skip (P4b T8b): a Rust channel-cycle
+    # flagged skip_gate_comparable=false (no cached pre-decision epoch: first
+    # triggered cycle after (re)start, or a channel's first appearance) is
+    # excluded from the contract -- the Rust line is INFO and its Python
+    # fee_changes counterpart in the SAME cycle-window is INFO too, NOT
+    # "rust missed a decision". Without this, every channel's first observed
+    # cycle would be a guaranteed false-positive miss.
+    rs = [_rs_noncomparable_skip(channel_id="ccc", at=1_700_000_000)]
+    py = [_py_row(channel_id="ccc", timestamp=1_700_000_010)]
+    results = diff_fee_decisions(_journal_fn_for(rs), _sqlite_fn_for(py), "node",
+                                "journal", "db", since_ts=0)
+    rc = report(results)
+    statuses = {r["status"] for r in results}
+    kinds = {r["kind"] for r in results}
+    print(f"[self-test] bootstrap non-comparable skip excluded (not rust_missed): exit={rc} "
+          f"statuses={statuses} kinds={kinds} "
+          f"(expect 0, {{'info'}}, {{'rust_noncomparable', 'python_noncomparable'}})")
+    ok = (ok and rc == 0 and statuses == {"info"}
+         and kinds == {"rust_noncomparable", "python_noncomparable"})
+
+    # -- 4a3. a bootstrap channel that DID move a fee is likewise excluded:
+    # the non-comparable Rust adjustment must NOT be "rust invented a
+    # decision", and its Python counterpart must NOT be a mismatch.
+    rs = [_rs_noncomparable_adjustment(channel_id="ddd", new=130, at=1_700_000_000)]
+    py = [_py_row(channel_id="ddd", new=120, timestamp=1_700_000_010)]  # DIFFERENT fee
+    results = diff_fee_decisions(_journal_fn_for(rs), _sqlite_fn_for(py), "node",
+                                "journal", "db", since_ts=0)
+    rc = report(results)
+    statuses = {r["status"] for r in results}
+    print(f"[self-test] bootstrap non-comparable adjustment excluded (not rust_invented/mismatch): "
+          f"exit={rc} statuses={statuses} (expect 0, {{'info'}})")
+    ok = ok and rc == 0 and statuses == {"info"}
+
+    # -- 4a4. a COMPARABLE skip (skip_gate_comparable absent/true) is
+    # unchanged: its Python algo counterpart in-window is still a real
+    # "rust missed a decision" mismatch (the exclusion is bootstrap-only).
+    rs = [_rs_skip(channel_id="eee", at=1_700_000_000)]  # no skip_gate_comparable key
+    py = [_py_row(channel_id="eee", timestamp=1_700_000_010)]
+    results = diff_fee_decisions(_journal_fn_for(rs), _sqlite_fn_for(py), "node",
+                                "journal", "db", since_ts=0)
+    rc = report(results)
+    missed = [r for r in results if r["status"] == "mismatch" and r["kind"] == "rust_missed"]
+    print(f"[self-test] comparable skip still counts a real miss: exit={rc} "
+          f"rust_missed={len(missed)} (expect 1, 1)")
+    ok = ok and rc == 1 and len(missed) == 1
 
     # -- 4b. python manual row is INFO, not "rust missed a decision" --
     rs = []

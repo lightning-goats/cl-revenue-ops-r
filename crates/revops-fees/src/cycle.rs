@@ -440,6 +440,21 @@ impl Default for DecisionSummary {
     }
 }
 
+/// One channel's skip-gate pre-decision epoch (Design Note 1 addendum,
+/// Phase 4b Task 8b): the `(last_update, is_sleeping)` values a triggered
+/// cycle FRESHLY hydrated from Python's `v2_state_json` at the top of a
+/// cycle. Retained across cycles so the NEXT cycle's skip gate reads the
+/// PREVIOUS cycle's fresh hydration -- which is exactly the pre-decision
+/// timestamp Python's current-cycle skip gate was conditioned on (Python
+/// reads `pre_last_update` before writing this cycle's flush; Rust
+/// rehydrates AFTER that flush, so the freshly-hydrated `cycle.last_update`
+/// is the WRONG epoch for the gate -- see the fee-window diagnosis, H1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SkipGateEpoch {
+    pub last_update: i64,
+    pub is_sleeping: bool,
+}
+
 /// The single-owner controller state (py instance dicts + Vegas globals).
 #[derive(Debug, Default)]
 pub struct ControllerState {
@@ -449,6 +464,21 @@ pub struct ControllerState {
     /// P8 edge trigger (py `_vegas_wake_armed`, init True).
     pub vegas_wake_armed: bool,
     pub last_decision_summary: DecisionSummary,
+    /// Skip-gate cross-cycle memory (Design Note 1 addendum, P4b T8b):
+    /// what the skip gate reads THIS cycle -- the PREVIOUS triggered
+    /// cycle's fresh hydration, i.e. the pre-decision epoch Python's
+    /// current-cycle gate was conditioned on. A channel absent here on a
+    /// triggered cycle has no cached prior (bootstrap / first appearance):
+    /// its skip gate is non-comparable this cycle (flagged in the trace so
+    /// the diff harness excludes it). Populated by
+    /// `revops::fee_state::rehydrate`; empty in `SeedOnce` after the seed
+    /// cycle, where the gate then falls back to live in-memory state
+    /// (byte-identical gate decisions to the pre-T8b code).
+    pub skip_gate_prev: BTreeMap<String, SkipGateEpoch>,
+    /// The most recent triggered cycle's OWN fresh hydration, promoted into
+    /// `skip_gate_prev` at the next `rehydrate`. Never read by the gate
+    /// directly.
+    pub skip_gate_seen: BTreeMap<String, SkipGateEpoch>,
 }
 
 impl ControllerState {
@@ -459,6 +489,8 @@ impl ControllerState {
             vegas: VegasReflexState::default(),
             vegas_wake_armed: true,
             last_decision_summary: DecisionSummary::default(),
+            skip_gate_prev: BTreeMap::new(),
+            skip_gate_seen: BTreeMap::new(),
         }
     }
 
@@ -832,14 +864,34 @@ pub fn process_channel(
         let cycle = get_cycle_state(&mut state.cycle_states, channel_id, Some(actual_fee));
         let _ = cycle;
     }
-    let (pre_is_sleeping, pre_last_update, pre_last_broadcast_fee) = {
-        let cycle = state.cycle_states.get(channel_id).expect("just inserted");
-        (
-            cycle.is_sleeping,
-            cycle.last_update,
-            cycle.last_broadcast_fee_ppm,
-        )
-    };
+    // P4b T8b (Design Note 1 addendum; fee-window diagnosis H1): the skip
+    // gate's pre-decision inputs (`pre_is_sleeping`/`pre_last_update`) must be
+    // the epoch Python's CURRENT-cycle gate was conditioned on -- i.e. the
+    // values persisted at the end of the PREVIOUS cycle. Python reads them
+    // BEFORE writing this cycle's flush; Rust rehydrates AFTER that flush, so
+    // the freshly-loaded `cycle.last_update` is the wrong epoch (seconds
+    // fresh -> pre_hours_elapsed ~0 -> guaranteed waiting_time skip). Source
+    // them instead from Rust's OWN cross-cycle memory (`skip_gate_prev`,
+    // populated by the prior triggered cycle's fresh hydration -- which IS
+    // Python's pre-decision epoch). A channel absent from that memory has no
+    // cached prior (bootstrap: first triggered cycle after (re)start, or a
+    // channel's first appearance in the DB): the gate falls back to the live
+    // value AND the channel is flagged NON-COMPARABLE so the diff harness
+    // excludes it rather than counting a spurious miss. `pre_last_broadcast_fee`
+    // and every other consumer keep the freshly rehydrated live state.
+    let pre_last_broadcast_fee = state
+        .cycle_states
+        .get(channel_id)
+        .expect("just inserted")
+        .last_broadcast_fee_ppm;
+    let (pre_is_sleeping, pre_last_update, skip_gate_comparable) =
+        match state.skip_gate_prev.get(channel_id) {
+            Some(epoch) => (epoch.is_sleeping, epoch.last_update, true),
+            None => {
+                let cycle = state.cycle_states.get(channel_id).expect("just inserted");
+                (cycle.is_sleeping, cycle.last_update, false)
+            }
+        };
     let mut pre_forward_count = 0i64;
     let mut pre_hours_elapsed = 0.0f64;
     let mut forward_count_hint: Option<i64> = None;
@@ -870,7 +922,7 @@ pub fn process_channel(
         profile,
     );
 
-    match adjust.adjustment {
+    let mut result = match adjust.adjustment {
         Some(adj) => ChannelResult {
             outcome: ChannelOutcome::Adjusted(Box::new(adj)),
             trace: adjust.trace,
@@ -895,6 +947,31 @@ pub fn process_channel(
                 governed: adjust.governed,
             }
         }
+    };
+    // P4b T8b: a channel with no cached pre-decision epoch this cycle
+    // (bootstrap / first appearance) is non-comparable for the skip gate --
+    // tag the trace so `tools/diff-harness` excludes it (adjust or skip).
+    if !skip_gate_comparable {
+        result.trace = tag_skip_gate_non_comparable(result.trace);
+    }
+    result
+}
+
+/// Push `"skip_gate_comparable": false` onto a decision trace (P4b T8b):
+/// present ONLY on non-comparable (bootstrap / first-appearance) channels;
+/// its absence means the skip gate ran on a valid cached pre-decision epoch.
+/// Defensive: a non-object trace (never produced today) is wrapped rather
+/// than dropped.
+fn tag_skip_gate_non_comparable(trace: OValue) -> OValue {
+    match trace {
+        OValue::Obj(mut entries) => {
+            entries.push(("skip_gate_comparable".to_string(), OValue::Bool(false)));
+            OValue::Obj(entries)
+        }
+        other => OValue::obj(vec![
+            ("skip_gate_comparable".to_string(), OValue::Bool(false)),
+            ("trace".to_string(), other),
+        ]),
     }
 }
 
