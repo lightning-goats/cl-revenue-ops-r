@@ -1,0 +1,4756 @@
+{
+ "cases": [
+  {
+   "case_id": "band_edge_high_exact_inside_band",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "edge-high",
+     "peer_id": "peer-eh",
+     "capacity_sats": 1000000,
+     "spendable_sats": 650000,
+     "receivable_sats": 350000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 100,
+     "value_class": "neutral",
+     "urgency": 0.1,
+     "drain": 0.1,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "edge-high",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "band_edge_low_exact_inside_band",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "edge-low",
+     "peer_id": "peer-el",
+     "capacity_sats": 1000000,
+     "spendable_sats": 350000,
+     "receivable_sats": 650000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 100,
+     "value_class": "neutral",
+     "urgency": 0.1,
+     "drain": 0.1,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "edge-low",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "half_even_rounding_case",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "tie-2",
+     "peer_id": "peer-tie-0",
+     "capacity_sats": 2,
+     "spendable_sats": 2,
+     "receivable_sats": 0,
+     "band_low": 0.35,
+     "band_high": 0.75,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "tie-10",
+     "peer_id": "peer-tie-1",
+     "capacity_sats": 10,
+     "spendable_sats": 10,
+     "receivable_sats": 0,
+     "band_low": 0.35,
+     "band_high": 0.75,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "tie-18",
+     "peer_id": "peer-tie-2",
+     "capacity_sats": 18,
+     "spendable_sats": 18,
+     "receivable_sats": 0,
+     "band_low": 0.35,
+     "band_high": 0.75,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "tie-2",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "tie-10",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "tie-18",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "no over-remote channels available"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "tie-2",
+      "peer_id": "peer-tie-0",
+      "excess_sats": 0,
+      "drain_score": 0.5,
+      "value_class": "neutral"
+     },
+     {
+      "channel_id": "tie-10",
+      "peer_id": "peer-tie-1",
+      "excess_sats": 2,
+      "drain_score": 0.5,
+      "value_class": "neutral"
+     },
+     {
+      "channel_id": "tie-18",
+      "peer_id": "peer-tie-2",
+      "excess_sats": 4,
+      "drain_score": 0.5,
+      "value_class": "neutral"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "stable_tie_case",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "stable-src-0",
+     "peer_id": "stable-src-peer-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 500,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.4,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "stable-dest-0",
+     "peer_id": "stable-dest-peer-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 500,
+     "value_class": "active",
+     "urgency": 0.6,
+     "drain": 0.0,
+     "capex_remaining_sats": 50000
+    },
+    {
+     "channel_id": "stable-src-1",
+     "peer_id": "stable-src-peer-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 500,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.4,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "stable-dest-1",
+     "peer_id": "stable-dest-peer-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 500,
+     "value_class": "active",
+     "urgency": 0.6,
+     "drain": 0.0,
+     "capex_remaining_sats": 50000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "stable-src-0",
+      "dest": "stable-dest-0",
+      "amount_sats": 250000,
+      "pair_budget_sats": 50000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.55
+     },
+     {
+      "source": "stable-src-1",
+      "dest": "stable-dest-1",
+      "amount_sats": 250000,
+      "pair_budget_sats": 50000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.55
+     }
+    ],
+    "skips": [],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "peer_collision_no_pair",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "pc-src",
+     "peer_id": "shared-peer",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 100,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "pc-dest",
+     "peer_id": "shared-peer",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 100,
+     "value_class": "profitable",
+     "urgency": 0.8,
+     "drain": 0.0,
+     "capex_remaining_sats": 20000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "pc-src",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "pc-dest",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "pc-src",
+      "peer_id": "shared-peer",
+      "excess_sats": 250000,
+      "drain_score": 0.5,
+      "value_class": "neutral"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "max_pairs_reached_case",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 1,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "mp-src-0",
+     "peer_id": "mp-src-peer-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.9,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "mp-dest-0",
+     "peer_id": "mp-dest-peer-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.9,
+     "drain": 0.0,
+     "capex_remaining_sats": 10000
+    },
+    {
+     "channel_id": "mp-src-1",
+     "peer_id": "mp-src-peer-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 100,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.8,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "mp-dest-1",
+     "peer_id": "mp-dest-peer-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.8,
+     "drain": 0.0,
+     "capex_remaining_sats": 10000
+    },
+    {
+     "channel_id": "mp-src-2",
+     "peer_id": "mp-src-peer-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 200,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.7,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "mp-dest-2",
+     "peer_id": "mp-dest-peer-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.7,
+     "drain": 0.0,
+     "capex_remaining_sats": 10000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "mp-src-0",
+      "dest": "mp-dest-0",
+      "amount_sats": 250000,
+      "pair_budget_sats": 10000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.7500000000000001
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "mp-src-1",
+      "reason": "max_pairs_reached",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "mp-src-2",
+      "reason": "max_pairs_reached",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "mp-dest-1",
+      "reason": "max_pairs_reached",
+      "value_class": "active",
+      "remaining_budget_sats": 10000,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "mp-dest-2",
+      "reason": "max_pairs_reached",
+      "value_class": "active",
+      "remaining_budget_sats": 10000,
+      "detail": "limit=1"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "mp-src-1",
+      "peer_id": "mp-src-peer-1",
+      "excess_sats": 250000,
+      "drain_score": 0.8,
+      "value_class": "neutral"
+     },
+     {
+      "channel_id": "mp-src-2",
+      "peer_id": "mp-src-peer-2",
+      "excess_sats": 250000,
+      "drain_score": 0.7,
+      "value_class": "neutral"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "value_class_table_case",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "vc-src-0",
+     "peer_id": "vc-src-peer-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "vc-src-1",
+     "peer_id": "vc-src-peer-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "vc-src-2",
+     "peer_id": "vc-src-peer-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "vc-src-3",
+     "peer_id": "vc-src-peer-3",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "vc-src-4",
+     "peer_id": "vc-src-peer-4",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "vc-dest-profitable",
+     "peer_id": "vc-dest-peer-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "profitable",
+     "urgency": 0.5,
+     "drain": 0.0,
+     "capex_remaining_sats": 30000
+    },
+    {
+     "channel_id": "vc-dest-active",
+     "peer_id": "vc-dest-peer-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.5,
+     "drain": 0.0,
+     "capex_remaining_sats": 30000
+    },
+    {
+     "channel_id": "vc-dest-funded",
+     "peer_id": "vc-dest-peer-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.5,
+     "drain": 0.0,
+     "capex_remaining_sats": 30000
+    },
+    {
+     "channel_id": "vc-dest-neutral",
+     "peer_id": "vc-dest-peer-3",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.5,
+     "drain": 0.0,
+     "capex_remaining_sats": 30000
+    },
+    {
+     "channel_id": "vc-dest-totally_unmapped",
+     "peer_id": "vc-dest-peer-4",
+     "capacity_sats": 1000000,
+     "spendable_sats": 100000,
+     "receivable_sats": 900000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "totally_unmapped",
+     "urgency": 0.5,
+     "drain": 0.0,
+     "capex_remaining_sats": 30000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "vc-src-0",
+      "dest": "vc-dest-profitable",
+      "amount_sats": 250000,
+      "pair_budget_sats": 30000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.75
+     },
+     {
+      "source": "vc-src-1",
+      "dest": "vc-dest-active",
+      "amount_sats": 250000,
+      "pair_budget_sats": 30000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.55
+     },
+     {
+      "source": "vc-src-2",
+      "dest": "vc-dest-funded",
+      "amount_sats": 250000,
+      "pair_budget_sats": 30000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.55
+     },
+     {
+      "source": "vc-src-3",
+      "dest": "vc-dest-neutral",
+      "amount_sats": 250000,
+      "pair_budget_sats": 30000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.35
+     },
+     {
+      "source": "vc-src-4",
+      "dest": "vc-dest-totally_unmapped",
+      "amount_sats": 250000,
+      "pair_budget_sats": 30000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.35
+     }
+    ],
+    "skips": [],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "fee_cap_dominates_pair_budget",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 2500
+   },
+   "channels": [
+    {
+     "channel_id": "fc-src",
+     "peer_id": "fc-src-peer",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1800000,
+     "receivable_sats": 200000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.9,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "fc-dest",
+     "peer_id": "fc-dest-peer",
+     "capacity_sats": 2000000,
+     "spendable_sats": 200000,
+     "receivable_sats": 1800000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "profitable",
+     "urgency": 0.9,
+     "drain": 0.0,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "fc-src",
+      "dest": "fc-dest",
+      "amount_sats": 500000,
+      "pair_budget_sats": 1250,
+      "pair_fee_cap_ppm": 2500,
+      "score": 0.9500000000000001
+     }
+    ],
+    "skips": [],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "zero_capacity_channel",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "zc-chan",
+     "peer_id": "zc-peer",
+     "capacity_sats": 0,
+     "spendable_sats": 0,
+     "receivable_sats": 0,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.0,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "zc-partner-src",
+     "peer_id": "zc-partner-peer",
+     "capacity_sats": 1000000,
+     "spendable_sats": 900000,
+     "receivable_sats": 100000,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.0,
+     "drain": 0.5,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "zc-partner-src",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "zc-chan",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "zc-partner-src",
+      "peer_id": "zc-partner-peer",
+      "excess_sats": 250000,
+      "drain_score": 0.5,
+      "value_class": "neutral"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_000",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-0-0",
+     "peer_id": "peer-0-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 379925,
+     "receivable_sats": 1605493,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 5000,
+     "value_class": "neutral",
+     "urgency": 0.855732,
+     "drain": 0.611839,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-0-1",
+     "peer_id": "peer-0-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2722104,
+     "receivable_sats": 2140211,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 250,
+     "value_class": "neutral",
+     "urgency": 0.22798,
+     "drain": 0.896159,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-0-2",
+     "peer_id": "peer-0-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2880635,
+     "receivable_sats": 2061954,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.172782,
+     "drain": 0.398803,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-0-3",
+     "peer_id": "peer-0-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3458575,
+     "receivable_sats": 1437098,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 3000,
+     "value_class": "funded",
+     "urgency": 0.214089,
+     "drain": 0.382697,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-0-1",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-0-2",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-0-3",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-0-0",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "no over-local channels available"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_001",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-1-0",
+     "peer_id": "peer-1-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 26371,
+     "receivable_sats": 4931376,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.310784,
+     "drain": 0.544408,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-1-1",
+     "peer_id": "peer-1-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 935627,
+     "receivable_sats": 54431,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 5000,
+     "value_class": "active",
+     "urgency": 0.251511,
+     "drain": 0.715076,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-1-2",
+     "peer_id": "peer-1-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 471102,
+     "receivable_sats": 4830,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 6000,
+     "value_class": "funded",
+     "urgency": 0.851542,
+     "drain": 0.2,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-1-3",
+     "peer_id": "peer-1-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 334104,
+     "receivable_sats": 161725,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 50,
+     "value_class": "active",
+     "urgency": 0.552904,
+     "drain": 0.821895,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-1-4",
+     "peer_id": "peer-1-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 1682719,
+     "receivable_sats": 3251376,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 50,
+     "value_class": "profitable",
+     "urgency": 0.599273,
+     "drain": 0.223442,
+     "capex_remaining_sats": 20000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-1-2",
+      "dest": "chan-1-0",
+      "amount_sats": 121102,
+      "pair_budget_sats": 5000,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.1332352
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-1-4",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-1-1",
+      "reason": "outcompeted",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-1-3",
+      "reason": "outcompeted",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-1-3",
+      "peer_id": "peer-1-0",
+      "excess_sats": 34104,
+      "drain_score": 0.821895,
+      "value_class": "active"
+     },
+     {
+      "channel_id": "chan-1-1",
+      "peer_id": "peer-1-0",
+      "excess_sats": 135627,
+      "drain_score": 0.715076,
+      "value_class": "active"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_002",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 1,
+    "pair_fee_cap_ppm": 2000
+   },
+   "channels": [
+    {
+     "channel_id": "chan-2-0",
+     "peer_id": "peer-2-3",
+     "capacity_sats": 5000000,
+     "spendable_sats": 739837,
+     "receivable_sats": 4182761,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 5000,
+     "value_class": "funded",
+     "urgency": 0.367718,
+     "drain": 0.228775,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-2-1",
+     "peer_id": "peer-2-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 72125,
+     "receivable_sats": 411797,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 50,
+     "value_class": "funded",
+     "urgency": 0.269226,
+     "drain": 0.757797,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-2-2",
+     "peer_id": "peer-2-4",
+     "capacity_sats": 500000,
+     "spendable_sats": 334033,
+     "receivable_sats": 165741,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 50,
+     "value_class": "profitable",
+     "urgency": 0.688495,
+     "drain": 0.659217,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-2-3",
+     "peer_id": "peer-2-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1332639,
+     "receivable_sats": 583428,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.180707,
+     "drain": 0.929734,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-2-4",
+     "peer_id": "peer-2-3",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3521326,
+     "receivable_sats": 1236082,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.257712,
+     "drain": 0.387671,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-2-5",
+     "peer_id": "peer-2-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1301981,
+     "receivable_sats": 8200278,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 3000,
+     "value_class": "active",
+     "urgency": 0.364241,
+     "drain": 0.955479,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-2-6",
+     "peer_id": "peer-2-2",
+     "capacity_sats": 2000000,
+     "spendable_sats": 962963,
+     "receivable_sats": 1003213,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "neutral",
+     "urgency": 0.034863,
+     "drain": 0.223849,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-2-7",
+     "peer_id": "peer-2-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 621858,
+     "receivable_sats": 1334620,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.907143,
+     "drain": 0.745078,
+     "capex_remaining_sats": 100000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-2-3",
+      "dest": "chan-2-0",
+      "amount_sats": 132638,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 2000,
+      "score": 0.5912622
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-2-2",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-2-6",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-2-4",
+      "reason": "max_pairs_reached",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "chan-2-1",
+      "reason": "max_pairs_reached",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "chan-2-5",
+      "reason": "max_pairs_reached",
+      "value_class": "active",
+      "remaining_budget_sats": 20000,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "chan-2-7",
+      "reason": "max_pairs_reached",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": "limit=1"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-2-4",
+      "peer_id": "peer-2-3",
+      "excess_sats": 271325,
+      "drain_score": 0.387671,
+      "value_class": "profitable"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_003",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "chan-3-0",
+     "peer_id": "peer-3-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 899187,
+     "receivable_sats": 85022,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.411264,
+     "drain": 0.018311,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-3-1",
+     "peer_id": "peer-3-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 4579566,
+     "receivable_sats": 5259608,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.070922,
+     "drain": 0.42133,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-3-1",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-3-0",
+      "reason": "no_partner",
+      "value_class": "profitable",
+      "remaining_budget_sats": 100000,
+      "detail": "no over-remote channels available"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-3-0",
+      "peer_id": "peer-3-0",
+      "excess_sats": 249187,
+      "drain_score": 0.018311,
+      "value_class": "profitable"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_004",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-4-0",
+     "peer_id": "peer-4-3",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2610657,
+     "receivable_sats": 2164018,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.661404,
+     "drain": 0.181892,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-4-1",
+     "peer_id": "peer-4-1",
+     "capacity_sats": 10000000,
+     "spendable_sats": 658817,
+     "receivable_sats": 9086758,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.909997,
+     "drain": 0.225856,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-4-2",
+     "peer_id": "peer-4-3",
+     "capacity_sats": 1000000,
+     "spendable_sats": 383812,
+     "receivable_sats": 577989,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.197507,
+     "drain": 0.085522,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-4-3",
+     "peer_id": "peer-4-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 837855,
+     "receivable_sats": 153616,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 3000,
+     "value_class": "neutral",
+     "urgency": 0.719964,
+     "drain": 0.331642,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-4-4",
+     "peer_id": "peer-4-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 7911725,
+     "receivable_sats": 1879171,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.95136,
+     "drain": 0.129617,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-4-5",
+     "peer_id": "peer-4-1",
+     "capacity_sats": 10000000,
+     "spendable_sats": 6426099,
+     "receivable_sats": 3290519,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 50,
+     "value_class": "neutral",
+     "urgency": 0.87541,
+     "drain": 0.694979,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-4-6",
+     "peer_id": "peer-4-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1324822,
+     "receivable_sats": 8620716,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.779772,
+     "drain": 0.533281,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-4-7",
+     "peer_id": "peer-4-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1186615,
+     "receivable_sats": 8453045,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 5000,
+     "value_class": "funded",
+     "urgency": 0.796891,
+     "drain": 0.901024,
+     "capex_remaining_sats": 1000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-4-5",
+      "dest": "chan-4-7",
+      "amount_sats": 100000,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.6770631
+     },
+     {
+      "source": "chan-4-3",
+      "dest": "chan-4-6",
+      "amount_sats": 100000,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.54026
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-4-0",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-4-4",
+      "reason": "max_pairs_reached",
+      "value_class": "profitable",
+      "remaining_budget_sats": 100000,
+      "detail": "limit=2"
+     },
+     {
+      "channel_id": "chan-4-1",
+      "reason": "max_pairs_reached",
+      "value_class": "funded",
+      "remaining_budget_sats": 100000,
+      "detail": "limit=2"
+     },
+     {
+      "channel_id": "chan-4-2",
+      "reason": "max_pairs_reached",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "limit=2"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-4-4",
+      "peer_id": "peer-4-0",
+      "excess_sats": 1411720,
+      "drain_score": 0.129617,
+      "value_class": "profitable"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_005",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 3,
+    "pair_fee_cap_ppm": 2000
+   },
+   "channels": [
+    {
+     "channel_id": "chan-5-0",
+     "peer_id": "peer-5-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 5090785,
+     "receivable_sats": 4428133,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 800,
+     "value_class": "funded",
+     "urgency": 0.944656,
+     "drain": 0.656591,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-5-1",
+     "peer_id": "peer-5-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 14936,
+     "receivable_sats": 461010,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 1500,
+     "value_class": "active",
+     "urgency": 0.650531,
+     "drain": 0.045719,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-5-2",
+     "peer_id": "peer-5-2",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1846942,
+     "receivable_sats": 91061,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 3000,
+     "value_class": "profitable",
+     "urgency": 0.969514,
+     "drain": 0.676352,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-5-3",
+     "peer_id": "peer-5-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 875972,
+     "receivable_sats": 83463,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 250,
+     "value_class": "funded",
+     "urgency": 0.971431,
+     "drain": 0.542198,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-5-4",
+     "peer_id": "peer-5-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1418957,
+     "receivable_sats": 571263,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.406408,
+     "drain": 0.099599,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-5-5",
+     "peer_id": "peer-5-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3646428,
+     "receivable_sats": 1276586,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 50,
+     "value_class": "active",
+     "urgency": 0.414095,
+     "drain": 0.03401,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-5-4",
+      "dest": "chan-5-1",
+      "amount_sats": 100000,
+      "pair_budget_sats": 100000,
+      "pair_fee_cap_ppm": 2000,
+      "score": 0.4150791
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-5-0",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-5-5",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-5-2",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 1000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-5-3",
+      "reason": "outcompeted",
+      "value_class": "funded",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-5-2",
+      "peer_id": "peer-5-2",
+      "excess_sats": 646942,
+      "drain_score": 0.676352,
+      "value_class": "profitable"
+     },
+     {
+      "channel_id": "chan-5-3",
+      "peer_id": "peer-5-2",
+      "excess_sats": 175972,
+      "drain_score": 0.542198,
+      "value_class": "funded"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_006",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 5,
+    "pair_fee_cap_ppm": 2000
+   },
+   "channels": [
+    {
+     "channel_id": "chan-6-0",
+     "peer_id": "peer-6-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 303114,
+     "receivable_sats": 670628,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "profitable",
+     "urgency": 0.151293,
+     "drain": 0.271433,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-6-1",
+     "peer_id": "peer-6-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 1994473,
+     "receivable_sats": 2973657,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 250,
+     "value_class": "funded",
+     "urgency": 0.593748,
+     "drain": 0.651118,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-6-2",
+     "peer_id": "peer-6-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 304421,
+     "receivable_sats": 185307,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.425415,
+     "drain": 0.94037,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-6-3",
+     "peer_id": "peer-6-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2550285,
+     "receivable_sats": 2424696,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.689396,
+     "drain": 0.480498,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-6-4",
+     "peer_id": "peer-6-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1688758,
+     "receivable_sats": 7953572,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.553483,
+     "drain": 0.997775,
+     "capex_remaining_sats": 20000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-6-0",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-6-1",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-6-2",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-6-3",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-6-4",
+      "reason": "no_partner",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": "no over-local channels available"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_007",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-7-0",
+     "peer_id": "peer-7-3",
+     "capacity_sats": 2000000,
+     "spendable_sats": 64876,
+     "receivable_sats": 1909514,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.214032,
+     "drain": 0.438585,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-7-1",
+     "peer_id": "peer-7-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3357798,
+     "receivable_sats": 1464975,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.577189,
+     "drain": 0.696141,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-7-2",
+     "peer_id": "peer-7-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3862212,
+     "receivable_sats": 984847,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 3000,
+     "value_class": "profitable",
+     "urgency": 0.676949,
+     "drain": 0.707393,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-7-3",
+     "peer_id": "peer-7-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 9343933,
+     "receivable_sats": 604984,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 250,
+     "value_class": "funded",
+     "urgency": 0.790694,
+     "drain": 0.273315,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-7-4",
+     "peer_id": "peer-7-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 67653,
+     "receivable_sats": 429924,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.996318,
+     "drain": 0.490785,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-7-5",
+     "peer_id": "peer-7-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 34876,
+     "receivable_sats": 446602,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.438437,
+     "drain": 0.980711,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-7-6",
+     "peer_id": "peer-7-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1374622,
+     "receivable_sats": 618155,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "active",
+     "urgency": 0.116684,
+     "drain": 0.604713,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-7-3",
+      "dest": "chan-7-4",
+      "amount_sats": 107347,
+      "pair_budget_sats": 54,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.8485583999999999
+     },
+     {
+      "source": "chan-7-1",
+      "dest": "chan-7-5",
+      "amount_sats": 107800,
+      "pair_budget_sats": 54,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.47075930000000005
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-7-2",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-7-6",
+      "reason": "max_pairs_reached",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": "limit=2"
+     },
+     {
+      "channel_id": "chan-7-0",
+      "reason": "max_pairs_reached",
+      "value_class": "funded",
+      "remaining_budget_sats": 0,
+      "detail": "limit=2"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-7-6",
+      "peer_id": "peer-7-0",
+      "excess_sats": 174622,
+      "drain_score": 0.604713,
+      "value_class": "active"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_008",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 1,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "chan-8-0",
+     "peer_id": "peer-8-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1253355,
+     "receivable_sats": 8357129,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.513049,
+     "drain": 0.596719,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-8-1",
+     "peer_id": "peer-8-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 463831,
+     "receivable_sats": 26690,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "funded",
+     "urgency": 0.314657,
+     "drain": 0.603137,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-8-2",
+     "peer_id": "peer-8-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 632542,
+     "receivable_sats": 322012,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 50,
+     "value_class": "neutral",
+     "urgency": 0.599735,
+     "drain": 0.287437,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-8-3",
+     "peer_id": "peer-8-3",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3739385,
+     "receivable_sats": 1066778,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 50,
+     "value_class": "neutral",
+     "urgency": 0.444436,
+     "drain": 0.233322,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-8-4",
+     "peer_id": "peer-8-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1570605,
+     "receivable_sats": 8359566,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 5000,
+     "value_class": "active",
+     "urgency": 0.561383,
+     "drain": 0.03485,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-8-5",
+     "peer_id": "peer-8-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 147127,
+     "receivable_sats": 331202,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.41421,
+     "drain": 0.396237,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-8-6",
+     "peer_id": "peer-8-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 8676931,
+     "receivable_sats": 1269647,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 800,
+     "value_class": "neutral",
+     "urgency": 0.956478,
+     "drain": 0.836277,
+     "capex_remaining_sats": 20000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-8-6",
+      "dest": "chan-8-4",
+      "amount_sats": 2000000,
+      "pair_budget_sats": 20000,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.6196703
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-8-2",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-8-1",
+      "reason": "max_pairs_reached",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "chan-8-3",
+      "reason": "max_pairs_reached",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "chan-8-0",
+      "reason": "max_pairs_reached",
+      "value_class": "funded",
+      "remaining_budget_sats": 1000,
+      "detail": "limit=1"
+     },
+     {
+      "channel_id": "chan-8-5",
+      "reason": "max_pairs_reached",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": "limit=1"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-8-1",
+      "peer_id": "peer-8-3",
+      "excess_sats": 138831,
+      "drain_score": 0.603137,
+      "value_class": "funded"
+     },
+     {
+      "channel_id": "chan-8-3",
+      "peer_id": "peer-8-3",
+      "excess_sats": 489385,
+      "drain_score": 0.233322,
+      "value_class": "neutral"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_009",
+   "params": {
+    "max_chunk_sats": 500000,
+    "max_pairs": 5,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "chan-9-0",
+     "peer_id": "peer-9-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 1751173,
+     "receivable_sats": 3141354,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "profitable",
+     "urgency": 0.889154,
+     "drain": 0.493991,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-9-1",
+     "peer_id": "peer-9-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 1050700,
+     "receivable_sats": 3913381,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.169228,
+     "drain": 0.922066,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-9-2",
+     "peer_id": "peer-9-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3598673,
+     "receivable_sats": 1323933,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 800,
+     "value_class": "active",
+     "urgency": 0.692473,
+     "drain": 0.268608,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-9-0",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-9-2",
+      "reason": "outcompeted",
+      "value_class": "active",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-9-1",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-9-2",
+      "peer_id": "peer-9-1",
+      "excess_sats": 348675,
+      "drain_score": 0.268608,
+      "value_class": "active"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_010",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-10-0",
+     "peer_id": "peer-10-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 220766,
+     "receivable_sats": 259615,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "active",
+     "urgency": 0.217394,
+     "drain": 0.252474,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-10-1",
+     "peer_id": "peer-10-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2237091,
+     "receivable_sats": 2715996,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.904476,
+     "drain": 0.636122,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-10-2",
+     "peer_id": "peer-10-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 566802,
+     "receivable_sats": 9292571,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 3000,
+     "value_class": "active",
+     "urgency": 0.85985,
+     "drain": 0.866934,
+     "capex_remaining_sats": 1000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-10-0",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-10-1",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-10-2",
+      "reason": "no_partner",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": "no over-local channels available"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_011",
+   "params": {
+    "max_chunk_sats": 500000,
+    "max_pairs": 3,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-11-0",
+     "peer_id": "peer-11-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 162409,
+     "receivable_sats": 314003,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 5000,
+     "value_class": "active",
+     "urgency": 0.220321,
+     "drain": 0.128416,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-11-1",
+     "peer_id": "peer-11-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 157821,
+     "receivable_sats": 1836758,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "neutral",
+     "urgency": 0.193691,
+     "drain": 0.720628,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-11-2",
+     "peer_id": "peer-11-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 422769,
+     "receivable_sats": 573473,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 50,
+     "value_class": "active",
+     "urgency": 0.007989,
+     "drain": 0.977771,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-11-3",
+     "peer_id": "peer-11-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 481609,
+     "receivable_sats": 4307231,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "profitable",
+     "urgency": 0.604988,
+     "drain": 0.116903,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-11-2",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-11-0",
+      "reason": "no_partner",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": "no over-local channels available"
+     },
+     {
+      "channel_id": "chan-11-1",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 20000,
+      "detail": "no over-local channels available"
+     },
+     {
+      "channel_id": "chan-11-3",
+      "reason": "no_partner",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": "no over-local channels available"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_012",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 5,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-12-0",
+     "peer_id": "peer-12-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 460853,
+     "receivable_sats": 495404,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 5000,
+     "value_class": "neutral",
+     "urgency": 0.086482,
+     "drain": 0.345146,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-12-1",
+     "peer_id": "peer-12-4",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1012791,
+     "receivable_sats": 8862420,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.433316,
+     "drain": 0.515945,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-12-2",
+     "peer_id": "peer-12-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 468509,
+     "receivable_sats": 29412,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.162035,
+     "drain": 0.328432,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-12-3",
+     "peer_id": "peer-12-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 379728,
+     "receivable_sats": 114606,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 3000,
+     "value_class": "neutral",
+     "urgency": 0.08347,
+     "drain": 0.971091,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-12-4",
+     "peer_id": "peer-12-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 455782,
+     "receivable_sats": 535745,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 12000,
+     "value_class": "active",
+     "urgency": 0.590981,
+     "drain": 0.882468,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-12-5",
+     "peer_id": "peer-12-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1515793,
+     "receivable_sats": 477665,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 5000,
+     "value_class": "active",
+     "urgency": 0.316341,
+     "drain": 0.573242,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-12-6",
+     "peer_id": "peer-12-4",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2184662,
+     "receivable_sats": 2795118,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "neutral",
+     "urgency": 0.629364,
+     "drain": 0.817254,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-12-7",
+     "peer_id": "peer-12-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 271394,
+     "receivable_sats": 216134,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "neutral",
+     "urgency": 0.62323,
+     "drain": 0.214288,
+     "capex_remaining_sats": 1000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-12-3",
+      "dest": "chan-12-1",
+      "amount_sats": 54728,
+      "pair_budget_sats": 5000,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.5642130000000001
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-12-0",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-12-4",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-12-5",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-12-6",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-12-7",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-12-2",
+      "reason": "outcompeted",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-12-2",
+      "peer_id": "peer-12-2",
+      "excess_sats": 68509,
+      "drain_score": 0.328432,
+      "value_class": "active"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_013",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-13-0",
+     "peer_id": "peer-13-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 202488,
+     "receivable_sats": 287372,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 250,
+     "value_class": "profitable",
+     "urgency": 0.86773,
+     "drain": 0.414915,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-13-1",
+     "peer_id": "peer-13-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 355517,
+     "receivable_sats": 611088,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 1500,
+     "value_class": "neutral",
+     "urgency": 0.642617,
+     "drain": 0.481022,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-13-2",
+     "peer_id": "peer-13-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1793867,
+     "receivable_sats": 162401,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 3000,
+     "value_class": "funded",
+     "urgency": 0.052509,
+     "drain": 0.20094,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-13-3",
+     "peer_id": "peer-13-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 38977,
+     "receivable_sats": 442046,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.930655,
+     "drain": 0.376817,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-13-4",
+     "peer_id": "peer-13-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 176820,
+     "receivable_sats": 321968,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.723728,
+     "drain": 0.738337,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-13-2",
+      "dest": "chan-13-4",
+      "amount_sats": 23180,
+      "pair_budget_sats": 5000,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.49730640000000004
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-13-0",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-13-1",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-13-3",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 20000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_014",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 2000
+   },
+   "channels": [
+    {
+     "channel_id": "chan-14-0",
+     "peer_id": "peer-14-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 835514,
+     "receivable_sats": 152570,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 50,
+     "value_class": "active",
+     "urgency": 0.182009,
+     "drain": 0.996606,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-14-1",
+     "peer_id": "peer-14-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 781643,
+     "receivable_sats": 1192033,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 800,
+     "value_class": "neutral",
+     "urgency": 0.687738,
+     "drain": 0.666244,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-14-1",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-14-0",
+      "reason": "no_partner",
+      "value_class": "active",
+      "remaining_budget_sats": 5000,
+      "detail": "no over-remote channels available"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-14-0",
+      "peer_id": "peer-14-0",
+      "excess_sats": 135514,
+      "drain_score": 0.996606,
+      "value_class": "active"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_015",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 5,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-15-0",
+     "peer_id": "peer-15-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 28074,
+     "receivable_sats": 453250,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 6000,
+     "value_class": "neutral",
+     "urgency": 0.854344,
+     "drain": 0.485599,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-15-1",
+     "peer_id": "peer-15-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 684726,
+     "receivable_sats": 275071,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 3000,
+     "value_class": "neutral",
+     "urgency": 0.514015,
+     "drain": 0.832573,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-15-2",
+     "peer_id": "peer-15-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 49482,
+     "receivable_sats": 431366,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 800,
+     "value_class": "funded",
+     "urgency": 0.532757,
+     "drain": 0.466682,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-15-3",
+     "peer_id": "peer-15-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 3534080,
+     "receivable_sats": 6173280,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 50,
+     "value_class": "active",
+     "urgency": 0.63862,
+     "drain": 0.886033,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-15-4",
+     "peer_id": "peer-15-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 291667,
+     "receivable_sats": 194577,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.821546,
+     "drain": 0.357491,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-15-5",
+     "peer_id": "peer-15-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1207505,
+     "receivable_sats": 8672640,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.381163,
+     "drain": 0.51777,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-15-1",
+      "dest": "chan-15-2",
+      "amount_sats": 50518,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.5663417000000001
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-15-3",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-15-4",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-15-0",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-15-5",
+      "reason": "outcompeted",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_016",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 5,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "chan-16-0",
+     "peer_id": "peer-16-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 414562,
+     "receivable_sats": 4524187,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.460626,
+     "drain": 0.407746,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-16-1",
+     "peer_id": "peer-16-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 706544,
+     "receivable_sats": 263055,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "profitable",
+     "urgency": 0.907278,
+     "drain": 0.871329,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-16-1",
+      "dest": "chan-16-0",
+      "amount_sats": 56544,
+      "pair_budget_sats": 0,
+      "pair_fee_cap_ppm": 0,
+      "score": 0.8124536
+     }
+    ],
+    "skips": [],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_017",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-17-0",
+     "peer_id": "peer-17-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 364195,
+     "receivable_sats": 134900,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 50,
+     "value_class": "profitable",
+     "urgency": 0.355812,
+     "drain": 0.568358,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-17-1",
+     "peer_id": "peer-17-3",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2011538,
+     "receivable_sats": 2818292,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.728494,
+     "drain": 0.024741,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-17-2",
+     "peer_id": "peer-17-1",
+     "capacity_sats": 10000000,
+     "spendable_sats": 2940833,
+     "receivable_sats": 7022804,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 5000,
+     "value_class": "profitable",
+     "urgency": 0.504212,
+     "drain": 0.975017,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-17-3",
+     "peer_id": "peer-17-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 462285,
+     "receivable_sats": 25170,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.231872,
+     "drain": 0.569975,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-17-4",
+     "peer_id": "peer-17-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3309069,
+     "receivable_sats": 1456308,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.744448,
+     "drain": 0.90188,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-17-5",
+     "peer_id": "peer-17-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 33529,
+     "receivable_sats": 445343,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "profitable",
+     "urgency": 0.815154,
+     "drain": 0.692854,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-17-6",
+     "peer_id": "peer-17-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1313229,
+     "receivable_sats": 632123,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.422019,
+     "drain": 0.917973,
+     "capex_remaining_sats": 100000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-17-0",
+      "dest": "chan-17-5",
+      "amount_sats": 39195,
+      "pair_budget_sats": 100000,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.8572178
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-17-1",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-17-2",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-17-4",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-17-3",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-17-6",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-17-6",
+      "peer_id": "peer-17-0",
+      "excess_sats": 113228,
+      "drain_score": 0.917973,
+      "value_class": "profitable"
+     },
+     {
+      "channel_id": "chan-17-3",
+      "peer_id": "peer-17-1",
+      "excess_sats": 137285,
+      "drain_score": 0.569975,
+      "value_class": "neutral"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_018",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-18-0",
+     "peer_id": "peer-18-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 314507,
+     "receivable_sats": 172677,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.609027,
+     "drain": 0.370955,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-18-1",
+     "peer_id": "peer-18-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 634239,
+     "receivable_sats": 1282157,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.548672,
+     "drain": 0.608248,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-18-2",
+     "peer_id": "peer-18-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 417535,
+     "receivable_sats": 547834,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 3000,
+     "value_class": "active",
+     "urgency": 0.12928,
+     "drain": 0.326168,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-18-3",
+     "peer_id": "peer-18-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 3512654,
+     "receivable_sats": 6156657,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "funded",
+     "urgency": 0.99178,
+     "drain": 0.863572,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-18-0",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-18-2",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-18-1",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": "no over-local channels available"
+     },
+     {
+      "channel_id": "chan-18-3",
+      "reason": "no_partner",
+      "value_class": "funded",
+      "remaining_budget_sats": 5000,
+      "detail": "no over-local channels available"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_019",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 2000
+   },
+   "channels": [
+    {
+     "channel_id": "chan-19-0",
+     "peer_id": "peer-19-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 60663,
+     "receivable_sats": 417202,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 5000,
+     "value_class": "funded",
+     "urgency": 0.30389,
+     "drain": 0.56878,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-19-1",
+     "peer_id": "peer-19-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 307084,
+     "receivable_sats": 187460,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 250,
+     "value_class": "funded",
+     "urgency": 0.865678,
+     "drain": 0.191992,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-19-2",
+     "peer_id": "peer-19-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 226687,
+     "receivable_sats": 725417,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.994954,
+     "drain": 0.461417,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-19-3",
+     "peer_id": "peer-19-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 953429,
+     "receivable_sats": 41245,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.997487,
+     "drain": 0.941906,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-19-4",
+     "peer_id": "peer-19-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2688998,
+     "receivable_sats": 2151542,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "profitable",
+     "urgency": 0.510134,
+     "drain": 0.073187,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-19-3",
+      "dest": "chan-19-2",
+      "amount_sats": 100000,
+      "pair_budget_sats": 200,
+      "pair_fee_cap_ppm": 2000,
+      "score": 0.8868674000000001
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-19-1",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-19-4",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-19-0",
+      "reason": "outcompeted",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_020",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-20-0",
+     "peer_id": "peer-20-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 240990,
+     "receivable_sats": 234612,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.658142,
+     "drain": 0.848163,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-20-1",
+     "peer_id": "peer-20-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2387801,
+     "receivable_sats": 2470311,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.930762,
+     "drain": 0.208542,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-20-2",
+     "peer_id": "peer-20-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 263203,
+     "receivable_sats": 9449059,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.62813,
+     "drain": 0.578965,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-20-3",
+     "peer_id": "peer-20-2",
+     "capacity_sats": 2000000,
+     "spendable_sats": 950554,
+     "receivable_sats": 1046837,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.702733,
+     "drain": 0.151162,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-20-4",
+     "peer_id": "peer-20-1",
+     "capacity_sats": 10000000,
+     "spendable_sats": 1478073,
+     "receivable_sats": 8121732,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 5000,
+     "value_class": "neutral",
+     "urgency": 0.887203,
+     "drain": 0.583566,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-20-5",
+     "peer_id": "peer-20-2",
+     "capacity_sats": 2000000,
+     "spendable_sats": 381935,
+     "receivable_sats": 1547749,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.460954,
+     "drain": 0.478304,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-20-6",
+     "peer_id": "peer-20-3",
+     "capacity_sats": 500000,
+     "spendable_sats": 476244,
+     "receivable_sats": 23431,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.101803,
+     "drain": 0.567265,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-20-7",
+     "peer_id": "peer-20-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 224195,
+     "receivable_sats": 4619055,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 3000,
+     "value_class": "neutral",
+     "urgency": 0.816879,
+     "drain": 0.637778,
+     "capex_remaining_sats": 1000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-20-6",
+      "dest": "chan-20-5",
+      "amount_sats": 18064,
+      "pair_budget_sats": 1,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.5217392000000001
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-20-0",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-20-1",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-20-3",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-20-2",
+      "reason": "outcompeted",
+      "value_class": "active",
+      "remaining_budget_sats": 20000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-20-4",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-20-7",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 1000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_021",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "chan-21-0",
+     "peer_id": "peer-21-4",
+     "capacity_sats": 10000000,
+     "spendable_sats": 6011791,
+     "receivable_sats": 3862932,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "active",
+     "urgency": 0.968899,
+     "drain": 0.358275,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-21-1",
+     "peer_id": "peer-21-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 230382,
+     "receivable_sats": 257487,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "neutral",
+     "urgency": 0.453166,
+     "drain": 0.58581,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-21-2",
+     "peer_id": "peer-21-4",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3123986,
+     "receivable_sats": 1783195,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.916894,
+     "drain": 0.969109,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-21-3",
+     "peer_id": "peer-21-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2365845,
+     "receivable_sats": 2568872,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 800,
+     "value_class": "active",
+     "urgency": 0.851322,
+     "drain": 0.697242,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-21-4",
+     "peer_id": "peer-21-4",
+     "capacity_sats": 500000,
+     "spendable_sats": 421307,
+     "receivable_sats": 72493,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.63188,
+     "drain": 0.707562,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-21-5",
+     "peer_id": "peer-21-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 7685047,
+     "receivable_sats": 1863384,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "active",
+     "urgency": 0.850627,
+     "drain": 0.302037,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-21-6",
+     "peer_id": "peer-21-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 445045,
+     "receivable_sats": 38148,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.62977,
+     "drain": 0.673964,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-21-7",
+     "peer_id": "peer-21-4",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3998059,
+     "receivable_sats": 899768,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.824002,
+     "drain": 0.415388,
+     "capex_remaining_sats": 1000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-21-0",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-21-1",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-21-2",
+      "reason": "inside_band",
+      "value_class": "funded",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-21-3",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-21-4",
+      "reason": "no_partner",
+      "value_class": "funded",
+      "remaining_budget_sats": 1000,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-21-5",
+      "reason": "no_partner",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-21-6",
+      "reason": "no_partner",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-21-7",
+      "reason": "no_partner",
+      "value_class": "funded",
+      "remaining_budget_sats": 1000,
+      "detail": "no over-remote channels available"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-21-4",
+      "peer_id": "peer-21-4",
+      "excess_sats": 71307,
+      "drain_score": 0.707562,
+      "value_class": "funded"
+     },
+     {
+      "channel_id": "chan-21-6",
+      "peer_id": "peer-21-1",
+      "excess_sats": 145045,
+      "drain_score": 0.673964,
+      "value_class": "profitable"
+     },
+     {
+      "channel_id": "chan-21-7",
+      "peer_id": "peer-21-4",
+      "excess_sats": 748060,
+      "drain_score": 0.415388,
+      "value_class": "funded"
+     },
+     {
+      "channel_id": "chan-21-5",
+      "peer_id": "peer-21-3",
+      "excess_sats": 1185050,
+      "drain_score": 0.302037,
+      "value_class": "active"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_022",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 1,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-22-0",
+     "peer_id": "peer-22-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 478877,
+     "receivable_sats": 11218,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.250961,
+     "drain": 0.022269,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-22-1",
+     "peer_id": "peer-22-3",
+     "capacity_sats": 2000000,
+     "spendable_sats": 737402,
+     "receivable_sats": 1227380,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "neutral",
+     "urgency": 0.739753,
+     "drain": 0.19697,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-22-2",
+     "peer_id": "peer-22-0",
+     "capacity_sats": 10000000,
+     "spendable_sats": 5534359,
+     "receivable_sats": 4128879,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.968553,
+     "drain": 0.798324,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-22-3",
+     "peer_id": "peer-22-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1680025,
+     "receivable_sats": 254539,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 250,
+     "value_class": "funded",
+     "urgency": 0.583822,
+     "drain": 0.456371,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-22-4",
+     "peer_id": "peer-22-3",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3233641,
+     "receivable_sats": 1624943,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "neutral",
+     "urgency": 0.523613,
+     "drain": 0.88993,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-22-5",
+     "peer_id": "peer-22-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 5241332,
+     "receivable_sats": 4738518,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.436496,
+     "drain": 0.859352,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-22-6",
+     "peer_id": "peer-22-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 334653,
+     "receivable_sats": 158371,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.652084,
+     "drain": 0.441235,
+     "capex_remaining_sats": 100000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-22-1",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-22-2",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-22-4",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-22-5",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-22-6",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-22-0",
+      "reason": "no_partner",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-22-3",
+      "reason": "no_partner",
+      "value_class": "funded",
+      "remaining_budget_sats": 20000,
+      "detail": "no over-remote channels available"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-22-3",
+      "peer_id": "peer-22-0",
+      "excess_sats": 280026,
+      "drain_score": 0.456371,
+      "value_class": "funded"
+     },
+     {
+      "channel_id": "chan-22-0",
+      "peer_id": "peer-22-1",
+      "excess_sats": 78877,
+      "drain_score": 0.022269,
+      "value_class": "profitable"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_023",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-23-0",
+     "peer_id": "peer-23-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 141592,
+     "receivable_sats": 821250,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 1500,
+     "value_class": "profitable",
+     "urgency": 0.771625,
+     "drain": 0.544602,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-23-1",
+     "peer_id": "peer-23-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 223801,
+     "receivable_sats": 261941,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.157158,
+     "drain": 0.02183,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-23-2",
+     "peer_id": "peer-23-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 109055,
+     "receivable_sats": 386154,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.449409,
+     "drain": 0.706607,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-23-3",
+     "peer_id": "peer-23-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 801111,
+     "receivable_sats": 186869,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 800,
+     "value_class": "profitable",
+     "urgency": 0.398067,
+     "drain": 0.119964,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-23-4",
+     "peer_id": "peer-23-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 646923,
+     "receivable_sats": 1347903,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "funded",
+     "urgency": 0.091152,
+     "drain": 0.386743,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-23-5",
+     "peer_id": "peer-23-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 812747,
+     "receivable_sats": 1107734,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 250,
+     "value_class": "neutral",
+     "urgency": 0.143328,
+     "drain": 0.607247,
+     "capex_remaining_sats": 0
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-23-3",
+      "dest": "chan-23-4",
+      "amount_sats": 100000,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.33533840000000004
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-23-1",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-23-5",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-23-0",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-23-2",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 1000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_024",
+   "params": {
+    "max_chunk_sats": 10000000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 0
+   },
+   "channels": [
+    {
+     "channel_id": "chan-24-0",
+     "peer_id": "peer-24-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 721349,
+     "receivable_sats": 248631,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 12000,
+     "value_class": "active",
+     "urgency": 0.872181,
+     "drain": 0.339805,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-24-1",
+     "peer_id": "peer-24-3",
+     "capacity_sats": 1000000,
+     "spendable_sats": 640194,
+     "receivable_sats": 345989,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.508999,
+     "drain": 0.08243,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-24-2",
+     "peer_id": "peer-24-3",
+     "capacity_sats": 10000000,
+     "spendable_sats": 7593966,
+     "receivable_sats": 2088063,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.704732,
+     "drain": 0.026287,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-24-3",
+     "peer_id": "peer-24-0",
+     "capacity_sats": 1000000,
+     "spendable_sats": 249998,
+     "receivable_sats": 709263,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 800,
+     "value_class": "active",
+     "urgency": 0.038399,
+     "drain": 0.595592,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-24-4",
+     "peer_id": "peer-24-1",
+     "capacity_sats": 1000000,
+     "spendable_sats": 839807,
+     "receivable_sats": 122624,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.113112,
+     "drain": 0.324697,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-24-5",
+     "peer_id": "peer-24-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 7736581,
+     "receivable_sats": 2126803,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 12000,
+     "value_class": "neutral",
+     "urgency": 0.177314,
+     "drain": 0.213585,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-24-1",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-24-3",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-24-0",
+      "reason": "no_partner",
+      "value_class": "active",
+      "remaining_budget_sats": 100000,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-24-2",
+      "reason": "no_partner",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-24-4",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 1000,
+      "detail": "no over-remote channels available"
+     },
+     {
+      "channel_id": "chan-24-5",
+      "reason": "no_partner",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": "no over-remote channels available"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-24-0",
+      "peer_id": "peer-24-2",
+      "excess_sats": 121349,
+      "drain_score": 0.339805,
+      "value_class": "active"
+     },
+     {
+      "channel_id": "chan-24-4",
+      "peer_id": "peer-24-1",
+      "excess_sats": 189807,
+      "drain_score": 0.324697,
+      "value_class": "neutral"
+     },
+     {
+      "channel_id": "chan-24-5",
+      "peer_id": "peer-24-2",
+      "excess_sats": 736580,
+      "drain_score": 0.213585,
+      "value_class": "neutral"
+     },
+     {
+      "channel_id": "chan-24-2",
+      "peer_id": "peer-24-3",
+      "excess_sats": 593970,
+      "drain_score": 0.026287,
+      "value_class": "profitable"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_025",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-25-0",
+     "peer_id": "peer-25-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 603497,
+     "receivable_sats": 8929732,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 800,
+     "value_class": "neutral",
+     "urgency": 0.604382,
+     "drain": 0.357058,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-25-1",
+     "peer_id": "peer-25-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 336598,
+     "receivable_sats": 1653652,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.430553,
+     "drain": 0.143659,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-25-2",
+     "peer_id": "peer-25-1",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1450699,
+     "receivable_sats": 545452,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 0,
+     "value_class": "neutral",
+     "urgency": 0.278174,
+     "drain": 0.313072,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-25-3",
+     "peer_id": "peer-25-2",
+     "capacity_sats": 10000000,
+     "spendable_sats": 9671633,
+     "receivable_sats": 52530,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 6000,
+     "value_class": "profitable",
+     "urgency": 0.656546,
+     "drain": 0.721065,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-25-4",
+     "peer_id": "peer-25-1",
+     "capacity_sats": 10000000,
+     "spendable_sats": 4662369,
+     "receivable_sats": 4869462,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 5000,
+     "value_class": "neutral",
+     "urgency": 0.399286,
+     "drain": 0.651621,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-25-2",
+      "dest": "chan-25-1",
+      "amount_sats": 63402,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 50,
+      "score": 0.49178030000000006
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-25-4",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-25-3",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-25-0",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 0,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-25-3",
+      "peer_id": "peer-25-2",
+      "excess_sats": 3171630,
+      "drain_score": 0.721065,
+      "value_class": "profitable"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_026",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 3,
+    "pair_fee_cap_ppm": 50
+   },
+   "channels": [
+    {
+     "channel_id": "chan-26-0",
+     "peer_id": "peer-26-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1111222,
+     "receivable_sats": 810976,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 50,
+     "value_class": "active",
+     "urgency": 0.991295,
+     "drain": 0.801323,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-26-1",
+     "peer_id": "peer-26-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 4381197,
+     "receivable_sats": 483993,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 6000,
+     "value_class": "funded",
+     "urgency": 0.761554,
+     "drain": 0.937227,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-26-2",
+     "peer_id": "peer-26-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 155709,
+     "receivable_sats": 325450,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 3000,
+     "value_class": "funded",
+     "urgency": 0.585456,
+     "drain": 0.113699,
+     "capex_remaining_sats": 5000
+    }
+   ],
+   "expected": {
+    "pairs": [],
+    "skips": [
+     {
+      "channel_id": "chan-26-0",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 0,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-26-1",
+      "reason": "outcompeted",
+      "value_class": "funded",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-26-2",
+      "reason": "outcompeted",
+      "value_class": "funded",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": [
+     {
+      "channel_id": "chan-26-1",
+      "peer_id": "peer-26-0",
+      "excess_sats": 1131195,
+      "drain_score": 0.937227,
+      "value_class": "funded"
+     }
+    ]
+   }
+  },
+  {
+   "case_id": "random_027",
+   "params": {
+    "max_chunk_sats": 2000000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-27-0",
+     "peer_id": "peer-27-1",
+     "capacity_sats": 10000000,
+     "spendable_sats": 5473672,
+     "receivable_sats": 4349828,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 3000,
+     "value_class": "profitable",
+     "urgency": 0.059007,
+     "drain": 0.375228,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-27-1",
+     "peer_id": "peer-27-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 402553,
+     "receivable_sats": 88316,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 800,
+     "value_class": "funded",
+     "urgency": 0.033333,
+     "drain": 0.089626,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-27-2",
+     "peer_id": "peer-27-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 82832,
+     "receivable_sats": 412383,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 250,
+     "value_class": "neutral",
+     "urgency": 0.843802,
+     "drain": 0.84671,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-27-3",
+     "peer_id": "peer-27-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 23344,
+     "receivable_sats": 456200,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.690324,
+     "drain": 0.01913,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-27-4",
+     "peer_id": "peer-27-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 628151,
+     "receivable_sats": 4128335,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 250,
+     "value_class": "active",
+     "urgency": 0.34819,
+     "drain": 0.225126,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-27-5",
+     "peer_id": "peer-27-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 1457750,
+     "receivable_sats": 461704,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 50,
+     "value_class": "profitable",
+     "urgency": 0.670328,
+     "drain": 0.672863,
+     "capex_remaining_sats": 0
+    },
+    {
+     "channel_id": "chan-27-6",
+     "peer_id": "peer-27-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2128261,
+     "receivable_sats": 2860962,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 6000,
+     "value_class": "active",
+     "urgency": 0.6594,
+     "drain": 0.324147,
+     "capex_remaining_sats": 20000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-27-5",
+      "dest": "chan-27-3",
+      "amount_sats": 57750,
+      "pair_budget_sats": 100000,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.6406698
+     },
+     {
+      "source": "chan-27-1",
+      "dest": "chan-27-4",
+      "amount_sats": 52553,
+      "pair_budget_sats": 27,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.4063822
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-27-0",
+      "reason": "inside_band",
+      "value_class": "profitable",
+      "remaining_budget_sats": 5000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-27-6",
+      "reason": "inside_band",
+      "value_class": "active",
+      "remaining_budget_sats": 20000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-27-2",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_028",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 2,
+    "pair_fee_cap_ppm": 2000
+   },
+   "channels": [
+    {
+     "channel_id": "chan-28-0",
+     "peer_id": "peer-28-0",
+     "capacity_sats": 5000000,
+     "spendable_sats": 665330,
+     "receivable_sats": 4330479,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 6000,
+     "value_class": "neutral",
+     "urgency": 0.294187,
+     "drain": 0.832886,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-28-1",
+     "peer_id": "peer-28-2",
+     "capacity_sats": 500000,
+     "spendable_sats": 103289,
+     "receivable_sats": 372751,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 3000,
+     "value_class": "profitable",
+     "urgency": 0.911526,
+     "drain": 0.098966,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-28-2",
+     "peer_id": "peer-28-0",
+     "capacity_sats": 500000,
+     "spendable_sats": 478568,
+     "receivable_sats": 4847,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 0,
+     "value_class": "active",
+     "urgency": 0.965217,
+     "drain": 0.707933,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-28-3",
+     "peer_id": "peer-28-1",
+     "capacity_sats": 500000,
+     "spendable_sats": 102422,
+     "receivable_sats": 384343,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 1500,
+     "value_class": "funded",
+     "urgency": 0.547755,
+     "drain": 0.098478,
+     "capex_remaining_sats": 5000
+    },
+    {
+     "channel_id": "chan-28-4",
+     "peer_id": "peer-28-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 2898876,
+     "receivable_sats": 1863626,
+     "band_low": 0.2,
+     "band_high": 0.8,
+     "inbound_ppm": 1500,
+     "value_class": "neutral",
+     "urgency": 0.444336,
+     "drain": 0.345533,
+     "capex_remaining_sats": 1000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-28-2",
+      "dest": "chan-28-1",
+      "amount_sats": 46711,
+      "pair_budget_sats": 5000,
+      "pair_fee_cap_ppm": 2000,
+      "score": 0.9150444
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-28-4",
+      "reason": "inside_band",
+      "value_class": "neutral",
+      "remaining_budget_sats": 1000,
+      "detail": null
+     },
+     {
+      "channel_id": "chan-28-0",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-28-3",
+      "reason": "outcompeted",
+      "value_class": "funded",
+      "remaining_budget_sats": 5000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  },
+  {
+   "case_id": "random_029",
+   "params": {
+    "max_chunk_sats": 100000,
+    "max_pairs": 10,
+    "pair_fee_cap_ppm": 500
+   },
+   "channels": [
+    {
+     "channel_id": "chan-29-0",
+     "peer_id": "peer-29-0",
+     "capacity_sats": 2000000,
+     "spendable_sats": 117908,
+     "receivable_sats": 1858584,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 800,
+     "value_class": "active",
+     "urgency": 0.757006,
+     "drain": 0.874217,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-29-1",
+     "peer_id": "peer-29-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 111729,
+     "receivable_sats": 4787349,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 12000,
+     "value_class": "profitable",
+     "urgency": 0.019131,
+     "drain": 0.263497,
+     "capex_remaining_sats": 20000
+    },
+    {
+     "channel_id": "chan-29-2",
+     "peer_id": "peer-29-2",
+     "capacity_sats": 5000000,
+     "spendable_sats": 1045776,
+     "receivable_sats": 3855445,
+     "band_low": 0.3,
+     "band_high": 0.7,
+     "inbound_ppm": 0,
+     "value_class": "funded",
+     "urgency": 0.716745,
+     "drain": 0.210317,
+     "capex_remaining_sats": 100000
+    },
+    {
+     "channel_id": "chan-29-3",
+     "peer_id": "peer-29-1",
+     "capacity_sats": 5000000,
+     "spendable_sats": 3803756,
+     "receivable_sats": 1191613,
+     "band_low": 0.4,
+     "band_high": 0.6,
+     "inbound_ppm": 250,
+     "value_class": "profitable",
+     "urgency": 0.039314,
+     "drain": 0.793248,
+     "capex_remaining_sats": 1000
+    },
+    {
+     "channel_id": "chan-29-4",
+     "peer_id": "peer-29-2",
+     "capacity_sats": 1000000,
+     "spendable_sats": 96280,
+     "receivable_sats": 881227,
+     "band_low": 0.35,
+     "band_high": 0.65,
+     "inbound_ppm": 5000,
+     "value_class": "neutral",
+     "urgency": 0.677824,
+     "drain": 0.758432,
+     "capex_remaining_sats": 100000
+    }
+   ],
+   "expected": {
+    "pairs": [
+     {
+      "source": "chan-29-3",
+      "dest": "chan-29-0",
+      "amount_sats": 100000,
+      "pair_budget_sats": 1000,
+      "pair_fee_cap_ppm": 500,
+      "score": 0.6807513999999999
+     }
+    ],
+    "skips": [
+     {
+      "channel_id": "chan-29-1",
+      "reason": "outcompeted",
+      "value_class": "profitable",
+      "remaining_budget_sats": 20000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-29-2",
+      "reason": "outcompeted",
+      "value_class": "funded",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     },
+     {
+      "channel_id": "chan-29-4",
+      "reason": "outcompeted",
+      "value_class": "neutral",
+      "remaining_budget_sats": 100000,
+      "detail": "lower-scoring pairs selected"
+     }
+    ],
+    "drain_demand": []
+   }
+  }
+ ]
+}
