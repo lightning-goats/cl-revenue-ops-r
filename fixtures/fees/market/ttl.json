@@ -1,0 +1,29 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "fee_interval": 0,
+   "expected": 3900
+  },
+  {
+   "fee_interval": -5,
+   "expected": 3900
+  },
+  {
+   "fee_interval": 60,
+   "expected": 3900
+  },
+  {
+   "fee_interval": 1950,
+   "expected": 3900
+  },
+  {
+   "fee_interval": 3000,
+   "expected": 6000
+  },
+  {
+   "fee_interval": 10000,
+   "expected": 20000
+  }
+ ]
+}

@@ -1,0 +1,107 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "no_channels_none",
+   "allow_rpc": true,
+   "channels_response": {
+    "channels": []
+   },
+   "expected_network_prior": null,
+   "expected_selected": null
+  },
+  {
+   "name": "weighted_median_with_spread",
+   "allow_rpc": true,
+   "channels_response": {
+    "channels": [
+     {
+      "fee_per_millionth": 100,
+      "satoshis": 1000000
+     },
+     {
+      "fee_per_millionth": 200,
+      "satoshis": 2000000
+     },
+     {
+      "fee_per_millionth": 300,
+      "satoshis": 500000
+     }
+    ]
+   },
+   "expected_network_prior": {
+    "mean": 200,
+    "std": 100
+   },
+   "expected_selected": {
+    "mean": 200,
+    "std": 100,
+    "source": "network"
+   }
+  },
+  {
+   "name": "single_channel_std_floor",
+   "allow_rpc": true,
+   "channels_response": {
+    "channels": [
+     {
+      "fee_per_millionth": 150,
+      "satoshis": 1000000
+     }
+    ]
+   },
+   "expected_network_prior": {
+    "mean": 150,
+    "std": 75
+   },
+   "expected_selected": {
+    "mean": 150,
+    "std": 75,
+    "source": "network"
+   }
+  },
+  {
+   "name": "all_out_of_range_none",
+   "allow_rpc": true,
+   "channels_response": {
+    "channels": [
+     {
+      "fee_per_millionth": 0,
+      "satoshis": 1000000
+     },
+     {
+      "fee_per_millionth": 10001,
+      "satoshis": 1000000
+     }
+    ]
+   },
+   "expected_network_prior": null,
+   "expected_selected": null
+  },
+  {
+   "name": "allow_rpc_false_short_circuits_selection",
+   "allow_rpc": false,
+   "channels_response": {
+    "channels": [
+     {
+      "fee_per_millionth": 100,
+      "satoshis": 1000000
+     },
+     {
+      "fee_per_millionth": 200,
+      "satoshis": 2000000
+     },
+     {
+      "fee_per_millionth": 300,
+      "satoshis": 500000
+     }
+    ]
+   },
+   "expected_network_prior": {
+    "mean": 200,
+    "std": 100
+   },
+   "expected_selected": null
+  }
+ ]
+}

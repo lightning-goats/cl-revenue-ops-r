@@ -1,0 +1,13 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "cfg_enabled": false,
+   "expected": null
+  },
+  {
+   "cfg_enabled": true,
+   "expected": null
+  }
+ ]
+}

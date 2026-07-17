@@ -1,0 +1,413 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "two_competitors_below_boundary_none",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": null
+  },
+  {
+   "name": "three_competitors_at_boundary_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "cln_default_excluded_leaves_two_none",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 10,
+     "base_fee_msat": 1000,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": null
+  },
+  {
+   "name": "cln_default_excluded_third_real_competitor_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 10,
+     "base_fee_msat": 1000,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "d",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "range_filter_excludes_zero_and_over_max",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 0,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 10001,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "d",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "e",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "age_weighting_fresh_competitors",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 900,
+     "base_fee_msat": 0,
+     "capacity_sats": 5000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 900
+  },
+  {
+   "name": "age_weighting_stale_competitors_same_shape",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1749808000
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1749808000
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 900,
+     "base_fee_msat": 0,
+     "capacity_sats": 5000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 900
+  },
+  {
+   "name": "unknown_last_update_flat_30day_age",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 0
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 0
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 0
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "weighted_median_tie_equal_fee_pair",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 150,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 150,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 500,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 150
+  },
+  {
+   "name": "excludes_our_own_channel",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "us",
+     "destination": "peer",
+     "fee_ppm": 5000,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "seven_competitor_varied_pool",
+   "now": 1752400000,
+   "our_id": "us",
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 80,
+     "base_fee_msat": 0,
+     "capacity_sats": 500000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 120,
+     "base_fee_msat": 0,
+     "capacity_sats": 2000000,
+     "last_update_ts": 1752392800
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 150,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752313600
+    },
+    {
+     "source": "d",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 3000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "e",
+     "destination": "peer",
+     "fee_ppm": 250,
+     "base_fee_msat": 0,
+     "capacity_sats": 1500000,
+     "last_update_ts": 1752227200
+    },
+    {
+     "source": "f",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 800000,
+     "last_update_ts": 1751968000
+    },
+    {
+     "source": "g",
+     "destination": "peer",
+     "fee_ppm": 400,
+     "base_fee_msat": 0,
+     "capacity_sats": 4000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  }
+ ]
+}
