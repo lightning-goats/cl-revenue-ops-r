@@ -11,8 +11,9 @@
 //! `_is_cln_default_fee` (py 3405-3427),
 //! `_get_neighbor_fee_percentile_live` (py 3429-3482),
 //! `_get_competitive_undercut_pct` (py 3484-3552),
-//! `_select_best_fee_prior` (py 7924-7948), and `_frozen_observation` (py
-//! 3134-3140) plus its cycle-frozen wrappers (py 3142-3177).
+//! `_select_best_fee_prior` (py 7924-7948), and `FrozenObservations`, which
+//! mirrors `_frozen_observation` (py 3134-3141) plus its cycle-frozen
+//! wrappers (py 3142-3178).
 //!
 //! Clock injection (Global Constraints): every function that Python
 //! computed with `time.time()` takes an explicit `now: i64` here.
@@ -426,6 +427,78 @@ impl Default for GossipCache {
     }
 }
 
+/// Per-cycle compute-once memo (py `_frozen_observation`, py 3134-3141,
+/// and its cycle-frozen wrappers, py 3142-3178): the Wave-3 cycle
+/// orchestrator owns exactly one `FrozenObservations` per fee cycle so
+/// every channel processed within that cycle observes an IDENTICAL gossip
+/// snapshot, no matter how many times a wrapper is invoked for the same
+/// key over the course of the cycle.
+///
+/// Python models two states with one field (`self._cycle_observations`):
+/// `None` outside an active cycle, where `_frozen_observation` is a bare
+/// passthrough — `compute()` runs on every call, nothing is cached — and a
+/// `dict` during an active cycle, where it memoizes per key. This struct
+/// only models the SECOND state (the active memo): the Wave-3 orchestrator
+/// is the only thing that ever constructs one, so "no active cycle" is
+/// simply "call the `_live`-equivalent function directly, never through a
+/// `FrozenObservations`" on the Rust side — there is no `Option`-wrapped
+/// passthrough mode to reproduce here.
+///
+/// Hit/miss semantics mirror `_frozen_observation` exactly: the first
+/// `get_or_compute` for a given `key` invokes `compute` and caches the
+/// value it returns; every later call for that SAME key returns the
+/// cached value WITHOUT invoking `compute` again. Distinct keys are
+/// independent — the "keyed by observation name" contract, ported from
+/// Python's per-callsite tuple keys (e.g. `("neighbor_median",
+/// peer_id)`) by having each wrapper format its own composite `String` key
+/// (e.g. `format!("neighbor_median:{peer_id}")`).
+///
+/// Error behavior (py: `memo[key] = compute()` — if the right-hand side
+/// raises, the assignment never happens, so `key` stays absent and the
+/// exception propagates to the caller): `compute` here returns a
+/// `Result<serde_json::Value, E>`; on `Err`, NOTHING is cached for `key`
+/// and the error is returned to the caller, so the NEXT call for that key
+/// retries `compute` from scratch rather than caching or replaying the
+/// failure.
+#[derive(Debug, Default)]
+pub struct FrozenObservations {
+    memo: HashMap<String, serde_json::Value>,
+}
+
+impl FrozenObservations {
+    pub fn new() -> Self {
+        Self {
+            memo: HashMap::new(),
+        }
+    }
+
+    /// Compute-once-per-cycle read: returns the cached value for `key` if
+    /// present, otherwise calls `compute`, caches its `Ok` result, and
+    /// returns it. An `Err` from `compute` is propagated without being
+    /// cached, so a subsequent call for the same `key` re-invokes
+    /// `compute`.
+    pub fn get_or_compute<F, E>(&mut self, key: &str, compute: F) -> Result<serde_json::Value, E>
+    where
+        F: FnOnce() -> Result<serde_json::Value, E>,
+    {
+        if let Some(cached) = self.memo.get(key) {
+            return Ok(cached.clone());
+        }
+        let value = compute()?;
+        self.memo.insert(key.to_string(), value.clone());
+        Ok(value)
+    }
+
+    /// Number of distinct keys frozen so far this cycle.
+    pub fn len(&self) -> usize {
+        self.memo.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.memo.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,5 +779,139 @@ mod tests {
         );
         cache.maybe_evict(now);
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn frozen_observations_compute_once_across_repeated_gets() {
+        let calls = std::cell::Cell::new(0u32);
+        let mut memo = FrozenObservations::new();
+
+        let first = memo
+            .get_or_compute::<_, ()>("neighbor_median:peer_a", || {
+                calls.set(calls.get() + 1);
+                Ok(serde_json::json!(150))
+            })
+            .unwrap();
+        let second = memo
+            .get_or_compute::<_, ()>("neighbor_median:peer_a", || {
+                calls.set(calls.get() + 1);
+                Ok(serde_json::json!(999)) // must never run: would prove a miss
+            })
+            .unwrap();
+        let third = memo
+            .get_or_compute::<_, ()>("neighbor_median:peer_a", || {
+                calls.set(calls.get() + 1);
+                Ok(serde_json::json!(999))
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.get(),
+            1,
+            "compute must run exactly once for a repeated key"
+        );
+        assert_eq!(first, serde_json::json!(150));
+        assert_eq!(second, serde_json::json!(150));
+        assert_eq!(third, serde_json::json!(150));
+    }
+
+    #[test]
+    fn frozen_observations_distinct_keys_are_independent() {
+        let mut memo = FrozenObservations::new();
+
+        let a = memo
+            .get_or_compute::<_, ()>("neighbor_median:peer_a", || Ok(serde_json::json!(150)))
+            .unwrap();
+        let b = memo
+            .get_or_compute::<_, ()>("neighbor_median:peer_b", || Ok(serde_json::json!(275)))
+            .unwrap();
+        // Re-reading peer_a must not have been perturbed by freezing peer_b.
+        let a_again = memo
+            .get_or_compute::<_, ()>("neighbor_median:peer_a", || Ok(serde_json::json!(-1)))
+            .unwrap();
+
+        assert_eq!(a, serde_json::json!(150));
+        assert_eq!(b, serde_json::json!(275));
+        assert_eq!(a_again, serde_json::json!(150));
+        assert_eq!(memo.len(), 2);
+    }
+
+    #[test]
+    fn frozen_observations_error_is_not_cached_and_retries_next_call() {
+        // Mirrors Python: `memo[key] = compute()` never assigns when the
+        // right-hand side raises, so an erroring key stays a permanent
+        // miss until a call finally succeeds.
+        let calls = std::cell::Cell::new(0u32);
+        let mut memo = FrozenObservations::new();
+
+        let first: Result<serde_json::Value, &str> = memo.get_or_compute("chain_costs", || {
+            calls.set(calls.get() + 1);
+            Err("rpc unavailable")
+        });
+        assert_eq!(first, Err("rpc unavailable"));
+        assert_eq!(memo.len(), 0, "a failed compute must not be cached");
+
+        let second: Result<serde_json::Value, &str> = memo.get_or_compute("chain_costs", || {
+            calls.set(calls.get() + 1);
+            Ok(serde_json::json!({"onchain_ppm": 12}))
+        });
+        assert_eq!(second, Ok(serde_json::json!({"onchain_ppm": 12})));
+
+        let third: Result<serde_json::Value, &str> = memo.get_or_compute("chain_costs", || {
+            calls.set(calls.get() + 1);
+            Err("must not run: key already frozen")
+        });
+        assert_eq!(third, Ok(serde_json::json!({"onchain_ppm": 12})));
+
+        assert_eq!(
+            calls.get(),
+            2,
+            "compute retries after an error but never re-runs once frozen"
+        );
+    }
+
+    #[test]
+    fn frozen_observations_wrapper_pattern_matches_live_call() {
+        // Demonstrates the shape the Wave-3 cycle orchestrator will use:
+        // a thin wrapper closes over `peer_id` and the gossip snapshot,
+        // and calls through `FrozenObservations` keyed by observation name
+        // + peer, mirroring `_get_neighbor_fee_median` (py 3156-3160).
+        fn frozen_neighbor_median(
+            memo: &mut FrozenObservations,
+            channels: &[GossipChannel],
+            our_id: &str,
+            now: i64,
+            peer_id: &str,
+        ) -> Option<i64> {
+            let key = format!("neighbor_median:{peer_id}");
+            let value = memo
+                .get_or_compute::<_, ()>(&key, || {
+                    Ok(match neighbor_fee_median(channels, our_id, now) {
+                        Some(v) => serde_json::json!(v),
+                        None => serde_json::Value::Null,
+                    })
+                })
+                .unwrap();
+            value.as_i64()
+        }
+
+        let channels = vec![
+            ch("a", 100, 0, 1_000_000, 1_752_400_000 - 3600),
+            ch("b", 200, 0, 1_000_000, 1_752_400_000 - 3600),
+            ch("c", 300, 0, 1_000_000, 1_752_400_000 - 3600),
+        ];
+        let live = neighbor_fee_median(&channels, "us", 1_752_400_000);
+
+        let mut memo = FrozenObservations::new();
+        let frozen_first =
+            frozen_neighbor_median(&mut memo, &channels, "us", 1_752_400_000, "peer_a");
+        // Second call passes an empty snapshot; if the wrapper were not
+        // actually frozen, this would compute `None` instead of replaying
+        // the first (non-empty-snapshot) result.
+        let frozen_second = frozen_neighbor_median(&mut memo, &[], "us", 1_752_400_000, "peer_a");
+
+        assert_eq!(frozen_first, live);
+        assert_eq!(frozen_second, live);
+        assert_eq!(memo.len(), 1);
     }
 }
