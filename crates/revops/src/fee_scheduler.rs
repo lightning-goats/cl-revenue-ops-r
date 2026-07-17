@@ -13,26 +13,45 @@
 //!     RNG -- the same single-owner discipline `revops_db::actor` uses for
 //!     its `Connection`.
 //!
-//! (b) **One tokio ticker task** that, each `fee_interval`, performs the
-//!     ASYNC half of a cycle -- `fee_config::resolve_fee_cfg` (T1, per
-//!     cycle so runtime `revenue-config set` changes on the Python side
-//!     stay visible), the `neighbor_median_min_competitors` resolution
-//!     (T1's verify==3 rule), and `fee_evidence::prefetch_rpc` (T2) -- and
-//!     sends the prepared inputs to the owner thread as one
-//!     [`CycleMsg::RunPrepared`] message.
+//! (b) **One tokio trigger task** that decides WHEN a cycle runs (see
+//!     "Cycle triggering" below) and then performs the ASYNC half of the
+//!     cycle -- `fee_config::resolve_fee_cfg` (T1, per cycle so runtime
+//!     `revenue-config set` changes on the Python side stay visible), the
+//!     `neighbor_median_min_competitors` resolution (T1's verify==3 rule),
+//!     and `fee_evidence::prefetch_rpc` (T2) -- and sends the prepared
+//!     inputs to the owner thread as one [`CycleMsg::RunPrepared`]
+//!     message.
 //!
-//! ## Tick alignment (Design Note 1)
+//! ## Cycle triggering (Design Note 1, T6b)
 //!
 //! The window's lifecycle is re-hydrate-per-cycle: every cycle re-reads
 //! Python's persisted `v2_state_json` flush so both controllers start the
 //! cycle from the same state. That only works if Rust hydrates AFTER
-//! Python's end-of-cycle flush, so the ticker fires at `fee_interval` with
-//! a fixed [`TICK_PHASE_OFFSET_SECS`] (+120s) phase offset from plugin
-//! start -- the same 120s tolerance `tools/diff-harness/
-//! diff_fee_decisions.py` matches decision pairs with. At cutover the
-//! [`StateLifecycle::SeedOnce`] variant flips hydration to
-//! once-at-start-then-evolve-in-memory: a scheduler config change, not a
-//! rework (Design Note 1's recorded consequence).
+//! Python's end-of-cycle flush. Production Python is NOT phase-locked:
+//! `fee_adjustment_loop` (cl-revenue-ops.py) starts at +90s and then
+//! sleeps `interval +/- 20% jitter` AFTER each cycle -- an unphased random
+//! walk (+/-360s per step at the default 1800s interval), so any fixed
+//! wall-phase offset decays within a few cycles and Rust would hydrate
+//! mid-Python-cycle from stale state, emitting decision mismatches for
+//! timing (not porting) reasons.
+//!
+//! [`TriggerMode::FlushTriggered`] (the window default) therefore keys
+//! every Rust cycle off the OBSERVED flush: poll the production DB
+//! read-only every `poll_secs` (cheap single-row [`read_flush_marker`]
+//! query), and when the marker changes, wait `settle_secs` of quiescence
+//! (the flush transaction plus Python's immediate cycle-tail writes, e.g.
+//! `_prune_stale_states`) before running exactly one cycle. If no advance
+//! is observed for more than 2x `fee_interval`, the trigger logs loudly
+//! (Python may be dead or paused) and keeps polling -- it never runs a
+//! cycle on stale state. [`FlushWatcher`] holds that state machine;
+//! `tests/fee_scheduler.rs` drives it synchronously.
+//!
+//! [`TriggerMode::FixedInterval`] preserves the T6 wall-clock cadence
+//! (`fee_interval` + phase offset from plugin start) for cutover, where
+//! Python is gone, nothing flushes, and wall-clock cadence is correct. At
+//! cutover the [`StateLifecycle::SeedOnce`] variant likewise flips
+//! hydration to once-at-start-then-evolve-in-memory: scheduler config
+//! changes, not a rework (Design Note 1's recorded consequence).
 //!
 //! ## Clock discipline
 //!
@@ -68,10 +87,178 @@ use crate::fee_evidence::{build_evidence_snapshot, prefetch_rpc, RpcPrefetch};
 use crate::fee_governor::GovernorWiring;
 use crate::fee_state::{rehydrate, JournalStateSink};
 
-/// Fixed tick phase offset from plugin start: Rust's hydrate must land
-/// AFTER Python's end-of-cycle state flush (Design Note 1, T6 Step 4) --
-/// the same 120s tolerance the diff harness matches with.
+/// T6's fixed tick phase offset from plugin start, kept as the
+/// [`TriggerMode::FixedInterval`] default for cutover. During the dry-run
+/// window it is NOT a hydrate-after-flush guarantee (Python's jittered
+/// sleep is an unphased random walk; see the module doc) -- that is what
+/// [`TriggerMode::FlushTriggered`] exists for.
 pub const TICK_PHASE_OFFSET_SECS: u64 = 120;
+
+/// Flush-trigger poll cadence default: a single-row read-only query every
+/// 30s is negligible against Python's own per-cycle DB traffic.
+pub const DEFAULT_FLUSH_POLL_SECS: u64 = 30;
+
+/// Flush-trigger settle default: observed-advance -> cycle delay, letting
+/// the flush transaction and Python's immediate cycle-tail writes
+/// (`_prune_stale_states`, decision-summary bookkeeping) go quiescent.
+pub const DEFAULT_FLUSH_SETTLE_SECS: u64 = 30;
+
+/// When a cycle runs (T6b's decision enum; see the module doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerMode {
+    /// Window default: run one cycle `settle_secs` after each observed
+    /// advance of Python's flush marker, polling every `poll_secs`.
+    FlushTriggered { poll_secs: u64, settle_secs: u64 },
+    /// Cutover mode: wall-clock cadence (`fee_interval`, first tick offset
+    /// by `phase_offset_secs` from spawn) -- T6's behavior, correct once
+    /// Python is gone and there is no flush to observe.
+    FixedInterval { phase_offset_secs: u64 },
+}
+
+impl Default for TriggerMode {
+    fn default() -> Self {
+        TriggerMode::FlushTriggered {
+            poll_secs: DEFAULT_FLUSH_POLL_SECS,
+            settle_secs: DEFAULT_FLUSH_SETTLE_SECS,
+        }
+    }
+}
+
+/// Read Python's fee-state flush marker: `MAX(_rowid_)` over
+/// `fee_strategy_state` (`Ok(None)` = empty table).
+///
+/// ## Why this column is the marker (verified against production Python)
+///
+/// The requirement is a value that steps exactly once per end-of-cycle
+/// state flush. In `modules/fee_controller.py`, `adjust_all_fees` defers
+/// every per-channel row to `_flush_pending_fee_strategy_rows`, which
+/// lands them via `database.update_fee_strategy_states_batch` -- ONE
+/// `BEGIN IMMEDIATE` transaction of `INSERT OR REPLACE` statements
+/// (modules/database.py). `INSERT OR REPLACE` deletes the conflicting row
+/// and re-inserts WITHOUT an explicit rowid, so every flushed row gets a
+/// fresh `MAX(rowid)+1` rowid: the marker steps once per flush commit
+/// EVEN when every column value is byte-identical (verified: the table's
+/// only writers are `INSERT OR REPLACE` and `DELETE` -- no `UPDATE`
+/// statements exist).
+///
+/// The rejected candidates:
+/// - `MAX(last_update)`: that column is the observation-window CURSOR
+///   (`ChannelCycleState.last_update`), advanced only when a channel
+///   ingests an observation/adjusts; a no-adjustment cycle flushes rows
+///   with unchanged cursors, and wake paths even BACKDATE it
+///   (`fee_controller.py` `_wake_...`/backdating around line 4327). It
+///   stalls exactly when fees are stable -- most of the time.
+/// - a `v2_state_json` cycle counter: none exists.
+///   `ChannelFeeState.to_v2_dict` (fee_controller.py) carries posterior /
+///   PID / timer fields only, none of which move on skip paths.
+///
+/// Caveats, all handled by the [`FlushWatcher`] contract of "any CHANGE
+/// is an advance" plus the settle delay:
+/// - `_prune_stale_states` DELETEs rows right after the flush and VACUUM
+///   renumbers rowids, so the marker can DECREASE -- still a change, and
+///   the next flush moves it again, so nothing becomes unobservable.
+/// - Out-of-cycle immediate writes (hook threads, manual RPC paths,
+///   `set_initial_fee`) also step it: the extra Rust cycle they trigger is
+///   an extra parity trial on freshly-flushed state -- valid, just
+///   unscheduled.
+pub fn read_flush_marker(db_path: &Path) -> anyhow::Result<Option<i64>> {
+    let conn = revops_db::open_read_only(db_path)?;
+    let marker = conn.query_row("SELECT MAX(_rowid_) FROM fee_strategy_state", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })?;
+    Ok(marker)
+}
+
+/// Per-poll parameters for [`FlushWatcher::on_poll`] (passed per call so
+/// a runtime `fee_interval` change moves the staleness bound immediately).
+#[derive(Debug, Clone, Copy)]
+pub struct WatchParams {
+    /// Observed-advance -> cycle delay.
+    pub settle_secs: u64,
+    /// Loud-log bound: no advance for LONGER than this (2x `fee_interval`)
+    /// means Python may be dead/paused.
+    pub stale_after_secs: u64,
+}
+
+/// What one poll observation means for the trigger loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollOutcome {
+    /// First successful read: recorded as the baseline, NEVER a trigger
+    /// (the marker's age is unknown at plugin start -- Python could be
+    /// mid-cycle right now).
+    Baselined,
+    /// Marker changed: settle delay (re-)armed. A change while already
+    /// settling re-arms it -- rapid successive writes coalesce into ONE
+    /// cycle once the DB goes quiescent.
+    Advanced,
+    /// Settle elapsed after an advance: run exactly one cycle NOW.
+    RunCycle,
+    /// Nothing to do this poll.
+    Idle,
+    /// No advance for `silent_secs` (> `stale_after_secs`): log loudly,
+    /// keep polling, do NOT run a cycle on stale state. Re-armed every
+    /// `stale_after_secs` of continued silence (loud, not spammy).
+    StaleNoFlush { silent_secs: i64 },
+}
+
+/// The flush-observation state machine ([`TriggerMode::FlushTriggered`]'s
+/// core), deliberately synchronous and clock-injected: the tokio loop
+/// feeds it real polls, the tests scripted timelines.
+#[derive(Debug)]
+pub struct FlushWatcher {
+    /// `None` until the first successful marker read (which baselines).
+    last_marker: Option<Option<i64>>,
+    /// Last observed change (or baseline) -- the staleness anchor.
+    last_advance_at: i64,
+    /// Armed by an observed change: cycle at the first poll at/after this.
+    settle_deadline: Option<i64>,
+    /// Rate limit for [`PollOutcome::StaleNoFlush`].
+    next_stale_report_at: Option<i64>,
+}
+
+impl FlushWatcher {
+    pub fn new(now: i64) -> FlushWatcher {
+        FlushWatcher {
+            last_marker: None,
+            last_advance_at: now,
+            settle_deadline: None,
+            next_stale_report_at: None,
+        }
+    }
+
+    /// Feed one successful marker read. Read ERRORS must not reach this
+    /// method (the loop logs and skips them): an unreadable DB is not an
+    /// advance and must never fire a cycle.
+    pub fn on_poll(&mut self, marker: Option<i64>, now: i64, params: &WatchParams) -> PollOutcome {
+        let Some(prev) = self.last_marker else {
+            self.last_marker = Some(marker);
+            self.last_advance_at = now;
+            return PollOutcome::Baselined;
+        };
+        if prev != marker {
+            self.last_marker = Some(marker);
+            self.last_advance_at = now;
+            self.settle_deadline = Some(now + params.settle_secs as i64);
+            self.next_stale_report_at = None;
+            return PollOutcome::Advanced;
+        }
+        if let Some(deadline) = self.settle_deadline {
+            if now >= deadline {
+                self.settle_deadline = None;
+                return PollOutcome::RunCycle;
+            }
+            return PollOutcome::Idle;
+        }
+        let silent_secs = now - self.last_advance_at;
+        if silent_secs > params.stale_after_secs as i64
+            && self.next_stale_report_at.is_none_or(|t| now >= t)
+        {
+            self.next_stale_report_at = Some(now + params.stale_after_secs as i64);
+            return PollOutcome::StaleNoFlush { silent_secs };
+        }
+        PollOutcome::Idle
+    }
+}
 
 /// State lifecycle for the owner thread (Design Note 1's decision enum).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +283,9 @@ pub struct SchedulerConfig {
     /// under here -- decision journal, state JSONL, dry-run econ ledger.
     pub journal_dir: PathBuf,
     pub lifecycle: StateLifecycle,
+    /// When cycles run: flush-observation (window default) or wall-clock
+    /// (cutover). See [`TriggerMode`].
+    pub trigger: TriggerMode,
 }
 
 /// Messages on the owner thread's channel.
@@ -346,95 +536,250 @@ pub struct SchedulerHandle {
     pub wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
-/// Spawn the scheduler: the owner thread (a) and the ticker task (b).
+/// Spawn the scheduler: the owner thread (a) and the trigger task (b).
 /// Must be called from within the plugin's tokio runtime. Returns the
 /// cheap [`SchedulerHandle`]; dropping every clone of `handle.tx` plus a
 /// `Shutdown` message winds both halves down.
+///
+/// T6b (T6 review Minor): a failed owner-thread spawn is `Err`, not a
+/// usable-looking handle whose sends silently vanish -- the caller
+/// decides how loudly to disable the dry-run.
 pub fn spawn(
     cfg: SchedulerConfig,
     db_handle: Option<DbHandle>,
     python_option_values: HashMap<String, OptValue>,
-) -> SchedulerHandle {
+) -> anyhow::Result<SchedulerHandle> {
+    spawn_with_thread_spawner(cfg, db_handle, python_option_values, |name, body| {
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(body)
+            .map(|_join| ())
+    })
+}
+
+/// [`spawn`] with the owner-thread spawner injected -- the test seam for
+/// the spawn-failure contract (`std::thread::Builder::spawn` failure is
+/// not forceable from a test). Production passes the real builder.
+pub fn spawn_with_thread_spawner<S>(
+    cfg: SchedulerConfig,
+    db_handle: Option<DbHandle>,
+    python_option_values: HashMap<String, OptValue>,
+    thread_spawner: S,
+) -> anyhow::Result<SchedulerHandle>
+where
+    S: FnOnce(&str, Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+{
     let (tx, rx) = mpsc::channel::<CycleMsg>();
-    let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let socket_path = cfg.socket_path.clone();
+    let db_path = cfg.db_path.clone();
+    let trigger = cfg.trigger;
 
     // (a) The owner thread: state + the ONE PyRandom live here, nowhere
     // else. `now_unix()` here is the spawn-time SEED read; per-cycle
-    // clock reads happen inside `run_cycle` (exactly one each).
+    // clock reads happen inside `run_cycle` (exactly one each). Spawned
+    // FIRST: if it fails, the trigger task is never started and the
+    // caller gets `Err` instead of a dead-letter handle.
     let owner_wake = wake_tx.clone();
-    let spawned = std::thread::Builder::new()
-        .name("revops-fee-cycle".to_string())
-        .spawn(move || {
-            let mut owner = CycleOwner::new(&cfg, crate::now_unix());
-            let mut clock = crate::now_unix;
-            while let Ok(msg) = rx.recv() {
-                match msg {
-                    CycleMsg::RunPrepared(prepared) => {
-                        // Outcome logging happens inside run_cycle; the
-                        // loop must survive every outcome.
-                        let _ = owner.run_cycle(*prepared, &mut clock);
-                    }
-                    CycleMsg::RunCycleNow => {
-                        // Only the async half can prefetch; hand over.
-                        let _ = owner_wake.send(());
-                    }
-                    CycleMsg::Shutdown => break,
+    let owner_body: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
+        let mut owner = CycleOwner::new(&cfg, crate::now_unix());
+        let mut clock = crate::now_unix;
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                CycleMsg::RunPrepared(prepared) => {
+                    // Outcome logging happens inside run_cycle; the
+                    // loop must survive every outcome.
+                    let _ = owner.run_cycle(*prepared, &mut clock);
                 }
-            }
-        });
-    if let Err(e) = spawned {
-        // Handle stays usable (sends just go nowhere); a node that cannot
-        // spawn a thread has bigger problems, but the plugin must not
-        // panic over the fee cycle.
-        eprintln!("revops: failed to spawn fee-cycle owner thread: {e}; fee dry-run disabled");
-    }
-
-    // (b) The ticker: async prefetch each fee_interval, phase-offset
-    // +120s from plugin start (see TICK_PHASE_OFFSET_SECS' doc comment).
-    let tick_tx = tx.clone();
-    tokio::spawn(async move {
-        // Initial cadence resolution -- for the FIRST tick's schedule
-        // only; every cycle's authoritative cfg is resolved in
-        // prepare_cycle below.
-        let mut interval_secs =
-            fee_config::resolve_fee_cfg(db_handle.as_ref(), &python_option_values)
-                .await
-                .fee_interval
-                .max(1) as u64;
-        let mut next = tokio::time::Instant::now()
-            + Duration::from_secs(interval_secs + TICK_PHASE_OFFSET_SECS);
-        loop {
-            // A tick advances the phase-locked schedule; a wake runs an
-            // extra cycle without disturbing it.
-            let ticked = tokio::select! {
-                _ = tokio::time::sleep_until(next) => true,
-                wake = wake_rx.recv() => {
-                    if wake.is_none() {
-                        break; // every wake sender dropped
-                    }
-                    false
+                CycleMsg::RunCycleNow => {
+                    // Only the async half can prefetch; hand over.
+                    let _ = owner_wake.send(());
                 }
-            };
-            match prepare_cycle(&socket_path, db_handle.as_ref(), &python_option_values).await {
-                Ok(prepared) => {
-                    interval_secs = prepared.cfg.fee_interval.max(1) as u64;
-                    if tick_tx
-                        .send(CycleMsg::RunPrepared(Box::new(prepared)))
-                        .is_err()
-                    {
-                        break; // owner thread gone
-                    }
-                }
-                Err(e) => {
-                    eprintln!("revops: fee cycle prefetch failed ({e:#}); cycle skipped");
-                }
-            }
-            if ticked {
-                next += Duration::from_secs(interval_secs);
+                CycleMsg::Shutdown => break,
             }
         }
     });
+    thread_spawner("revops-fee-cycle", owner_body).map_err(|e| {
+        anyhow::anyhow!("failed to spawn fee-cycle owner thread: {e}; fee dry-run cannot start")
+    })?;
 
-    SchedulerHandle { tx, wake_tx }
+    // (b) The trigger task (flush-observation or wall-clock; module doc).
+    let tick_tx = tx.clone();
+    tokio::spawn(trigger_loop(
+        trigger,
+        db_path,
+        socket_path,
+        db_handle,
+        python_option_values,
+        tick_tx,
+        wake_rx,
+    ));
+
+    Ok(SchedulerHandle { tx, wake_tx })
+}
+
+/// One dispatch on the async side: prepare a cycle and send it to the
+/// owner thread.
+enum Dispatch {
+    /// Sent; carries the freshly resolved `fee_interval` (the per-cycle
+    /// authoritative cadence/staleness bound).
+    Sent(u64),
+    /// Prefetch failed; logged, cycle skipped.
+    Skipped,
+    /// Owner thread gone -- the trigger loop must exit.
+    OwnerGone,
+}
+
+async fn dispatch_cycle(
+    socket_path: &Path,
+    db_handle: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+    tick_tx: &mpsc::Sender<CycleMsg>,
+) -> Dispatch {
+    match prepare_cycle(socket_path, db_handle, python_option_values).await {
+        Ok(prepared) => {
+            let interval_secs = prepared.cfg.fee_interval.max(1) as u64;
+            if tick_tx
+                .send(CycleMsg::RunPrepared(Box::new(prepared)))
+                .is_err()
+            {
+                Dispatch::OwnerGone
+            } else {
+                Dispatch::Sent(interval_secs)
+            }
+        }
+        Err(e) => {
+            eprintln!("revops: fee cycle prefetch failed ({e:#}); cycle skipped");
+            Dispatch::Skipped
+        }
+    }
+}
+
+/// The trigger task body: decides WHEN cycles run (module doc, "Cycle
+/// triggering"), in either mode also servicing `RunCycleNow` wakes.
+async fn trigger_loop(
+    trigger: TriggerMode,
+    db_path: PathBuf,
+    socket_path: PathBuf,
+    db_handle: Option<DbHandle>,
+    python_option_values: HashMap<String, OptValue>,
+    tick_tx: mpsc::Sender<CycleMsg>,
+    mut wake_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    // Initial cadence resolution -- schedule/staleness seed only; every
+    // cycle's authoritative cfg is resolved in prepare_cycle.
+    let mut interval_secs = fee_config::resolve_fee_cfg(db_handle.as_ref(), &python_option_values)
+        .await
+        .fee_interval
+        .max(1) as u64;
+
+    match trigger {
+        TriggerMode::FixedInterval { phase_offset_secs } => {
+            let mut next = tokio::time::Instant::now()
+                + Duration::from_secs(interval_secs + phase_offset_secs);
+            loop {
+                // A tick advances the phase-locked schedule; a wake runs
+                // an extra cycle without disturbing it.
+                let ticked = tokio::select! {
+                    _ = tokio::time::sleep_until(next) => true,
+                    wake = wake_rx.recv() => {
+                        if wake.is_none() {
+                            return; // every wake sender dropped
+                        }
+                        false
+                    }
+                };
+                match dispatch_cycle(
+                    &socket_path,
+                    db_handle.as_ref(),
+                    &python_option_values,
+                    &tick_tx,
+                )
+                .await
+                {
+                    Dispatch::Sent(interval) => interval_secs = interval,
+                    Dispatch::Skipped => {}
+                    Dispatch::OwnerGone => return,
+                }
+                if ticked {
+                    next += Duration::from_secs(interval_secs);
+                }
+            }
+        }
+        TriggerMode::FlushTriggered {
+            poll_secs,
+            settle_secs,
+        } => {
+            let poll = Duration::from_secs(poll_secs.max(1));
+            let mut watcher = FlushWatcher::new(crate::now_unix());
+            loop {
+                let polled = tokio::select! {
+                    _ = tokio::time::sleep(poll) => true,
+                    wake = wake_rx.recv() => {
+                        if wake.is_none() {
+                            return; // every wake sender dropped
+                        }
+                        false
+                    }
+                };
+                if !polled {
+                    // RunCycleNow wake: an extra cycle outside the flush
+                    // schedule; the watcher is not disturbed.
+                    match dispatch_cycle(
+                        &socket_path,
+                        db_handle.as_ref(),
+                        &python_option_values,
+                        &tick_tx,
+                    )
+                    .await
+                    {
+                        Dispatch::Sent(interval) => interval_secs = interval,
+                        Dispatch::Skipped => {}
+                        Dispatch::OwnerGone => return,
+                    }
+                    continue;
+                }
+                // An unreadable marker is NOT an advance: log, retry next
+                // poll, never run a cycle on unknown state.
+                let marker = match read_flush_marker(&db_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!(
+                            "revops: flush-marker poll failed ({e:#}); retrying (no cycle on \
+                             unknown state)"
+                        );
+                        continue;
+                    }
+                };
+                let params = WatchParams {
+                    settle_secs,
+                    stale_after_secs: interval_secs.saturating_mul(2),
+                };
+                match watcher.on_poll(marker, crate::now_unix(), &params) {
+                    PollOutcome::RunCycle => {
+                        match dispatch_cycle(
+                            &socket_path,
+                            db_handle.as_ref(),
+                            &python_option_values,
+                            &tick_tx,
+                        )
+                        .await
+                        {
+                            Dispatch::Sent(interval) => interval_secs = interval,
+                            Dispatch::Skipped => {}
+                            Dispatch::OwnerGone => return,
+                        }
+                    }
+                    PollOutcome::StaleNoFlush { silent_secs } => {
+                        eprintln!(
+                            "revops: NO PYTHON FEE-STATE FLUSH OBSERVED for {silent_secs}s \
+                             (> 2x fee_interval={interval_secs}s): Python may be dead or \
+                             paused; NOT running cycles on stale state, still polling"
+                        );
+                    }
+                    PollOutcome::Baselined | PollOutcome::Advanced | PollOutcome::Idle => {}
+                }
+            }
+        }
+    }
 }
