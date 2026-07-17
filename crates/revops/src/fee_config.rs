@@ -365,6 +365,31 @@ pub async fn resolve_fee_cfg(
     }
 }
 
+/// Per-cycle resolution of the `neighbor_median_min_competitors` key
+/// through the SAME 3-layer precedence as every `FeeCfgSnapshot` field
+/// ((a) DB override -> (b) cached `listconfigs` value -> (c) the Python
+/// `Config` default of `2`), returned as a typed `serde_json::Value` (the
+/// fixture types the field `int`, so a raw override/option string like
+/// `"3"` comes back as JSON `3`). NOT routed through `FeeCfgSnapshot` --
+/// the struct is a frozen 22-field contract (see
+/// [`neighbor_median_min_competitors_ok`]); the T6 scheduler resolves this
+/// each cycle and fails closed on anything other than the baked `3`.
+pub async fn resolve_neighbor_median_min_competitors(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+) -> serde_json::Value {
+    let suffix = "neighbor-median-min-competitors";
+    match resolve_raw(db, python_option_values, suffix).await {
+        Some(raw) => {
+            let field = config_resolve::db_override_key(suffix);
+            config_types::typed_value(&field, &raw)
+        }
+        // Python `Config.neighbor_median_min_competitors` default
+        // (config.py, mirrored by fixtures/options.json's default "2").
+        None => serde_json::json!(2),
+    }
+}
+
 /// `neighbor_median_min_competitors` is VERIFY==3, not plumbed as a
 /// `FeeCfgSnapshot` field: the market functions bake `market::
 /// MIN_COMPETITORS = 3` and the struct is a frozen 22-field contract (do

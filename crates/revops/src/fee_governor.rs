@@ -10,8 +10,11 @@
 //! any new write target must be a Rust-owned file next to
 //! `revops-r-observer.db`).
 //!
-//! No `setchannel` (or any other broadcast) call exists anywhere in this
-//! module or the crate it wires into — that is cutover work.
+//! No fee-broadcast RPC call (or any other broadcast) exists anywhere in
+//! this module or the crate it wires into — that is cutover work. (The
+//! broadcast RPC's name is deliberately not spelled out here:
+//! `tests/fee_scheduler.rs`' source-scan guard asserts the literal is
+//! absent from this whole crate.)
 
 use std::path::Path;
 

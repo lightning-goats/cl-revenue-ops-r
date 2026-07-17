@@ -9,6 +9,7 @@ pub mod config_types;
 pub mod fee_config;
 pub mod fee_evidence;
 pub mod fee_governor;
+pub mod fee_scheduler;
 pub mod fee_state;
 pub mod hydration;
 pub mod notify;

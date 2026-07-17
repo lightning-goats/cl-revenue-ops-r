@@ -246,3 +246,43 @@ async fn all_22_fields_are_plumbed() {
     let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
     assert_eq!(cfg.authority_level, Some("assist".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// T6 consumer: per-cycle neighbor_median_min_competitors resolution
+// (verify==3, not plumbed -- the scheduler fails closed on anything != 3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn neighbor_min_competitors_defaults_to_2_and_fails_the_gate() {
+    // Python `Config.neighbor_median_min_competitors` defaults to 2
+    // (fixtures/options.json default "2") -- an unconfigured node must
+    // therefore FAIL the ==3 gate, never silently pass it.
+    let v =
+        revops::fee_config::resolve_neighbor_median_min_competitors(None, &HashMap::new()).await;
+    assert_eq!(v, serde_json::json!(2));
+    assert!(!revops::fee_config::neighbor_median_min_competitors_ok(&v));
+}
+
+#[tokio::test]
+async fn neighbor_min_competitors_db_override_resolves_typed_and_passes_gate() {
+    let (handle, _tmp) = fixture_db_with_override("neighbor-median-min-competitors", "3").await;
+    let v =
+        revops::fee_config::resolve_neighbor_median_min_competitors(Some(&handle), &HashMap::new())
+            .await;
+    // The raw DB string "3" must come back TYPED (the fixture types the
+    // field int), so the strict ==json!(3) gate can pass.
+    assert_eq!(v, serde_json::json!(3));
+    assert!(revops::fee_config::neighbor_median_min_competitors_ok(&v));
+}
+
+#[tokio::test]
+async fn neighbor_min_competitors_listconfigs_layer_resolves_typed() {
+    let mut py = HashMap::new();
+    py.insert(
+        "revenue-ops-neighbor-median-min-competitors".to_string(),
+        cln_plugin::options::Value::String("3".to_string()),
+    );
+    let v = revops::fee_config::resolve_neighbor_median_min_competitors(None, &py).await;
+    assert_eq!(v, serde_json::json!(3));
+    assert!(revops::fee_config::neighbor_median_min_competitors_ok(&v));
+}
