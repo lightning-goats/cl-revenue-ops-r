@@ -873,6 +873,91 @@ fn default_cfg_authority_level_authorizes_governed_fees_broadcast() {
 }
 
 #[test]
+fn default_cfg_matches_python_config_defaults() {
+    // Important finding fix (Phase 4 final review, cycle.rs:155-184 /
+    // fbc9ef2-era): `FeeCfgSnapshot::default()`'s doc claims it mirrors
+    // Python `Config` defaults, but 4 fields had silently drifted to the
+    // Rust fixture generator's `_base_cfg` test-helper values instead
+    // (max_fee_ppm 5000 vs 2000, htlcmax_sink_pct 0.9 vs 0.25,
+    // htlcmax_balanced_pct 0.75 vs 0.45, min_fee_ppm 0 vs 10). A 4b wiring
+    // fallback to `Default` would have silently run a 2.5x-wrong ceiling.
+    //
+    // `fixtures/config_types.json` only carries field *types*/ranges/enums,
+    // not default VALUES, so it cannot drive this comparison — this is the
+    // cited inline table the review's fallback directive asks for. Every
+    // entry is a `(field, python_default, config.py_line)` triple; keep
+    // this table AND `FeeCfgSnapshot::default()`'s per-field `// py
+    // config.py:N` comments in sync on every `Config` change.
+    let cfg = FeeCfgSnapshot::default();
+
+    // (field name, python default repr, config.py line) — verify against
+    // ~/bin/cl_revenue_ops-port modules/config.py, branch `port` == `main`.
+    assert_eq!(cfg.min_fee_ppm, 10, "config.py:596 min_fee_ppm");
+    assert_eq!(cfg.max_fee_ppm, 2000, "config.py:605 max_fee_ppm");
+    assert_eq!(
+        cfg.min_fee_ppm_saturated, 0,
+        "config.py:604 min_fee_ppm_saturated"
+    );
+    assert_eq!(cfg.fee_interval, 1800, "config.py:506 fee_interval");
+    assert_eq!(cfg.flow_interval, 3600, "config.py:505 flow_interval");
+    assert_eq!(
+        cfg.htlc_congestion_threshold, 0.8,
+        "config.py:738 htlc_congestion_threshold"
+    );
+    assert_eq!(
+        cfg.market_fee_mode, "undercut",
+        "config.py:630 market_fee_mode"
+    );
+    assert_eq!(
+        cfg.drain_fee_discount_max, 0.0,
+        "config.py:529 drain_fee_discount_max"
+    );
+    assert_eq!(
+        cfg.high_liquidity_threshold, 0.7,
+        "config.py:653 high_liquidity_threshold"
+    );
+    assert_eq!(cfg.fee_profile, "active", "config.py:631 fee_profile");
+    assert_eq!(cfg.base_fee_msat, 0, "config.py:606 base_fee_msat");
+    assert!(cfg.enable_vegas_reflex, "config.py:765 enable_vegas_reflex");
+    assert_eq!(
+        cfg.enable_dynamic_htlcmax,
+        serde_json::Value::Bool(false),
+        "config.py:542 enable_dynamic_htlcmax"
+    );
+    assert_eq!(
+        cfg.htlcmax_source_pct, 0.50,
+        "config.py:543 htlcmax_source_pct"
+    );
+    assert_eq!(cfg.htlcmax_sink_pct, 0.25, "config.py:544 htlcmax_sink_pct");
+    assert_eq!(
+        cfg.htlcmax_balanced_pct, 0.45,
+        "config.py:545 htlcmax_balanced_pct"
+    );
+    assert!(!cfg.paused, "config.py:761 paused");
+    assert!(
+        !cfg.node_drain_bias_enabled,
+        "config.py:535 node_drain_bias_enabled"
+    );
+    assert_eq!(
+        cfg.receivable_ratio_target, 0.30,
+        "config.py:522 receivable_ratio_target"
+    );
+    assert_eq!(
+        cfg.receivable_ratio_floor, 0.20,
+        "config.py:523 receivable_ratio_floor"
+    );
+    assert!(
+        !cfg.econ_governor_fees_enabled,
+        "config.py:560 econ_governor_fees_enabled"
+    );
+    assert_eq!(
+        cfg.authority_level.as_deref(),
+        Some("capital"),
+        "config.py:572 authority_level"
+    );
+}
+
+#[test]
 fn governed_paused_refuses_without_reservation() {
     let deps = GovernedDeps {
         ledger: None,

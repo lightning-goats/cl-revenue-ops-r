@@ -153,29 +153,60 @@ pub struct FeeCfgSnapshot {
 }
 
 impl Default for FeeCfgSnapshot {
-    /// Python `Config` defaults for the fields this cycle reads.
+    /// Python `Config` defaults for the fields this cycle reads. Every
+    /// field below is cited against `modules/config.py` (branch `port` ==
+    /// `main`) and covered by the `default_cfg_matches_python_config_*`
+    /// drift-guard tests in `tests/cycle.rs`, which walk this struct
+    /// against a cited table of the same line numbers — keep both in sync.
+    ///
+    /// Important finding fix (Phase 4 final review): four fields
+    /// previously mirrored the Rust fixture generator's `_base_cfg` test
+    /// helper instead of the real `Config` class defaults (`max_fee_ppm`
+    /// 5000 vs 2000, `htlcmax_sink_pct` 0.9 vs 0.25, `htlcmax_balanced_pct`
+    /// 0.75 vs 0.45, `min_fee_ppm` 0 vs 10) — corrected here.
     fn default() -> Self {
         FeeCfgSnapshot {
-            min_fee_ppm: 0,
-            max_fee_ppm: 5000,
+            // py config.py:596: `min_fee_ppm: int = 10`.
+            min_fee_ppm: 10,
+            // py config.py:605: `max_fee_ppm: int = 2000`.
+            max_fee_ppm: 2000,
+            // py config.py:604: `min_fee_ppm_saturated: int = 0`.
             min_fee_ppm_saturated: 0,
+            // py config.py:506: `fee_interval: int = 1800`.
             fee_interval: 1800,
+            // py config.py:505: `flow_interval: int = 3600`.
             flow_interval: 3600,
+            // py config.py:738: `htlc_congestion_threshold: float = 0.8`.
             htlc_congestion_threshold: 0.8,
+            // py config.py:630: `market_fee_mode: str = "undercut"`.
             market_fee_mode: "undercut".to_string(),
+            // py config.py:529: `drain_fee_discount_max: float = 0.0`.
             drain_fee_discount_max: 0.0,
+            // py config.py:653: `high_liquidity_threshold: float = 0.7`.
             high_liquidity_threshold: 0.7,
+            // py config.py:631: `fee_profile: str = 'active'`.
             fee_profile: "active".to_string(),
+            // py config.py:606: `base_fee_msat: int = 0`.
             base_fee_msat: 0,
+            // py config.py:765: `enable_vegas_reflex: bool = True`.
             enable_vegas_reflex: true,
+            // py config.py:542: `enable_dynamic_htlcmax: bool = False`.
             enable_dynamic_htlcmax: serde_json::Value::Bool(false),
+            // py config.py:543: `htlcmax_source_pct: float = 0.50`.
             htlcmax_source_pct: 0.5,
-            htlcmax_sink_pct: 0.9,
-            htlcmax_balanced_pct: 0.75,
+            // py config.py:544: `htlcmax_sink_pct: float = 0.25`.
+            htlcmax_sink_pct: 0.25,
+            // py config.py:545: `htlcmax_balanced_pct: float = 0.45`.
+            htlcmax_balanced_pct: 0.45,
+            // py config.py:761: `paused: bool = False`.
             paused: false,
+            // py config.py:535: `node_drain_bias_enabled: bool = False`.
             node_drain_bias_enabled: false,
+            // py config.py:522: `receivable_ratio_target: float = 0.30`.
             receivable_ratio_target: 0.30,
+            // py config.py:523: `receivable_ratio_floor: float = 0.20`.
             receivable_ratio_floor: 0.20,
+            // py config.py:560: `econ_governor_fees_enabled: bool = False`.
             econ_governor_fees_enabled: false,
             // py `config.py:572`: `authority_level: str = "capital"`.
             authority_level: Some("capital".to_string()),
