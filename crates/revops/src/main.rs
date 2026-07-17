@@ -872,7 +872,7 @@ async fn main() -> Result<()> {
                      dir resolved (set {journal_dir_name} or {observer_db_name})"
                 ),
                 (Some(prod_db_path), Some(journal_dir)) => {
-                    let handle = revops::fee_scheduler::spawn(
+                    match revops::fee_scheduler::spawn(
                         revops::fee_scheduler::SchedulerConfig {
                             db_path: prod_db_path.clone(),
                             socket_path: init_socket_path.clone(),
@@ -881,17 +881,30 @@ async fn main() -> Result<()> {
                             // whole dry-run window; SeedOnce is the
                             // cutover flip.
                             lifecycle: revops::fee_scheduler::StateLifecycle::RehydratePerCycle,
+                            // T6b: cycles keyed off Python's observed
+                            // end-of-cycle state flush (FixedInterval is
+                            // the cutover flip, alongside SeedOnce).
+                            trigger: revops::fee_scheduler::TriggerMode::default(),
                         },
                         s.db.clone(),
                         s.python_option_values.clone(),
-                    );
-                    let _ = s.scheduler.set(handle);
-                    eprintln!(
-                        "revops: fee-cycle scheduler started (dry-run; journal dir {}, first \
-                         tick at fee_interval+{}s)",
-                        journal_dir.display(),
-                        revops::fee_scheduler::TICK_PHASE_OFFSET_SECS
-                    );
+                    ) {
+                        Ok(handle) => {
+                            let _ = s.scheduler.set(handle);
+                            eprintln!(
+                                "revops: fee-cycle scheduler started (dry-run; journal dir {}, \
+                                 flush-triggered: poll {}s / settle {}s off Python's \
+                                 fee_strategy_state flush marker)",
+                                journal_dir.display(),
+                                revops::fee_scheduler::DEFAULT_FLUSH_POLL_SECS,
+                                revops::fee_scheduler::DEFAULT_FLUSH_SETTLE_SECS
+                            );
+                        }
+                        Err(e) => eprintln!(
+                            "revops: fee-cycle scheduler FAILED to start: {e:#}; fee dry-run \
+                             disabled for this plugin lifetime"
+                        ),
+                    }
                 }
             }
         }
