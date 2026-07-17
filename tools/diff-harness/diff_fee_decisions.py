@@ -742,6 +742,18 @@ def self_test():
     # window are excluded symmetrically. Two adjustments with one inside and
     # one outside the window; same for Python rows; the outside-window pair
     # must be excluded entirely.
+    #
+    # MINOR: this scenario drives `diff_fee_decisions`'s POST-FETCH filters
+    # (the `until_ts is not None` list comprehensions around lines 429/434),
+    # not `fetch_python_rows`'s SQL `AND timestamp <= {until_ts}` clause
+    # construction (line 244) -- `_sqlite_fn_for` below is a stub that
+    # returns its captured `rows` unconditionally and ignores the `query`
+    # string entirely, so the SQL text itself is never parsed or executed
+    # here. The post-fetch filter is what's actually enforced against a live
+    # node (it re-checks every row regardless of what the SQL already
+    # excluded), so self-test coverage of that guarantee is sufficient; the
+    # SQL clause is a query-side optimization only a live/integration run
+    # against real sqlite would exercise.
     rs = [_rs_adjustment(at=1_700_000_000, new=110),
          _rs_adjustment(at=1_700_000_200, new=130)]  # outside until window
     py = [_py_row(timestamp=1_700_000_005, new=110),

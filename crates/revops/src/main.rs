@@ -37,6 +37,16 @@ struct State {
     /// subscription handler and startup hydration treat that as a no-op,
     /// never falling back to the read-only `db` connection above.
     observer_db: Option<revops_db::owner::ObserverHandle>,
+    /// Resolved once at init via [`resolve_journal_dir`] (Task 3): `None`
+    /// when `revops-r-journal-dir` is empty AND `observer-db-path` is also
+    /// unset/unresolved -- there is nothing to derive a dry-run journal
+    /// location from in that case. T6's scheduler consumes this to build
+    /// `SchedulerConfig.journal_dir` (a required `PathBuf`) and skips
+    /// spawning the fee-cycle scheduler entirely when this is `None`.
+    /// Not yet read anywhere in this task -- T6 is the first consumer;
+    /// `#[allow(dead_code)]` is scoped to exactly that until then.
+    #[allow(dead_code)]
+    journal_dir: Option<PathBuf>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -112,6 +122,31 @@ fn expand_tilde(raw: &str) -> PathBuf {
         }
     }
     PathBuf::from(raw)
+}
+
+/// Task 3 interface (`docs/superpowers/plans/2026-07-17-phase4b-wiring.md`,
+/// Task 3): resolve the effective journal directory for the fee
+/// controller's dry-run JSONL output. `journal_dir_opt` is the raw,
+/// not-yet-expanded `revops-r-journal-dir` option value.
+///
+/// - **Empty** (`""`, the registered default): resolves to the PARENT
+///   directory of `observer_db_path` -- the caller passes the already
+///   `~`-expanded `observer-db-path` value here, so no further expansion is
+///   needed on that branch. `None` if `observer_db_path` is itself `None`
+///   (nothing to derive a location from), matching the doc comment on the
+///   registered option ("Empty = parent of observer-db-path").
+/// - **Non-empty**: used as-is after [`expand_tilde`] (same tilde-expansion
+///   every other path-shaped option in this file goes through), regardless
+///   of whether `observer_db_path` is set.
+pub fn resolve_journal_dir(
+    journal_dir_opt: &str,
+    observer_db_path: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    if journal_dir_opt.is_empty() {
+        observer_db_path.and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+    } else {
+        Some(expand_tilde(journal_dir_opt))
+    }
 }
 
 /// True if the observer's own db path (`observer-db-path`, already
@@ -718,6 +753,13 @@ async fn main() -> Result<()> {
     // the production DB, which this plugin is never supposed to touch).
     let production_db_path_expanded = db_path.as_deref().map(expand_tilde);
     let observer_db_raw = configured.option(&observer_db_opt)?;
+    // Captured by reference (not moved) BEFORE the match below consumes
+    // `observer_db_raw` -- Task 3's `resolve_journal_dir` needs the
+    // resolved observer-db-path regardless of whether the observer actor
+    // itself went on to open successfully (a failed/refused open still
+    // names a Rust-owned, writable directory by construction).
+    let observer_db_path_expanded: Option<PathBuf> =
+        (!observer_db_raw.is_empty()).then(|| expand_tilde(&observer_db_raw));
     let observer_db = match (!observer_db_raw.is_empty()).then_some(observer_db_raw) {
         Some(raw) => {
             let path = expand_tilde(&raw);
@@ -764,12 +806,20 @@ async fn main() -> Result<()> {
     let python_option_values =
         revops::config_resolve::fetch_python_option_values(&init_socket_path).await;
 
+    // Task 3: resolve `revops-r-journal-dir` once at init (empty default
+    // falls back to the parent of the resolved `observer-db-path`; see
+    // `resolve_journal_dir`'s doc comment). T6 consumes `State::journal_dir`
+    // to build the fee-cycle scheduler's `SchedulerConfig`.
+    let journal_dir_raw = configured.option(&journal_dir_opt)?;
+    let journal_dir = resolve_journal_dir(&journal_dir_raw, observer_db_path_expanded.as_deref());
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
         db_path,
         db,
         observer_db,
+        journal_dir,
         config_names: config_name_map(),
         python_option_values,
     });
@@ -1011,5 +1061,57 @@ mod tests {
             map.contains_key("observer-db-path"),
             "observer-db-path missing from config_name_map: {map:?}"
         );
+    }
+
+    /// Checklist-mandated mirror of `config_name_map_includes_observer_db_path`:
+    /// `config_name_map` must also expose `journal-dir` (Task 3) so
+    /// `revenue-r-config key=journal-dir` can resolve it.
+    #[test]
+    fn config_name_map_includes_journal_dir() {
+        let map = config_name_map();
+        assert!(
+            map.contains_key("journal-dir"),
+            "journal-dir missing from config_name_map: {map:?}"
+        );
+    }
+
+    /// Task 3, branch 1: an explicit, non-empty `revops-r-journal-dir`
+    /// value is used as-is after `expand_tilde`, regardless of what
+    /// `observer_db_path` is (even `Some`, to prove the explicit value
+    /// wins rather than being ignored).
+    #[test]
+    fn resolve_journal_dir_explicit_value_is_tilde_expanded() {
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/home/testuser");
+        let resolved = resolve_journal_dir(
+            "~/journal",
+            Some(&PathBuf::from("/var/lib/revops/observer.db")),
+        );
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(resolved, Some(PathBuf::from("/home/testuser/journal")));
+    }
+
+    /// Task 3, branch 2: empty option value + a resolved `observer_db_path`
+    /// resolves to that path's PARENT directory.
+    #[test]
+    fn resolve_journal_dir_empty_with_observer_db_uses_parent_dir() {
+        let resolved = resolve_journal_dir(
+            "",
+            Some(&PathBuf::from(
+                "/home/testuser/.lightning/revops-r-observer.db",
+            )),
+        );
+        assert_eq!(resolved, Some(PathBuf::from("/home/testuser/.lightning")));
+    }
+
+    /// Task 3, branch 3: empty option value AND no `observer_db_path` ->
+    /// nothing to derive a journal location from -> `None`.
+    #[test]
+    fn resolve_journal_dir_both_unset_yields_none() {
+        let resolved = resolve_journal_dir("", None);
+        assert_eq!(resolved, None);
     }
 }
