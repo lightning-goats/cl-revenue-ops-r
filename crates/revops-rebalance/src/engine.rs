@@ -16,6 +16,22 @@
 //!   `Err`) wraps as `route_pricing_failed: {e}` (py `:3314`); a failed
 //!   `RouteResult` wraps as `route_pricing_failed: {err} ({route_label})`
 //!   (py `:3336`).
+//! - **Pricing EXCEPTION aborts the whole cycle** (fix round 1, `p5-t7`):
+//!   a pricing EXCEPTION inside `find_candidates` (the router seam's
+//!   `Err` — distinct from a failed `RouteResult`, which stays a per-pair
+//!   `no_route` skip, py `find_candidates` / `rebalance_engine_v2.py`
+//!   pricing loop) propagates out and ABORTS the cycle with ZERO
+//!   executions, matching Python's uncaught raise (`_route_pair` ->
+//!   `_market_price_pair` -> `router.price_pair`, unprotected in the
+//!   `find_candidates` loop) which propagates through `_run_cycle_locked`
+//!   (`:3393`) and `rebalancer.py` (`:721`/`:844`, `finally` only, no
+//!   `except`) — on a mid-cycle askrene flake, Python pays nothing, even
+//!   for pairs that already priced. `run_cycle_locked` reports the abort
+//!   as a single `audit_records` entry (reason `route_pricing_failed`,
+//!   `detail` carrying the EXCEPTION wrap form `route_pricing_failed: {e}`
+//!   — the same template as `execute_candidate_locked`'s py `:3314` site),
+//!   with empty `candidates`/`executions` (Python never returns a value
+//!   when `find_candidates` raises).
 //! - **payment_pending** (P4-007/P4-009/P8-001): the engine never retries
 //!   on top of a pending payment (exclusion retry and the partial-amount
 //!   ladder both break on pending) and HOLDS the budget reservation only
@@ -59,10 +75,6 @@
 //!   `rebalance_audit_v2.py` per the plan's "Explicitly Deferred" section;
 //!   skip records that Python ALSO appends to the plan/cycle result are
 //!   kept (they are engine data, not log stream).
-//! - A pricing EXCEPTION inside `find_candidates` (py: an uncaught raise
-//!   that would abort the whole cycle) records a `no_route` skip and
-//!   continues — a crashed auto-cycle serves nobody in shadow mode; the
-//!   `execute_candidate` path keeps the exact Python wrap semantics.
 //! - The sats-EV gate consumes an [`EvProvider`] seam (the decomposition's
 //!   raw inputs live in the deferred state builder); the T6 interface note
 //!   is honored by folding `failure_count * fee_sats * FAILURE_COST_RATE`
@@ -1660,16 +1672,23 @@ impl EngineShared {
     /// Py `find_candidates` (`rebalance_engine_v2.py:1220-1601`), reduced
     /// per the module docs (audit stream + score-decomposition enrichment
     /// deferred). Returns the priced selection plus every skip record.
-    fn find_candidates(&self) -> (Vec<PairCandidate>, Vec<SkipRecord>) {
+    ///
+    /// `Err` is the pricing-EXCEPTION abort path (fix round 1, `p5-t7`): a
+    /// pricing EXCEPTION (the router seam's `Err`) aborts the ENTIRE
+    /// function immediately, discarding every skip collected so far in this
+    /// call — matching Python's uncaught raise out of `find_candidates`,
+    /// which never reaches its own `return`. A failed `RouteResult` is
+    /// UNCHANGED: still a per-pair `no_route` skip that continues the loop.
+    fn find_candidates(&self) -> Result<(Vec<PairCandidate>, Vec<SkipRecord>), RpcFailure> {
         let Some(channels) = self.snapshot.channels() else {
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         if channels.is_empty() {
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let Some(mut router) = self.router_factory.begin_cycle() else {
             // askrene unavailable; the v3 router is required (fail closed).
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
 
         let cfg = &self.config;
@@ -1804,17 +1823,12 @@ impl EngineShared {
             let route_result = match router.price_pair(&ctx, &[]) {
                 Ok(rr) => rr,
                 Err(exc) => {
-                    // DEVIATION (documented in the module docs): Python
-                    // would raise out of find_candidates and abort the
-                    // cycle; the port records the skip and continues.
-                    skips.push(SkipRecord {
-                        channel_id: pair.dest_channel_id.clone(),
-                        reason: "no_route".to_string(),
-                        value_class: "valuable".to_string(),
-                        remaining_budget_sats: pair.pair_budget_sats.max(0),
-                        detail: Some(exc.message),
-                    });
-                    continue;
+                    // Python-true (fix round 1, `p5-t7`): a pricing
+                    // EXCEPTION aborts the WHOLE cycle — it never reaches
+                    // Python's own `return`, so every skip collected in
+                    // this call (including this one) is discarded too.
+                    drop(router); // end_cycle before unwinding
+                    return Err(exc);
                 }
             };
             if !route_result.success {
@@ -1909,7 +1923,7 @@ impl EngineShared {
         }
         drop(router); // end_cycle
 
-        (priced, skips)
+        Ok((priced, skips))
     }
 
     // -- cycle -------------------------------------------------------------
@@ -1917,7 +1931,35 @@ impl EngineShared {
     /// Py `_run_cycle_locked` (`rebalance_engine_v2.py:3388-3626`).
     fn run_cycle_locked(self: &Arc<Self>) -> CycleResult {
         self.reconcile_pending_settlements();
-        let (candidates, skips) = self.find_candidates();
+        let (candidates, skips) = match self.find_candidates() {
+            Ok(pair) => pair,
+            Err(exc) => {
+                // Python-true abort surface (fix round 1, `p5-t7`): a
+                // pricing EXCEPTION aborts the whole cycle with ZERO
+                // executions and ZERO candidates -- Python's `run_cycle`
+                // never returns a value when `find_candidates` raises (the
+                // exception propagates through `_run_cycle_locked` and
+                // `rebalancer.py`, which only has `finally`, never
+                // `except`). Reported the same way this module already
+                // reports other whole-cycle aborts (`cycle_already_running`):
+                // a single `audit_records` entry, `detail` carrying the
+                // EXCEPTION wrap form (`route_pricing_failed: {e}`, the
+                // same template as `execute_candidate_locked`'s py `:3314`
+                // site -- no route label, unlike the failed-`RouteResult`
+                // wrap).
+                return CycleResult {
+                    candidates: Vec::new(),
+                    executions: Vec::new(),
+                    audit_records: vec![SkipRecord {
+                        channel_id: String::new(),
+                        reason: "route_pricing_failed".to_string(),
+                        value_class: "none".to_string(),
+                        remaining_budget_sats: 0,
+                        detail: Some(format!("{ROUTE_PRICING_FAILED_PREFIX}{exc}")),
+                    }],
+                };
+            }
+        };
         let mut result = CycleResult {
             candidates: candidates.clone(),
             executions: Vec::new(),

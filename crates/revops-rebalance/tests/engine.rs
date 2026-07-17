@@ -529,6 +529,47 @@ fn snapshot_two_channels() -> Vec<PlannerChannel> {
     ]
 }
 
+/// Three independent surplus/deficit pairs, distinct peers throughout, all
+/// identically scored (same bands/urgency/drain/value_class/inbound_ppm) so
+/// the planner's stable tie-break preserves source-major generation order:
+/// `[(src-chan-1,dst-chan-1), (src-chan-2,dst-chan-2), (src-chan-3,
+/// dst-chan-3)]`. Used to drive a mid-cycle pricing exception on the LAST
+/// pair after the first two have already priced successfully.
+fn snapshot_three_pairs() -> Vec<PlannerChannel> {
+    let mut channels = Vec::new();
+    for i in 1..=3 {
+        channels.push(PlannerChannel {
+            channel_id: format!("src-chan-{i}"),
+            peer_id: format!("peer-src-{i}"),
+            capacity_sats: 10_000_000,
+            spendable_sats: 9_000_000,
+            receivable_sats: 1_000_000,
+            band_low: 0.35,
+            band_high: 0.65,
+            inbound_ppm: 0,
+            value_class: "neutral".to_string(),
+            urgency: 0.0,
+            drain: 0.0,
+            capex_remaining_sats: 0,
+        });
+        channels.push(PlannerChannel {
+            channel_id: format!("dst-chan-{i}"),
+            peer_id: format!("peer-dst-{i}"),
+            capacity_sats: 10_000_000,
+            spendable_sats: 1_000_000,
+            receivable_sats: 9_000_000,
+            band_low: 0.35,
+            band_high: 0.65,
+            inbound_ppm: 0,
+            value_class: "neutral".to_string(),
+            urgency: 0.0,
+            drain: 0.0,
+            capex_remaining_sats: 0,
+        });
+    }
+    channels
+}
+
 fn base_config() -> EngineConfig {
     EngineConfig {
         rebalance_max_amount: 2_000_000,
@@ -1488,6 +1529,77 @@ fn find_candidates_drops_inflight_dest_with_skip() {
     assert_eq!(skip.channel_id, "dst-chan");
 
     h.executor.release();
+}
+
+/// Parity fix: a pricing EXCEPTION (the router seam's `Err` -- Python's
+/// `_route_pair` -> `_market_price_pair` -> `router.price_pair`, unprotected
+/// in `find_candidates`'s loop) mid-cycle must abort the WHOLE cycle with
+/// ZERO executions, matching Python's uncaught raise propagating through
+/// `_run_cycle_locked` and `rebalancer.py` (which only has `finally`, never
+/// `except`). Two pairs price successfully before the third raises: on a
+/// mid-cycle askrene flake, the port must NOT pay the pairs that already
+/// priced -- Python pays nothing.
+#[test]
+fn pricing_exception_mid_cycle_aborts_whole_cycle_zero_executions() {
+    let store = MockStore::new();
+    let payment = MockPaymentRpc::new();
+    let executor = ScriptExecutor::new(vec![]);
+    let engine = RebalanceEngine::new(EngineDeps {
+        config: base_config(),
+        store: store.clone(),
+        router_factory: ScriptRouterFactory::new(vec![
+            route_ok(10),
+            route_ok(10),
+            Err(RpcFailure {
+                message: "askrene-create-layer: boom".to_string(),
+            }),
+        ]),
+        executor: executor.clone(),
+        payment_rpc: payment,
+        reconcile_rpc: Arc::new(MockReconcileRpc {
+            listsendpays: HashMap::new(),
+        }),
+        segstore: Arc::new(SegmentObservationStore::with_defaults()),
+        snapshot: Arc::new(FixedSnapshot {
+            channels: snapshot_three_pairs(),
+        }),
+        clock: Arc::new(SystemTestClock),
+        policy: Some(Arc::new(AllowAllPolicy)),
+        arbiter: None,
+        ev: None,
+    });
+
+    let result = engine.run_cycle();
+
+    assert!(
+        result.executions.is_empty(),
+        "pricing exception on pair 3 must abort the whole cycle (Python-true), \
+         not skip-and-continue; got {} executions",
+        result.executions.len()
+    );
+    assert!(
+        result.candidates.is_empty(),
+        "Python never returns candidates when find_candidates raises"
+    );
+    assert_eq!(result.audit_records.len(), 1);
+    assert_eq!(result.audit_records[0].reason, "route_pricing_failed");
+    assert_eq!(
+        result.audit_records[0].detail.as_deref(),
+        Some("route_pricing_failed: askrene-create-layer: boom"),
+        "abort surface must use the EXCEPTION wrap form (no route label) -- \
+         the same template as execute_candidate_locked's py `:3314` site"
+    );
+
+    // Zero executions means zero side effects: the two pairs that priced
+    // successfully before the abort must never reach the budget rail, the
+    // history store, or the executor.
+    assert!(
+        store.calls().is_empty(),
+        "no reservation/history activity may leak from a cycle Python never \
+         completed; got {:?}",
+        store.calls()
+    );
+    assert!(executor.calls().is_empty());
 }
 
 /// Failed executions push the segment-observation snapshot to the CLN
