@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/revops", "crates/revops-analytics", "crates/revops-core", "crates/revops-db", "crates/revops-econ", "crates/revops-fees", "crates/revops-rpc"]
+members = ["crates/revops", "crates/revops-analytics", "crates/revops-core", "crates/revops-db", "crates/revops-econ", "crates/revops-fees", "crates/revops-rebalance", "crates/revops-rpc"]
 
 # Money arithmetic must fail loudly, never silently wrap, even in a release
 # build (debug builds already panic on overflow by default). This is

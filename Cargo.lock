@@ -664,6 +664,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "revops-rebalance"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "revops-rpc"
 version = "0.1.0"
 dependencies = [
