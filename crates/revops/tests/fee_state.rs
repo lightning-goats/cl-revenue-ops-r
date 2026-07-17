@@ -86,6 +86,99 @@ fn sample_row(channel_id: &str) -> FeeStrategyRow {
     }
 }
 
+fn set_last_update(conn: &Connection, channel_id: &str, last_update: i64) {
+    conn.execute(
+        "UPDATE fee_strategy_state SET last_update = ?1 WHERE channel_id = ?2",
+        rusqlite::params![last_update, channel_id],
+    )
+    .expect("update last_update");
+}
+
+/// Phase 4b Task 8b (Design Note 1 addendum): `rehydrate` retains, per
+/// channel, the `last_update`/`is_sleeping` it hydrated at the top of the
+/// PREVIOUS triggered cycle in `skip_gate_prev` -- the pre-decision epoch
+/// Python's current-cycle skip gate was conditioned on -- while
+/// `skip_gate_seen` tracks THIS cycle's fresh hydration for promotion next
+/// cycle. The FIRST cycle has no prior (bootstrap).
+#[test]
+fn rehydrate_promotes_previous_cycle_hydration_into_skip_gate_prev() {
+    let conn = Connection::open_in_memory().unwrap();
+    create_schema(&conn);
+    let mut row = sample_row("chan_a");
+    row.last_update = 1_000_000;
+    insert_row(&conn, &row);
+
+    let mut state = ControllerState::new();
+
+    // Cycle 1 (bootstrap): no cached prior yet; this cycle's fresh
+    // last_update (T0) is recorded as `seen`, not yet in `prev`.
+    rehydrate(&mut state, &conn);
+    assert!(
+        !state.skip_gate_prev.contains_key("chan_a"),
+        "first triggered cycle has NO cached pre-decision epoch (bootstrap)"
+    );
+    assert_eq!(
+        state.skip_gate_seen.get("chan_a").map(|e| e.last_update),
+        Some(1_000_000),
+        "cycle 1's fresh hydration is recorded for promotion next cycle"
+    );
+
+    // Python advances its flush (end of its next cycle): last_update -> T1.
+    set_last_update(&conn, "chan_a", 1_000_500);
+
+    // Cycle 2: the gate must now read T0 (cycle 1's fresh hydration = the
+    // epoch Python's cycle-2 decision was conditioned on), NOT the freshly
+    // hydrated T1.
+    rehydrate(&mut state, &conn);
+    assert_eq!(
+        state.skip_gate_prev.get("chan_a").map(|e| e.last_update),
+        Some(1_000_000),
+        "skip_gate_prev is the PREVIOUS cycle's fresh hydration (Python's pre-decision epoch)"
+    );
+    assert_eq!(
+        state.skip_gate_seen.get("chan_a").map(|e| e.last_update),
+        Some(1_000_500),
+        "skip_gate_seen advances to this cycle's fresh hydration"
+    );
+    assert_eq!(
+        state.cycle_states.get("chan_a").map(|c| c.last_update),
+        Some(1_000_500),
+        "live cycle_states still holds the freshly rehydrated value (everything else uses it)"
+    );
+}
+
+/// Phase 4b Task 8b, T6b COALESCING watch item: if two Python flushes merge
+/// into one Rust cycle (settle window), `skip_gate_prev` holds Rust's OWN
+/// last-observed hydration, NOT the intermediate flush Rust never saw. The
+/// cached epoch is then one Python-cycle stale (biases pre_hours_elapsed
+/// upward -> more permissive). This pins the documented behavior honestly.
+#[test]
+fn rehydrate_coalescing_caches_own_prior_observation_not_missed_flush() {
+    let conn = Connection::open_in_memory().unwrap();
+    create_schema(&conn);
+    let mut row = sample_row("chan_a");
+    row.last_update = 1_000_000; // T0
+    insert_row(&conn, &row);
+
+    let mut state = ControllerState::new();
+    rehydrate(&mut state, &conn); // Rust cycle 1 observes T0
+
+    // Python runs TWO cycles before Rust's settle window fires: it writes T1
+    // (1_000_400) then T2 (1_000_800). Rust never hydrates the intermediate
+    // T1 -- both flush-marker advances coalesce into ONE Rust cycle that
+    // sees only the latest, T2.
+    set_last_update(&conn, "chan_a", 1_000_800);
+    rehydrate(&mut state, &conn); // Rust coalesced cycle 2 observes T2
+
+    assert_eq!(
+        state.skip_gate_prev.get("chan_a").map(|e| e.last_update),
+        Some(1_000_000),
+        "coalesced cycle's cached epoch is Rust's OWN prior observation (T0), \
+         NOT Python's true pre-decision epoch (T1) it never saw -- stale-by-one \
+         (documented window watch item, biases toward evaluate)"
+    );
+}
+
 #[test]
 fn rehydrate_replaces_channel_maps_and_preserves_vegas() {
     let conn = Connection::open_in_memory().unwrap();

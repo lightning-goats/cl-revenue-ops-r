@@ -27,7 +27,7 @@ use revops_econ::pyfloat::py_repr;
 use revops_fees::cycle::{
     self, process_channel, run_fee_cycle, ChannelCycleState, ChannelFeeState, ChannelInfo,
     ChannelOutcome, ChannelStateRow, ControllerState, CycleDeps, FeeCfgSnapshot, FeeEvidence,
-    GossipRow, PeerFeeHistory, StateSink,
+    GossipRow, PeerFeeHistory, SkipGateEpoch, StateSink,
 };
 use revops_fees::execution::{
     decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, GovernedDeps,
@@ -1268,4 +1268,172 @@ fn dts_summary_and_wake_helpers() {
     let woken = cycle::wake_all_sleeping_channels(&mut state, profile, 1_752_400_000);
     assert_eq!(woken, 1);
     assert!(!state.cycle_states["c1"].is_sleeping);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b Task 8b: skip-gate cross-cycle memory (Design Note 1 addendum).
+//
+// The bug (fee-window diagnosis H1): a triggered Rust cycle rehydrates AFTER
+// Python's end-of-cycle flush, so the freshly-loaded `cycle.last_update` is
+// the timestamp Python JUST WROTE for the cycle Rust is reproducing -- NOT
+// the pre-decision timestamp Python's skip gate was actually conditioned on.
+// With a fresh (seconds-old) `last_update`, `pre_hours_elapsed` is ~0 and the
+// waiting-time gate skips EVERY channel, EVERY cycle. The fix feeds the gate
+// the value Rust's OWN previous cycle hydrated (`skip_gate_prev`), which is
+// Python's real pre-decision epoch.
+// ---------------------------------------------------------------------------
+
+/// Drive ONE channel through `run_fee_cycle` with a fresh (`now`)
+/// `last_update` in `cycle_states` -- i.e. exactly what `rehydrate` loads
+/// after Python's current-cycle flush -- and the given `skip_gate_prev`
+/// cache seeded. Returns the channel's `reason_code`.
+fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String {
+    let cid = "700x1x0";
+    let peer = "03".to_string() + &"07".repeat(32);
+    let mut infos = BTreeMap::new();
+    infos.insert(cid.to_string(), synthetic_info(cid, &peer, 200));
+    let evidence = SyntheticEvidence {
+        rows: vec![synthetic_row(cid, &peer)],
+        infos,
+        // No forwards: isolate the TIME gate (forwards_ok stays false, so
+        // the outcome turns purely on pre_hours_elapsed).
+        volumes: BTreeMap::new(),
+        forwards: BTreeMap::new(),
+        passive_peer: String::new(),
+    };
+
+    let mut state = ControllerState::new();
+    // Python's just-flushed row: last_update == now (the WRONG epoch for the
+    // gate). This is what `rehydrate` loads into `cycle_states`.
+    let mut cyc = ChannelCycleState::default();
+    cyc.last_update = now;
+    cyc.last_fee_ppm = 200;
+    cyc.last_broadcast_fee_ppm = 200;
+    cyc.last_revenue_rate = 5.0;
+    state.cycle_states.insert(cid.to_string(), cyc);
+    let mut fee = ChannelFeeState::default();
+    fee.last_update = now;
+    fee.last_fee_ppm = 200;
+    fee.last_broadcast_fee_ppm = 200;
+    fee.last_revenue_rate = 5.0;
+    state.fee_states.insert(cid.to_string(), fee);
+
+    if let Some(epoch) = cached_prev {
+        state.skip_gate_prev.insert(cid.to_string(), epoch);
+    }
+
+    let cfg = base_cfg();
+    let mut rng = PyRandom::seed_from_u64(4242);
+    let decisions = {
+        let mut deps = CycleDeps {
+            evidence: &evidence,
+            cfg: &cfg,
+            rng: &mut rng,
+            now,
+            governed: None,
+            journal: None,
+            state_sink: None,
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
+        };
+        run_fee_cycle(&mut state, &mut deps)
+    };
+    assert_eq!(decisions.len(), 1, "one decision for the one channel");
+    decisions[0].reason_code.clone()
+}
+
+/// REPRODUCE: with the pre-decision epoch as fresh as the flush (what the
+/// old rehydrate-after-flush wiring effectively fed the gate), the channel
+/// is skipped for waiting_time even though it is due to act -- the all-skip
+/// bug, watched here.
+#[test]
+fn skip_gate_all_skip_when_pre_decision_epoch_is_fresh() {
+    let now = 1_752_400_000i64;
+    let fresh = SkipGateEpoch {
+        last_update: now, // seconds old == Python's just-written flush
+        is_sleeping: false,
+    };
+    let reason = run_skip_gate_channel(now, Some(fresh));
+    assert_eq!(
+        reason, "skip_waiting_time",
+        "a fresh (post-flush) pre-decision epoch wrongly skips: pre_hours_elapsed ~0"
+    );
+}
+
+/// FIX: with the TRUE pre-decision epoch (the value Rust's own previous
+/// cycle hydrated, hours old), the gate no longer skips for waiting_time --
+/// the channel is evaluated, exactly as Python evaluated it.
+#[test]
+fn skip_gate_evaluates_when_cached_pre_decision_epoch_is_old() {
+    let now = 1_752_400_000i64;
+    let old = SkipGateEpoch {
+        last_update: now - 7200, // 2h ago: well past min_observation_hours
+        is_sleeping: false,
+    };
+    let reason = run_skip_gate_channel(now, Some(old));
+    assert_ne!(
+        reason, "skip_waiting_time",
+        "the cached pre-decision epoch is hours old -> time_ok -> gate must NOT skip waiting_time"
+    );
+}
+
+/// BOOTSTRAP: on a triggered cycle with NO cached prior (first cycle after
+/// (re)start, or a channel's first appearance), the skip gate is
+/// non-comparable -- flagged `skip_gate_comparable: false` in the trace so
+/// the diff harness excludes it instead of counting a spurious miss.
+#[test]
+fn skip_gate_bootstrap_marks_channel_non_comparable() {
+    let now = 1_752_400_000i64;
+    let cid = "700x1x0";
+    let peer = "03".to_string() + &"07".repeat(32);
+    let mut infos = BTreeMap::new();
+    infos.insert(cid.to_string(), synthetic_info(cid, &peer, 200));
+    let evidence = SyntheticEvidence {
+        rows: vec![synthetic_row(cid, &peer)],
+        infos,
+        volumes: BTreeMap::new(),
+        forwards: BTreeMap::new(),
+        passive_peer: String::new(),
+    };
+
+    let mut state = ControllerState::new();
+    let mut cyc = ChannelCycleState::default();
+    cyc.last_update = now;
+    cyc.last_fee_ppm = 200;
+    cyc.last_broadcast_fee_ppm = 200;
+    state.cycle_states.insert(cid.to_string(), cyc);
+    let mut fee = ChannelFeeState::default();
+    fee.last_update = now;
+    fee.last_fee_ppm = 200;
+    fee.last_broadcast_fee_ppm = 200;
+    state.fee_states.insert(cid.to_string(), fee);
+    // NO skip_gate_prev entry -> bootstrap.
+
+    let cfg = base_cfg();
+    let mut rng = PyRandom::seed_from_u64(4242);
+    let decisions = {
+        let mut deps = CycleDeps {
+            evidence: &evidence,
+            cfg: &cfg,
+            rng: &mut rng,
+            now,
+            governed: None,
+            journal: None,
+            state_sink: None,
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
+        };
+        run_fee_cycle(&mut state, &mut deps)
+    };
+    assert_eq!(decisions.len(), 1);
+    let comparable = decisions[0]
+        .trace
+        .get("skip_gate_comparable")
+        .and_then(|v| match v {
+            OValue::Bool(b) => Some(*b),
+            _ => None,
+        });
+    assert_eq!(
+        comparable,
+        Some(false),
+        "a bootstrap channel (no cached prior) must be flagged non-comparable in its trace"
+    );
 }

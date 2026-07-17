@@ -35,7 +35,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use revops_fees::cycle::{
-    serialize_cycle_state_payload, ChannelCycleState, ChannelFeeState, ControllerState, StateSink,
+    serialize_cycle_state_payload, ChannelCycleState, ChannelFeeState, ControllerState,
+    SkipGateEpoch, StateSink,
 };
 use revops_fees::pyjson::{dumps_python, OValue};
 use revops_fees::state_store::{
@@ -67,6 +68,32 @@ pub fn rehydrate(state: &mut ControllerState, conn: &rusqlite::Connection) {
         fee_states.insert(row.channel_id.clone(), fee_state);
         cycle_states.insert(row.channel_id.clone(), cycle_state);
     }
+
+    // Phase 4b Task 8b (Design Note 1 addendum): maintain the skip gate's
+    // cross-cycle memory. This cycle's FRESH hydration is exactly the epoch
+    // Python's NEXT-cycle skip gate will be conditioned on, so record it as
+    // `skip_gate_seen` and PROMOTE the previous cycle's `seen` into
+    // `skip_gate_prev` -- the value the gate reads THIS cycle. Rust's own
+    // last observation, not the just-flushed blob, is the pre-decision epoch
+    // (the freshly-flushed `last_update` is what Python just WROTE for the
+    // cycle Rust is reproducing -- the wrong epoch; see the fee-window
+    // diagnosis, H1). Built from the fresh `cycle_states` BEFORE they move
+    // into `state`; a channel absent from `skip_gate_prev` next cycle is a
+    // bootstrap / first appearance (the gate then falls back to live state
+    // and flags the channel non-comparable).
+    let this_cycle_seen: std::collections::BTreeMap<String, SkipGateEpoch> = cycle_states
+        .iter()
+        .map(|(id, c)| {
+            (
+                id.clone(),
+                SkipGateEpoch {
+                    last_update: c.last_update,
+                    is_sleeping: c.is_sleeping,
+                },
+            )
+        })
+        .collect();
+    state.skip_gate_prev = std::mem::replace(&mut state.skip_gate_seen, this_cycle_seen);
 
     state.cycle_states = cycle_states;
     state.fee_states = fee_states;
