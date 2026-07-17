@@ -8,6 +8,7 @@ pub mod config_resolve;
 pub mod config_types;
 pub mod fee_config;
 pub mod fee_evidence;
+pub mod fee_governor;
 pub mod hydration;
 pub mod notify;
 pub mod options_table;
