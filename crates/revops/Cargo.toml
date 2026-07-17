@@ -11,10 +11,12 @@ cln-rpc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+revops-analytics = { path = "../revops-analytics" }
 revops-core = { path = "../revops-core" }
 revops-db = { path = "../revops-db" }
+revops-fees = { path = "../revops-fees" }
 revops-rpc = { path = "../revops-rpc" }
+rusqlite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-rusqlite.workspace = true
