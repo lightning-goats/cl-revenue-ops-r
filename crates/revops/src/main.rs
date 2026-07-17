@@ -457,6 +457,11 @@ async fn main() -> Result<()> {
     let history_name = rpc_name("history");
     let report_name = rpc_name("report");
     let dashboard_name = rpc_name("dashboard");
+    // Phase 4b Task 7: fee-controller diagnostic + manual wake, both
+    // gated on the fee-cycle scheduler actually running (see the
+    // `s.scheduler.get()` checks in each handler below).
+    let fee_debug_name = rpc_name("fee-debug");
+    let fee_wake_name = rpc_name("fee-wake");
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
@@ -686,6 +691,69 @@ async fn main() -> Result<()> {
                 let now = now_unix();
                 let pnl = queries::pnl_summary(handle, window_days, now).await?;
                 Ok(build_dashboard(&pnl))
+            },
+        )
+        .rpcmethod(
+            &fee_debug_name,
+            "fee-controller diagnostic: one channel's DTS/cycle summary \
+             (channel_id param) or the controller-wide summary \
+             (last_decision_summary + a per-channel map); requires the \
+             fee-cycle scheduler running (revops-r-fee-dryrun=true)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let s = p.state();
+                let Some(handle) = s.scheduler.get() else {
+                    return Ok(serde_json::json!({
+                        "error": "fee-cycle scheduler not running (revops-r-fee-dryrun=false, \
+                                  or it failed to start -- see plugin log)"
+                    }));
+                };
+                let query = match v.get("channel_id").and_then(|c| c.as_str()) {
+                    Some(id) => revops::fee_scheduler::FeeDebugQuery::Channel(id.to_string()),
+                    None => revops::fee_scheduler::FeeDebugQuery::Summary,
+                };
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                if handle
+                    .tx
+                    .send(revops::fee_scheduler::CycleMsg::Query(query, reply_tx))
+                    .is_err()
+                {
+                    return Ok(serde_json::json!({"error": "fee-cycle owner thread not running"}));
+                }
+                // `reply_rx.recv()` is a blocking std call -- `spawn_blocking`
+                // keeps it off the tokio worker thread this async fn is
+                // polled on.
+                match tokio::task::spawn_blocking(move || reply_rx.recv()).await {
+                    Ok(Ok(value)) => Ok(value),
+                    _ => Ok(serde_json::json!({
+                        "error": "fee-cycle owner thread did not respond"
+                    })),
+                }
+            },
+        )
+        .rpcmethod(
+            &fee_wake_name,
+            "operator/diagnostic: wake every sleeping channel immediately \
+             (mirrors Python's revenue-wake-all semantics -- fire-and-forget: \
+             see revenue-r-fee-debug for the resulting state); requires the \
+             fee-cycle scheduler running (revops-r-fee-dryrun=true)",
+            |p: Plugin<SharedState>, _v| async move {
+                let s = p.state();
+                let Some(handle) = s.scheduler.get() else {
+                    return Ok(serde_json::json!({
+                        "error": "fee-cycle scheduler not running (revops-r-fee-dryrun=false, \
+                                  or it failed to start -- see plugin log)"
+                    }));
+                };
+                match handle.tx.send(revops::fee_scheduler::CycleMsg::WakeAll) {
+                    Ok(()) => Ok(serde_json::json!({
+                        "status": "ok",
+                        "message": "wake-all requested; sleeping channels will be evaluated on \
+                                     the next fee cycle"
+                    })),
+                    Err(_) => {
+                        Ok(serde_json::json!({"error": "fee-cycle owner thread not running"}))
+                    }
+                }
             },
         );
     let builder = register_python_options(builder, canonical_names());

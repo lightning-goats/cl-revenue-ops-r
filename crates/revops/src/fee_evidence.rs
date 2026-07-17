@@ -554,7 +554,11 @@ pub fn build_evidence_snapshot(
 /// ```sql
 /// SELECT * FROM channel_states ORDER BY state, flow_ratio DESC
 /// ```
-fn read_channel_states(conn: &Connection) -> Result<Vec<ChannelStateRow>> {
+///
+/// `pub(crate)`: T7's `fee_scheduler::PolicyChanged` handler reuses this
+/// exact query (a fresh, unpinned read -- no per-cycle snapshot semantics
+/// needed for an out-of-cycle wake) rather than duplicating the SQL.
+pub(crate) fn read_channel_states(conn: &Connection) -> Result<Vec<ChannelStateRow>> {
     let mut stmt = conn.prepare("SELECT * FROM channel_states ORDER BY state, flow_ratio DESC")?;
     let rows = stmt
         .query_map([], |row| {

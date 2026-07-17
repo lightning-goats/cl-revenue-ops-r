@@ -109,6 +109,15 @@ fn manifest_advertises_shadow_names() {
         methods.contains(&"revenue-r-dashboard"),
         "methods: {methods:?}"
     );
+    // Phase 4b Task 7.
+    assert!(
+        methods.contains(&"revenue-r-fee-debug"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-r-fee-wake"),
+        "methods: {methods:?}"
+    );
 }
 
 #[test]
@@ -204,12 +213,22 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-dashboard"),
         "methods: {methods:?}"
     );
-    // Exactly 6 rpc methods total (no leftover revenue-r-* names bleeding
-    // through from shadow mode) -- ping/status/config (Phase 1a) plus
-    // Phase 1b Task 5's history/report/dashboard read-RPC subset.
+    // Phase 4b Task 7's fee-debug/fee-wake pair, canonical-mapped.
+    assert!(
+        methods.contains(&"revenue-fee-debug"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-fee-wake"),
+        "methods: {methods:?}"
+    );
+    // Exactly 8 rpc methods total (no leftover revenue-r-* names bleeding
+    // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
+    // Task 5's history/report/dashboard read-RPC subset, plus Phase 4b
+    // Task 7's fee-debug/fee-wake.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        6,
+        8,
         "methods: {methods:?}"
     );
 

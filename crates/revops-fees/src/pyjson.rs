@@ -109,6 +109,39 @@ impl OValue {
     pub fn is_null(&self) -> bool {
         matches!(self, OValue::Null)
     }
+
+    /// Convert to `serde_json::Value` for an INTERACTIVE JSON-RPC response
+    /// (e.g. `revenue-r-fee-debug`, Phase 4b Task 7) -- NOT the
+    /// byte-parity persisted-state path [`dumps_python`] serves. That path
+    /// preserves Python's exact key order and float `repr` formatting on
+    /// purpose (round-tripping a `v2_state_json` blob); an RPC response has
+    /// no such contract, so this goes through plain `serde_json::Number`
+    /// (the same the rest of this workspace's RPC builders use) and drops
+    /// key order — `serde_json::Map` is a `BTreeMap` without the
+    /// `preserve_order` feature (off-limits workspace-wide; see this
+    /// module's doc comment), so object keys come back alphabetized.
+    /// `NaN`/`Infinity` (never expected in the debug fields this feeds)
+    /// fall back to `null`, since JSON has no literal for either.
+    pub fn to_serde_json(&self) -> serde_json::Value {
+        match self {
+            OValue::Null => serde_json::Value::Null,
+            OValue::Bool(b) => serde_json::Value::Bool(*b),
+            OValue::Int(i) => serde_json::Value::from(*i),
+            OValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            OValue::Str(s) => serde_json::Value::String(s.clone()),
+            OValue::Arr(items) => {
+                serde_json::Value::Array(items.iter().map(OValue::to_serde_json).collect())
+            }
+            OValue::Obj(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_serde_json()))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +513,44 @@ mod tests {
     fn empty_containers() {
         assert_eq!(dumps_python(&OValue::Obj(vec![])), "{}");
         assert_eq!(dumps_python(&OValue::Arr(vec![])), "[]");
+    }
+
+    /// `to_serde_json` (T7): every variant converts to its natural
+    /// `serde_json::Value` counterpart, nested through arrays/objects.
+    #[test]
+    fn to_serde_json_converts_every_variant() {
+        let v = OValue::obj(vec![
+            ("n".to_string(), OValue::Null),
+            ("b".to_string(), OValue::Bool(true)),
+            ("i".to_string(), OValue::Int(-7)),
+            ("f".to_string(), OValue::Float(1.5)),
+            ("s".to_string(), OValue::str("hi")),
+            (
+                "a".to_string(),
+                OValue::arr(vec![OValue::Int(1), OValue::Bool(false)]),
+            ),
+        ]);
+        assert_eq!(
+            v.to_serde_json(),
+            serde_json::json!({
+                "n": null,
+                "b": true,
+                "i": -7,
+                "f": 1.5,
+                "s": "hi",
+                "a": [1, false],
+            })
+        );
+    }
+
+    /// Non-finite floats have no JSON literal; the conversion falls back
+    /// to `null` rather than producing invalid JSON.
+    #[test]
+    fn to_serde_json_non_finite_float_becomes_null() {
+        assert_eq!(
+            OValue::Float(f64::NAN).to_serde_json(),
+            serde_json::Value::Null
+        );
     }
 
     #[test]
