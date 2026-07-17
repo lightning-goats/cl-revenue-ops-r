@@ -5,6 +5,7 @@
    "name": "two_competitors_below_boundary_none",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -29,6 +30,7 @@
    "name": "three_competitors_at_boundary_some",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -61,6 +63,7 @@
    "name": "cln_default_excluded_leaves_two_none",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -93,6 +96,7 @@
    "name": "cln_default_excluded_third_real_competitor_some",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -133,6 +137,7 @@
    "name": "range_filter_excludes_zero_and_over_max",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -181,6 +186,7 @@
    "name": "age_weighting_fresh_competitors",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -213,6 +219,7 @@
    "name": "age_weighting_stale_competitors_same_shape",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -245,6 +252,7 @@
    "name": "unknown_last_update_flat_30day_age",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -277,6 +285,7 @@
    "name": "weighted_median_tie_equal_fee_pair",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -309,6 +318,7 @@
    "name": "excludes_our_own_channel",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "us",
@@ -349,6 +359,7 @@
    "name": "seven_competitor_varied_pool",
    "now": 1752400000,
    "our_id": "us",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -404,6 +415,180 @@
      "fee_ppm": 400,
      "base_fee_msat": 0,
      "capacity_sats": 4000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "min_competitors_2_below_boundary_one_none",
+   "now": 1752400000,
+   "our_id": "us",
+   "min_competitors": 2,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": null
+  },
+  {
+   "name": "min_competitors_2_at_boundary_two_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "min_competitors": 2,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 100
+  },
+  {
+   "name": "min_competitors_2_above_boundary_three_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "min_competitors": 2,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "min_competitors_3_below_boundary_two_none_same_pool_as_min2_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "min_competitors": 3,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": null
+  },
+  {
+   "name": "min_competitors_3_at_boundary_three_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "min_competitors": 3,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "min_competitors_3_above_boundary_four_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "min_competitors": 3,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "d",
+     "destination": "peer",
+     "fee_ppm": 400,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
      "last_update_ts": 1752396400
     }
    ],

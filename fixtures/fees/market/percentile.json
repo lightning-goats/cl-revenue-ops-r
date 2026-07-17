@@ -6,6 +6,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.5",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -31,6 +32,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.5",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -64,6 +66,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.5",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -97,6 +100,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.5",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -146,6 +150,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.0",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -211,6 +216,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.25",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -276,6 +282,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.5",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -341,6 +348,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.75",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -406,6 +414,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "0.9",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -471,6 +480,7 @@
    "now": 1752400000,
    "our_id": "us",
    "pct": "1.0",
+   "min_competitors": 3,
    "peer_channels": [
     {
      "source": "a",
@@ -530,6 +540,186 @@
     }
    ],
    "expected": 400
+  },
+  {
+   "name": "min_competitors_2_below_boundary_one_none",
+   "now": 1752400000,
+   "our_id": "us",
+   "pct": "0.5",
+   "min_competitors": 2,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": null
+  },
+  {
+   "name": "min_competitors_2_at_boundary_two_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "pct": "0.5",
+   "min_competitors": 2,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 100
+  },
+  {
+   "name": "min_competitors_2_above_boundary_three_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "pct": "0.5",
+   "min_competitors": 2,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "min_competitors_3_below_boundary_two_none_same_pool_as_min2_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "pct": "0.5",
+   "min_competitors": 3,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": null
+  },
+  {
+   "name": "min_competitors_3_at_boundary_three_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "pct": "0.5",
+   "min_competitors": 3,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 200
+  },
+  {
+   "name": "min_competitors_3_above_boundary_four_some",
+   "now": 1752400000,
+   "our_id": "us",
+   "pct": "0.5",
+   "min_competitors": 3,
+   "peer_channels": [
+    {
+     "source": "a",
+     "destination": "peer",
+     "fee_ppm": 100,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "b",
+     "destination": "peer",
+     "fee_ppm": 200,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "c",
+     "destination": "peer",
+     "fee_ppm": 300,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    },
+    {
+     "source": "d",
+     "destination": "peer",
+     "fee_ppm": 400,
+     "base_fee_msat": 0,
+     "capacity_sats": 1000000,
+     "last_update_ts": 1752396400
+    }
+   ],
+   "expected": 300
   }
  ]
 }
