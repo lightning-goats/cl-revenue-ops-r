@@ -161,7 +161,8 @@ import argparse, json, shlex, subprocess, sys
 CYCLE_WINDOW_TOLERANCE_SECONDS = 120
 
 # Best-inferred default; see module docstring's `--journal` paragraph.
-DEFAULT_JOURNAL_PATH = "~/.lightning/fee_dryrun_journal.jsonl"
+# Updated to T3 wiring: lnnode observer-db dir + JOURNAL_FILE_NAME
+DEFAULT_JOURNAL_PATH = "/data/lightningd/.lightning/fee_dryrun_journal.jsonl"
 
 # CONFIRMED absolute production path (not a `~`-relative guess -- see the
 # module docstring's `--python-db` paragraph for why `~` is wrong here both
@@ -232,15 +233,19 @@ def parse_journal(raw):
     return decisions
 
 
-def fetch_python_rows(sqlite_fn, node, python_db, since_ts):
+def fetch_python_rows(sqlite_fn, node, python_db, since_ts, until_ts=None):
     """Fetch `fee_changes` rows (channel_id, peer_id, old_fee_ppm,
     new_fee_ppm, reason, reason_code, manual, timestamp) with
-    `timestamp >= since_ts`, via sqlite_json(). Returns [] for a genuinely
-    empty result set (see sqlite_json()'s blank-stdout note)."""
+    `timestamp >= since_ts` (and `timestamp <= until_ts` if provided),
+    via sqlite_json(). Returns [] for a genuinely empty result set
+    (see sqlite_json()'s blank-stdout note)."""
+    where_clause = f"WHERE timestamp >= {int(since_ts)}"
+    if until_ts is not None:
+        where_clause += f" AND timestamp <= {int(until_ts)}"
     query = (
         "SELECT channel_id, peer_id, old_fee_ppm, new_fee_ppm, reason, "
         "reason_code, manual, timestamp FROM fee_changes "
-        f"WHERE timestamp >= {int(since_ts)} ORDER BY timestamp"
+        f"{where_clause} ORDER BY timestamp"
     )
     raw = sqlite_fn(node, python_db, query).strip()
     if not raw:
@@ -378,7 +383,7 @@ def match_channel(py_rows, rs_adjustments, tolerance_ppm):
 
 
 def diff_fee_decisions(journal_fn, sqlite_fn, node, journal_path, python_db,
-                       since_ts=None, tolerance_ppm=0):
+                       since_ts=None, until_ts=None, tolerance_ppm=0):
     """Fetch the journal + fee_changes rows and return a list of result
     dicts:
       {"status": "match",     "kind": "pair", "channel_id", "fields": [], "py", "rs"}
@@ -396,6 +401,9 @@ def diff_fee_decisions(journal_fn, sqlite_fn, node, journal_path, python_db,
     requiring the caller to know it up front -- `--since` overrides this
     outright, mirroring diff_read_rpcs.py's derived-then-overridable
     window pattern.
+
+    `until_ts=None` excludes rows/decisions with `timestamp > until_ts`
+    from matching on both sides, bounding the comparison window.
     """
     try:
         raw_journal = journal_fn(node, journal_path)
@@ -411,13 +419,19 @@ def diff_fee_decisions(journal_fn, sqlite_fn, node, journal_path, python_db,
         since_ts = min((d.get("at", 0) for d in decisions), default=0)
 
     try:
-        python_rows = fetch_python_rows(sqlite_fn, node, python_db, since_ts)
+        python_rows = fetch_python_rows(sqlite_fn, node, python_db, since_ts, until_ts)
     except subprocess.CalledProcessError as exc:
         return [{"status": "transport", "side": "python", "cause": _one_line(exc)}]
     except (ValueError, json.JSONDecodeError) as exc:
         return [{"status": "transport", "side": "python", "cause": _one_line(exc)}]
 
     decisions = [d for d in decisions if d.get("at", 0) >= since_ts]
+    if until_ts is not None:
+        decisions = [d for d in decisions if d.get("at", 0) <= until_ts]
+
+    python_rows = [r for r in python_rows if r.get("timestamp", 0) >= since_ts]
+    if until_ts is not None:
+        python_rows = [r for r in python_rows if r.get("timestamp", 0) <= until_ts]
 
     skips = [d for d in decisions if not is_adjustment(d)]
     adjustments = [d for d in decisions if is_adjustment(d)]
@@ -724,6 +738,34 @@ def self_test():
     ok = (ok and rc == 1 and len(matched) == 2 and matched_clean
          and len(missed) == 1 and missed_is_py_b and len(invented) == 0)
 
+    # -- 10. --until window boundary: decisions/rows outside the [since, until]
+    # window are excluded symmetrically. Two adjustments with one inside and
+    # one outside the window; same for Python rows; the outside-window pair
+    # must be excluded entirely.
+    #
+    # MINOR: this scenario drives `diff_fee_decisions`'s POST-FETCH filters
+    # (the `until_ts is not None` list comprehensions around lines 429/434),
+    # not `fetch_python_rows`'s SQL `AND timestamp <= {until_ts}` clause
+    # construction (line 244) -- `_sqlite_fn_for` below is a stub that
+    # returns its captured `rows` unconditionally and ignores the `query`
+    # string entirely, so the SQL text itself is never parsed or executed
+    # here. The post-fetch filter is what's actually enforced against a live
+    # node (it re-checks every row regardless of what the SQL already
+    # excluded), so self-test coverage of that guarantee is sufficient; the
+    # SQL clause is a query-side optimization only a live/integration run
+    # against real sqlite would exercise.
+    rs = [_rs_adjustment(at=1_700_000_000, new=110),
+         _rs_adjustment(at=1_700_000_200, new=130)]  # outside until window
+    py = [_py_row(timestamp=1_700_000_005, new=110),
+         _py_row(timestamp=1_700_000_205, new=130)]  # outside until window
+    results = diff_fee_decisions(_journal_fn_for(rs), _sqlite_fn_for(py), "node",
+                                "journal", "db", since_ts=0, until_ts=1_700_000_100)
+    rc = report(results)
+    matched = [r for r in results if r["status"] == "match"]
+    print(f"[self-test] --until excludes out-of-window pair: exit={rc} "
+          f"matched_pairs={len(matched)} (expect 0, 1)")
+    ok = ok and rc == 0 and len(matched) == 1
+
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1
 
@@ -742,6 +784,10 @@ def main(argv=None, journal_fn=read_journal, sqlite_fn=sqlite_json, cli_fn=cli):
                     help="unix ts floor for both the journal and the python fee_changes "
                          "query; default: derive from the journal's own earliest `at` "
                          "timestamp (0 if the journal is empty)")
+    ap.add_argument("--until", type=int, default=None,
+                    help="unix ts ceiling for both the journal and the python fee_changes "
+                         "query; rows/decisions with timestamp > until are excluded from "
+                         "matching on both sides (default: no ceiling)")
     ap.add_argument("--tolerance-ppm", type=int, default=0,
                     help="allowed ppm drift for old_fee_ppm/new_fee_ppm on matched "
                          "adjustment pairs (default: 0 -- exact match; deterministic "
@@ -755,7 +801,7 @@ def main(argv=None, journal_fn=read_journal, sqlite_fn=sqlite_json, cli_fn=cli):
         return self_test()
 
     results = diff_fee_decisions(journal_fn, sqlite_fn, args.node, args.journal,
-                                args.python_db, since_ts=args.since,
+                                args.python_db, since_ts=args.since, until_ts=args.until,
                                 tolerance_ppm=args.tolerance_ppm)
     rc = report(results)
 
