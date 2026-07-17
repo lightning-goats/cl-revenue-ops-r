@@ -53,6 +53,8 @@
 //! regression on the NaN path. `#[allow(clippy::manual_clamp)]` markers
 //! below are intentional for this reason, not an oversight.
 
+use revops_econ::pyfloat::py_pow;
+
 // =============================================================================
 // Constants (flow_analysis.py lines 69-129), transcribed with the exact
 // same arithmetic expressions Python uses — do not fold the divisions.
@@ -512,7 +514,11 @@ pub fn calculate_confidence(forward_count: i64, last_forward_ts: i64, now: i64) 
     let recency_factor = if last_forward_ts > 0 {
         let days_since = (now - last_forward_ts) as f64 / 86400.0;
         let halflife = CONFIDENCE_RECENCY_HALFLIFE_DAYS;
-        0.5f64.powf(days_since / halflife)
+        // `py_pow(0.5, _)`, not a bare `0.5f64.powf(_)`: LLVM rewrites a
+        // constant-`0.5`-base `powf` into an `exp2` form under `-O2`+,
+        // which diverges from CPython's `**` in the last bit for ~0.11%
+        // of inputs — see `revops_econ::pyfloat::py_pow`'s doc comment.
+        py_pow(0.5, days_since / halflife)
     } else {
         MIN_CONFIDENCE
     };

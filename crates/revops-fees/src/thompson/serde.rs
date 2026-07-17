@@ -32,6 +32,7 @@ use super::{
 };
 use crate::mat3::{M3, V3};
 use crate::pyjson::OValue;
+use revops_econ::pyfloat::py_pow;
 
 /// Every key `to_dict()` ever writes (`fee_controller.py:1721-1756`), in
 /// its exact output order. Used both to build `gts_to_dict`'s output and to
@@ -74,12 +75,14 @@ const KNOWN_KEYS: &[&str] = &[
 
 /// `GaussianThompsonState.to_dict` (py 1721-1756) — exact key order,
 /// including the derived `posterior_variance` (`float(posterior_std) ** 2`
-/// — via `powf(2.0)`, NOT `x*x`: CPython's `**` calls `pow()`, which
-/// disagrees with a direct multiply in the last bit for ~0.08% of inputs)
-/// and `weight_scheme` (always [`WEIGHT_SCHEME`] — this port never
-/// persists a legacy-scheme state). Unknown top-level keys captured by
-/// `gts_from_dict` are appended after all 29 known keys, in the order they
-/// were first seen.
+/// — via `py_pow(_, 2.0)`, NOT a bare `.powf(2.0)` or `x*x`: CPython's
+/// `**` calls `pow()`, which disagrees with a direct multiply in the last
+/// bit for ~0.08% of inputs, and LLVM rewrites a bare `.powf(2.0)` into
+/// `x*x` under `-O2`+ — see `revops_econ::pyfloat::py_pow`'s doc comment
+/// for the full story) and `weight_scheme` (always [`WEIGHT_SCHEME`] —
+/// this port never persists a legacy-scheme state). Unknown top-level keys
+/// captured by `gts_from_dict` are appended after all 29 known keys, in
+/// the order they were first seen.
 pub fn gts_to_dict(s: &GaussianThompsonState) -> OValue {
     let mut entries: Vec<(String, OValue)> = vec![
         (
@@ -101,7 +104,7 @@ pub fn gts_to_dict(s: &GaussianThompsonState) -> OValue {
         ("posterior_std".to_string(), OValue::Float(s.posterior_std)),
         (
             "posterior_variance".to_string(),
-            OValue::Float(s.posterior_std.powf(2.0)),
+            OValue::Float(py_pow(s.posterior_std, 2.0)),
         ),
         (
             "posterior_coeffs".to_string(),
@@ -511,7 +514,10 @@ fn convert_ctx_posterior(v: &OValue) -> CtxPosterior {
         let legacy_mean = arr[0].as_f64().unwrap_or(0.0);
         let legacy_std = arr[1].as_f64().unwrap_or(0.0);
         let legacy_count = arr[2].as_i64().unwrap_or(0);
-        let legacy_precision = 1.0 / (legacy_std.powf(2.0)).max(MIN_STD.powf(2.0));
+        // `py_pow(_, 2.0)`, not a bare `.powf(2.0)`: see
+        // `revops_econ::pyfloat::py_pow`'s doc comment (LLVM's `-O2`+
+        // `powf(2.0)` -> `x*x` rewrite diverges from CPython's `**`).
+        let legacy_precision = 1.0 / (py_pow(legacy_std, 2.0)).max(py_pow(MIN_STD, 2.0));
         CtxPosterior {
             mean: legacy_mean,
             precision: legacy_precision,

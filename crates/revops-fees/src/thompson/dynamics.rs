@@ -28,6 +28,7 @@ use super::{
 // blend `_apply_posterior_bias` re-applies after every rebuild); this
 // module only calls it.
 use super::recompute::blend_posterior_toward;
+use revops_econ::pyfloat::py_pow;
 
 /// `FeeController.FEE_RELEVANT_FAILCODES` (py 8501): the
 /// WIRE_FEE_INSUFFICIENT family — the only forward-failure codes that are
@@ -351,7 +352,11 @@ pub fn update_contextual(
     // Time decay on accumulated precision (7-day half-life).
     if ctx_last_update > 0 {
         let age_hours = (now - ctx_last_update) as f64 / 3600.0;
-        let decay = 0.5f64.powf(age_hours / DECAY_HOURS);
+        // `py_pow(0.5, _)`, not a bare `0.5f64.powf(_)`: see
+        // `revops_econ::pyfloat::py_pow`'s doc comment (LLVM's `-O2`+
+        // constant-`0.5`-base `powf` -> `exp2` rewrite diverges from
+        // CPython's `**`).
+        let decay = py_pow(0.5, age_hours / DECAY_HOURS);
         ctx_precision *= decay;
     }
 
@@ -509,7 +514,9 @@ pub fn posterior_bias_shift(state: &GaussianThompsonState, base: f64, now: i64) 
     let mut shifted = base;
     for &(target_fee, weight, ts) in &state.posterior_bias {
         let age_hours = ((now - ts) as f64 / 3600.0).max(0.0);
-        let decayed = weight * 0.5f64.powf(age_hours / BIAS_DECAY_HOURS);
+        // `py_pow(0.5, _)`, not a bare `0.5f64.powf(_)` — see
+        // `revops_econ::pyfloat::py_pow`'s doc comment.
+        let decayed = weight * py_pow(0.5, age_hours / BIAS_DECAY_HOURS);
         if decayed < BIAS_MIN_WEIGHT {
             continue;
         }

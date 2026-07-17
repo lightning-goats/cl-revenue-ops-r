@@ -9,6 +9,7 @@
 //! - HIGH-03: probabilistic early trigger at 200-400% spikes.
 
 use crate::pyrand::PyRandom;
+use revops_econ::pyfloat::py_pow;
 
 /// `VegasReflexState` (py 2328-2351).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,21 +93,25 @@ pub fn vegas_update(
 
 /// `VegasReflexState.get_floor_multiplier` (py 2391-2401) verbatim.
 ///
-/// Uses `powf(0.5)`, NOT `.sqrt()`: CPython's `self.intensity ** 0.5`
-/// calls `pow()`, which disagrees with `sqrt()` in the last bit for
-/// ~0.08% of inputs (same landmine already documented in
+/// Uses `py_pow(_, 0.5)`, NOT `.sqrt()` or a bare `.powf(0.5)`: CPython's
+/// `self.intensity ** 0.5` calls `pow()`, which disagrees with `sqrt()` in
+/// the last bit for ~0.09% of inputs (same landmine already documented in
 /// `thompson::serde` for `** 2`) — verified empirically against CPython
-/// for this port. `.sqrt()` (and `.powf(0.5)` under `-O2`+, where LLVM
-/// rewrites `powf(_, 0.5)` into `sqrt`) both diverge from CPython's `pow`
-/// in the same fraction of cases; `.powf(0.5)` under this workspace's
-/// unoptimized (`opt-level = 0`) dev/test profile calls the real libm
-/// `pow()` and matches CPython exactly. A `--release` build of this crate
-/// would need the `std::hint::black_box(0.5)` operand pattern (T6 review adjudication: the libm crate reproduces the WRONG sqrt-identical bits, and extern-C FFI is still rewritten for powf(2.0) besides violating forbid(unsafe_code)); workspace-wide py_pow fix task owns the migration to preserve parity — out
-/// of scope for this dry-run-journal task, flagged for the cutover phase.
+/// for this port. `.sqrt()` (and a bare `.powf(0.5)` under `-O2`+, where
+/// LLVM rewrites `powf(_, 0.5)` into `sqrt`) both diverge from CPython's
+/// `pow` in the same fraction of cases; `.powf(0.5)` under this
+/// workspace's unoptimized (`opt-level = 0`) dev/test profile calls the
+/// real libm `pow()` and matches CPython exactly, but a `--release` build
+/// hits the LLVM rewrite. `revops_econ::pyfloat::py_pow` (T6 review
+/// adjudication: the libm crate reproduces the WRONG sqrt-identical bits,
+/// and extern-C FFI is still rewritten for powf(2.0) besides violating
+/// forbid(unsafe_code)) black_box-guards both operands, which blocks the
+/// rewrite and matches CPython in both profiles — see that function's doc
+/// comment for the full story and the workspace-wide migration.
 pub fn vegas_floor_multiplier(s: &VegasReflexState) -> f64 {
     if s.intensity < 0.01 {
         1.0
     } else {
-        1.0 + s.intensity.powf(0.5) * 2.0
+        1.0 + py_pow(s.intensity, 0.5) * 2.0
     }
 }

@@ -49,9 +49,17 @@
 //! 4. Noise-variance update happens AFTER solving for `mu_n`:
 //!    `new_sigma2 = ss / max(sw - 3.0, 1.0)`, `noise_variance =
 //!    max(10.0, 0.7*new_sigma2 + 0.3*noise_variance)`.
+//!
+//! All `0.5 ** (age_hours / half_life)` decay math below goes through
+//! [`revops_econ::pyfloat::py_pow`], not a bare `0.5f64.powf(...)`: LLVM
+//! rewrites a constant-`0.5`-base `powf` into an `exp2` form under
+//! `-O2`+, which diverges from CPython's `**` (`pow()`) in the last bit
+//! for ~0.11% of inputs — see `py_pow`'s doc comment for the full story
+//! (T6 review adjudication, workspace-wide float-hardening task).
 
 use super::{GaussianThompsonState, CONGESTION_OBS_FLAG, MIN_STD, ZERO_PROBE_FLAG};
 use crate::mat3::{invert3, matvec3};
+use revops_econ::pyfloat::py_pow;
 
 /// CPython 3.12+ `sum()` for floats: Neumaier (improved Kahan-Babuska)
 /// compensated summation, NOT naive left-fold. This is a real, verified
@@ -170,7 +178,7 @@ pub fn effective_positive_rate_ref(state: &GaussianThompsonState, now: i64) -> f
         return 0.0;
     }
     let age_hours = ((now - state.positive_rate_ref_ts) as f64 / 3600.0).max(0.0);
-    state.positive_rate_ref * 0.5f64.powf(age_hours / POSITIVE_RATE_REF_HALF_LIFE_HOURS)
+    state.positive_rate_ref * py_pow(0.5, age_hours / POSITIVE_RATE_REF_HALF_LIFE_HOURS)
 }
 
 /// `_positive_revenue_mass` (py 860-892): `(fee, recency-decayed revenue
@@ -190,7 +198,7 @@ pub fn positive_revenue_mass(state: &GaussianThompsonState, now: i64) -> Vec<(f6
         }
         // py 879: age_hours IS clamped to >= 0 here.
         let age_hours = ((now - obs.ts) as f64 / 3600.0).max(0.0);
-        let decay = 0.5f64.powf(age_hours / DECAY_HOURS);
+        let decay = py_pow(0.5, age_hours / DECAY_HOURS);
         let mass = obs.revenue_rate * obs.weight * decay;
         if mass > SUPPORTED_CEILING_MIN_WEIGHT {
             masses.push((obs.fee, mass));
@@ -246,7 +254,7 @@ pub fn recompute_posterior_legacy(
             for obs in &state.observations {
                 // py 1600: age_hours is NOT clamped to >= 0 here.
                 let age_hours = (now - obs.ts) as f64 / 3600.0;
-                let decay = 0.5f64.powf(age_hours / DECAY_HOURS);
+                let decay = py_pow(0.5, age_hours / DECAY_HOURS);
                 let weight = obs.weight * decay;
                 if weight < 1e-6 {
                     continue;
@@ -314,7 +322,7 @@ pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
     for obs in &state.observations {
         // py 1340: age_hours is NOT clamped to >= 0 here.
         let age_hours = (now - obs.ts) as f64 / 3600.0;
-        let decay = 0.5f64.powf(age_hours / DECAY_HOURS);
+        let decay = py_pow(0.5, age_hours / DECAY_HOURS);
         let weight = obs.weight * decay;
         if weight < 1e-6 {
             continue;
@@ -376,7 +384,7 @@ pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
             .iter()
             .map(|&(f, w, ts)| {
                 let age_hours = ((now - ts) as f64 / 3600.0).max(0.0);
-                let decay = 0.5f64.powf(age_hours / ZERO_REGIME_ANCHOR_HALF_LIFE_HOURS);
+                let decay = py_pow(0.5, age_hours / ZERO_REGIME_ANCHOR_HALF_LIFE_HOURS);
                 (f, w * decay, ts)
             })
             .collect();
@@ -593,7 +601,7 @@ fn apply_posterior_bias(state: &mut GaussianThompsonState, now: i64) {
     let mut kept: Vec<(f64, f64, i64)> = Vec::new();
     for (target_fee, weight, ts) in entries {
         let age_hours = ((now - ts) as f64 / 3600.0).max(0.0);
-        let decayed = weight * 0.5f64.powf(age_hours / BIAS_DECAY_HOURS);
+        let decayed = weight * py_pow(0.5, age_hours / BIAS_DECAY_HOURS);
         if decayed < BIAS_MIN_WEIGHT {
             continue; // Expired — prune.
         }

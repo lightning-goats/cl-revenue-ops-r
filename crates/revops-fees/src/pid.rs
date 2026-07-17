@@ -127,6 +127,15 @@ pub fn calculate_multiplier(
     s.prev_ewma_error = s.ewma_error;
 
     let output = p_term + i_term + d_term;
+    // Deliberately left as a bare `.powf(output)`, NOT migrated to
+    // `revops_econ::pyfloat::py_pow`: this is a constant-`1.5`-base call,
+    // and the workspace-wide float-hardening audit (T6 review adjudication)
+    // empirically checked this exact shape against this toolchain and found
+    // LLVM does NOT rewrite it (only `.powf(0.5)`, `.powf(2.0)`, and a
+    // constant-`0.5`-base `powf(y)` are rewritten under `-O2`+). Migrating
+    // sites that are not actually at risk would only add uniformity churn
+    // that risks re-baking this crate's fixtures for zero parity benefit —
+    // see `py_pow`'s doc comment for the full story.
     let multiplier = 1.5_f64.powf(output);
     multiplier.clamp(0.5, 2.0)
 }

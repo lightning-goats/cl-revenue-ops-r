@@ -19,3 +19,13 @@ jobs:
       # deliberately environment-gated rather than faked with a partial
       # checkout.
       - run: cargo test --workspace
+      # HARD PRE-DRY-RUN GATE (T6 discovery, T6 review adjudication;
+      # `.superpowers/sdd/progress.md`): the deployed binary is a `--release`
+      # build, and LLVM's `-O2`+ optimizer rewrites several `powf()` shapes
+      # (constant `0.5`/`2.0` exponent, constant `0.5` base) into intrinsics
+      # that are NOT bit-identical to CPython's `pow()`-backed `**`. `dev`
+      # is unoptimized and never exercises this, so a green `cargo test
+      # --workspace` alone cannot catch a regression here — every
+      # fixture-compared float path must also pass under `--release`. See
+      # `revops_econ::pyfloat::py_pow` for the guard and fix.
+      - run: cargo test --workspace --release

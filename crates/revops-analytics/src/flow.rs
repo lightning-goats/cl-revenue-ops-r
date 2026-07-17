@@ -306,6 +306,15 @@ pub fn calculate_ema_flow(
         // `float.__pow__`, which converts the exponent to `double` and
         // calls C's `pow()` unconditionally (no integer fast path) — so
         // `powf`, never `powi` (repeated squaring would round differently).
+        //
+        // Left as a bare `.powf`, NOT migrated to
+        // `revops_econ::pyfloat::py_pow`: both `decay_factor` (caller-
+        // supplied, e.g. `calculate_adaptive_decay`'s output) and `age`
+        // are runtime values here, not compile-time constants, so this
+        // doesn't match any of the LLVM `-O2`+ rewrite shapes the
+        // workspace-wide float-hardening audit (T6 review) found (those
+        // all require a *constant* `0.5`/`2.0` operand) — see `py_pow`'s
+        // doc comment for the full story.
         let weight = decay_factor.powf(age as f64);
 
         ema_in += bucket.in_sats as f64 * weight;
