@@ -1,0 +1,71 @@
+{
+ "modes": {
+  "normal": {
+   "name": "normal",
+   "priority": 50,
+   "budget_bucket": "maintenance",
+   "reserve_on_rail": true,
+   "account_costs": true,
+   "deadline": "normal",
+   "accounting_owner": "engine"
+  },
+  "hot_protection": {
+   "name": "hot_protection",
+   "priority": 90,
+   "budget_bucket": "revenue_protection",
+   "reserve_on_rail": true,
+   "account_costs": true,
+   "deadline": "short",
+   "accounting_owner": "engine"
+  },
+  "structural_drain": {
+   "name": "structural_drain",
+   "priority": 20,
+   "budget_bucket": "structural",
+   "reserve_on_rail": true,
+   "account_costs": true,
+   "deadline": "long",
+   "accounting_owner": "engine"
+  },
+  "manual": {
+   "name": "manual",
+   "priority": 100,
+   "budget_bucket": "operator_explicit",
+   "reserve_on_rail": false,
+   "account_costs": false,
+   "deadline": "immediate",
+   "accounting_owner": "caller"
+  },
+  "diagnostic": {
+   "name": "diagnostic",
+   "priority": 10,
+   "budget_bucket": "diagnostic",
+   "reserve_on_rail": true,
+   "account_costs": true,
+   "deadline": "none",
+   "accounting_owner": "engine"
+  }
+ },
+ "engine_kwargs": {
+  "normal": {
+   "reserve_budget": true,
+   "account_costs": true
+  },
+  "hot_protection": {
+   "reserve_budget": true,
+   "account_costs": true
+  },
+  "structural_drain": {
+   "reserve_budget": true,
+   "account_costs": true
+  },
+  "manual": {
+   "reserve_budget": false,
+   "account_costs": false
+  },
+  "diagnostic": {
+   "reserve_budget": true,
+   "account_costs": true
+  }
+ }
+}
