@@ -1,0 +1,456 @@
+{
+ "persisted_cooldown_cases": [
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 1,
+   "expected_secs": 300
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 2,
+   "expected_secs": 600
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 3,
+   "expected_secs": 900
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 4,
+   "expected_secs": 1200
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 5,
+   "expected_secs": 1500
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 6,
+   "expected_secs": 1800
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 7,
+   "expected_secs": 1800
+  },
+  {
+   "kind": "temporary_channel_failure",
+   "base_secs": 300,
+   "failure_count": 8,
+   "expected_secs": 1800
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 1,
+   "expected_secs": 1800
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 2,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 3,
+   "expected_secs": 5400
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 4,
+   "expected_secs": 7200
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 5,
+   "expected_secs": 9000
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 6,
+   "expected_secs": 10800
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 7,
+   "expected_secs": 10800
+  },
+  {
+   "kind": "fee_insufficient",
+   "base_secs": 1800,
+   "failure_count": 8,
+   "expected_secs": 10800
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 1,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 2,
+   "expected_secs": 7200
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 3,
+   "expected_secs": 10800
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 4,
+   "expected_secs": 14400
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 5,
+   "expected_secs": 18000
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 6,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 7,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "incorrect_cltv_expiry",
+   "base_secs": 3600,
+   "failure_count": 8,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 1,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 2,
+   "expected_secs": 43200
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 3,
+   "expected_secs": 64800
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 4,
+   "expected_secs": 86400
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 5,
+   "expected_secs": 108000
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 6,
+   "expected_secs": 129600
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 7,
+   "expected_secs": 129600
+  },
+  {
+   "kind": "permanent_failure",
+   "base_secs": 21600,
+   "failure_count": 8,
+   "expected_secs": 129600
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 1,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 2,
+   "expected_secs": 7200
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 3,
+   "expected_secs": 10800
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 4,
+   "expected_secs": 14400
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 5,
+   "expected_secs": 18000
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 6,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 7,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "payment_pending_timeout",
+   "base_secs": 3600,
+   "failure_count": 8,
+   "expected_secs": 21600
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 1,
+   "expected_secs": 600
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 2,
+   "expected_secs": 1200
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 3,
+   "expected_secs": 1800
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 4,
+   "expected_secs": 2400
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 5,
+   "expected_secs": 3000
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 6,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 7,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "local_execution_failed",
+   "base_secs": 600,
+   "failure_count": 8,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 1,
+   "expected_secs": 600
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 2,
+   "expected_secs": 1200
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 3,
+   "expected_secs": 1800
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 4,
+   "expected_secs": 2400
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 5,
+   "expected_secs": 3000
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 6,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 7,
+   "expected_secs": 3600
+  },
+  {
+   "kind": "other_retriable",
+   "base_secs": 600,
+   "failure_count": 8,
+   "expected_secs": 3600
+  }
+ ],
+ "dest_cooldown_cases": [
+  {
+   "case_id": "zero_gap_full_cooldown",
+   "base_secs": 86400,
+   "amount_sats": 500,
+   "remaining_band_gap_sats": 0,
+   "expected_secs": 86400
+  },
+  {
+   "case_id": "zero_amount_no_anchor_amount_full_cooldown",
+   "base_secs": 86400,
+   "amount_sats": 0,
+   "remaining_band_gap_sats": 1000,
+   "expected_secs": 86400
+  },
+  {
+   "case_id": "partial_fill_scaled",
+   "base_secs": 86400,
+   "amount_sats": 500,
+   "remaining_band_gap_sats": 1000,
+   "expected_secs": 57600
+  },
+  {
+   "case_id": "exact_half_fill_boundary",
+   "base_secs": 86400,
+   "amount_sats": 1000,
+   "remaining_band_gap_sats": 1000,
+   "expected_secs": 86400
+  },
+  {
+   "case_id": "over_half_fill_full_cooldown",
+   "base_secs": 86400,
+   "amount_sats": 5000,
+   "remaining_band_gap_sats": 1000,
+   "expected_secs": 86400
+  },
+  {
+   "case_id": "tiny_fill_short_cooldown",
+   "base_secs": 86400,
+   "amount_sats": 1,
+   "remaining_band_gap_sats": 1000000,
+   "expected_secs": 0
+  },
+  {
+   "case_id": "small_base_half_fill",
+   "base_secs": 3600,
+   "amount_sats": 250,
+   "remaining_band_gap_sats": 250,
+   "expected_secs": 3600
+  },
+  {
+   "case_id": "fill_fraction_one_fifth",
+   "base_secs": 300,
+   "amount_sats": 100,
+   "remaining_band_gap_sats": 400,
+   "expected_secs": 120
+  },
+  {
+   "case_id": "no_anchor_full_cooldown_gap_positive",
+   "base_secs": 86400,
+   "amount_sats": 0,
+   "remaining_band_gap_sats": 1000,
+   "expected_secs": 86400
+  },
+  {
+   "case_id": "no_anchor_full_cooldown_gap_zero",
+   "base_secs": 86400,
+   "amount_sats": 0,
+   "remaining_band_gap_sats": 0,
+   "expected_secs": 86400
+  }
+ ],
+ "drift_override_cases": [
+  {
+   "case_id": "near_threshold_fp_precision_no_trigger",
+   "anchor_ratio": 0.7,
+   "current_ratio": 0.4,
+   "expected": false
+  },
+  {
+   "case_id": "just_below_threshold_no_trigger",
+   "anchor_ratio": 0.7,
+   "current_ratio": 0.41,
+   "expected": false
+  },
+  {
+   "case_id": "just_above_threshold_triggers",
+   "anchor_ratio": 0.7,
+   "current_ratio": 0.39,
+   "expected": true
+  },
+  {
+   "case_id": "no_drift_no_trigger",
+   "anchor_ratio": 0.5,
+   "current_ratio": 0.5,
+   "expected": false
+  },
+  {
+   "case_id": "negative_drift_no_trigger",
+   "anchor_ratio": 0.4,
+   "current_ratio": 0.7,
+   "expected": false
+  },
+  {
+   "case_id": "large_drift_triggers",
+   "anchor_ratio": 1.0,
+   "current_ratio": 0.7,
+   "expected": true
+  },
+  {
+   "case_id": "exact_threshold_from_zero",
+   "anchor_ratio": 0.3,
+   "current_ratio": 0.0,
+   "expected": true
+  }
+ ]
+}
