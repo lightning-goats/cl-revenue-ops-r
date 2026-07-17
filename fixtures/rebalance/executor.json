@@ -1,0 +1,5065 @@
+{
+ "invoice_expiry_sec": 300,
+ "sendpay_timeout_sec": 60,
+ "attributed_confidence": 0.85,
+ "inferred_confidence_floor": 0.2,
+ "cases": [
+  {
+   "name": "validation_invalid_amount_zero",
+   "now_ms": 1750000000000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 0,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 0,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: invalid_amount",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_invalid_amount_negative",
+   "now_ms": 1750000001000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": -5,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": -5,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: invalid_amount",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_missing_route",
+   "now_ms": 1750000002000,
+   "request": {
+    "route": [],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 0,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: missing_route",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": []
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_first_hop_not_source_channel",
+   "now_ms": 1750000003000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "999999x1x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: first_hop_not_source_channel",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_final_hop_not_dest_channel",
+   "now_ms": 1750000004000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "999999x2x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: final_hop_not_dest_channel",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_final_hop_not_our_node",
+   "now_ms": 1750000005000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: final_hop_not_our_node",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_final_amount_mismatch",
+   "now_ms": 1750000006000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 99999999,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: final_amount_mismatch",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 99999999,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_hop_0_invalid_amount",
+   "now_ms": 1750000007000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 0,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: hop_0_invalid_amount",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 0,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_increasing_route_amount",
+   "now_ms": 1750000008000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000901,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_invalid: increasing_route_amount",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000901,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "validation_over_budget",
+   "now_ms": 1750000009000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 1,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {},
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_route_over_budget: route_over_budget: 2 > 1",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [],
+   "expected_observations": []
+  },
+  {
+   "name": "success_amount_sent_int",
+   "now_ms": 1750000010000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph10000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case10",
+      "payment_secret": "sec10111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "result": {
+      "status": "complete",
+      "amount_sent_msat": 100001500
+     }
+    }
+   },
+   "expected": {
+    "success": true,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 15,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": null,
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000010000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph10000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case10",
+     "payment_secret": "sec10111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph10000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "success_amount_sent_msat_string",
+   "now_ms": 1750000011000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph11000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case11"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "result": {
+      "status": "complete",
+      "amount_sent_msat": "100001500msat"
+     }
+    }
+   },
+   "expected": {
+    "success": true,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 15,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": null,
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000011000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph11000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case11",
+     "payment_secret": ""
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph11000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "success_missing_amount_sent_falls_back_to_first_hop",
+   "now_ms": 1750000012000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph12000000000000000000000000000000000000000000000000000000000000"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "result": {
+      "status": "complete"
+     }
+    }
+   },
+   "expected": {
+    "success": true,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 15,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": null,
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000012000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph12000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "",
+     "payment_secret": ""
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph12000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "success_status_missing_treated_complete",
+   "now_ms": 1750000013000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph13000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case13",
+      "payment_secret": "sec13111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "result": {
+      "amount_sent_msat": 100000600
+     }
+    }
+   },
+   "expected": {
+    "success": true,
+    "attempts": 1,
+    "fee_sats": 1,
+    "fee_msat": 600,
+    "amount_sats": 100000,
+    "fee_ppm": 6,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": null,
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000013000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph13000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case13",
+     "payment_secret": "sec13111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph13000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "invoice_response_not_dict",
+   "now_ms": 1750000014000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "raw": "garbage"
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_invoice_error: unexpected response",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ],
+     "failure_class": "unknown"
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000014000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000014000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "invoice_response_missing_payment_hash",
+   "now_ms": 1750000015000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "bolt11": "lnbc1nohash"
+     }
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_invoice_error: missing payment_hash",
+    "excluded_channels": [],
+    "failure_data": {
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ],
+     "failure_class": "unknown"
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000015000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000015000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "pending_waitsendpay_code_200",
+   "now_ms": 1750000016000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph16000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case16",
+      "payment_secret": "sec16111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error": {
+      "code": 200,
+      "message": "Timed out while waiting for payment"
+     }
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "payment_pending_timeout: Timed out while waiting for payment",
+    "excluded_channels": [],
+    "failure_data": {
+     "failure_class": "pending",
+     "payment_hash": "ph16000000000000000000000000000000000000000000000000000000000000",
+     "invoice_label": "rebal-native-1750000016000-800000x2000x1",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": true
+   },
+   "expected_payment_hash": "ph16000000000000000000000000000000000000000000000000000000000000",
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000016000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph16000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case16",
+     "payment_secret": "sec16111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph16000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "pending_proxy_timeout_on_sendpay",
+   "now_ms": 1750000017000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph17000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case17",
+      "payment_secret": "sec17111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "timeout_error": "RPC timeout after 60.0s (sendpay)"
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "payment_pending_timeout: RPC timeout after 60.0s (sendpay)",
+    "excluded_channels": [],
+    "failure_data": {
+     "failure_class": "pending",
+     "payment_hash": "ph17000000000000000000000000000000000000000000000000000000000000",
+     "invoice_label": "rebal-native-1750000017000-800000x2000x1",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": true
+   },
+   "expected_payment_hash": "ph17000000000000000000000000000000000000000000000000000000000000",
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000017000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph17000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case17",
+     "payment_secret": "sec17111111111111111111111111111111111111111111111111111111111111"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "pending_proxy_timeout_on_waitsendpay",
+   "now_ms": 1750000018000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph18000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case18",
+      "payment_secret": "sec18111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "timeout_error": "RPC timeout after 60.0s (waitsendpay)"
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "payment_pending_timeout: RPC timeout after 60.0s (waitsendpay)",
+    "excluded_channels": [],
+    "failure_data": {
+     "failure_class": "pending",
+     "payment_hash": "ph18000000000000000000000000000000000000000000000000000000000000",
+     "invoice_label": "rebal-native-1750000018000-800000x2000x1",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": true
+   },
+   "expected_payment_hash": "ph18000000000000000000000000000000000000000000000000000000000000",
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000018000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph18000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case18",
+     "payment_secret": "sec18111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph18000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "pending_waitsendpay_status_pending",
+   "now_ms": 1750000019000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph19000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case19",
+      "payment_secret": "sec19111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "result": {
+      "status": "pending"
+     }
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 2,
+    "fee_msat": 1500,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "payment_pending_timeout: waitsendpay_status=pending",
+    "excluded_channels": [],
+    "failure_data": {
+     "failure_class": "pending",
+     "payment_hash": "ph19000000000000000000000000000000000000000000000000000000000000",
+     "invoice_label": "rebal-native-1750000019000-800000x2000x1",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": true
+   },
+   "expected_payment_hash": "ph19000000000000000000000000000000000000000000000000000000000000",
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000019000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph19000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case19",
+     "payment_secret": "sec19111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph19000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "terminal_erring_channel_and_direction",
+   "now_ms": 1750000020000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph20000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case20",
+      "payment_secret": "sec20111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error": {
+      "code": 204,
+      "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (reply from remote)",
+      "data": {
+       "erring_channel": "810000x20x1",
+       "erring_direction": 0,
+       "erring_node": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "erring_index": 2,
+       "failcode": 4103,
+       "failcodename": "WIRE_TEMPORARY_CHANNEL_FAILURE"
+      }
+     }
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (reply from remote) (failcodename=WIRE_TEMPORARY_CHANNEL_FAILURE, failcode=4103, erring_channel=810000x20x1, erring_direction=0, erring_index=2, erring_node=03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03)",
+    "excluded_channels": [
+     "810000x20x1/0"
+    ],
+    "failure_data": {
+     "code": 204,
+     "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (reply from remote)",
+     "erring_channel": "810000x20x1",
+     "erring_direction": 0,
+     "erring_node": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+     "erring_index": 2,
+     "failcode": 4103,
+     "failcodename": "WIRE_TEMPORARY_CHANNEL_FAILURE",
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000020000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph20000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case20",
+     "payment_secret": "sec20111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph20000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph20000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000020000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000020-1",
+     "short_channel_id": "810000x20x1",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.85,
+     "observed_at": 1750000020,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_erring_direction_string",
+   "now_ms": 1750000021000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph21000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case21",
+      "payment_secret": "sec21111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error": {
+      "code": 204,
+      "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+      "data": {
+       "erring_channel": "810000x10x0",
+       "erring_direction": "1"
+      }
+     }
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (erring_channel=810000x10x0, erring_direction=1)",
+    "excluded_channels": [
+     "810000x10x0/1"
+    ],
+    "failure_data": {
+     "code": 204,
+     "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+     "erring_channel": "810000x10x0",
+     "erring_direction": "1",
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000021000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph21000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case21",
+     "payment_secret": "sec21111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph21000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph21000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000021000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000021-1",
+     "short_channel_id": "810000x10x0",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.85,
+     "observed_at": 1750000021,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_erring_channel_unknown_direction",
+   "now_ms": 1750000022000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph22000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case22",
+      "payment_secret": "sec22111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error": {
+      "code": 204,
+      "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+      "data": {
+       "erring_channel": "810000x10x0",
+       "failcode": 4103
+      }
+     }
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (failcode=4103, erring_channel=810000x10x0)",
+    "excluded_channels": [
+     "810000x10x0"
+    ],
+    "failure_data": {
+     "code": 204,
+     "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+     "erring_channel": "810000x10x0",
+     "failcode": 4103,
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000022000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph22000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case22",
+     "payment_secret": "sec22111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph22000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph22000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000022000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000022-1",
+     "short_channel_id": "810000x10x0",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.425,
+     "observed_at": 1750000022,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000022-2",
+     "short_channel_id": "810000x10x0",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.425,
+     "observed_at": 1750000022,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_liquidity_no_attribution_middle_hops",
+   "now_ms": 1750000023000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph23000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case23",
+      "payment_secret": "sec23111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error_text": "WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure"
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+    "excluded_channels": [
+     "810000x10x0/1",
+     "810000x20x1/0"
+    ],
+    "failure_data": {
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000023000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph23000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case23",
+     "payment_secret": "sec23111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph23000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph23000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000023000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000023-1",
+     "short_channel_id": "810000x10x0",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.425,
+     "observed_at": 1750000023,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000023-2",
+     "short_channel_id": "810000x20x1",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.425,
+     "observed_at": 1750000023,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_fee_no_attribution_dedups_middle_hops",
+   "now_ms": 1750000024000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 140,
+      "amount_msat": 100002000,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 120,
+      "amount_msat": 100001200,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000700,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph24000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case24",
+      "payment_secret": "sec24111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error": {
+      "code": 204,
+      "message": "failed: WIRE_FEE_INSUFFICIENT: fee_insufficient"
+     }
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 5,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: failed: WIRE_FEE_INSUFFICIENT: fee_insufficient",
+    "excluded_channels": [
+     "810000x10x0/1",
+     "810000x20x1/0"
+    ],
+    "failure_data": {
+     "code": 204,
+     "message": "failed: WIRE_FEE_INSUFFICIENT: fee_insufficient",
+     "failure_class": "fee",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100002000,
+       "delay": 140
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100001200,
+       "delay": 120
+      },
+      {
+       "index": 2,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000700,
+       "delay": 100
+      },
+      {
+       "index": 3,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 4,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000024000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 140,
+       "amount_msat": 100002000,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 120,
+       "amount_msat": 100001200,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000700,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph24000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case24",
+     "payment_secret": "sec24111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph24000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph24000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000024000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000024-1",
+     "short_channel_id": "810000x10x0",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "fee",
+     "confidence": 0.425,
+     "observed_at": 1750000024,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000024-2",
+     "short_channel_id": "810000x20x1",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "fee",
+     "confidence": 0.425,
+     "observed_at": 1750000024,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_inferred_confidence_floor",
+   "now_ms": 1750000025000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 220,
+      "amount_msat": 100006000,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 200,
+      "amount_msat": 100005000,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 180,
+      "amount_msat": 100004200,
+      "style": "tlv"
+     },
+     {
+      "id": "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05",
+      "channel": "810000x30x0",
+      "direction": 0,
+      "delay": 160,
+      "amount_msat": 100003400,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "820000x40x1",
+      "direction": 1,
+      "delay": 140,
+      "amount_msat": 100002600,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "820000x50x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001800,
+      "style": "tlv"
+     },
+     {
+      "id": "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05",
+      "channel": "820000x60x1",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100001000,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph25000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case25",
+      "payment_secret": "sec25111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error_text": "WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure"
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 8,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+    "excluded_channels": [
+     "810000x10x0/1",
+     "810000x20x1/0",
+     "810000x30x0/0",
+     "820000x40x1/1",
+     "820000x50x0/0",
+     "820000x60x1/1"
+    ],
+    "failure_data": {
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100006000,
+       "delay": 220
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100005000,
+       "delay": 200
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100004200,
+       "delay": 180
+      },
+      {
+       "index": 3,
+       "channel": "810000x30x0",
+       "direction": 0,
+       "id": "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05",
+       "amount_msat": 100003400,
+       "delay": 160
+      },
+      {
+       "index": 4,
+       "channel": "820000x40x1",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100002600,
+       "delay": 140
+      },
+      {
+       "index": 5,
+       "channel": "820000x50x0",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100001800,
+       "delay": 120
+      },
+      {
+       "index": 6,
+       "channel": "820000x60x1",
+       "direction": 1,
+       "id": "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05",
+       "amount_msat": 100001000,
+       "delay": 100
+      },
+      {
+       "index": 7,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000025000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 220,
+       "amount_msat": 100006000,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 200,
+       "amount_msat": 100005000,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 180,
+       "amount_msat": 100004200,
+       "style": "tlv"
+      },
+      {
+       "id": "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05",
+       "channel": "810000x30x0",
+       "direction": 0,
+       "delay": 160,
+       "amount_msat": 100003400,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "820000x40x1",
+       "direction": 1,
+       "delay": 140,
+       "amount_msat": 100002600,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "820000x50x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001800,
+       "style": "tlv"
+      },
+      {
+       "id": "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05",
+       "channel": "820000x60x1",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100001000,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph25000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case25",
+     "payment_secret": "sec25111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph25000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph25000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000025000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000025-1",
+     "short_channel_id": "810000x10x0",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.2,
+     "observed_at": 1750000025,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000025-2",
+     "short_channel_id": "810000x20x1",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.2,
+     "observed_at": 1750000025,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000025-3",
+     "short_channel_id": "810000x30x0",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.2,
+     "observed_at": 1750000025,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000025-4",
+     "short_channel_id": "820000x40x1",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.2,
+     "observed_at": 1750000025,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000025-5",
+     "short_channel_id": "820000x50x0",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.2,
+     "observed_at": 1750000025,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    },
+    {
+     "observation_id": "obs-1750000025-6",
+     "short_channel_id": "820000x60x1",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.2,
+     "observed_at": 1750000025,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_waitsendpay_status_failed_unknown_class",
+   "now_ms": 1750000026000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph26000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case26",
+      "payment_secret": "sec26111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "result": {
+      "status": "failed"
+     }
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: waitsendpay_status=failed",
+    "excluded_channels": [],
+    "failure_data": {
+     "failure_class": "unknown",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000026000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph26000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case26",
+     "payment_secret": "sec26111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph26000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph26000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000026000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "terminal_timeout_class_not_proxy_timeout",
+   "now_ms": 1750000027000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph27000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case27",
+      "payment_secret": "sec27111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error_text": "deadline exceeded waiting for htlc resolution"
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: deadline exceeded waiting for htlc resolution",
+    "excluded_channels": [],
+    "failure_data": {
+     "failure_class": "timeout",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000027000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph27000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case27",
+     "payment_secret": "sec27111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph27000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph27000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000027000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "terminal_invoice_rpc_error",
+   "now_ms": 1750000028000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "error": {
+      "code": -32602,
+      "message": "Invalid label"
+     }
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: Invalid label",
+    "excluded_channels": [],
+    "failure_data": {
+     "code": -32602,
+     "message": "Invalid label",
+     "failure_class": "unknown",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000028000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000028000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "terminal_invoice_code_200_not_pending",
+   "now_ms": 1750000029000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "error": {
+      "code": 200,
+      "message": "Timed out creating invoice"
+     }
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: Timed out creating invoice",
+    "excluded_channels": [],
+    "failure_data": {
+     "code": 200,
+     "message": "Timed out creating invoice",
+     "failure_class": "unknown",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000029000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000029000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": []
+  },
+  {
+   "name": "terminal_sendpay_structured_error",
+   "now_ms": 1750000030000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph30000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case30",
+      "payment_secret": "sec30111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "error": {
+      "code": 204,
+      "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+      "data": {
+       "erring_channel": "810000x10x0",
+       "erring_direction": 1
+      }
+     }
+    },
+    "delpay": {
+     "result": {}
+    },
+    "delinvoice": {
+     "result": {}
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (erring_channel=810000x10x0, erring_direction=1)",
+    "excluded_channels": [
+     "810000x10x0/1"
+    ],
+    "failure_data": {
+     "code": 204,
+     "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+     "erring_channel": "810000x10x0",
+     "erring_direction": 1,
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000030000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph30000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case30",
+     "payment_secret": "sec30111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph30000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000030000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000030-1",
+     "short_channel_id": "810000x10x0",
+     "direction": 1,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.85,
+     "observed_at": 1750000030,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  },
+  {
+   "name": "terminal_cleanup_failures_swallowed",
+   "now_ms": 1750000031000,
+   "request": {
+    "route": [
+     {
+      "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+      "channel": "800000x1000x0",
+      "direction": 0,
+      "delay": 120,
+      "amount_msat": 100001500,
+      "style": "tlv"
+     },
+     {
+      "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+      "channel": "810000x10x0",
+      "direction": 1,
+      "delay": 100,
+      "amount_msat": 100000900,
+      "style": "tlv"
+     },
+     {
+      "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+      "channel": "810000x20x1",
+      "direction": 0,
+      "delay": 80,
+      "amount_msat": 100000300,
+      "style": "tlv"
+     },
+     {
+      "id": "020000000000000000000000000000000000000000000000000000000000000001",
+      "channel": "800000x2000x1",
+      "direction": 1,
+      "delay": 18,
+      "amount_msat": 100000000,
+      "style": "tlv"
+     }
+    ],
+    "amount_sats": 100000,
+    "source_channel_id": "800000x1000x0",
+    "dest_channel_id": "800000x2000x1",
+    "max_fee_sats": 10,
+    "our_id": "020000000000000000000000000000000000000000000000000000000000000001"
+   },
+   "rpc_script": {
+    "invoice": {
+     "result": {
+      "payment_hash": "ph31000000000000000000000000000000000000000000000000000000000000",
+      "bolt11": "lnbc1case31",
+      "payment_secret": "sec31111111111111111111111111111111111111111111111111111111111111"
+     }
+    },
+    "sendpay": {
+     "result": {
+      "status": "pending"
+     }
+    },
+    "waitsendpay": {
+     "error": {
+      "code": 204,
+      "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+      "data": {
+       "erring_channel": "810000x20x1",
+       "erring_direction": 0
+      }
+     }
+    },
+    "delpay": {
+     "error": {
+      "message": "Payment with hash not found"
+     }
+    },
+    "delinvoice": {
+     "error": {
+      "message": "Invoice not found"
+     }
+    }
+   },
+   "expected": {
+    "success": false,
+    "attempts": 1,
+    "fee_sats": 0,
+    "fee_msat": 0,
+    "amount_sats": 100000,
+    "fee_ppm": 0,
+    "hops": 4,
+    "route_type": "native",
+    "parts": 1,
+    "error": "native_sendpay_error: failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure (erring_channel=810000x20x1, erring_direction=0)",
+    "excluded_channels": [
+     "810000x20x1/0"
+    ],
+    "failure_data": {
+     "code": 204,
+     "message": "failed: WIRE_TEMPORARY_CHANNEL_FAILURE: temporary_channel_failure",
+     "erring_channel": "810000x20x1",
+     "erring_direction": 0,
+     "failure_class": "liquidity",
+     "route_summary": [
+      {
+       "index": 0,
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "amount_msat": 100001500,
+       "delay": 120
+      },
+      {
+       "index": 1,
+       "channel": "810000x10x0",
+       "direction": 1,
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "amount_msat": 100000900,
+       "delay": 100
+      },
+      {
+       "index": 2,
+       "channel": "810000x20x1",
+       "direction": 0,
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "amount_msat": 100000300,
+       "delay": 80
+      },
+      {
+       "index": 3,
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "amount_msat": 100000000,
+       "delay": 18
+      }
+     ]
+    },
+    "payment_pending": false
+   },
+   "expected_payment_hash": null,
+   "expected_calls": [
+    {
+     "method": "invoice",
+     "amount_msat": 100000000,
+     "label": "rebal-native-1750000031000-800000x2000x1",
+     "expiry": 300
+    },
+    {
+     "method": "sendpay",
+     "route": [
+      {
+       "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+       "channel": "800000x1000x0",
+       "direction": 0,
+       "delay": 120,
+       "amount_msat": 100001500,
+       "style": "tlv"
+      },
+      {
+       "id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+       "channel": "810000x10x0",
+       "direction": 1,
+       "delay": 100,
+       "amount_msat": 100000900,
+       "style": "tlv"
+      },
+      {
+       "id": "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04",
+       "channel": "810000x20x1",
+       "direction": 0,
+       "delay": 80,
+       "amount_msat": 100000300,
+       "style": "tlv"
+      },
+      {
+       "id": "020000000000000000000000000000000000000000000000000000000000000001",
+       "channel": "800000x2000x1",
+       "direction": 1,
+       "delay": 18,
+       "amount_msat": 100000000,
+       "style": "tlv"
+      }
+     ],
+     "payment_hash": "ph31000000000000000000000000000000000000000000000000000000000000",
+     "bolt11": "lnbc1case31",
+     "payment_secret": "sec31111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "method": "waitsendpay",
+     "payment_hash": "ph31000000000000000000000000000000000000000000000000000000000000",
+     "timeout": 60
+    },
+    {
+     "method": "delpay",
+     "payment_hash": "ph31000000000000000000000000000000000000000000000000000000000000",
+     "status": "failed"
+    },
+    {
+     "method": "delinvoice",
+     "label": "rebal-native-1750000031000-800000x2000x1",
+     "status": "unpaid"
+    }
+   ],
+   "expected_observations": [
+    {
+     "observation_id": "obs-1750000031-1",
+     "short_channel_id": "810000x20x1",
+     "direction": 0,
+     "amount_bucket_sats": 100000,
+     "outcome": "failure",
+     "failure_class": "liquidity",
+     "confidence": 0.85,
+     "observed_at": 1750000031,
+     "source_channel_id": "",
+     "dest_channel_id": "",
+     "route_policy": "",
+     "router_kind": "",
+     "correlation_id": ""
+    }
+   ]
+  }
+ ]
+}
