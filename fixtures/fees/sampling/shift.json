@@ -1,0 +1,105 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "empty_bias_zero",
+   "now": 1752400000,
+   "posterior_bias": [],
+   "base": "150.0",
+   "expected": "0.0"
+  },
+  {
+   "name": "single_fresh_nudge",
+   "now": 1752400000,
+   "posterior_bias": [
+    [
+     "300.0",
+     "0.5",
+     1752396400
+    ]
+   ],
+   "base": "150.0",
+   "expected": "49.04197365499823"
+  },
+  {
+   "name": "single_fresh_nudge_base_zero",
+   "now": 1752400000,
+   "posterior_bias": [
+    [
+     "300.0",
+     "0.5",
+     1752396400
+    ]
+   ],
+   "base": "0.0",
+   "expected": "98.08394730999646"
+  },
+  {
+   "name": "negative_base",
+   "now": 1752400000,
+   "posterior_bias": [
+    [
+     "300.0",
+     "0.5",
+     1752396400
+    ]
+   ],
+   "base": "-50.0",
+   "expected": "114.43127186166254"
+  },
+  {
+   "name": "sequential_blends_order_matters",
+   "now": 1752400000,
+   "posterior_bias": [
+    [
+     "300.0",
+     "0.5",
+     1752396400
+    ],
+    [
+     "100.0",
+     "0.8",
+     1752392800
+    ],
+    [
+     "700.0",
+     "0.2",
+     1752292000
+    ]
+   ],
+   "base": "200.0",
+   "expected": "16.280962804287867"
+  },
+  {
+   "name": "expired_entry_skipped",
+   "now": 1752400000,
+   "posterior_bias": [
+    [
+     "300.0",
+     "0.5",
+     1751536000
+    ],
+    [
+     "400.0",
+     "0.5",
+     1752227200
+    ]
+   ],
+   "base": "200.0",
+   "expected": "22.22222222222223"
+  },
+  {
+   "name": "future_ts_age_clamped_to_zero",
+   "now": 1752400000,
+   "posterior_bias": [
+    [
+     "300.0",
+     "0.5",
+     1752436000
+    ]
+   ],
+   "base": "200.0",
+   "expected": "33.333333333333314"
+  }
+ ]
+}

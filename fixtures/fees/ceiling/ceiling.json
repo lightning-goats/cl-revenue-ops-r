@@ -1,0 +1,292 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "no_earning_history_none",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "300.0",
+     "0.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "280.0",
+     "0.0",
+     "1.0",
+     1752392800,
+     "normal"
+    ]
+   ],
+   "expected": null
+  },
+  {
+   "name": "empty_observations_none",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [],
+   "expected": null
+  },
+  {
+   "name": "basic_quantile_with_headroom",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "200.0",
+     "80.0",
+     "1.0",
+     1752392800,
+     "normal"
+    ],
+    [
+     "300.0",
+     "20.0",
+     "1.0",
+     1752389200,
+     "normal"
+    ]
+   ],
+   "expected": "375.0"
+  },
+  {
+   "name": "quantile_reaches_top_fee",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "100.0",
+     "10.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "500.0",
+     "300.0",
+     "1.0",
+     1752392800,
+     "normal"
+    ]
+   ],
+   "expected": "625.0"
+  },
+  {
+   "name": "winsorized_whale_quantile",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "150.0",
+     "60.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "200.0",
+     "55.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "900.0",
+     "5000.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ]
+   ],
+   "expected": "1125.0"
+  },
+  {
+   "name": "congestion_revenue_excluded",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "2000.0",
+     "900.0",
+     "1.0",
+     1752396400,
+     "normal",
+     "congestion"
+    ],
+    [
+     "150.0",
+     "40.0",
+     "1.0",
+     1752392800,
+     "normal"
+    ]
+   ],
+   "expected": "187.5"
+  },
+  {
+   "name": "zero_probe_carries_no_mass",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "90.0",
+     "0.0",
+     "1.0",
+     1752396400,
+     "normal",
+     "zero_probe"
+    ]
+   ],
+   "expected": "125.0"
+  },
+  {
+   "name": "floor_escape_at_floor",
+   "now": 1752400000,
+   "floor_ppm": "100.0",
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "100.0",
+     "45.0",
+     "1.0",
+     1752392800,
+     "normal"
+    ]
+   ],
+   "expected": "200.0"
+  },
+  {
+   "name": "floor_escape_only_binds_when_larger",
+   "now": 1752400000,
+   "floor_ppm": "50.0",
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ]
+   ],
+   "expected": "125.0"
+  },
+  {
+   "name": "no_escape_quantile_above_floor",
+   "now": 1752400000,
+   "floor_ppm": "100.0",
+   "observations": [
+    [
+     "300.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "350.0",
+     "45.0",
+     "1.0",
+     1752392800,
+     "normal"
+    ]
+   ],
+   "expected": "437.5"
+  },
+  {
+   "name": "floor_zero_never_escapes",
+   "now": 1752400000,
+   "floor_ppm": "0.0",
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ]
+   ],
+   "expected": "125.0"
+  },
+  {
+   "name": "stale_mass_decays_out",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "100.0",
+     "50.0",
+     "1.0",
+     1717840000,
+     "normal"
+    ]
+   ],
+   "expected": null
+  },
+  {
+   "name": "same_fee_two_windows",
+   "now": 1752400000,
+   "floor_ppm": null,
+   "observations": [
+    [
+     "250.0",
+     "30.0",
+     "1.0",
+     1752396400,
+     "normal"
+    ],
+    [
+     "250.0",
+     "90.0",
+     "0.5",
+     1752392800,
+     "normal"
+    ],
+    [
+     "400.0",
+     "5.0",
+     "1.0",
+     1752389200,
+     "normal"
+    ]
+   ],
+   "expected": "312.5"
+  }
+ ]
+}
