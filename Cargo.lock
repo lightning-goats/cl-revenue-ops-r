@@ -652,6 +652,7 @@ dependencies = [
 name = "revops-fees"
 version = "0.1.0"
 dependencies = [
+ "revops-analytics",
  "revops-core",
  "revops-econ",
  "rusqlite",
