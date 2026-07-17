@@ -1,0 +1,107 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "below_saturated_and_not_source_returns_base",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": null,
+   "outbound_ratio": "0.5",
+   "capacity_sats": 1000000,
+   "flow_window": null,
+   "expected": 100
+  },
+  {
+   "name": "sat_floor_negative_ignored_returns_base",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": -5,
+   "flow_state": "source",
+   "outbound_ratio": "0.9",
+   "capacity_sats": 1000000,
+   "flow_window": null,
+   "expected": 100
+  },
+  {
+   "name": "sat_floor_equal_base_ignored_returns_base",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 100,
+   "flow_state": "source",
+   "outbound_ratio": "0.9",
+   "capacity_sats": 1000000,
+   "flow_window": null,
+   "expected": 100
+  },
+  {
+   "name": "source_channel_no_flow_data_takes_sat_floor",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": "source",
+   "outbound_ratio": "0.3",
+   "capacity_sats": 1000000,
+   "flow_window": null,
+   "expected": 20
+  },
+  {
+   "name": "saturated_outbound_ratio_at_boundary_takes_sat_floor",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": null,
+   "outbound_ratio": "0.85",
+   "capacity_sats": 1000000,
+   "flow_window": null,
+   "expected": 20
+  },
+  {
+   "name": "saturated_outbound_ratio_just_below_boundary_returns_base",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": null,
+   "outbound_ratio": "0.849999",
+   "capacity_sats": 1000000,
+   "flow_window": null,
+   "expected": 100
+  },
+  {
+   "name": "flow_balanced_router_exemption_returns_base",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": "source",
+   "outbound_ratio": "0.9",
+   "capacity_sats": 1000000,
+   "flow_window": [
+    200000,
+    190000,
+    42
+   ],
+   "expected": 100
+  },
+  {
+   "name": "flow_not_balanced_low_turnover_takes_sat_floor",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": "source",
+   "outbound_ratio": "0.9",
+   "capacity_sats": 1000000,
+   "flow_window": [
+    10000,
+    9000,
+    3
+   ],
+   "expected": 20
+  },
+  {
+   "name": "flow_not_balanced_net_ratio_too_high_takes_sat_floor",
+   "min_fee_ppm": 100,
+   "min_fee_ppm_saturated": 20,
+   "flow_state": "source",
+   "outbound_ratio": "0.9",
+   "capacity_sats": 1000000,
+   "flow_window": [
+    300000,
+    50000,
+    12
+   ],
+   "expected": 20
+  }
+ ]
+}

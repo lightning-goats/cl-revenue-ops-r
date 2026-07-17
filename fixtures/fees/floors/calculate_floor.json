@@ -1,0 +1,100 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "risk_premium_wins_no_stall",
+   "capacity_sats": 2000000,
+   "chain_costs": {
+    "open_cost_sats": 2500,
+    "close_cost_sats": 1500,
+    "sat_per_vbyte": 15.0
+   },
+   "peer_latency": null,
+   "opener": "local",
+   "expected_floor_ppm": 45
+  },
+  {
+   "name": "stall_multiplier_after_max_p8_002_regression",
+   "capacity_sats": 2000000,
+   "chain_costs": {
+    "open_cost_sats": 2500,
+    "close_cost_sats": 1500,
+    "sat_per_vbyte": 15.0
+   },
+   "peer_latency": {
+    "avg": 15.0,
+    "std": 1.0
+   },
+   "opener": "local",
+   "expected_floor_ppm": 54
+  },
+  {
+   "name": "stall_multiplier_only_no_dynamic_costs",
+   "capacity_sats": 2000000,
+   "chain_costs": null,
+   "peer_latency": {
+    "avg": 0.0,
+    "std": 6.0
+   },
+   "opener": "local",
+   "expected_floor_ppm": 25
+  },
+  {
+   "name": "peer_latency_below_thresholds_no_stall",
+   "capacity_sats": 2000000,
+   "chain_costs": null,
+   "peer_latency": {
+    "avg": 5.0,
+    "std": 2.0
+   },
+   "opener": "local",
+   "expected_floor_ppm": 21
+  },
+  {
+   "name": "risk_premium_zero_sat_per_vbyte_skipped",
+   "capacity_sats": 2000000,
+   "chain_costs": {
+    "open_cost_sats": 2500,
+    "close_cost_sats": 1500,
+    "sat_per_vbyte": 0.0
+   },
+   "peer_latency": null,
+   "opener": "local",
+   "expected_floor_ppm": 21
+  },
+  {
+   "name": "remote_opener_with_risk_premium",
+   "capacity_sats": 500000,
+   "chain_costs": {
+    "open_cost_sats": 2500,
+    "close_cost_sats": 1500,
+    "sat_per_vbyte": 20.0
+   },
+   "peer_latency": null,
+   "opener": "remote",
+   "expected_floor_ppm": 60
+  },
+  {
+   "name": "avg_threshold_boundary_10_0_not_triggered",
+   "capacity_sats": 2000000,
+   "chain_costs": null,
+   "peer_latency": {
+    "avg": 10.0,
+    "std": 0.0
+   },
+   "opener": "local",
+   "expected_floor_ppm": 21
+  },
+  {
+   "name": "avg_threshold_boundary_10_0001_triggered",
+   "capacity_sats": 2000000,
+   "chain_costs": null,
+   "peer_latency": {
+    "avg": 10.0001,
+    "std": 0.0
+   },
+   "opener": "local",
+   "expected_floor_ppm": 25
+  }
+ ]
+}

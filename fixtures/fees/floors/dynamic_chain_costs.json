@@ -1,0 +1,83 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "opening_present",
+   "perkb": {
+    "opening": 5000
+   },
+   "expected": {
+    "open_cost_sats": 700,
+    "close_cost_sats": 1000,
+    "sat_per_vbyte": "5.0"
+   }
+  },
+  {
+   "name": "opening_zero_falls_to_mutual_close",
+   "perkb": {
+    "opening": 0,
+    "mutual_close": 3000
+   },
+   "expected": {
+    "open_cost_sats": 500,
+    "close_cost_sats": 600,
+    "sat_per_vbyte": "3.0"
+   }
+  },
+  {
+   "name": "opening_null_mutual_close_zero_falls_to_unilateral",
+   "perkb": {
+    "opening": null,
+    "mutual_close": 0,
+    "unilateral_close": 2000
+   },
+   "expected": {
+    "open_cost_sats": 500,
+    "close_cost_sats": 400,
+    "sat_per_vbyte": "2.0"
+   }
+  },
+  {
+   "name": "all_missing_falls_to_floor_key",
+   "perkb": {
+    "floor": 800
+   },
+   "expected": {
+    "open_cost_sats": 500,
+    "close_cost_sats": 300,
+    "sat_per_vbyte": "0.8"
+   }
+  },
+  {
+   "name": "all_missing_falls_to_1000_default",
+   "perkb": {},
+   "expected": {
+    "open_cost_sats": 500,
+    "close_cost_sats": 300,
+    "sat_per_vbyte": "1.0"
+   }
+  },
+  {
+   "name": "high_fee_clamped_to_max",
+   "perkb": {
+    "opening": 1000000
+   },
+   "expected": {
+    "open_cost_sats": 50000,
+    "close_cost_sats": 50000,
+    "sat_per_vbyte": "1000.0"
+   }
+  },
+  {
+   "name": "low_fee_clamped_to_min",
+   "perkb": {
+    "opening": 1
+   },
+   "expected": {
+    "open_cost_sats": 500,
+    "close_cost_sats": 300,
+    "sat_per_vbyte": "0.001"
+   }
+  }
+ ]
+}

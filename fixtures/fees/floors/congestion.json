@@ -1,0 +1,140 @@
+{
+ "now": 1752400000,
+ "cases": [
+  {
+   "name": "live_data_over_threshold_true",
+   "state": null,
+   "channel_info": {
+    "has_htlc_data": true,
+    "max_accepted_htlcs": 10,
+    "our_htlcs_in_flight": 9
+   },
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": true
+  },
+  {
+   "name": "live_data_at_threshold_boundary_false",
+   "state": null,
+   "channel_info": {
+    "has_htlc_data": true,
+    "max_accepted_htlcs": 10,
+    "our_htlcs_in_flight": 8
+   },
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": false
+  },
+  {
+   "name": "live_data_max_zero_falls_back_to_snapshot_none",
+   "state": null,
+   "channel_info": {
+    "has_htlc_data": true,
+    "max_accepted_htlcs": 0,
+    "our_htlcs_in_flight": 5
+   },
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": false
+  },
+  {
+   "name": "snapshot_fresh_congested_true",
+   "state": {
+    "state": "congested",
+    "updated_at": 1752399900
+   },
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": true
+  },
+  {
+   "name": "snapshot_stale_beyond_2x_flow_interval_false",
+   "state": {
+    "state": "congested",
+    "updated_at": 1752396000
+   },
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": false
+  },
+  {
+   "name": "snapshot_missing_updated_at_treated_fresh_true",
+   "state": {
+    "state": "congested"
+   },
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": true
+  },
+  {
+   "name": "snapshot_updated_at_zero_treated_fresh_true",
+   "state": {
+    "state": "congested",
+    "updated_at": 0
+   },
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": true
+  },
+  {
+   "name": "snapshot_not_congested_false",
+   "state": {
+    "state": "idle",
+    "updated_at": 1752400000
+   },
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": false
+  },
+  {
+   "name": "no_state_no_channel_info_false",
+   "state": null,
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": false
+  },
+  {
+   "name": "live_htlc_data_false_falls_back_to_fresh_snapshot_true",
+   "state": {
+    "state": "congested",
+    "updated_at": 1752399990
+   },
+   "channel_info": {
+    "has_htlc_data": false,
+    "max_accepted_htlcs": 10,
+    "our_htlcs_in_flight": 9
+   },
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": true
+  },
+  {
+   "name": "stale_boundary_exactly_2x_flow_interval_still_fresh",
+   "state": {
+    "state": "congested",
+    "updated_at": 1752396400
+   },
+   "channel_info": null,
+   "htlc_congestion_threshold": "0.8",
+   "flow_interval": 1800,
+   "now": 1752400000,
+   "expected": true
+  }
+ ]
+}

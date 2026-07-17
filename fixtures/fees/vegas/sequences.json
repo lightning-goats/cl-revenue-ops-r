@@ -1,0 +1,505 @@
+{
+ "now": 1752400000,
+ "entries": [
+  {
+   "seed": 0,
+   "cycles": [
+    {
+     "cycle": 0,
+     "now": 1752400000,
+     "spike_ratio_input": "1.0",
+     "current_sat_vb": "10.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 1,
+     "now": 1752401800,
+     "spike_ratio_input": "2.0",
+     "current_sat_vb": "20.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 2,
+     "now": 1752403600,
+     "spike_ratio_input": "2.5",
+     "current_sat_vb": "25.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.075",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "1.547722557505166"
+    },
+    {
+     "cycle": 3,
+     "now": 1752405400,
+     "spike_ratio_input": "3.9",
+     "current_sat_vb": "39.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.34875",
+     "consecutive_spikes": 3,
+     "floor_multiplier": "2.1811011811017718"
+    },
+    {
+     "cycle": 4,
+     "now": 1752407200,
+     "spike_ratio_input": "4.5",
+     "current_sat_vb": "45.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 4,
+     "floor_multiplier": "3.0"
+    },
+    {
+     "cycle": 5,
+     "now": 1752409000,
+     "spike_ratio_input": "1.5",
+     "current_sat_vb": "15.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.85",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.8439088914585775"
+    },
+    {
+     "cycle": 6,
+     "now": 1752410800,
+     "spike_ratio_input": "2.1",
+     "current_sat_vb": "21.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.7224999999999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.7"
+    },
+    {
+     "cycle": 7,
+     "now": 1752412600,
+     "spike_ratio_input": "1.9",
+     "current_sat_vb": "19.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.6141249999999999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.5673225577397907"
+    },
+    {
+     "cycle": 8,
+     "now": 1752414400,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5220062499999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.445"
+    },
+    {
+     "cycle": 9,
+     "now": 1752416200,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5787053124999999",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "2.521453663441644"
+    },
+    {
+     "cycle": 10,
+     "now": 1752418000,
+     "spike_ratio_input": "0.5",
+     "current_sat_vb": "5.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.4918995156249999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.402710968981137"
+    },
+    {
+     "cycle": 11,
+     "now": 1752419800,
+     "spike_ratio_input": "4.0",
+     "current_sat_vb": "40.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "3.0"
+    }
+   ]
+  },
+  {
+   "seed": 1,
+   "cycles": [
+    {
+     "cycle": 0,
+     "now": 1752400000,
+     "spike_ratio_input": "1.0",
+     "current_sat_vb": "10.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 1,
+     "now": 1752401800,
+     "spike_ratio_input": "2.0",
+     "current_sat_vb": "20.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 2,
+     "now": 1752403600,
+     "spike_ratio_input": "2.5",
+     "current_sat_vb": "25.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.075",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "1.547722557505166"
+    },
+    {
+     "cycle": 3,
+     "now": 1752405400,
+     "spike_ratio_input": "3.9",
+     "current_sat_vb": "39.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.34875",
+     "consecutive_spikes": 3,
+     "floor_multiplier": "2.1811011811017718"
+    },
+    {
+     "cycle": 4,
+     "now": 1752407200,
+     "spike_ratio_input": "4.5",
+     "current_sat_vb": "45.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 4,
+     "floor_multiplier": "3.0"
+    },
+    {
+     "cycle": 5,
+     "now": 1752409000,
+     "spike_ratio_input": "1.5",
+     "current_sat_vb": "15.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.85",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.8439088914585775"
+    },
+    {
+     "cycle": 6,
+     "now": 1752410800,
+     "spike_ratio_input": "2.1",
+     "current_sat_vb": "21.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.7224999999999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.7"
+    },
+    {
+     "cycle": 7,
+     "now": 1752412600,
+     "spike_ratio_input": "1.9",
+     "current_sat_vb": "19.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.6141249999999999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.5673225577397907"
+    },
+    {
+     "cycle": 8,
+     "now": 1752414400,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5220062499999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.445"
+    },
+    {
+     "cycle": 9,
+     "now": 1752416200,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5787053124999999",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "2.521453663441644"
+    },
+    {
+     "cycle": 10,
+     "now": 1752418000,
+     "spike_ratio_input": "0.5",
+     "current_sat_vb": "5.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.4918995156249999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.402710968981137"
+    },
+    {
+     "cycle": 11,
+     "now": 1752419800,
+     "spike_ratio_input": "4.0",
+     "current_sat_vb": "40.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "3.0"
+    }
+   ]
+  },
+  {
+   "seed": 42,
+   "cycles": [
+    {
+     "cycle": 0,
+     "now": 1752400000,
+     "spike_ratio_input": "1.0",
+     "current_sat_vb": "10.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 1,
+     "now": 1752401800,
+     "spike_ratio_input": "2.0",
+     "current_sat_vb": "20.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 2,
+     "now": 1752403600,
+     "spike_ratio_input": "2.5",
+     "current_sat_vb": "25.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.075",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "1.547722557505166"
+    },
+    {
+     "cycle": 3,
+     "now": 1752405400,
+     "spike_ratio_input": "3.9",
+     "current_sat_vb": "39.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.34875",
+     "consecutive_spikes": 3,
+     "floor_multiplier": "2.1811011811017718"
+    },
+    {
+     "cycle": 4,
+     "now": 1752407200,
+     "spike_ratio_input": "4.5",
+     "current_sat_vb": "45.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 4,
+     "floor_multiplier": "3.0"
+    },
+    {
+     "cycle": 5,
+     "now": 1752409000,
+     "spike_ratio_input": "1.5",
+     "current_sat_vb": "15.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.85",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.8439088914585775"
+    },
+    {
+     "cycle": 6,
+     "now": 1752410800,
+     "spike_ratio_input": "2.1",
+     "current_sat_vb": "21.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.7224999999999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.7"
+    },
+    {
+     "cycle": 7,
+     "now": 1752412600,
+     "spike_ratio_input": "1.9",
+     "current_sat_vb": "19.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.6141249999999999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.5673225577397907"
+    },
+    {
+     "cycle": 8,
+     "now": 1752414400,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5220062499999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.445"
+    },
+    {
+     "cycle": 9,
+     "now": 1752416200,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5787053124999999",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "2.521453663441644"
+    },
+    {
+     "cycle": 10,
+     "now": 1752418000,
+     "spike_ratio_input": "0.5",
+     "current_sat_vb": "5.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.4918995156249999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.402710968981137"
+    },
+    {
+     "cycle": 11,
+     "now": 1752419800,
+     "spike_ratio_input": "4.0",
+     "current_sat_vb": "40.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "3.0"
+    }
+   ]
+  },
+  {
+   "seed": 12345,
+   "cycles": [
+    {
+     "cycle": 0,
+     "now": 1752400000,
+     "spike_ratio_input": "1.0",
+     "current_sat_vb": "10.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 1,
+     "now": 1752401800,
+     "spike_ratio_input": "2.0",
+     "current_sat_vb": "20.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "1.0"
+    },
+    {
+     "cycle": 2,
+     "now": 1752403600,
+     "spike_ratio_input": "2.5",
+     "current_sat_vb": "25.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.075",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "1.547722557505166"
+    },
+    {
+     "cycle": 3,
+     "now": 1752405400,
+     "spike_ratio_input": "3.9",
+     "current_sat_vb": "39.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.34875",
+     "consecutive_spikes": 3,
+     "floor_multiplier": "2.1811011811017718"
+    },
+    {
+     "cycle": 4,
+     "now": 1752407200,
+     "spike_ratio_input": "4.5",
+     "current_sat_vb": "45.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 4,
+     "floor_multiplier": "3.0"
+    },
+    {
+     "cycle": 5,
+     "now": 1752409000,
+     "spike_ratio_input": "1.5",
+     "current_sat_vb": "15.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.85",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.8439088914585775"
+    },
+    {
+     "cycle": 6,
+     "now": 1752410800,
+     "spike_ratio_input": "2.1",
+     "current_sat_vb": "21.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.7374999999999999",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.7175564037317668"
+    },
+    {
+     "cycle": 7,
+     "now": 1752412600,
+     "spike_ratio_input": "1.9",
+     "current_sat_vb": "19.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.626875",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.5835087622113115"
+    },
+    {
+     "cycle": 8,
+     "now": 1752414400,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.53284375",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "2.4599229431720016"
+    },
+    {
+     "cycle": 9,
+     "now": 1752416200,
+     "spike_ratio_input": "2.9",
+     "current_sat_vb": "29.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.5879171874999999",
+     "consecutive_spikes": 2,
+     "floor_multiplier": "2.533515161320552"
+    },
+    {
+     "cycle": 10,
+     "now": 1752418000,
+     "spike_ratio_input": "0.5",
+     "current_sat_vb": "5.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "0.4997296093749999",
+     "consecutive_spikes": 0,
+     "floor_multiplier": "2.4138311205727505"
+    },
+    {
+     "cycle": 11,
+     "now": 1752419800,
+     "spike_ratio_input": "4.0",
+     "current_sat_vb": "40.0",
+     "ma_sat_vb": "10.0",
+     "intensity": "1.0",
+     "consecutive_spikes": 1,
+     "floor_multiplier": "3.0"
+    }
+   ]
+  }
+ ]
+}
