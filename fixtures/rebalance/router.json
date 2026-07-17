@@ -1,0 +1,2709 @@
+{
+ "getroutes_rpc_timeout_seconds": 45,
+ "cases": [
+  {
+   "name": "multi_route_picks_cheapest_int_msat",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "amount_msat": 500125000,
+         "path": []
+        },
+        {
+         "probability_ppm": 900000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700002x300x0/0",
+           "next_node_id": "032222222222222222222222222222222222222222222222222222222222222222",
+           "amount_msat": 500300000,
+           "delay": 100
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        },
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "nmsat_string_amounts",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": "500125000msat",
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": "500200000msat",
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": "500125000msat",
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "missing_probability_defaults_zero",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "loop_through_us_rejected",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "path_loops_through_us: middle path invalid",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "wrong_terminus_rejected",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "032222222222222222222222222222222222222222222222222222222222222222",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "path_loops_through_us: middle path invalid",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "empty_routes_list",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": []
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "no_route: getroutes returned empty",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "all_paths_empty_rejected",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "amount_msat": 1000,
+         "path": []
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "path_loops_through_us: middle path invalid",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "getroutes_error_unknown_source",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "error": "Unknown source node 02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "unknown_source_node: Unknown source node 02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "getroutes_error_child_died",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "error": "askrene: child died with signal 6"
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "askrene_child_died: askrene: child died with signal 6",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "unknown_layer_invalidates_cycle_caches",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "error": "Unknown layer 'rebalance-exclude-3-7'"
+     },
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "unknown_layer: Unknown layer 'rebalance-exclude-3-7'",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    },
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-2>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>",
+     "<exclude-2>"
+    ],
+    "removes": [
+     "<exclude-1>",
+     "<exclude-2>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ],
+     "<exclude-2>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 2
+   }
+  },
+  {
+   "name": "final_hop_policy_gossip_fallback",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1"
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     },
+     {
+      "short_channel_id": "800001x2000x1",
+      "source": "024444444444444444444444444444444444444444444444444444444444444444",
+      "destination": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fee_per_millionth": 300,
+      "base_fee_millisatoshi": 0,
+      "delay": 34
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 277,
+      "final_hop_fee_ppm": 300,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500276046,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500225023,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500150000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500150000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500150000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "final_hop_policy_none",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {},
+    "gossip_channels": [],
+    "getroutes": []
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "cannot determine final-hop fee for peer 024444444444444444444444444444444444444444444444444444444444444444",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": null
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [],
+    "removes": [],
+    "updates": {},
+    "listlayers_calls": 0
+   }
+  },
+  {
+   "name": "dest_cltv_default_40",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 58
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "first_middle_policy_missing",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": false,
+      "route_cost_sats": 0,
+      "final_hop_fee_ppm": 0,
+      "hops": 0,
+      "route": [],
+      "error": "cannot determine source peer forwarding policy for 700000x100x0",
+      "probability_ppm": 0
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "reprice_missing_policy_keeps_router_amount",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700002x300x0",
+      "source": "032222222222222222222222222222222222222222222222222222222222222222",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 200,
+      "base_fee_millisatoshi": 500,
+      "delay": 30
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 640000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500260000,
+           "delay": 132
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "032222222222222222222222222222222222222222222222222222222222222222",
+           "amount_msat": 500190000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700002x300x0/1",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 312,
+      "final_hop_fee_ppm": 250,
+      "hops": 5,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500311026,
+        "delay": 166,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500260000,
+        "delay": 132,
+        "style": "tlv"
+       },
+       {
+        "id": "032222222222222222222222222222222222222222222222222222222222222222",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500225525,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700002x300x0",
+        "direction": 1,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 640000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "exclude_retry_directional_and_bare",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [
+      "600000x5x0/1",
+      "600001x6x0",
+      "800001x2000x1"
+     ],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "600000x5x0/1",
+      "600001x6x0/0",
+      "600001x6x0/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1",
+      "800000x1000x1/0",
+      "800000x1000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "cycle_reuses_exclude_layer",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [
+     "xpay",
+     "bimodal"
+    ],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "024444444444444444444444444444444444444444444444444444444444444444": [
+      {
+       "peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+       "short_channel_id": "800001x2000x1",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 250,
+         "fee_base_msat": 0,
+         "cltv_expiry_delta": 34
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700000x100x0",
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "031111111111111111111111111111111111111111111111111111111111111111",
+      "fee_per_millionth": 100,
+      "base_fee_millisatoshi": 1000,
+      "delay": 34
+     },
+     {
+      "short_channel_id": "700001x200x0",
+      "source": "031111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "fee_per_millionth": 150,
+      "base_fee_millisatoshi": 0,
+      "delay": 40
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 875000,
+         "amount_msat": 500125000,
+         "path": [
+          {
+           "short_channel_id_dir": "700000x100x0/1",
+           "next_node_id": "031111111111111111111111111111111111111111111111111111111111111111",
+           "amount_msat": 500200000,
+           "delay": 92
+          },
+          {
+           "short_channel_id_dir": "700001x200x0/0",
+           "next_node_id": "024444444444444444444444444444444444444444444444444444444444444444",
+           "amount_msat": 500125000,
+           "delay": 52
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    },
+    {
+     "pair": {
+      "source_channel_id": "800000x1000x1",
+      "dest_channel_id": "800001x2000x1",
+      "source_peer_id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dest_peer_id": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_sats": 500000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 252,
+      "final_hop_fee_ppm": 250,
+      "hops": 4,
+      "route": [
+       {
+        "id": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "channel": "800000x1000x1",
+        "direction": 0,
+        "amount_msat": 500251040,
+        "delay": 126,
+        "style": "tlv"
+       },
+       {
+        "id": "031111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "700000x100x0",
+        "direction": 1,
+        "amount_msat": 500200019,
+        "delay": 92,
+        "style": "tlv"
+       },
+       {
+        "id": "024444444444444444444444444444444444444444444444444444444444444444",
+        "channel": "700001x200x0",
+        "direction": 0,
+        "amount_msat": 500125000,
+        "delay": 52,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800001x2000x1",
+        "direction": 0,
+        "amount_msat": 500000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 875000
+     },
+     "expected_getroutes_params": {
+      "source": "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "destination": "024444444444444444444444444444444444444444444444444444444444444444",
+      "amount_msat": 500125000,
+      "layers": [
+       "xpay",
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 500125000,
+      "final_cltv": 52
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800000x1000x1/0",
+      "800000x1000x1/1",
+      "800001x2000x1/0",
+      "800001x2000x1/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  },
+  {
+   "name": "single_hop_middle_standalone_layers",
+   "setup": {
+    "our_node_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layer_names": [],
+    "invoice_final_cltv": 18,
+    "live_layers": [
+     "xpay",
+     "auto.no_mpp_support"
+    ],
+    "peers": {
+     "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": [
+      {
+       "peer_id": "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+       "short_channel_id": "800003x4000x0",
+       "updates": {
+        "remote": {
+         "fee_proportional_millionths": 777,
+         "fee_base_msat": 1500,
+         "cltv_expiry_delta": 80
+        }
+       }
+      }
+     ]
+    },
+    "gossip_channels": [
+     {
+      "short_channel_id": "700003x400x0",
+      "source": "021111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "fee_per_millionth": 50,
+      "base_fee_millisatoshi": 0,
+      "delay": 14
+     }
+    ],
+    "getroutes": [
+     {
+      "result": {
+       "routes": [
+        {
+         "probability_ppm": 999999,
+         "amount_msat": 250195000,
+         "path": [
+          {
+           "short_channel_id_dir": "700003x400x0/0",
+           "next_node_id": "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+           "amount_msat": 250195000,
+           "delay": 98
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "pair": {
+      "source_channel_id": "800002x3000x0",
+      "dest_channel_id": "800003x4000x0",
+      "source_peer_id": "021111111111111111111111111111111111111111111111111111111111111111",
+      "dest_peer_id": "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "amount_sats": 250000
+     },
+     "exclude": [],
+     "expected": {
+      "success": true,
+      "route_cost_sats": 209,
+      "final_hop_fee_ppm": 777,
+      "hops": 3,
+      "route": [
+       {
+        "id": "021111111111111111111111111111111111111111111111111111111111111111",
+        "channel": "800002x3000x0",
+        "direction": 1,
+        "amount_msat": 250208510,
+        "delay": 112,
+        "style": "tlv"
+       },
+       {
+        "id": "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "channel": "700003x400x0",
+        "direction": 0,
+        "amount_msat": 250196000,
+        "delay": 98,
+        "style": "tlv"
+       },
+       {
+        "id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "800003x4000x0",
+        "direction": 1,
+        "amount_msat": 250000000,
+        "delay": 18,
+        "style": "tlv"
+       }
+      ],
+      "error": "",
+      "probability_ppm": 999999
+     },
+     "expected_getroutes_params": {
+      "source": "021111111111111111111111111111111111111111111111111111111111111111",
+      "destination": "02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "amount_msat": 250196000,
+      "layers": [
+       "auto.no_mpp_support",
+       "<exclude-1>"
+      ],
+      "maxfee_msat": 250196000,
+      "final_cltv": 98
+     }
+    }
+   ],
+   "expected_layer_lifecycle": {
+    "creates": [
+     "<exclude-1>"
+    ],
+    "removes": [
+     "<exclude-1>"
+    ],
+    "updates": {
+     "<exclude-1>": [
+      "800002x3000x0/0",
+      "800002x3000x0/1",
+      "800003x4000x0/0",
+      "800003x4000x0/1"
+     ]
+    },
+    "listlayers_calls": 1
+   }
+  }
+ ],
+ "error_translation": [
+  {
+   "input": "Unknown source node 02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "reason": "unknown_source_node",
+   "detail": "Unknown source node 02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  {
+   "input": "Unknown destination node 024444444444444444444444444444444444444444444444444444444444444444",
+   "reason": "unknown_dest_node",
+   "detail": "Unknown destination node 024444444444444444444444444444444444444444444444444444444444444444"
+  },
+  {
+   "input": "Unknown layer 'rebalance-exclude-1-2'",
+   "reason": "unknown_layer",
+   "detail": "Unknown layer 'rebalance-exclude-1-2'"
+  },
+  {
+   "input": "askrene: child died with signal 11",
+   "reason": "askrene_child_died",
+   "detail": "askrene: child died with signal 11"
+  },
+  {
+   "input": "askrene: failed to fork child",
+   "reason": "askrene_child_died",
+   "detail": "askrene: failed to fork child"
+  },
+  {
+   "input": "askrene: child produced no output",
+   "reason": "askrene_child_died",
+   "detail": "askrene: child produced no output"
+  },
+  {
+   "input": "askrene: failed to create pipes: EMFILE",
+   "reason": "askrene_child_died",
+   "detail": "askrene: failed to create pipes: EMFILE"
+  },
+  {
+   "input": "We could not find a usable set of paths",
+   "reason": "no_route",
+   "detail": "We could not find a usable set of paths"
+  },
+  {
+   "input": "RPC timeout after 45s on getroutes",
+   "reason": "no_route",
+   "detail": "RPC timeout after 45s on getroutes"
+  },
+  {
+   "input": "",
+   "reason": "no_route",
+   "detail": ""
+  }
+ ],
+ "configured_layer_names": [
+  {
+   "raw": null,
+   "expected": []
+  },
+  {
+   "raw": "",
+   "expected": []
+  },
+  {
+   "raw": "   ",
+   "expected": []
+  },
+  {
+   "raw": "standalone",
+   "expected": []
+  },
+  {
+   "raw": "STANDALONE",
+   "expected": []
+  },
+  {
+   "raw": "none",
+   "expected": []
+  },
+  {
+   "raw": "off",
+   "expected": []
+  },
+  {
+   "raw": "Disabled",
+   "expected": []
+  },
+  {
+   "raw": "false",
+   "expected": []
+  },
+  {
+   "raw": "0",
+   "expected": []
+  },
+  {
+   "raw": "xpay",
+   "expected": [
+    "xpay"
+   ]
+  },
+  {
+   "raw": "xpay,bimodal",
+   "expected": [
+    "xpay",
+    "bimodal"
+   ]
+  },
+  {
+   "raw": " a , b ,, c ",
+   "expected": [
+    "a",
+    "b",
+    "c"
+   ]
+  }
+ ],
+ "orphan_sweep": [
+  {
+   "name": "removes_only_prefix",
+   "live_layers": [
+    "rebalance-exclude-1700000000-1",
+    "xpay",
+    "auto.no_mpp_support",
+    "rebalance-exclude-1700000099-7",
+    "my-rebalance-exclude-not-prefix"
+   ],
+   "fail_list": false,
+   "fail_remove": [],
+   "expected_removed_count": 2,
+   "expected_remove_attempts": [
+    "rebalance-exclude-1700000000-1",
+    "rebalance-exclude-1700000099-7"
+   ]
+  },
+  {
+   "name": "listlayers_failure_returns_zero",
+   "live_layers": [],
+   "fail_list": true,
+   "fail_remove": [],
+   "expected_removed_count": 0,
+   "expected_remove_attempts": []
+  },
+  {
+   "name": "remove_failure_still_counted",
+   "live_layers": [
+    "rebalance-exclude-1700000000-1",
+    "rebalance-exclude-1700000000-2"
+   ],
+   "fail_list": false,
+   "fail_remove": [
+    "rebalance-exclude-1700000000-1"
+   ],
+   "expected_removed_count": 2,
+   "expected_remove_attempts": [
+    "rebalance-exclude-1700000000-1",
+    "rebalance-exclude-1700000000-2"
+   ]
+  },
+  {
+   "name": "no_orphans",
+   "live_layers": [
+    "xpay"
+   ],
+   "fail_list": false,
+   "fail_remove": [],
+   "expected_removed_count": 0,
+   "expected_remove_attempts": []
+  }
+ ]
+}

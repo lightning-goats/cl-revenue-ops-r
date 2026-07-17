@@ -14,9 +14,9 @@ license.workspace = true
 # BTreeMap-backed Object won't do).
 revops-fees = { path = "../revops-fees" }
 revops-econ = { path = "../revops-econ" }
-
-[dev-dependencies]
 serde.workspace = true
 # serde_json's float_roundtrip feature is enabled at the workspace root (see
 # root Cargo.toml) — golden-parity fixtures here depend on exact f64 parsing.
 serde_json.workspace = true
+
+[dev-dependencies]
