@@ -13,7 +13,19 @@ license.workspace = true
 # revops-fees/src/pyjson.rs doc comment for why serde_json::Value's
 # BTreeMap-backed Object won't do).
 revops-fees = { path = "../revops-fees" }
+revops-econ = { path = "../revops-econ" }
 
 [dev-dependencies]
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: serde_json's default f64 parser is a fast approximate
+# algorithm that does NOT always round-trip a `repr(float)`-precision JSON
+# literal to the exact same `f64` bits (e.g. it parses "0.9500000000000001"
+# — a real fixture value from `fixtures/rebalance/planner.json` — to the
+# WRONG double, the one whose shortest repr is "0.95"). Byte-parity
+# discipline (Global Constraints) compares fixture floats via `py_repr`
+# string equality, which requires an exact round-trip; this feature swaps
+# in serde_json's slower, precise parser. Discovered via
+# `tests/planner.rs`'s golden-parity suite (Phase 5 Task 2) — see that
+# file's `debug_probe_fixture_float_parse`-style investigation in the task
+# report.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
