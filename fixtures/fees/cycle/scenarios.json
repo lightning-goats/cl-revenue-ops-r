@@ -11234,6 +11234,1310 @@
      }
     }
    ]
+  },
+  {
+   "name": "capacity_rank_own_source",
+   "seed": 117,
+   "our_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "channel_id": "820x1x0",
+   "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "cfg": {
+    "min_fee_ppm": 10,
+    "max_fee_ppm": 5000,
+    "min_fee_ppm_saturated": 0,
+    "fee_interval": 1800,
+    "flow_interval": 3600,
+    "htlc_congestion_threshold": {
+     "__f__": "0.8"
+    },
+    "market_fee_mode": "undercut",
+    "neighbor_median_min_competitors": 3,
+    "drain_fee_discount_max": {
+     "__f__": "0.0"
+    },
+    "high_liquidity_threshold": {
+     "__f__": "0.7"
+    },
+    "fee_profile": "active",
+    "base_fee_msat": 0,
+    "enable_dynamic_htlcmax": false,
+    "htlcmax_source_pct": {
+     "__f__": "0.5"
+    },
+    "htlcmax_sink_pct": {
+     "__f__": "0.9"
+    },
+    "htlcmax_balanced_pct": {
+     "__f__": "0.75"
+    },
+    "paused": false,
+    "node_drain_bias_enabled": false,
+    "econ_governor_fees_enabled": false,
+    "vegas_decay_rate": {
+     "__f__": "0.85"
+    }
+   },
+   "policy": null,
+   "gossip": [
+    {
+     "source": "020101010101010101010101010101010101010101010101010101010101010101",
+     "active": true,
+     "fee_per_millionth": 420,
+     "satoshis": 4000000,
+     "amount_msat": 4000000000,
+     "last_update": 1752399400,
+     "base_fee_millisatoshi": 500
+    },
+    {
+     "source": "020202020202020202020202020202020202020202020202020202020202020202",
+     "active": true,
+     "fee_per_millionth": 500,
+     "satoshis": 6000000,
+     "amount_msat": 6000000000,
+     "last_update": 1752399400,
+     "base_fee_millisatoshi": 500
+    },
+    {
+     "source": "020303030303030303030303030303030303030303030303030303030303030303",
+     "active": true,
+     "fee_per_millionth": 380,
+     "satoshis": 3000000,
+     "amount_msat": 3000000000,
+     "last_update": 1752392800,
+     "base_fee_millisatoshi": 500
+    },
+    {
+     "source": "020404040404040404040404040404040404040404040404040404040404040404",
+     "active": true,
+     "fee_per_millionth": 10,
+     "satoshis": 1000000,
+     "amount_msat": 1000000000,
+     "last_update": 1752399400,
+     "base_fee_millisatoshi": 1000
+    },
+    {
+     "source": "020505050505050505050505050505050505050505050505050505050505050505",
+     "active": false,
+     "fee_per_millionth": 460,
+     "satoshis": 8000000,
+     "amount_msat": 8000000000,
+     "last_update": 1752399400,
+     "base_fee_millisatoshi": 500
+    },
+    {
+     "source": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "active": true,
+     "fee_per_millionth": 300,
+     "satoshis": 2000000,
+     "amount_msat": 2000000000,
+     "last_update": 1752399400,
+     "base_fee_millisatoshi": 500
+    }
+   ],
+   "latency": {
+    "avg": {
+     "__f__": "0.0"
+    },
+    "std": {
+     "__f__": "0.0"
+    }
+   },
+   "cost_history": [],
+   "peer_fee_history": null,
+   "probe_flag": false,
+   "last_forward_time": null,
+   "vegas_intensity": {
+    "__f__": "0.0"
+   },
+   "marginal_roi": {
+    "__f__": "42.3567"
+   },
+   "initial_state": {
+    "cycle": {
+     "last_revenue_rate": {
+      "__f__": "8.0"
+     },
+     "last_fee_ppm": 600,
+     "trend_direction": 1,
+     "step_ppm": 50,
+     "last_update": 1752392800,
+     "last_broadcast_at": 1752392800,
+     "consecutive_same_direction": 0,
+     "is_sleeping": false,
+     "sleep_until": 0,
+     "stable_cycles": 0,
+     "last_broadcast_fee_ppm": 600,
+     "last_state": "dts_pid",
+     "forward_count_since_update": 0,
+     "last_volume_sats": 0,
+     "congestion_active": false,
+     "congestion_quiet_cycles": 0,
+     "congestion_entry_fee_ppm": 0,
+     "pending_target_ppm": 0,
+     "last_gossip_refresh": 0,
+     "dynamic_htlcmin_baseline_msat": null
+    },
+    "fee": {
+     "thompson_state": {
+      "prior_mean_fee": 200,
+      "prior_std_fee": 100,
+      "observations": [
+       [
+        {
+         "__f__": "700.0"
+        },
+        {
+         "__f__": "25.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752256000,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "704.0"
+        },
+        {
+         "__f__": "25.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752270400,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "708.0"
+        },
+        {
+         "__f__": "25.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752284800,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "700.0"
+        },
+        {
+         "__f__": "25.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752299200,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "704.0"
+        },
+        {
+         "__f__": "25.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752313600,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "708.0"
+        },
+        {
+         "__f__": "25.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752328000,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "700.0"
+        },
+        {
+         "__f__": "25.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752342400,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "704.0"
+        },
+        {
+         "__f__": "25.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752356800,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "708.0"
+        },
+        {
+         "__f__": "25.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752371200,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "700.0"
+        },
+        {
+         "__f__": "25.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752385600,
+        "normal"
+       ]
+      ],
+      "posterior_mean": {
+       "__f__": "703.6089191239727"
+      },
+      "posterior_std": 10,
+      "posterior_variance": {
+       "__f__": "100.0"
+      },
+      "posterior_coeffs": [
+       {
+        "__f__": "2.8997536470553555"
+       },
+       {
+        "__f__": "4.938371312648963"
+       },
+       {
+        "__f__": "13.559389042917585"
+       }
+      ],
+      "posterior_precision": [
+       [
+        {
+         "__f__": "0.015106193510249513"
+        },
+        {
+         "__f__": "0.005401926190391144"
+        },
+        {
+         "__f__": "0.005993391550674407"
+        }
+       ],
+       [
+        {
+         "__f__": "0.005401926190391144"
+        },
+        {
+         "__f__": "0.015993391550674408"
+        },
+        {
+         "__f__": "0.007176322271240931"
+        }
+       ],
+       [
+        {
+         "__f__": "0.005993391550674407"
+        },
+        {
+         "__f__": "0.007176322271240931"
+        },
+        {
+         "__f__": "0.025907970280788666"
+        }
+       ]
+      ],
+      "noise_variance": {
+       "__f__": "230.57327224340185"
+      },
+      "_prior_coeffs": [
+       {
+        "__f__": "0.0"
+       },
+       {
+        "__f__": "1.0"
+       },
+       {
+        "__f__": "0.0"
+       }
+      ],
+      "_prior_precision": [
+       [
+        {
+         "__f__": "0.01"
+        },
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.0"
+        }
+       ],
+       [
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.01"
+        },
+        {
+         "__f__": "0.0"
+        }
+       ],
+       [
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.01"
+        }
+       ]
+      ],
+      "_last_fee_min": {
+       "__f__": "700.0"
+      },
+      "_last_fee_max": {
+       "__f__": "708.0"
+      },
+      "contextual_posteriors": {},
+      "posterior_bias": [],
+      "charged_fee_mean": {
+       "__f__": "703.6089191239727"
+      },
+      "zero_revenue_streak": 0,
+      "zero_run_start_fee": {
+       "__f__": "0.0"
+      },
+      "zero_run_start_ts": 0,
+      "positive_rate_ref": {
+       "__f__": "24.023439562503313"
+      },
+      "positive_rate_ref_ts": 1752385600,
+      "meaningful_gap_ema_hours": {
+       "__f__": "4.0"
+      },
+      "last_meaningful_ts": 1752385600,
+      "last_upward_probe_ts": 0,
+      "weight_scheme": "exposure_v2",
+      "exploration_boost": {
+       "__f__": "1.0"
+      },
+      "last_sampled_fee": 0,
+      "last_sample_time": 0,
+      "reseeded_at": 0
+     },
+     "pid_state": {
+      "kp": {
+       "__f__": "2.0"
+      },
+      "ki": {
+       "__f__": "0.1"
+      },
+      "kd": {
+       "__f__": "0.0"
+      },
+      "ewma_error": {
+       "__f__": "0.0"
+      },
+      "integral_error": {
+       "__f__": "0.0"
+      },
+      "prev_ewma_error": {
+       "__f__": "0.0"
+      },
+      "last_update_time": 0,
+      "integral_clamp": {
+       "__f__": "3.0"
+      }
+     },
+     "scalars": {
+      "last_revenue_rate": {
+       "__f__": "8.0"
+      },
+      "last_fee_ppm": 600,
+      "last_broadcast_fee_ppm": 600,
+      "last_update": 1752392800,
+      "last_broadcast_at": 1752392800,
+      "last_state": "balanced",
+      "is_sleeping": false,
+      "sleep_until": 0,
+      "stable_cycles": 0,
+      "forward_count_since_update": 0,
+      "last_volume_sats": 0,
+      "last_gossip_refresh": 0,
+      "last_vegas_multiplier": {
+       "__f__": "1.0"
+      }
+     }
+    }
+   },
+   "cycles": [
+    {
+     "now": 1752400000,
+     "state_row": {
+      "channel_id": "820x1x0",
+      "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "state": "balanced",
+      "updated_at": 1752399400,
+      "kalman_flow_ratio": {
+       "__f__": "0.2"
+      },
+      "kalman_velocity": {
+       "__f__": "0.01"
+      }
+     },
+     "channel_info": {
+      "channel_id": "820x1x0",
+      "short_channel_id": "820x1x0",
+      "full_channel_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "capacity": 2000000,
+      "spendable_msat": 1100000000,
+      "receivable_msat": 900000000,
+      "fee_base_msat": 0,
+      "fee_proportional_millionths": 600,
+      "htlc_minimum_msat": 0,
+      "htlc_min_msat": 0,
+      "htlc_maximum_msat": 0,
+      "htlc_max_msat": 0,
+      "opener": "local",
+      "has_htlc_data": false,
+      "max_accepted_htlcs": 483,
+      "our_htlcs_in_flight": 0
+     },
+     "chain_costs": null,
+     "volume_since": {
+      "default": 1500000
+     },
+     "forward_count_since": {
+      "default": 8
+     },
+     "probe_flag": null,
+     "last_forward_time": null,
+     "expected": {
+      "adjustment": {
+       "channel_id": "820x1x0",
+       "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "old_fee_ppm": 600,
+       "new_fee_ppm": 486,
+       "reason": "DTS+PID: rate=450.00sats/hr (dts_pid (dts=578, pid=0.99, flow=balanced)) [VOLATILITY_RESET], targets=dts:578, post_pid:346, bounded:346, blended:486, applied:486, blend:0.45, bound:none, cap:none(300ppm), wake:none, sparse:False, exploration:none, zero_flow_guard:none, applied=down(-114ppm), state=balanced, liquidity=balanced (55%), marginal_roi=42.4%, posterior_mean=549, posterior_std=76",
+       "algorithm_values": {
+        "current_revenue_rate": {
+         "__f__": "450.0"
+        },
+        "previous_revenue_rate": {
+         "__f__": "8.0"
+        },
+        "rate_change": {
+         "__f__": "442.0"
+        },
+        "volume_since_sats": 1500000,
+        "hours_elapsed": {
+         "__f__": "2.0"
+        },
+        "direction": -1,
+        "step_ppm": 114,
+        "consecutive_same_direction": 1,
+        "volatility_reset": true,
+        "raw_dts_target_ppm": 578,
+        "post_pid_target_ppm": 346,
+        "zero_flow_guard_reason": null,
+        "zero_flow_guard_target_ppm": null,
+        "zero_revenue_streak": 0,
+        "supported_fee_ceiling_ppm": 885,
+        "bounded_target_ppm": 346,
+        "blended_target_ppm": 486,
+        "applied_target_ppm": 486,
+        "target_blend_ratio": {
+         "__f__": "0.45"
+        },
+        "bound_reason": "none",
+        "delta_cap_reason": "none",
+        "delta_cap_ppm": 300,
+        "delta_cap_applied": false,
+        "base_fee_policy_change": false,
+        "current_base_fee_msat": 0,
+        "target_base_fee_msat": 0,
+        "htlcmax_policy_change": false,
+        "wake_damping_applied": false,
+        "wake_reason": "none",
+        "sparse_data_conservative": false,
+        "exploration_mode": "none",
+        "rebalance_cost_floor_ppm": 0,
+        "rebalance_cost_nudge_ppm": 0,
+        "floor_ppm": 21,
+        "effective_min_fee_ppm": 10,
+        "fee_profile": "active",
+        "fee_profile_settings": {
+         "min_observation_hours": {
+          "__f__": "0.25"
+         },
+         "min_forwards_for_signal": 3,
+         "dts_discount_gamma": {
+          "__f__": "0.98"
+         },
+         "dts_sparse_discount_gamma": {
+          "__f__": "0.992"
+         },
+         "normal_target_blend_ratio": {
+          "__f__": "0.35"
+         },
+         "wake_target_blend_ratio": {
+          "__f__": "0.15"
+         },
+         "sparse_target_blend_ratio": {
+          "__f__": "0.2"
+         },
+         "normal_cycle_max_delta_ratio": {
+          "__f__": "0.5"
+         },
+         "normal_cycle_min_delta_ppm": 100,
+         "wake_cycle_max_delta_ratio": {
+          "__f__": "0.2"
+         },
+         "wake_cycle_min_delta_ppm": 50
+        },
+        "context_key": "balanced:normal:P",
+        "time_bucket": "normal",
+        "corridor_role": "P",
+        "context_observation_count": 1,
+        "contextual_sample_used": false,
+        "drain_multiplier": {
+         "__f__": "1.0"
+        },
+        "drain_discount_max_effective": {
+         "__f__": "0.0"
+        },
+        "node_receivable_ratio": null,
+        "node_drain_pressure": null
+       },
+       "reason_code": "dts_pid_sample"
+      },
+      "skip_reason": null,
+      "set_channel_calls": 1,
+      "post_cycle_state": {
+       "last_revenue_rate": {
+        "__f__": "450.0"
+       },
+       "last_fee_ppm": 600,
+       "trend_direction": -1,
+       "step_ppm": 114,
+       "last_update": 1752400000,
+       "last_broadcast_at": 1752400000,
+       "consecutive_same_direction": 1,
+       "is_sleeping": false,
+       "sleep_until": 0,
+       "stable_cycles": 0,
+       "last_broadcast_fee_ppm": 486,
+       "last_state": "dts_pid (dts=578, pid=0.99, flow=balanced)",
+       "forward_count_since_update": 8,
+       "last_volume_sats": 1500000,
+       "congestion_active": false,
+       "congestion_quiet_cycles": 0,
+       "congestion_entry_fee_ppm": 0,
+       "pending_target_ppm": 0,
+       "last_gossip_refresh": 0,
+       "dynamic_htlcmin_baseline_msat": null
+      },
+      "post_fee_state": {
+       "posterior_mean": {
+        "__f__": "548.9097452416215"
+       },
+       "posterior_std": {
+        "__f__": "76.48404136073916"
+       },
+       "zero_revenue_streak": 0,
+       "observation_count": 11,
+       "last_sampled_fee": 578,
+       "pid_state": {
+        "kp": {
+         "__f__": "2.0"
+        },
+        "ki": {
+         "__f__": "0.1"
+        },
+        "kd": {
+         "__f__": "0.0"
+        },
+        "ewma_error": {
+         "__f__": "-0.015000000000000013"
+        },
+        "integral_error": {
+         "__f__": "0.0"
+        },
+        "prev_ewma_error": {
+         "__f__": "-0.015000000000000013"
+        },
+        "last_update_time": 1752400000,
+        "integral_clamp": {
+         "__f__": "3.0"
+        }
+       },
+       "scalars": {
+        "last_revenue_rate": {
+         "__f__": "450.0"
+        },
+        "last_fee_ppm": 600,
+        "last_broadcast_fee_ppm": 486,
+        "last_update": 1752400000,
+        "last_broadcast_at": 1752400000,
+        "last_state": "dts_pid (dts=578, pid=0.99, flow=balanced)",
+        "is_sleeping": false,
+        "sleep_until": 0,
+        "stable_cycles": 0,
+        "forward_count_since_update": 0,
+        "last_volume_sats": 1500000,
+        "last_gossip_refresh": 0,
+        "last_vegas_multiplier": {
+         "__f__": "1.0"
+        }
+       },
+       "last_context_key": "balanced:normal:P",
+       "last_contextual_sample_used": false
+      },
+      "rng_next_random": "0.4066565536092135"
+     }
+    }
+   ]
+  },
+  {
+   "name": "rebal_cost_soft_nudge",
+   "seed": 118,
+   "our_id": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "channel_id": "820x1x0",
+   "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "cfg": {
+    "min_fee_ppm": 10,
+    "max_fee_ppm": 5000,
+    "min_fee_ppm_saturated": 0,
+    "fee_interval": 1800,
+    "flow_interval": 3600,
+    "htlc_congestion_threshold": {
+     "__f__": "0.8"
+    },
+    "market_fee_mode": "undercut",
+    "neighbor_median_min_competitors": 3,
+    "drain_fee_discount_max": {
+     "__f__": "0.0"
+    },
+    "high_liquidity_threshold": {
+     "__f__": "0.7"
+    },
+    "fee_profile": "active",
+    "base_fee_msat": 0,
+    "enable_dynamic_htlcmax": false,
+    "htlcmax_source_pct": {
+     "__f__": "0.5"
+    },
+    "htlcmax_sink_pct": {
+     "__f__": "0.9"
+    },
+    "htlcmax_balanced_pct": {
+     "__f__": "0.75"
+    },
+    "paused": false,
+    "node_drain_bias_enabled": false,
+    "econ_governor_fees_enabled": false,
+    "vegas_decay_rate": {
+     "__f__": "0.85"
+    }
+   },
+   "policy": null,
+   "gossip": [],
+   "latency": {
+    "avg": {
+     "__f__": "0.0"
+    },
+    "std": {
+     "__f__": "0.0"
+    }
+   },
+   "cost_history": [
+    {
+     "timestamp": 1752328000,
+     "cost_sats": 150,
+     "amount_sats": 100000
+    },
+    {
+     "timestamp": 1752364000,
+     "cost_sats": 120,
+     "amount_sats": 90000
+    }
+   ],
+   "peer_fee_history": null,
+   "probe_flag": false,
+   "last_forward_time": null,
+   "vegas_intensity": {
+    "__f__": "0.0"
+   },
+   "marginal_roi": null,
+   "initial_state": {
+    "cycle": {
+     "last_revenue_rate": {
+      "__f__": "8.0"
+     },
+     "last_fee_ppm": 200,
+     "trend_direction": 1,
+     "step_ppm": 50,
+     "last_update": 1752392800,
+     "last_broadcast_at": 1752392800,
+     "consecutive_same_direction": 0,
+     "is_sleeping": false,
+     "sleep_until": 0,
+     "stable_cycles": 0,
+     "last_broadcast_fee_ppm": 200,
+     "last_state": "dts_pid",
+     "forward_count_since_update": 0,
+     "last_volume_sats": 0,
+     "congestion_active": false,
+     "congestion_quiet_cycles": 0,
+     "congestion_entry_fee_ppm": 0,
+     "pending_target_ppm": 0,
+     "last_gossip_refresh": 0,
+     "dynamic_htlcmin_baseline_msat": null
+    },
+    "fee": {
+     "thompson_state": {
+      "prior_mean_fee": 200,
+      "prior_std_fee": 100,
+      "observations": [
+       [
+        {
+         "__f__": "200.0"
+        },
+        {
+         "__f__": "8.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752256000,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "204.0"
+        },
+        {
+         "__f__": "8.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752270400,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "208.0"
+        },
+        {
+         "__f__": "8.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752284800,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "200.0"
+        },
+        {
+         "__f__": "8.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752299200,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "204.0"
+        },
+        {
+         "__f__": "8.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752313600,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "208.0"
+        },
+        {
+         "__f__": "8.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752328000,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "200.0"
+        },
+        {
+         "__f__": "8.0"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752342400,
+        "normal"
+       ],
+       [
+        {
+         "__f__": "204.0"
+        },
+        {
+         "__f__": "8.8"
+        },
+        {
+         "__f__": "0.6666666666666666"
+        },
+        1752356800,
+        "normal"
+       ]
+      ],
+      "posterior_mean": {
+       "__f__": "207.95606349190504"
+      },
+      "posterior_std": {
+       "__f__": "53.50014067291617"
+      },
+      "posterior_variance": {
+       "__f__": "2862.265052021819"
+      },
+      "posterior_coeffs": [
+       {
+        "__f__": "-0.5900996766933453"
+       },
+       {
+        "__f__": "1.1737176235812221"
+       },
+       {
+        "__f__": "7.933831057791867"
+       }
+      ],
+      "posterior_precision": [
+       [
+        {
+         "__f__": "0.1477943839072321"
+        },
+        {
+         "__f__": "0.14970029564587595"
+        },
+        {
+         "__f__": "0.17351211912316367"
+        }
+       ],
+       [
+        {
+         "__f__": "0.14970029564587595"
+        },
+        {
+         "__f__": "0.18351211912316368"
+        },
+        {
+         "__f__": "0.2211357660777391"
+        }
+       ],
+       [
+        {
+         "__f__": "0.17351211912316367"
+        },
+        {
+         "__f__": "0.2211357660777391"
+        },
+        {
+         "__f__": "0.5137596195227656"
+        }
+       ]
+      ],
+      "noise_variance": {
+       "__f__": "10.0"
+      },
+      "_prior_coeffs": [
+       {
+        "__f__": "0.0"
+       },
+       {
+        "__f__": "1.0"
+       },
+       {
+        "__f__": "0.0"
+       }
+      ],
+      "_prior_precision": [
+       [
+        {
+         "__f__": "0.01"
+        },
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.0"
+        }
+       ],
+       [
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.01"
+        },
+        {
+         "__f__": "0.0"
+        }
+       ],
+       [
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.0"
+        },
+        {
+         "__f__": "0.01"
+        }
+       ]
+      ],
+      "_last_fee_min": {
+       "__f__": "200.0"
+      },
+      "_last_fee_max": {
+       "__f__": "208.0"
+      },
+      "contextual_posteriors": {},
+      "posterior_bias": [],
+      "charged_fee_mean": {
+       "__f__": "203.51176644586528"
+      },
+      "zero_revenue_streak": 0,
+      "zero_run_start_fee": {
+       "__f__": "0.0"
+      },
+      "zero_run_start_ts": 0,
+      "positive_rate_ref": {
+       "__f__": "7.95866766812135"
+      },
+      "positive_rate_ref_ts": 1752356800,
+      "meaningful_gap_ema_hours": {
+       "__f__": "4.0"
+      },
+      "last_meaningful_ts": 1752356800,
+      "last_upward_probe_ts": 0,
+      "weight_scheme": "exposure_v2",
+      "exploration_boost": {
+       "__f__": "1.0"
+      },
+      "last_sampled_fee": 0,
+      "last_sample_time": 0,
+      "reseeded_at": 0
+     },
+     "pid_state": {
+      "kp": {
+       "__f__": "2.0"
+      },
+      "ki": {
+       "__f__": "0.1"
+      },
+      "kd": {
+       "__f__": "0.0"
+      },
+      "ewma_error": {
+       "__f__": "0.0"
+      },
+      "integral_error": {
+       "__f__": "0.0"
+      },
+      "prev_ewma_error": {
+       "__f__": "0.0"
+      },
+      "last_update_time": 0,
+      "integral_clamp": {
+       "__f__": "3.0"
+      }
+     },
+     "scalars": {
+      "last_revenue_rate": {
+       "__f__": "8.0"
+      },
+      "last_fee_ppm": 200,
+      "last_broadcast_fee_ppm": 200,
+      "last_update": 1752392800,
+      "last_broadcast_at": 1752392800,
+      "last_state": "balanced",
+      "is_sleeping": false,
+      "sleep_until": 0,
+      "stable_cycles": 0,
+      "forward_count_since_update": 0,
+      "last_volume_sats": 0,
+      "last_gossip_refresh": 0,
+      "last_vegas_multiplier": {
+       "__f__": "1.0"
+      }
+     }
+    }
+   },
+   "cycles": [
+    {
+     "now": 1752400000,
+     "state_row": {
+      "channel_id": "820x1x0",
+      "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "state": "balanced",
+      "updated_at": 1752399400,
+      "kalman_flow_ratio": {
+       "__f__": "0.2"
+      },
+      "kalman_velocity": {
+       "__f__": "0.01"
+      }
+     },
+     "channel_info": {
+      "channel_id": "820x1x0",
+      "short_channel_id": "820x1x0",
+      "full_channel_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "capacity": 2000000,
+      "spendable_msat": 1000000000,
+      "receivable_msat": 1000000000,
+      "fee_base_msat": 0,
+      "fee_proportional_millionths": 200,
+      "htlc_minimum_msat": 0,
+      "htlc_min_msat": 0,
+      "htlc_maximum_msat": 0,
+      "htlc_max_msat": 0,
+      "opener": "local",
+      "has_htlc_data": false,
+      "max_accepted_htlcs": 483,
+      "our_htlcs_in_flight": 0
+     },
+     "chain_costs": null,
+     "volume_since": {
+      "default": 400000
+     },
+     "forward_count_since": {
+      "default": 4
+     },
+     "probe_flag": null,
+     "last_forward_time": null,
+     "expected": {
+      "adjustment": {
+       "channel_id": "820x1x0",
+       "peer_id": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "old_fee_ppm": 200,
+       "new_fee_ppm": 236,
+       "reason": "DTS+PID: rate=40.00sats/hr (dts_pid (dts=198, pid=1.00, flow=balanced)) [VOLATILITY_RESET], targets=dts:198, post_pid:260, bounded:260, blended:236, applied:236, blend:0.60, bound:none, cap:none(100ppm), wake:none, sparse:False, exploration:none, zero_flow_guard:none, rebal_cost_nudge:1421ppm, applied=up(+36ppm), state=balanced, liquidity=balanced (50%), unknown, posterior_mean=208, posterior_std=10",
+       "algorithm_values": {
+        "current_revenue_rate": {
+         "__f__": "40.0"
+        },
+        "previous_revenue_rate": {
+         "__f__": "8.0"
+        },
+        "rate_change": {
+         "__f__": "32.0"
+        },
+        "volume_since_sats": 400000,
+        "hours_elapsed": {
+         "__f__": "2.0"
+        },
+        "direction": 1,
+        "step_ppm": 36,
+        "consecutive_same_direction": 1,
+        "volatility_reset": true,
+        "raw_dts_target_ppm": 198,
+        "post_pid_target_ppm": 260,
+        "zero_flow_guard_reason": null,
+        "zero_flow_guard_target_ppm": null,
+        "zero_revenue_streak": 0,
+        "supported_fee_ceiling_ppm": 260,
+        "bounded_target_ppm": 260,
+        "blended_target_ppm": 236,
+        "applied_target_ppm": 236,
+        "target_blend_ratio": {
+         "__f__": "0.6"
+        },
+        "bound_reason": "none",
+        "delta_cap_reason": "none",
+        "delta_cap_ppm": 100,
+        "delta_cap_applied": false,
+        "base_fee_policy_change": false,
+        "current_base_fee_msat": 0,
+        "target_base_fee_msat": 0,
+        "htlcmax_policy_change": false,
+        "wake_damping_applied": false,
+        "wake_reason": "none",
+        "sparse_data_conservative": false,
+        "exploration_mode": "none",
+        "rebalance_cost_floor_ppm": 0,
+        "rebalance_cost_nudge_ppm": 1421,
+        "floor_ppm": 21,
+        "effective_min_fee_ppm": 10,
+        "fee_profile": "active",
+        "fee_profile_settings": {
+         "min_observation_hours": {
+          "__f__": "0.25"
+         },
+         "min_forwards_for_signal": 3,
+         "dts_discount_gamma": {
+          "__f__": "0.98"
+         },
+         "dts_sparse_discount_gamma": {
+          "__f__": "0.992"
+         },
+         "normal_target_blend_ratio": {
+          "__f__": "0.35"
+         },
+         "wake_target_blend_ratio": {
+          "__f__": "0.15"
+         },
+         "sparse_target_blend_ratio": {
+          "__f__": "0.2"
+         },
+         "normal_cycle_max_delta_ratio": {
+          "__f__": "0.5"
+         },
+         "normal_cycle_min_delta_ppm": 100,
+         "wake_cycle_max_delta_ratio": {
+          "__f__": "0.2"
+         },
+         "wake_cycle_min_delta_ppm": 50
+        },
+        "context_key": "balanced:normal:P",
+        "time_bucket": "normal",
+        "corridor_role": "P",
+        "context_observation_count": 1,
+        "contextual_sample_used": false,
+        "drain_multiplier": {
+         "__f__": "1.0"
+        },
+        "drain_discount_max_effective": {
+         "__f__": "0.0"
+        },
+        "node_receivable_ratio": null,
+        "node_drain_pressure": null
+       },
+       "reason_code": "dts_pid_sample"
+      },
+      "skip_reason": null,
+      "set_channel_calls": 1,
+      "post_cycle_state": {
+       "last_revenue_rate": {
+        "__f__": "40.0"
+       },
+       "last_fee_ppm": 200,
+       "trend_direction": 1,
+       "step_ppm": 36,
+       "last_update": 1752400000,
+       "last_broadcast_at": 1752400000,
+       "consecutive_same_direction": 1,
+       "is_sleeping": false,
+       "sleep_until": 0,
+       "stable_cycles": 0,
+       "last_broadcast_fee_ppm": 236,
+       "last_state": "dts_pid (dts=198, pid=1.00, flow=balanced)",
+       "forward_count_since_update": 4,
+       "last_volume_sats": 400000,
+       "congestion_active": false,
+       "congestion_quiet_cycles": 0,
+       "congestion_entry_fee_ppm": 0,
+       "pending_target_ppm": 0,
+       "last_gossip_refresh": 0,
+       "dynamic_htlcmin_baseline_msat": null
+      },
+      "post_fee_state": {
+       "posterior_mean": {
+        "__f__": "207.99999999999997"
+       },
+       "posterior_std": {
+        "__f__": "10.101525445522107"
+       },
+       "zero_revenue_streak": 0,
+       "observation_count": 9,
+       "last_sampled_fee": 198,
+       "pid_state": {
+        "kp": {
+         "__f__": "2.0"
+        },
+        "ki": {
+         "__f__": "0.1"
+        },
+        "kd": {
+         "__f__": "0.0"
+        },
+        "ewma_error": {
+         "__f__": "0.0"
+        },
+        "integral_error": {
+         "__f__": "0.0"
+        },
+        "prev_ewma_error": {
+         "__f__": "0.0"
+        },
+        "last_update_time": 1752400000,
+        "integral_clamp": {
+         "__f__": "3.0"
+        }
+       },
+       "scalars": {
+        "last_revenue_rate": {
+         "__f__": "40.0"
+        },
+        "last_fee_ppm": 200,
+        "last_broadcast_fee_ppm": 236,
+        "last_update": 1752400000,
+        "last_broadcast_at": 1752400000,
+        "last_state": "dts_pid (dts=198, pid=1.00, flow=balanced)",
+        "is_sleeping": false,
+        "sleep_until": 0,
+        "stable_cycles": 0,
+        "forward_count_since_update": 0,
+        "last_volume_sats": 400000,
+        "last_gossip_refresh": 0,
+        "last_vegas_multiplier": {
+         "__f__": "1.0"
+        }
+       },
+       "last_context_key": "balanced:normal:P",
+       "last_contextual_sample_used": false
+      },
+      "rng_next_random": "0.7680565716176476"
+     }
+    }
+   ]
   }
  ]
 }

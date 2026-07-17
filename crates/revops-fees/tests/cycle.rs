@@ -1,6 +1,6 @@
 //! End-to-end fee-cycle parity tests (Phase 4 Task 10).
 //!
-//! `fixtures/fees/cycle/scenarios.json` holds 16 seeded single-channel
+//! `fixtures/fees/cycle/scenarios.json` holds 18 seeded single-channel
 //! scenarios generated from the REAL Python
 //! `_adjust_all_fees_channel_loop`/`_adjust_channel_fee` (port worktree,
 //! `tools/port/gen_fees_fixtures.py cycle`) with a frozen module clock and
@@ -461,7 +461,7 @@ fn post_fee_state(ts: &ChannelFeeState) -> OValue {
 }
 
 // ---------------------------------------------------------------------------
-// The 16-scenario replay
+// The 18-scenario replay
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -471,7 +471,7 @@ fn cycle_scenarios_replay_bit_for_bit() {
         .get("scenarios")
         .and_then(|s| s.as_arr())
         .expect("scenarios");
-    assert_eq!(scenarios.len(), 16, "scenario count");
+    assert_eq!(scenarios.len(), 18, "scenario count");
 
     for scn in scenarios {
         let name = gets(scn, "name");
@@ -830,6 +830,40 @@ fn governed_zero_cost_emits_no_budget_reserved_event() {
         ledger.count_events(Some("budget_reserved")).expect("count"),
         0
     );
+}
+
+#[test]
+fn default_cfg_authority_level_authorizes_governed_fees_broadcast() {
+    // Important-2 review finding: `FeeCfgSnapshot::default()` documents
+    // itself as mirroring Python `Config` defaults verbatim, and Python's
+    // default IS "capital" (config.py:572, `authority_level: str =
+    // "capital"`) — not a missing/None attribute. A `GovernedDeps` wired
+    // straight from the default snapshot must therefore authorize a
+    // "fees"-level broadcast, not fail closed to AUTHORITY_LEVEL_BLOCKED.
+    let cfg = FeeCfgSnapshot::default();
+    assert_eq!(cfg.authority_level.as_deref(), Some("capital"));
+
+    let deps = GovernedDeps {
+        ledger: None,
+        registry: None,
+        paused: false,
+        authority_level: cfg.authority_level.clone(),
+    };
+    let (ok, code, trace) = governed_authorize_fee_broadcast(
+        &deps,
+        "820x1x0",
+        150,
+        Some(100),
+        "r",
+        None,
+        1_752_400_000,
+    );
+    assert!(
+        ok,
+        "default-config governed broadcast should authorize: {code}"
+    );
+    assert_eq!(code, "");
+    assert!(trace.expect("trace").authorized);
 }
 
 #[test]

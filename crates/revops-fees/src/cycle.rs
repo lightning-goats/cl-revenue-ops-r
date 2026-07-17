@@ -135,6 +135,20 @@ pub struct FeeCfgSnapshot {
     pub receivable_ratio_floor: f64,
     /// `econ_governor_fees_enabled is True` (py 7521-7529).
     pub econ_governor_fees_enabled: bool,
+    /// `Config.authority_level` (py `config.py:572`, `"capital"`) — the
+    /// CONFIGURED level, distinct from `execution::GovernedDeps`'s
+    /// `getattr(cfg, "authority_level", "capital")` fallback (that
+    /// fallback only fires when the attribute is literally missing from
+    /// an object that isn't a real `Config`; a real `Config` instance
+    /// always carries `"capital"` unless a caller overrides it).
+    /// `None` here is reserved for callers who explicitly construct a
+    /// snapshot without reading `Config` (e.g. an unconfigured/erroring
+    /// path) — `governor::authority_allows` fails CLOSED to `observe` on
+    /// `None`/unknown strings, matching Python's fail-closed posture for
+    /// a missing or garbled level. `Default` must mirror the CONFIG
+    /// default (`Some("capital")`), not the fail-closed sentinel, or
+    /// every governed broadcast built from an unconfigured snapshot would
+    /// wrongly read as `AUTHORITY_LEVEL_BLOCKED`.
     pub authority_level: Option<String>,
 }
 
@@ -163,7 +177,8 @@ impl Default for FeeCfgSnapshot {
             receivable_ratio_target: 0.30,
             receivable_ratio_floor: 0.20,
             econ_governor_fees_enabled: false,
-            authority_level: None,
+            // py `config.py:572`: `authority_level: str = "capital"`.
+            authority_level: Some("capital".to_string()),
         }
     }
 }
@@ -282,6 +297,16 @@ pub trait FeeEvidence {
     /// py `database.get_channel_probe(channel_id) is not None`.
     fn exploration_flag(&self, channel_id: &str) -> bool;
     /// py `database.clear_channel_probe` — interior mutability allowed.
+    /// MUST be a no-op over the read-only evidence surface: this trait
+    /// documents itself as reading a DB snapshot (`FeeEvidence: NO hidden
+    /// clock/RNG/IO`, module docs above), and `clear_exploration_flag` is
+    /// the one deliberate exception — implementations may mutate their
+    /// OWN probe-flag bookkeeping (e.g. an interior `RefCell`/DB write)
+    /// but must never mutate anything `channels_info`/`gossip_channels`/
+    /// etc. observed THIS cycle, and must never change what any other
+    /// `FeeEvidence` method returns for the remainder of the cycle
+    /// (per-cycle observations stay frozen). Per the T10 review
+    /// adjudication.
     fn clear_exploration_flag(&self, channel_id: &str);
     /// py `_get_peer_inbound_channels` (trimmed gossip rows; per-cycle
     /// frozen — implementations should memoize per cycle like PR 3e's
@@ -3240,5 +3265,194 @@ fn skip_reason_code(reason: &str) -> &'static str {
         "temporary_overlay" => "skip_temporary_overlay",
         "error" => "skip_error",
         _ => "skip_unknown",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct unit tests: `channel_capacity_rank` / `channel_rebalance_cost_ppm`
+// (Important-1 review finding — both were previously exercised by ZERO
+// fixtures: no fixture carried an own-source gossip row, so the rank
+// always hit its no-data default, and the one cost-history fixture
+// (`floor_inversion`) activated the HARD floor, gating the soft nudge off
+// at the source. `fixtures/fees/cycle` scenarios 17/18
+// (`capacity_rank_own_source` / `rebal_cost_soft_nudge`) now close the
+// end-to-end gap; these pin the pure functions directly.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gossip(
+        source: &str,
+        active: bool,
+        satoshis: Option<i64>,
+        amount_msat: Option<i64>,
+    ) -> GossipRow {
+        GossipRow {
+            source: source.to_string(),
+            active,
+            fee_per_millionth: 100,
+            satoshis,
+            amount_msat,
+            last_update: 0,
+            base_fee_msat: None,
+        }
+    }
+
+    // -- channel_capacity_rank (py `_get_competitive_undercut_pct` 3506-3531) --
+
+    #[test]
+    fn capacity_rank_none_when_no_rows() {
+        assert_eq!(channel_capacity_rank(&[], "us"), None);
+    }
+
+    #[test]
+    fn capacity_rank_none_without_our_own_row() {
+        let rows = vec![
+            gossip("a", true, Some(1_000_000), None),
+            gossip("b", true, Some(2_000_000), None),
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), None);
+    }
+
+    #[test]
+    fn capacity_rank_none_without_active_competitors() {
+        let rows = vec![
+            gossip("us", true, Some(1_000_000), None),
+            gossip("b", false, Some(2_000_000), None), // inactive: excluded
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), None);
+    }
+
+    #[test]
+    fn capacity_rank_zero_capacity_row_is_skipped_boundary() {
+        // py `if not cap or cap <= 0: continue` — exactly 0 is filtered
+        // out, 1 (the smallest positive) survives.
+        let rows = vec![
+            gossip("us", true, Some(1_000_000), None),
+            gossip("zero", true, Some(0), None),
+            gossip("tiny", true, Some(1), None),
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), Some((0, 1)));
+    }
+
+    #[test]
+    fn capacity_rank_own_row_counts_even_when_inactive() {
+        // py: `if ch.get("source") == our_id: our_capacity = max(...)` has
+        // NO active gate (only the `elif ch.get("active")` competitor arm
+        // does) — our own row must count regardless of `active`.
+        let rows = vec![
+            gossip("us", false, Some(1_000_000), None),
+            gossip("comp", true, Some(2_000_000), None),
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), Some((1, 1)));
+    }
+
+    #[test]
+    fn capacity_rank_active_gating_excludes_inactive_competitors() {
+        let rows = vec![
+            gossip("us", true, Some(1_000_000), None),
+            gossip("a", true, Some(2_000_000), None), // active, larger: counts
+            gossip("b", false, Some(5_000_000), None), // inactive: excluded despite being larger
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), Some((1, 1)));
+    }
+
+    #[test]
+    fn capacity_rank_uses_satoshis_over_amount_msat_default() {
+        // py 3516: `ch.get("satoshis", base_to_sats_floor(ch.get("amount_msat", 0)))`.
+        let rows = vec![
+            gossip("us", true, None, Some(500_000)), // 500 sats via msat fallback
+            gossip("a", true, None, Some(2_000_000_000)), // 2_000_000 sats
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), Some((1, 1)));
+    }
+
+    #[test]
+    fn capacity_rank_strict_greater_than_boundary() {
+        // `c > our_capacity` is STRICT: a competitor exactly equal to us
+        // does not count as "larger".
+        let rows = vec![
+            gossip("us", true, Some(1_000_000), None),
+            gossip("eq", true, Some(1_000_000), None), // equal: not larger
+            gossip("gt", true, Some(1_000_001), None), // 1 sat over: larger
+        ];
+        assert_eq!(channel_capacity_rank(&rows, "us"), Some((1, 2)));
+    }
+
+    // -- channel_rebalance_cost_ppm (py `_get_channel_rebalance_cost_ppm` 3554-3594) --
+
+    fn sample(timestamp: i64, cost_sats: i64, amount_sats: i64) -> RebalanceCostSample {
+        RebalanceCostSample {
+            cost_sats,
+            amount_sats,
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn rebalance_cost_ppm_zero_for_sink_and_dormant() {
+        // The "active-gating" carried from `_get_rebalance_cost_floor`:
+        // sink/dormant channels don't pay outbound rebalance costs.
+        let history = vec![sample(1000, 500, 100_000)];
+        assert_eq!(channel_rebalance_cost_ppm("sink", &history, 100_000), 0);
+        assert_eq!(channel_rebalance_cost_ppm("dormant", &history, 100_000), 0);
+        assert_ne!(channel_rebalance_cost_ppm("balanced", &history, 100_000), 0);
+    }
+
+    #[test]
+    fn rebalance_cost_ppm_window_boundary_inclusive() {
+        let now = 100_000_000;
+        let cutoff = now - REBALANCE_FLOOR_WINDOW_DAYS * 86400;
+        let history = vec![
+            sample(cutoff, 100, 10_000),    // exactly at cutoff: included (py `>=`)
+            sample(cutoff - 1, 999_999, 1), // one second stale: excluded
+        ];
+        // Only the in-window sample counts: 100 * 1e6 / 10_000 = 10_000,
+        // then capped at 5000 — if the stale sample leaked in, the ratio
+        // (and thus the assertion) would differ.
+        assert_eq!(channel_rebalance_cost_ppm("balanced", &history, now), 5000);
+    }
+
+    #[test]
+    fn rebalance_cost_ppm_zero_volume_or_cost_is_zero() {
+        assert_eq!(
+            channel_rebalance_cost_ppm("balanced", &[sample(0, 0, 10_000)], 0),
+            0,
+            "zero cost -> 0"
+        );
+        assert_eq!(
+            channel_rebalance_cost_ppm("balanced", &[sample(0, 100, 0)], 0),
+            0,
+            "zero volume -> 0"
+        );
+    }
+
+    #[test]
+    fn rebalance_cost_ppm_truncates_toward_zero_not_floor_division() {
+        // 750 * 1_000_000 / 190_000 = 3947.368...; the soft nudge computes
+        // this via `(total as f64 / total as f64) as i64` (truncating
+        // cast) — a DIFFERENT code shape from the HARD floor's integer
+        // `//` (`floors::rebalance_cost_floor`, which uses plain i64 `/`
+        // on non-negative operands). Both land on 3947 here because
+        // truncation == floor for non-negative operands, but this pins
+        // the actual float-division code path rather than assuming it
+        // matches the integer path by coincidence — a future edit that
+        // swaps one division style for the other without checking both
+        // fixture scenario 18 (`rebal_cost_soft_nudge`, cost_ppm=1421)
+        // and this unit test would need to keep both green.
+        let history = vec![sample(0, 750, 190_000)];
+        let via_soft_nudge = channel_rebalance_cost_ppm("balanced", &history, 0);
+        let via_integer_floor_div = (750_i64 * 1_000_000) / 190_000;
+        assert_eq!(via_soft_nudge, 3947);
+        assert_eq!(via_soft_nudge, via_integer_floor_div);
+    }
+
+    #[test]
+    fn rebalance_cost_ppm_caps_at_5000() {
+        // cost_ppm would be 100_000_000 uncapped; min(5000, ..) applies.
+        let history = vec![sample(0, 100, 1)];
+        assert_eq!(channel_rebalance_cost_ppm("balanced", &history, 0), 5000);
     }
 }
