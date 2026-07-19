@@ -15,6 +15,48 @@ const MATRIX_A: u32 = 0x9908_b0df;
 const UPPER_MASK: u32 = 0x8000_0000;
 const LOWER_MASK: u32 = 0x7fff_ffff;
 
+/// A strict replay input could not be consumed at the requested semantic
+/// decision boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionInputError {
+    message: String,
+}
+
+impl DecisionInputError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn empty_label(input: &str) -> Self {
+        Self::new(format!("{input} decision label must not be empty"))
+    }
+}
+
+impl std::fmt::Display for DecisionInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DecisionInputError {}
+
+fn require_label(label: &str, input: &str) -> Result<(), DecisionInputError> {
+    if label.is_empty() {
+        Err(DecisionInputError::empty_label(input))
+    } else {
+        Ok(())
+    }
+}
+
+/// Replayable entropy consumed at semantically labeled decision boundaries.
+pub trait DecisionEntropy {
+    fn random(&mut self, label: &str) -> Result<f64, DecisionInputError>;
+
+    fn gauss(&mut self, label: &str, mu: f64, sigma: f64) -> Result<f64, DecisionInputError>;
+}
+
 /// CPython-compatible `random.Random` (MT19937 core + `gauss` cache).
 ///
 /// `gauss_next` mirrors Python's instance attribute: `gauss()` generates
@@ -143,5 +185,17 @@ impl PyRandom {
         let z = x2pi.cos() * g2rad;
         self.gauss_next = Some(x2pi.sin() * g2rad);
         mu + z * sigma
+    }
+}
+
+impl DecisionEntropy for PyRandom {
+    fn random(&mut self, label: &str) -> Result<f64, DecisionInputError> {
+        require_label(label, "entropy")?;
+        Ok(PyRandom::random(self))
+    }
+
+    fn gauss(&mut self, label: &str, mu: f64, sigma: f64) -> Result<f64, DecisionInputError> {
+        require_label(label, "entropy")?;
+        Ok(PyRandom::gauss(self, mu, sigma))
     }
 }

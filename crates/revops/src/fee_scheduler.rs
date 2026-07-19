@@ -59,7 +59,7 @@
 //!
 //! `now_unix()` is read EXACTLY once per cycle, at the top of
 //! [`CycleOwner::run_cycle`], and that single value is threaded through
-//! `CycleDeps::now` / `build_evidence_snapshot` to every downstream
+//! `FixedDecisionClock` / `build_evidence_snapshot` to every downstream
 //! consumer (Global Constraint: "clock once per cycle"). The clock is an
 //! injected `FnMut() -> i64` so tests can count reads; production passes
 //! `crate::now_unix`.
@@ -135,8 +135,9 @@ use cln_plugin::options::Value as OptValue;
 use revops_db::actor::DbHandle;
 use revops_fees::cycle::{
     handle_policy_change, maybe_wake_for_vegas_spike, run_fee_cycle, wake_all_sleeping_channels,
-    ChannelStateRow, ControllerState, CycleDeps, FeeCfgSnapshot, StateSink,
+    ChannelStateRow, ControllerState, CycleDeps, FeeCfgSnapshot, FixedDecisionClock, StateSink,
 };
+use revops_fees::execution::GovernedFeeAuthorizer;
 use revops_fees::journal::Journal;
 use revops_fees::profiles::fee_profile;
 use revops_fees::pyrand::PyRandom;
@@ -459,6 +460,9 @@ pub enum CycleOutcome {
     SkippedMinCompetitors,
     /// `build_evidence_snapshot` failed (DB open/read error).
     SkippedEvidence,
+    /// A replayable clock, entropy, or authorizer input failed. The cycle
+    /// stops before journaling any partial decision set.
+    SkippedDecisionInput,
 }
 
 /// The single owner of `ControllerState` + the ONE long-lived `PyRandom`.
@@ -555,7 +559,7 @@ impl CycleOwner {
     /// `tests/fee_scheduler.rs`:
     ///
     /// 1. `clock()` EXACTLY once; the value feeds every downstream
-    ///    consumer (evidence snapshot windows, `CycleDeps::now`).
+    ///    consumer (evidence snapshot windows, `FixedDecisionClock`).
     /// 2. Fail closed if `neighbor_median_min_competitors` is unresolvable
     ///    (Phase 4b Task 8a; any resolvable positive integer threads
     ///    through to `CycleDeps::min_competitors` instead of the old
@@ -628,17 +632,25 @@ impl CycleOwner {
         // append alone would lose failures the window contract requires
         // logged loudly. Step (7) below is the single, loud append.
         let governed = self.governor.governed_deps(&prepared.cfg);
+        let authorizer = GovernedFeeAuthorizer::new(&governed);
+        let mut decision_clock = FixedDecisionClock::new(now);
         let mut deps = CycleDeps {
             evidence: &snapshot,
             cfg: &prepared.cfg,
             rng: &mut self.rng,
-            now,
-            governed: Some(&governed),
+            clock: &mut decision_clock,
+            authorizer: Some(&authorizer),
             journal: None,
             state_sink: self.state_sink.as_ref().map(|s| s as &dyn StateSink),
             min_competitors,
         };
-        let decisions = run_fee_cycle(&mut self.state, &mut deps);
+        let decisions = match run_fee_cycle(&mut self.state, &mut deps) {
+            Ok(decisions) => decisions,
+            Err(error) => {
+                eprintln!("revops: fee cycle stopped: replayable decision input failed: {error}");
+                return CycleOutcome::SkippedDecisionInput;
+            }
+        };
 
         // (7) The one journal append -- loud on failure, never fatal.
         if let Some(journal) = &self.journal {

@@ -39,7 +39,9 @@ use std::collections::BTreeMap;
 
 use crate::admission::{self, HtlcmaxCfg};
 use crate::drain;
-use crate::execution::{self, decide_set_channel_fee, GovernedDeps, GovernedTrace, SetFeeRequest};
+use crate::execution::{
+    decide_set_channel_fee, FeeAuthorizationRequest, FeeAuthorizer, GovernedTrace, SetFeeRequest,
+};
 use crate::floors::{
     self, ChainCosts, FlowStateRow, FlowWindow, LiveHtlc, MinFeeCfg, PeerLatency,
     RebalanceCostSample, SATURATED_OUTBOUND_RATIO,
@@ -49,7 +51,7 @@ use crate::market::{self, GossipChannel};
 use crate::pid;
 use crate::profiles::{fee_profile, FeeProfileSettings};
 use crate::pyjson::OValue;
-use crate::pyrand::PyRandom;
+use crate::pyrand::{DecisionEntropy, DecisionInputError};
 use crate::rails;
 use crate::reason::FeeReasonCode;
 use crate::thompson::recompute::MIN_OBSERVATIONS;
@@ -380,15 +382,41 @@ pub trait StateSink {
     fn flush_batch(&self, rows: &[(String, ChannelCycleState, ChannelFeeState)]);
 }
 
+/// Replayable clock consumed at semantically labeled decision boundaries.
+pub trait DecisionClock {
+    fn now(&mut self, label: &str) -> Result<i64, DecisionInputError>;
+}
+
+/// Production clock adapter: the scheduler reads the wall clock once, then
+/// every kernel boundary consumes that one frozen value under its own label.
+pub struct FixedDecisionClock {
+    now: i64,
+}
+
+impl FixedDecisionClock {
+    pub fn new(now: i64) -> Self {
+        Self { now }
+    }
+}
+
+impl DecisionClock for FixedDecisionClock {
+    fn now(&mut self, label: &str) -> Result<i64, DecisionInputError> {
+        if label.is_empty() {
+            return Err(DecisionInputError::empty_label("clock"));
+        }
+        Ok(self.now)
+    }
+}
+
 /// Injected cycle dependencies (plan Task 10 sketch).
 pub struct CycleDeps<'a> {
     pub evidence: &'a dyn FeeEvidence,
     pub cfg: &'a FeeCfgSnapshot,
-    pub rng: &'a mut PyRandom,
-    pub now: i64,
-    /// Governor plumbing; consulted only when
+    pub rng: &'a mut dyn DecisionEntropy,
+    pub clock: &'a mut dyn DecisionClock,
+    /// Replayable governor boundary; consulted only when
     /// `cfg.econ_governor_fees_enabled`.
-    pub governed: Option<&'a GovernedDeps<'a>>,
+    pub authorizer: Option<&'a dyn FeeAuthorizer>,
     pub journal: Option<&'a Journal>,
     pub state_sink: Option<&'a dyn StateSink>,
     /// The per-cycle resolved `neighbor_median_min_competitors` (Phase 4b
@@ -816,21 +844,21 @@ pub fn process_channel(
     node_drain_bias_effective_cap: Option<f64>,
     node_receivable_ratio: Option<f64>,
     node_drain_pressure: Option<f64>,
-) -> ChannelResult {
+) -> Result<ChannelResult, DecisionInputError> {
     let channel_id = row.channel_id.as_str();
     let peer_id = row.peer_id.as_str();
-    let now = deps.now;
+    let now = deps.clock.now("cycle.channel.evaluate")?;
     let (profile_name, profile) = fee_profile(&deps.cfg.fee_profile);
 
     if deps.evidence.temporary_overlay_active(channel_id) {
-        return ChannelResult {
+        return Ok(ChannelResult {
             outcome: ChannelOutcome::Skipped("temporary_overlay"),
             trace: OValue::obj(vec![(
                 "skip_reason".to_string(),
                 OValue::str("temporary_overlay"),
             )]),
             governed: None,
-        };
+        });
     }
 
     // Policy gate (py 4764-4818).
@@ -838,18 +866,18 @@ pub fn process_channel(
     if let Some(p) = &policy {
         match p.strategy {
             FeeStrategy::Passive => {
-                return ChannelResult {
+                return Ok(ChannelResult {
                     outcome: ChannelOutcome::Skipped("policy_passive"),
                     trace: OValue::obj(vec![(
                         "skip_reason".to_string(),
                         OValue::str("policy_passive"),
                     )]),
                     governed: None,
-                };
+                });
             }
             FeeStrategy::Static => {
                 if let Some(target) = p.fee_ppm_target {
-                    return static_policy_branch(state, deps, info, peer_id, target, now);
+                    return static_policy_branch(state, deps, info, peer_id, target);
                 }
                 // No target: falls through to DYNAMIC optimization like
                 // Python (the STATIC arm requires fee_ppm_target).
@@ -920,7 +948,8 @@ pub fn process_channel(
         },
         profile_name,
         profile,
-    );
+        now,
+    )?;
 
     let mut result = match adjust.adjustment {
         Some(adj) => ChannelResult {
@@ -954,7 +983,7 @@ pub fn process_channel(
     if !skip_gate_comparable {
         result.trace = tag_skip_gate_non_comparable(result.trace);
     }
-    result
+    Ok(result)
 }
 
 /// Push `"skip_gate_comparable": false` onto a decision trace (P4b T8b):
@@ -984,8 +1013,7 @@ fn static_policy_branch(
     info: &ChannelInfo,
     peer_id: &str,
     target: i64,
-    now: i64,
-) -> ChannelResult {
+) -> Result<ChannelResult, DecisionInputError> {
     let cfg = deps.cfg;
     let channel_id = info.channel_id.as_str();
     let current_fee = info.fee_proportional_millionths;
@@ -994,14 +1022,14 @@ fn static_policy_branch(
         .min_fee_ppm
         .max(cfg.max_fee_ppm.min(requested_static_fee));
     if current_fee == effective_static_fee {
-        return ChannelResult {
+        return Ok(ChannelResult {
             outcome: ChannelOutcome::Skipped("policy_static"),
             trace: OValue::obj(vec![(
                 "skip_reason".to_string(),
                 OValue::str("policy_static"),
             )]),
             governed: None,
-        };
+        });
     }
 
     let decision = decide_set_channel_fee(
@@ -1019,30 +1047,32 @@ fn static_policy_branch(
     let mut governed = None;
     let mut success = decision.success;
     if success && cfg.econ_governor_fees_enabled {
-        if let Some(gdeps) = deps.governed {
-            let (ok, _code, trace) = execution::governed_authorize_fee_broadcast(
-                gdeps,
-                channel_id,
-                decision.clamped_fee_ppm,
-                Some(current_fee),
-                "Policy: STATIC",
-                Some(FeeReasonCode::PolicyStatic.as_str()),
-                now,
-            );
-            governed = trace;
-            if !ok {
+        if let Some(authorizer) = deps.authorizer {
+            let authorize_now = deps.clock.now("governor.authorize")?;
+            let result = authorizer.authorize(&FeeAuthorizationRequest {
+                channel_id: channel_id.to_string(),
+                fee_ppm: decision.clamped_fee_ppm,
+                old_fee_ppm: Some(current_fee),
+                reason: "Policy: STATIC".to_string(),
+                reason_code: Some(FeeReasonCode::PolicyStatic.as_str().to_string()),
+                now: authorize_now,
+            })?;
+            governed = result.trace;
+            if !result.authorized {
                 success = false;
             }
         }
     }
     if !success {
-        return ChannelResult {
+        return Ok(ChannelResult {
             outcome: ChannelOutcome::Skipped("error"),
             trace: OValue::obj(vec![("skip_reason".to_string(), OValue::str("error"))]),
             governed,
-        };
+        });
     }
     let applied_fee_ppm = decision.clamped_fee_ppm;
+    let _applied_at = deps.clock.now("fee.apply")?;
+    let now = deps.clock.now("fee.state_sync")?;
 
     // set_channel_fee should_sync_state (py 7862-7892).
     {
@@ -1087,14 +1117,14 @@ fn static_policy_branch(
         ]),
         reason_code: FeeReasonCode::PolicyStatic.as_str().to_string(),
     };
-    ChannelResult {
+    Ok(ChannelResult {
         outcome: ChannelOutcome::Adjusted(Box::new(adj)),
         trace: OValue::obj(vec![
             ("disposition".to_string(), OValue::str("policy_static")),
             ("would_broadcast".to_string(), OValue::Bool(true)),
         ]),
         governed,
-    }
+    })
 }
 
 /// `_classify_no_adjustment_skip_reason` (py 4885-4921), verbatim.
@@ -1189,10 +1219,10 @@ pub fn adjust_channel_fee(
     ctx: AdjustCtx<'_>,
     fee_profile_name: &str,
     profile: &FeeProfileSettings,
-) -> AdjustResult {
+    now: i64,
+) -> Result<AdjustResult, DecisionInputError> {
     let cfg = deps.cfg;
     let evidence = deps.evidence;
-    let now = deps.now;
     let channel_id = ctx.row.channel_id.as_str();
     let peer_id = ctx.row.peer_id.as_str();
     let info = ctx.info;
@@ -1341,11 +1371,11 @@ pub fn adjust_channel_fee(
                 cycle.stable_cycles = 0;
             } else {
                 trace.set("disposition", OValue::str("sleeping_hold"));
-                return AdjustResult {
+                return Ok(AdjustResult {
                     adjustment: None,
                     trace: trace.finish(),
                     governed: governed_trace,
-                };
+                });
             }
         }
     }
@@ -1387,11 +1417,11 @@ pub fn adjust_channel_fee(
             // window closed — proceed (py 5768-5782)
         } else {
             trace.set("disposition", OValue::str("waiting_window"));
-            return AdjustResult {
+            return Ok(AdjustResult {
                 adjustment: None,
                 trace: trace.finish(),
                 governed: governed_trace,
-            };
+            });
         }
     }
 
@@ -1788,11 +1818,11 @@ pub fn adjust_channel_fee(
                 cycle.last_revenue_rate = current_revenue_rate;
                 cycle.last_fee_ppm = current_fee_ppm;
                 trace.set("disposition", OValue::str("sleep_entry"));
-                return AdjustResult {
+                return Ok(AdjustResult {
                     adjustment: None,
                     trace: trace.finish(),
                     governed: governed_trace,
-                };
+                });
             }
         } else if rate_change_ratio >= STABILITY_THRESHOLD {
             ts.stable_cycles = 0;
@@ -1835,7 +1865,7 @@ pub fn adjust_channel_fee(
             .contextual_posteriors
             .iter()
             .any(|(k, _)| k == &context_key);
-        let dts_fee = sampling::sample_fee_contextual(
+        let dts_fee = sampling::sample_fee_contextual_with_entropy(
             &mut ts.thompson,
             &context_key,
             floor_ppm,
@@ -1843,7 +1873,7 @@ pub fn adjust_channel_fee(
             None,
             deps.rng,
             now,
-        );
+        )?;
         contextual_sample_used = ctx_exists && context_observation_count >= MIN_OBSERVATIONS;
         ts.last_fee_profile = fee_profile_name.to_string();
         ts.last_context_key = context_key.clone();
@@ -1852,8 +1882,9 @@ pub fn adjust_channel_fee(
         ts.last_contextual_sample_used = contextual_sample_used;
 
         // PID multiplier (py 6402-6416).
+        let pid_now = deps.clock.now("pid.calculate")?;
         let pid_multiplier =
-            pid::calculate_multiplier(&mut ts.pid, outbound_ratio, capacity, flow_state, now);
+            pid::calculate_multiplier(&mut ts.pid, outbound_ratio, capacity, flow_state, pid_now);
         raw_dts_target_ppm = Some(dts_fee);
         let mut post_pid = (dts_fee as f64 * pid_multiplier) as i64;
 
@@ -2190,20 +2221,21 @@ pub fn adjust_channel_fee(
                 cycle,
                 ts,
                 cfg,
-                deps.governed,
+                deps.authorizer,
                 channel_id,
                 peer_id,
                 evidence,
                 current_fee_ppm,
                 now,
                 &mut governed_trace,
-            ) {
+                deps.clock,
+            )? {
                 trace.set("disposition", OValue::str("gossip_refresh"));
-                return AdjustResult {
+                return Ok(AdjustResult {
                     adjustment: Some(res),
                     trace: trace.finish(),
                     governed: governed_trace,
-                };
+                });
             }
         }
 
@@ -2215,11 +2247,11 @@ pub fn adjust_channel_fee(
         ts.last_update = now;
         trace.set("disposition", OValue::str("alpha_guard"));
         trace.set("pending_target_ppm", OValue::Int(cycle.pending_target_ppm));
-        return AdjustResult {
+        return Ok(AdjustResult {
             adjustment: None,
             trace: trace.finish(),
             governed: governed_trace,
-        };
+        });
     }
 
     // =====================================================================
@@ -2253,20 +2285,21 @@ pub fn adjust_channel_fee(
                 cycle,
                 ts,
                 cfg,
-                deps.governed,
+                deps.authorizer,
                 channel_id,
                 peer_id,
                 evidence,
                 current_fee_ppm,
                 now,
                 &mut governed_trace,
-            ) {
+                deps.clock,
+            )? {
                 trace.set("disposition", OValue::str("gossip_refresh"));
-                return AdjustResult {
+                return Ok(AdjustResult {
                     adjustment: Some(res),
                     trace: trace.finish(),
                     governed: governed_trace,
-                };
+                });
             }
             // FC-I16: no safe nudge — fall through to the hysteresis reset.
         }
@@ -2282,11 +2315,11 @@ pub fn adjust_channel_fee(
         ts.last_update = now;
         trace.set("disposition", OValue::str("gossip_suppressed"));
         trace.set("pending_target_ppm", OValue::Int(cycle.pending_target_ppm));
-        return AdjustResult {
+        return Ok(AdjustResult {
             adjustment: None,
             trace: trace.finish(),
             governed: governed_trace,
-        };
+        });
     }
 
     // =====================================================================
@@ -2379,11 +2412,11 @@ pub fn adjust_channel_fee(
         ts.last_state = decision_reason.clone();
         ts.last_update = now;
         trace.set("disposition", OValue::str("idempotent"));
-        return AdjustResult {
+        return Ok(AdjustResult {
             adjustment: None,
             trace: trace.finish(),
             governed: governed_trace,
-        };
+        });
     }
 
     // reason_code (py 7188-7200).
@@ -2417,28 +2450,30 @@ pub fn adjust_channel_fee(
     }
     let mut success = decision.success;
     if success && cfg.econ_governor_fees_enabled {
-        if let Some(gdeps) = deps.governed {
-            let (ok, code, gtrace) = execution::governed_authorize_fee_broadcast(
-                gdeps,
-                channel_id,
-                decision.clamped_fee_ppm,
-                Some(raw_chain_fee),
-                &reason,
-                Some(fee_reason_code.as_str()),
-                now,
-            );
-            governed_trace = gtrace;
-            if !ok {
+        if let Some(authorizer) = deps.authorizer {
+            let authorize_now = deps.clock.now("governor.authorize")?;
+            let result = authorizer.authorize(&FeeAuthorizationRequest {
+                channel_id: channel_id.to_string(),
+                fee_ppm: decision.clamped_fee_ppm,
+                old_fee_ppm: Some(raw_chain_fee),
+                reason: reason.clone(),
+                reason_code: Some(fee_reason_code.as_str().to_string()),
+                now: authorize_now,
+            })?;
+            governed_trace = result.trace;
+            if !result.authorized {
                 success = false;
                 trace.set(
                     "governor_block",
-                    OValue::str(format!("governor_block: {code}")),
+                    OValue::str(format!("governor_block: {}", result.reason_code)),
                 );
             }
         }
     }
 
     if success {
+        let _applied_at = deps.clock.now("fee.apply")?;
+        let now = deps.clock.now("fee.state_sync")?;
         // Read back the (clamped) applied fee (py 7217-7219).
         let new_fee_ppm = decision.clamped_fee_ppm;
 
@@ -2638,7 +2673,7 @@ pub fn adjust_channel_fee(
         trace.set("vegas_multiplier", OValue::Float(vegas_multiplier));
         let _ = original_step_ppm; // logged only (py 7268); kept for parity clarity
 
-        return AdjustResult {
+        return Ok(AdjustResult {
             adjustment: Some(FeeAdjustmentRec {
                 channel_id: channel_id.to_string(),
                 peer_id: peer_id.to_string(),
@@ -2650,7 +2685,7 @@ pub fn adjust_channel_fee(
             }),
             trace: trace.finish(),
             governed: governed_trace,
-        };
+        });
     }
 
     // RPC failed / governor blocked (py 7333-7354): reset the observation
@@ -2662,11 +2697,11 @@ pub fn adjust_channel_fee(
     ts.last_fee_ppm = current_fee_ppm;
     ts.last_update = now;
     trace.set("disposition", OValue::str("broadcast_refused"));
-    AdjustResult {
+    Ok(AdjustResult {
         adjustment: None,
         trace: trace.finish(),
         governed: governed_trace,
-    }
+    })
 }
 
 fn opt_int(v: Option<i64>) -> OValue {
@@ -2789,14 +2824,15 @@ fn create_gossip_refresh_adjustment(
     cycle: &mut ChannelCycleState,
     ts: &mut ChannelFeeState,
     cfg: &FeeCfgSnapshot,
-    governed: Option<&GovernedDeps<'_>>,
+    authorizer: Option<&dyn FeeAuthorizer>,
     channel_id: &str,
     peer_id: &str,
     evidence: &dyn FeeEvidence,
     current_fee_ppm: i64,
     now: i64,
     governed_trace: &mut Option<GovernedTrace>,
-) -> Option<FeeAdjustmentRec> {
+    clock: &mut dyn DecisionClock,
+) -> Result<Option<FeeAdjustmentRec>, DecisionInputError> {
     // Pick a nudge that survives clamping (py 5002-5014).
     let mut nudge_fee: Option<i64> = None;
     for cand in [
@@ -2809,7 +2845,9 @@ fn create_gossip_refresh_adjustment(
             break;
         }
     }
-    let nudge_fee = nudge_fee?;
+    let Some(nudge_fee) = nudge_fee else {
+        return Ok(None);
+    };
 
     let last_broadcast_at = cycle.last_broadcast_at();
     let hours_since_broadcast = if last_broadcast_at > 0 {
@@ -2837,26 +2875,28 @@ fn create_gossip_refresh_adjustment(
     );
     let mut success = decision.success;
     if success && cfg.econ_governor_fees_enabled {
-        if let Some(gdeps) = governed {
-            let (ok, _code, gtrace) = execution::governed_authorize_fee_broadcast(
-                gdeps,
-                channel_id,
-                decision.clamped_fee_ppm,
-                Some(current_fee_ppm),
-                "gossip_refresh",
-                Some(FeeReasonCode::GossipRefresh.as_str()),
-                now,
-            );
-            *governed_trace = gtrace;
-            if !ok {
+        if let Some(authorizer) = authorizer {
+            let authorize_now = clock.now("governor.authorize")?;
+            let result = authorizer.authorize(&FeeAuthorizationRequest {
+                channel_id: channel_id.to_string(),
+                fee_ppm: decision.clamped_fee_ppm,
+                old_fee_ppm: Some(current_fee_ppm),
+                reason: "gossip_refresh".to_string(),
+                reason_code: Some(FeeReasonCode::GossipRefresh.as_str().to_string()),
+                now: authorize_now,
+            })?;
+            *governed_trace = result.trace;
+            if !result.authorized {
                 success = false;
             }
         }
     }
     if !success {
-        return None;
+        return Ok(None);
     }
     let nudge_fee = decision.clamped_fee_ppm;
+    let _applied_at = clock.now("fee.apply")?;
+    let now = clock.now("fee.state_sync")?;
 
     // set_channel_fee should_sync_state (py 7862-7892) + helper updates
     // (py 5044-5068).
@@ -2879,7 +2919,7 @@ fn create_gossip_refresh_adjustment(
     ts.last_update = now;
     ts.last_state = FeeReasonCode::GossipRefresh.as_str().to_string();
 
-    Some(FeeAdjustmentRec {
+    Ok(Some(FeeAdjustmentRec {
         channel_id: channel_id.to_string(),
         peer_id: peer_id.to_string(),
         old_fee_ppm: current_fee_ppm,
@@ -2894,7 +2934,7 @@ fn create_gossip_refresh_adjustment(
             ),
         ]),
         reason_code: FeeReasonCode::GossipRefresh.as_str().to_string(),
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3005,9 +3045,12 @@ pub fn handle_policy_change(
 /// The full dry-run fee cycle: paused gate, Vegas update + spike wake,
 /// node-drain-bias aggregate, the per-channel loop, ONE state flush, and
 /// the decision journal. Returns every journaled decision.
-pub fn run_fee_cycle(state: &mut ControllerState, deps: &mut CycleDeps<'_>) -> Vec<FeeDecision> {
+pub fn run_fee_cycle(
+    state: &mut ControllerState,
+    deps: &mut CycleDeps<'_>,
+) -> Result<Vec<FeeDecision>, DecisionInputError> {
     let cfg = deps.cfg;
-    let now = deps.now;
+    let now = deps.clock.now("cycle.started_at")?;
     let (profile_name, profile) = fee_profile(&cfg.fee_profile);
     let _ = profile_name;
     let mut decisions: Vec<FeeDecision> = Vec::new();
@@ -3015,7 +3058,7 @@ pub fn run_fee_cycle(state: &mut ControllerState, deps: &mut CycleDeps<'_>) -> V
 
     if cfg.paused {
         state.set_summary("suppressed", "paused", Some("paused"), true);
-        return decisions;
+        return Ok(decisions);
     }
 
     let channel_states = deps.evidence.channel_states();
@@ -3026,7 +3069,7 @@ pub fn run_fee_cycle(state: &mut ControllerState, deps: &mut CycleDeps<'_>) -> V
             Some("channel_state_data"),
             false,
         );
-        return decisions;
+        return Ok(decisions);
     }
 
     let channels = deps.evidence.channels_info();
@@ -3037,8 +3080,15 @@ pub fn run_fee_cycle(state: &mut ControllerState, deps: &mut CycleDeps<'_>) -> V
         if let Some(costs) = &chain_costs {
             let current_sat_vb = costs.sat_per_vbyte;
             let ma_sat_vb = deps.evidence.mempool_ma_24h();
-            vegas::vegas_update(&mut state.vegas, current_sat_vb, ma_sat_vb, deps.rng, now);
-            maybe_wake_for_vegas_spike(state, profile, now);
+            let vegas_now = deps.clock.now("vegas.update")?;
+            vegas::vegas_update_with_entropy(
+                &mut state.vegas,
+                current_sat_vb,
+                ma_sat_vb,
+                deps.rng,
+                vegas_now,
+            )?;
+            maybe_wake_for_vegas_spike(state, profile, vegas_now);
         }
     }
 
@@ -3088,7 +3138,7 @@ pub fn run_fee_cycle(state: &mut ControllerState, deps: &mut CycleDeps<'_>) -> V
             node_drain_bias_effective_cap,
             node_receivable_ratio_value,
             node_drain_pressure_value,
-        );
+        )?;
         if !dirty.contains(&row.channel_id) {
             dirty.push(row.channel_id.clone());
         }
@@ -3206,7 +3256,7 @@ pub fn run_fee_cycle(state: &mut ControllerState, deps: &mut CycleDeps<'_>) -> V
         let _ = journal.append_all(&decisions);
     }
 
-    decisions
+    Ok(decisions)
 }
 
 /// Journal reason_code for scheduler skips (`skip_*` wire values from

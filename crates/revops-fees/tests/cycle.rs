@@ -26,19 +26,19 @@ use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_econ::pyfloat::py_repr;
 use revops_fees::cycle::{
     self, process_channel, run_fee_cycle, ChannelCycleState, ChannelFeeState, ChannelInfo,
-    ChannelOutcome, ChannelStateRow, ControllerState, CycleDeps, FeeCfgSnapshot, FeeEvidence,
-    GossipRow, PeerFeeHistory, SkipGateEpoch, StateSink,
+    ChannelOutcome, ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot,
+    FeeEvidence, FixedDecisionClock, GossipRow, PeerFeeHistory, SkipGateEpoch, StateSink,
 };
 use revops_fees::execution::{
-    decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, GovernedDeps,
-    SetFeeRequest,
+    decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, FeeAuthorizationRequest,
+    FeeAuthorizationResult, FeeAuthorizer, GovernedDeps, SetFeeRequest,
 };
 use revops_fees::floors::{ChainCosts, FlowWindow, PeerLatency, RebalanceCostSample};
 use revops_fees::journal::{FeeDecision, Journal};
 use revops_fees::pid::pid_from_dict;
 use revops_fees::pid::pid_to_dict;
 use revops_fees::pyjson::{dumps_python, parse, OValue};
-use revops_fees::pyrand::PyRandom;
+use revops_fees::pyrand::{DecisionInputError, PyRandom};
 use revops_fees::thompson::serde::gts_from_dict;
 
 fn fixture_path(rel: &str) -> PathBuf {
@@ -579,12 +579,13 @@ fn cycle_scenarios_replay_bit_for_bit() {
             };
 
             let result = {
+                let mut clock = FixedDecisionClock::new(now);
                 let mut deps = CycleDeps {
                     evidence: &evidence,
                     cfg: &cfg,
                     rng: &mut rng,
-                    now,
-                    governed: None,
+                    clock: &mut clock,
+                    authorizer: None,
                     journal: None,
                     state_sink: None,
                     min_competitors,
@@ -599,6 +600,7 @@ fn cycle_scenarios_replay_bit_for_bit() {
                     None,
                     None,
                 )
+                .expect("fixed decision inputs")
             };
 
             let expected = cyc.get("expected").expect("expected");
@@ -1087,6 +1089,37 @@ impl StateSink for CountingSink {
     }
 }
 
+struct RecordingClock {
+    now: i64,
+    labels: Vec<String>,
+}
+
+impl DecisionClock for RecordingClock {
+    fn now(&mut self, label: &str) -> Result<i64, DecisionInputError> {
+        self.labels.push(label.to_string());
+        Ok(self.now)
+    }
+}
+
+#[derive(Default)]
+struct RecordingAuthorizer {
+    requests: RefCell<Vec<FeeAuthorizationRequest>>,
+}
+
+impl FeeAuthorizer for RecordingAuthorizer {
+    fn authorize(
+        &self,
+        request: &FeeAuthorizationRequest,
+    ) -> Result<FeeAuthorizationResult, DecisionInputError> {
+        self.requests.borrow_mut().push(request.clone());
+        Ok(FeeAuthorizationResult {
+            authorized: true,
+            reason_code: String::new(),
+            trace: None,
+        })
+    }
+}
+
 fn synthetic_info(cid: &str, peer: &str, fee: i64) -> ChannelInfo {
     ChannelInfo {
         channel_id: cid.to_string(),
@@ -1185,15 +1218,21 @@ fn three_channel_synthetic_cycle_end_to_end() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let journal = Journal::open_dir(dir.path()).expect("journal");
     let sink = CountingSink::default();
-    let cfg = base_cfg();
+    let mut cfg = base_cfg();
+    cfg.econ_governor_fees_enabled = true;
+    let authorizer = RecordingAuthorizer::default();
     let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = RecordingClock {
+        now,
+        labels: Vec::new(),
+    };
     let decisions = {
         let mut deps = CycleDeps {
             evidence: &evidence,
             cfg: &cfg,
             rng: &mut rng,
-            now,
-            governed: None,
+            clock: &mut clock,
+            authorizer: Some(&authorizer),
             journal: Some(&journal),
             state_sink: Some(&sink),
             // No gossip in `SyntheticEvidence` (`gossip_channels` returns
@@ -1202,10 +1241,27 @@ fn three_channel_synthetic_cycle_end_to_end() {
             // fine here.
             min_competitors: revops_fees::market::MIN_COMPETITORS,
         };
-        run_fee_cycle(&mut state, &mut deps)
+        run_fee_cycle(&mut state, &mut deps).expect("scripted decision inputs")
     };
 
+    assert_eq!(
+        clock.labels,
+        [
+            "cycle.started_at",
+            "cycle.channel.evaluate",
+            "pid.calculate",
+            "governor.authorize",
+            "fee.apply",
+            "fee.state_sync",
+            "cycle.channel.evaluate",
+            "cycle.channel.evaluate",
+        ],
+        "clock transcript must follow Python semantic branch order"
+    );
     assert_eq!(decisions.len(), 3, "one journal decision per channel");
+    let requests = authorizer.requests.borrow();
+    assert_eq!(requests.len(), 1, "only the adjusted channel is authorized");
+    assert_eq!(requests[0].channel_id, "100x1x0");
 
     // Serialize-once assertion: exactly ONE flush batch, 3 rows.
     assert_eq!(
@@ -1324,18 +1380,19 @@ fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String
 
     let cfg = base_cfg();
     let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = FixedDecisionClock::new(now);
     let decisions = {
         let mut deps = CycleDeps {
             evidence: &evidence,
             cfg: &cfg,
             rng: &mut rng,
-            now,
-            governed: None,
+            clock: &mut clock,
+            authorizer: None,
             journal: None,
             state_sink: None,
             min_competitors: revops_fees::market::MIN_COMPETITORS,
         };
-        run_fee_cycle(&mut state, &mut deps)
+        run_fee_cycle(&mut state, &mut deps).expect("fixed decision inputs")
     };
     assert_eq!(decisions.len(), 1, "one decision for the one channel");
     decisions[0].reason_code.clone()
@@ -1410,18 +1467,19 @@ fn skip_gate_bootstrap_marks_channel_non_comparable() {
 
     let cfg = base_cfg();
     let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = FixedDecisionClock::new(now);
     let decisions = {
         let mut deps = CycleDeps {
             evidence: &evidence,
             cfg: &cfg,
             rng: &mut rng,
-            now,
-            governed: None,
+            clock: &mut clock,
+            authorizer: None,
             journal: None,
             state_sink: None,
             min_competitors: revops_fees::market::MIN_COMPETITORS,
         };
-        run_fee_cycle(&mut state, &mut deps)
+        run_fee_cycle(&mut state, &mut deps).expect("fixed decision inputs")
     };
     assert_eq!(decisions.len(), 1);
     let comparable = decisions[0]

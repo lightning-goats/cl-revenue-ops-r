@@ -8,7 +8,7 @@
 //!   fee spamming to keep intensity pinned).
 //! - HIGH-03: probabilistic early trigger at 200-400% spikes.
 
-use crate::pyrand::PyRandom;
+use crate::pyrand::{DecisionEntropy, DecisionInputError, PyRandom};
 use revops_econ::pyfloat::py_pow;
 
 /// `VegasReflexState` (py 2328-2351).
@@ -59,6 +59,17 @@ pub fn vegas_update(
     rng: &mut PyRandom,
     now: i64,
 ) {
+    vegas_update_with_entropy(s, current_sat_vb, ma_sat_vb, rng, now)
+        .expect("PyRandom with a static non-empty label cannot fail");
+}
+
+pub fn vegas_update_with_entropy(
+    s: &mut VegasReflexState,
+    current_sat_vb: f64,
+    ma_sat_vb: f64,
+    rng: &mut dyn DecisionEntropy,
+    now: i64,
+) -> Result<(), DecisionInputError> {
     let ma_sat_vb = if ma_sat_vb <= 0.0 { 1.0 } else { ma_sat_vb };
     let spike_ratio = current_sat_vb / ma_sat_vb;
 
@@ -83,12 +94,13 @@ pub fn vegas_update(
         // TRAP: keep this short-circuited exactly like Python's `or` —
         // `rng.random()` must be evaluated ONLY when `consecutive_spikes <
         // 2` (i.e. only when the left side is false).
-        if s.consecutive_spikes >= 2 || rng.random() < boost * 0.5 {
+        if s.consecutive_spikes >= 2 || rng.random("vegas.boost")? < boost * 0.5 {
             s.intensity = (s.intensity + boost * 0.3).min(1.0);
         }
     }
     s.last_sat_vb = current_sat_vb;
     s.last_update = now;
+    Ok(())
 }
 
 /// `VegasReflexState.get_floor_multiplier` (py 2391-2401) verbatim.

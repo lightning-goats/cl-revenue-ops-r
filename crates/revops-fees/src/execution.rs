@@ -20,6 +20,7 @@ use revops_econ::types::{EconResult, Micro, Msat, SignedMsat, UnixTime};
 use serde_json::{json, Value};
 
 use crate::cycle::FeeCfgSnapshot;
+use crate::pyrand::DecisionInputError;
 
 /// `FeeController.ABS_MIN_FEE_PPM` (py 2917).
 pub const ABS_MIN_FEE_PPM: i64 = 0;
@@ -152,6 +153,67 @@ pub struct GovernedTrace {
     pub reason_code: String,
     pub intent_id: String,
     pub idempotency_key: String,
+}
+
+/// One replayable request to authorize a would-be fee broadcast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeAuthorizationRequest {
+    pub channel_id: String,
+    pub fee_ppm: i64,
+    pub old_fee_ppm: Option<i64>,
+    pub reason: String,
+    pub reason_code: Option<String>,
+    pub now: i64,
+}
+
+/// The authorization result consumed by the fee kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeAuthorizationResult {
+    pub authorized: bool,
+    pub reason_code: String,
+    pub trace: Option<GovernedTrace>,
+}
+
+/// Replayable fee-governor decision boundary.
+pub trait FeeAuthorizer {
+    fn authorize(
+        &self,
+        request: &FeeAuthorizationRequest,
+    ) -> Result<FeeAuthorizationResult, DecisionInputError>;
+}
+
+/// Production adapter that preserves the existing governed facade, ledger,
+/// registry, trace, and fail-closed reason-string behavior.
+pub struct GovernedFeeAuthorizer<'deps, 'resources> {
+    deps: &'deps GovernedDeps<'resources>,
+}
+
+impl<'deps, 'resources> GovernedFeeAuthorizer<'deps, 'resources> {
+    pub fn new(deps: &'deps GovernedDeps<'resources>) -> Self {
+        Self { deps }
+    }
+}
+
+impl FeeAuthorizer for GovernedFeeAuthorizer<'_, '_> {
+    fn authorize(
+        &self,
+        request: &FeeAuthorizationRequest,
+    ) -> Result<FeeAuthorizationResult, DecisionInputError> {
+        let (authorized, reason_code, trace) = governed_authorize_fee_broadcast(
+            self.deps,
+            &request.channel_id,
+            request.fee_ppm,
+            request.old_fee_ppm,
+            &request.reason,
+            request.reason_code.as_deref(),
+            request.now,
+        );
+        Ok(FeeAuthorizationResult {
+            authorized,
+            reason_code,
+            trace,
+        })
+    }
 }
 
 /// Convert a float component to the py_repr string form BEFORE it enters
