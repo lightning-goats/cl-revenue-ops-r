@@ -93,6 +93,23 @@ fn rejects_wrong_schema_identity_even_when_resealed() {
 }
 
 #[test]
+fn rejects_schema_scalar_boundaries_even_when_resealed() {
+    for (field, wrong) in [
+        ("capture_seq", json!(0)),
+        ("capture_run_id", json!("")),
+        ("cycle_id", json!("")),
+        ("started_at", json!("")),
+    ] {
+        let mut value = fixture_value();
+        value[field] = wrong;
+        reseal(&mut value);
+
+        let error = parse_value(&value).expect_err("schema scalar boundary must fail closed");
+        assert!(error.to_string().contains(field), "{error}");
+    }
+}
+
+#[test]
 fn rejects_unknown_top_level_field_even_when_resealed() {
     let mut value = fixture_value();
     value["unexpected"] = json!("field");
@@ -189,6 +206,25 @@ fn validates_closed_drained_zero_loss_manifest() {
     let manifest = manifest_from(valid_manifest_value());
 
     validate_capture_manifest(&manifest, &[capture]).expect("valid manifest must pass");
+}
+
+#[test]
+fn accepts_lossless_manifest_with_degraded_health_metadata() {
+    let capture = parse_fee_capture(COMPLETE_SKIP).expect("fixture must parse");
+
+    for (writer_health, last_error_category) in [
+        ("degraded", Value::Null),
+        ("healthy", json!("OSError")),
+        ("degraded", json!("OSError")),
+    ] {
+        let mut value = valid_manifest_value();
+        value["writer_health"] = json!(writer_health);
+        value["last_error_category"] = last_error_category;
+        let manifest = manifest_from(value);
+
+        validate_capture_manifest(&manifest, std::slice::from_ref(&capture))
+            .expect("health metadata must not override zero-loss manifest invariants");
+    }
 }
 
 #[test]

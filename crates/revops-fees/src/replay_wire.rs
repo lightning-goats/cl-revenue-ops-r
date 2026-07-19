@@ -269,6 +269,11 @@ pub enum ReplayWireError {
     DigestMismatch,
     #[error("cannot canonicalize replay body: {0}")]
     Canonical(String),
+    #[error("{field} {requirement}")]
+    InvalidScalar {
+        field: &'static str,
+        requirement: &'static str,
+    },
     #[error("capture completeness.complete must be true")]
     IncompleteCapture,
     #[error("completeness.{field} is {declared}, but the corresponding payload contains {actual}")]
@@ -293,6 +298,7 @@ pub fn parse_fee_capture(bytes: &[u8]) -> Result<FeeCycleReplayV0, ReplayWireErr
     let capture: FeeCycleReplayV0 = serde_json::from_slice(bytes)
         .map_err(|error| ReplayWireError::InvalidJson(error.to_string()))?;
     validate_capture_identity(&capture)?;
+    validate_capture_scalars(&capture)?;
     verify_payload_digest(&capture)?;
     validate_capture_completeness(&capture)?;
     Ok(capture)
@@ -310,6 +316,28 @@ fn validate_capture_identity(capture: &FeeCycleReplayV0) -> Result<(), ReplayWir
             expected: REPLAY_SCHEMA_VERSION,
             actual: capture.schema_version,
         });
+    }
+    Ok(())
+}
+
+fn validate_capture_scalars(capture: &FeeCycleReplayV0) -> Result<(), ReplayWireError> {
+    if capture.capture_seq == 0 {
+        return Err(ReplayWireError::InvalidScalar {
+            field: "capture_seq",
+            requirement: "must be at least 1",
+        });
+    }
+    for (field, value) in [
+        ("capture_run_id", capture.capture_run_id.as_str()),
+        ("cycle_id", capture.cycle_id.as_str()),
+        ("started_at", capture.started_at.as_str()),
+    ] {
+        if value.is_empty() {
+            return Err(ReplayWireError::InvalidScalar {
+                field,
+                requirement: "must be a non-empty string",
+            });
+        }
     }
     Ok(())
 }
@@ -459,18 +487,6 @@ pub fn validate_capture_manifest(
             manifest.attempted, manifest.completed
         ),
     )?;
-    manifest_require(
-        manifest.writer_health == "healthy",
-        format!(
-            "writer_health must be healthy, got {:?}",
-            manifest.writer_health
-        ),
-    )?;
-    manifest_require(
-        manifest.last_error_category.is_none(),
-        "last_error_category must be null",
-    )?;
-
     let expected_last = (manifest.completed > 0).then_some(manifest.completed);
     manifest_require(
         manifest.last_attempted_seq == expected_last,
