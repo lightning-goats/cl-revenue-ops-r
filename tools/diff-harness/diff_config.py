@@ -17,15 +17,17 @@ Key namespaces: the fixture's option suffix is hyphenated (e.g. "foo-bar"),
 which is exactly what the Rust side expects for `-k revenue-r-config
 key=<suffix>`. The Python `revenue-config get` subcommand, however,
 resolves keys via getattr() on a dataclass whose fields are underscored,
-so the Python-side call must use py_key = suffix.replace("-", "_") --
-the hyphenated suffix would raise/return an error envelope instead of a
-value. Two distinct key namespaces, one fixture.
+so the Python-side call uses PYTHON_FIELD_MAP for the four non-mechanical
+Config field names and suffix.replace("-", "_") for all others. The
+hyphenated suffix would raise/return an error envelope instead of a value.
+Constructor-only options use CLN listconfigs instead because no Config field
+exists for them. Two distinct key namespaces, one fixture.
 
 Type normalization: Phase 1a's Rust shadow plugin's `revenue-r-config`
 response can carry a resolved value that is already stringified (e.g.
 the string `"3600"`), while the Python plugin's `revenue-config get`
 returns a typed JSON scalar (the int `3600`, the bool `true`, a float).
-By default `diff_key()` normalizes both sides to a canonical string
+By default both comparison paths normalize values to a canonical string
 before comparing: everything goes through `str()`, except Python bools,
 which are mapped explicitly to the lowercase JSON spelling
 ("true"/"false") rather than `str()`'s "True"/"False" -- this is the ONE
@@ -35,44 +37,25 @@ compares equal to the matching lowercase string on the other. Pass
 intended for Phase 1b, once the Rust port returns properly typed values
 and a real type mismatch should once again fail the diff.
 """
-import argparse, json, subprocess, sys, pathlib
+import argparse, contextlib, io, json, pathlib, subprocess, sys
 
 # Keys to skip in comparison. revenue-ops-db-path is deliberately not shadow-registered
 # by the Rust plugin per the design spec's db-path ruling.
 SKIP_KEYS = {"db-path"}
 
-# Keys whose `revenue-ops-*` CLN option has no `Config` dataclass attribute
-# reachable via this harness's fixed `py_key = suffix.replace("-", "_")`
-# transform (see diff_key()'s docstring) -- so `revenue-config get <py_key>`
-# (which resolves purely via `hasattr(config, py_key)`/`getattr(config,
-# py_key)`, cl-revenue-ops.py:5669-5673) ALWAYS returns {"error": "Unknown
-# config key: ..."} for these, never a comparable value. That is a
-# structural property of Python's own `revenue-config get` command, not a
-# Rust-side defect, so these are SKIPPED rather than reported as ERROR.
-#
-# Two distinct reasons land a key here, both with the identical
-# harness-visible symptom:
-#
-#   1. No `Config` equivalent at all -- the option feeds a DIFFERENT
-#      subsystem's constructor kwargs, never `Config`. Twelve `boltz-*`
-#      keys are this case: e.g. `revenue-ops-boltz-btc-wallet` is read
-#      once at init (`options.get('revenue-ops-boltz-btc-wallet', 'CLN')`,
-#      cl-revenue-ops.py:2633) and passed straight into the `BoltzManager`
-#      constructor -- there never was a `Config.boltz_btc_wallet` field
-#      for `revenue-config get` to resolve.
-#   2. A `Config` field DOES exist, but under a different attribute name
-#      than this harness's naive suffix->underscore conversion produces:
-#      `vegas-reflex` -> `Config.enable_vegas_reflex`
-#      (cl-revenue-ops.py:2545), `vegas-decay` -> `vegas_decay_rate`
-#      (:2546), `planner-max-fee-rate` -> `planner_max_fee_rate_sat_vb`
-#      (:2560), `boltz-structural-budget-sats` ->
-#      `boltz_structural_budget_sats_per_day` (:2431). `revenue-config get
-#      vegas_reflex` still 404s (there is no such attribute) even though
-#      the underlying setting genuinely is configurable -- diffing these
-#      correctly would need a suffix->field-name remap table, which is
-#      future work, not this pass's scope.
-OPTION_ONLY_KEYS = {
-    # Case 1: no Config attribute at all -- BoltzManager-only kwargs.
+# Option suffixes whose effective Python Config field is not the mechanical
+# hyphen-to-underscore spelling. Rust continues to resolve the original suffix.
+PYTHON_FIELD_MAP = {
+    "vegas-reflex": "enable_vegas_reflex",
+    "vegas-decay": "vegas_decay_rate",
+    "planner-max-fee-rate": "planner_max_fee_rate_sat_vb",
+    "boltz-structural-budget-sats": "boltz_structural_budget_sats_per_day",
+}
+
+# These startup-only Boltz constructor options have no Python Config dataclass
+# field. Compare their effective CLN option values through `listconfigs
+# revenue-ops-<suffix>` instead of skipping them.
+CONSTRUCTOR_ONLY_KEYS = {
     "boltz-enabled",
     "boltz-cli-path",
     "boltz-datadir",
@@ -85,12 +68,6 @@ OPTION_ONLY_KEYS = {
     "boltz-lbtc-wallet",
     "boltz-routing-fee-limit-ppm",
     "boltz-max-withdraw-sats",
-    # Case 2: a Config attribute exists, under a different name than
-    # suffix.replace("-", "_") produces.
-    "vegas-reflex",
-    "vegas-decay",
-    "planner-max-fee-rate",
-    "boltz-structural-budget-sats",
 }
 
 
@@ -154,7 +131,7 @@ def diff_key(cli_fn, node, suffix, strict=False):
     # Python dataclass fields are underscored (revenue-config get resolves via
     # getattr); the Rust RPC keeps the hyphenated fixture suffix as-is. Same
     # fixture, two key namespaces -- translate only for the Python call.
-    py_key = suffix.replace("-", "_")
+    py_key = PYTHON_FIELD_MAP.get(suffix, suffix.replace("-", "_"))
 
     try:
         py = cli_fn(node, "revenue-config", "get", py_key)
@@ -178,42 +155,91 @@ def diff_key(cli_fn, node, suffix, strict=False):
     return {"key": suffix, "status": "ok", "py": py_val, "rs": rs_val}
 
 
+def diff_constructor_option(cli_fn, node, suffix, strict=False):
+    """Compare a constructor-only Python CLN option with Rust's resolved value.
+
+    Python has no Config field for these options, so fetch the effective startup
+    value from `listconfigs revenue-ops-<suffix>`. CLN encodes the scalar under
+    exactly one of value_bool/value_int/value_str; an explicit JSON null is a
+    valid value, while a missing/ambiguous value field is a malformed response.
+    """
+    option_name = f"revenue-ops-{suffix}"
+    result_base = {"key": suffix, "surface": "constructor"}
+
+    try:
+        py = cli_fn(node, "listconfigs", option_name)
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        return {**result_base, "status": "transport", "side": "python", "cause": _one_line(exc)}
+
+    if isinstance(py, dict) and "error" in py:
+        return {**result_base, "status": "error", "side": "python", "cause": _one_line(py["error"])}
+
+    try:
+        configs = py["configs"]
+        entry = configs[option_name]
+        if not isinstance(configs, dict) or not isinstance(entry, dict):
+            raise TypeError("configs entry is not an object")
+        value_fields = [name for name in ("value_bool", "value_int", "value_str") if name in entry]
+        if len(value_fields) != 1:
+            raise ValueError(f"expected exactly one value_* field, got {len(value_fields)}")
+        py_val = entry[value_fields[0]]
+    except (KeyError, TypeError, ValueError) as exc:
+        return {
+            **result_base,
+            "status": "error",
+            "side": "python",
+            "cause": f"malformed listconfigs response: {_one_line(exc)}",
+        }
+
+    try:
+        rs = cli_fn(node, "-k", "revenue-r-config", f"key={suffix}")
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        return {**result_base, "status": "transport", "side": "rust", "cause": _one_line(exc)}
+
+    if isinstance(rs, dict) and "error" in rs:
+        return {**result_base, "status": "error", "side": "rust", "cause": _one_line(rs["error"])}
+    if not isinstance(rs, dict) or "value" not in rs:
+        return {
+            **result_base,
+            "status": "error",
+            "side": "rust",
+            "cause": "malformed revenue-r-config response: missing value",
+        }
+
+    rs_val = rs["value"]
+    cmp_py, cmp_rs = (py_val, rs_val) if strict else (normalize(py_val), normalize(rs_val))
+    if cmp_py != cmp_rs:
+        return {**result_base, "status": "mismatch", "py": py_val, "rs": rs_val}
+    return {**result_base, "status": "ok", "py": py_val, "rs": rs_val}
+
+
 def load_fixtures(path):
     with open(path) as f:
         return json.load(f)
 
 
 def run_diff(cli_fn, node, table, strict=False):
-    """Diff every non-skipped key in `table`. Never raises -- per-key
-    failures are captured in the returned result dicts (see diff_key).
-
-    Keys in OPTION_ONLY_KEYS are never dispatched to `cli_fn` at all (no
-    ssh/RPC round trip) -- they are structurally unresolvable by Python's
-    `revenue-config get` (see OPTION_ONLY_KEYS' docstring), so this
-    short-circuits straight to a "skipped" result.
-    """
+    """Diff every comparable key in `table`; capture failures per key."""
     results = []
     for opt in table:
         suffix = opt["name"].removeprefix("revenue-ops-")
         if suffix in SKIP_KEYS:
             continue
-        if suffix in OPTION_ONLY_KEYS:
-            results.append({
-                "key": suffix,
-                "status": "skipped",
-                "cause": "not a Config dataclass field (see OPTION_ONLY_KEYS)",
-            })
-            continue
-        results.append(diff_key(cli_fn, node, suffix, strict=strict))
-    return results, len(table) - len(SKIP_KEYS)
+        if suffix in CONSTRUCTOR_ONLY_KEYS:
+            results.append(
+                diff_constructor_option(cli_fn, node, suffix, strict=strict)
+            )
+        else:
+            results.append(diff_key(cli_fn, node, suffix, strict=strict))
+    return results, len(results)
 
 
 def report(results, total):
     """Print an aligned-column report of any non-ok results and return the
     process exit code: 0 parity, 1 mismatch/error, 2 transport failure.
 
-    SKIPPED rows (OPTION_ONLY_KEYS) are informational only -- they never
-    affect the exit code, unlike MISMATCH/ERROR/TRANSPORT.
+    SKIPPED rows, if introduced for an explicitly non-comparable key, are
+    informational only and never affect the exit code.
     """
     mismatches = [r for r in results if r["status"] == "mismatch"]
     errors = [r for r in results if r["status"] == "error"]
@@ -242,12 +268,16 @@ def report(results, total):
     if mismatches or errors:
         return 1
     compared = total - len(skipped)
-    print(f"parity: {compared} keys identical ({len(skipped)} skipped)")
+    option_surface = sum(r.get("surface") == "constructor" for r in results)
+    print(
+        f"parity: {compared} keys identical "
+        f"({option_surface} option-surface checks, {len(skipped)} skipped)"
+    )
     return 0
 
 
 def self_test():
-    """Exercise the four contract paths with stubbed CLI calls (no ssh/node
+    """Exercise comparison contracts with stubbed CLI calls (no ssh/node
     needed). Invoke via: python3 diff_config.py --self-test"""
     ok = True
     table = [{"name": "revenue-ops-foo-bar"}]
@@ -316,24 +346,124 @@ def self_test():
     print(f"[self-test] typed-vs-string (bool True vs \"true\") --strict: exit={rc} (expect 1)")
     ok = ok and rc == 1
 
-    # OPTION_ONLY_KEYS: a key with no Config attribute must be reported as
-    # SKIPPED (never ERROR/MISMATCH) and must short-circuit BEFORE any
-    # cli_fn dispatch at all -- if cli_fn is ever called for this suffix,
-    # something is wrong with the skip-before-call ordering in run_diff().
-    def cli_should_not_be_called(node, *a):
-        raise AssertionError(
-            "cli_fn must not be called for an OPTION_ONLY_KEYS suffix"
-        )
+    # Remapped Config fields: Python receives the effective dataclass field,
+    # while Rust keeps the original hyphenated option suffix.
+    for suffix, py_field in PYTHON_FIELD_MAP.items():
+        calls = []
 
-    table_option_only = [{"name": "revenue-ops-boltz-btc-wallet"}]
-    results, total = run_diff(cli_should_not_be_called, "node", table_option_only)
-    rc = report(results, total)
-    statuses = {r["status"] for r in results}
+        def cli_remapped(node, *a):
+            calls.append(a)
+            return {"value": "same"}
+
+        result = diff_key(cli_remapped, "node", suffix)
+        expected_calls = [
+            ("revenue-config", "get", py_field),
+            ("-k", "revenue-r-config", f"key={suffix}"),
+        ]
+        mapped_ok = result["status"] == "ok" and calls == expected_calls
+        print(
+            f"[self-test] mapped field {suffix}: calls={calls!r} "
+            f"(expect {expected_calls!r}) => {'PASS' if mapped_ok else 'FAIL'}"
+        )
+        ok = ok and mapped_ok
+
+    # Constructor-only option surface: these twelve options do not exist on
+    # Python's Config dataclass, but their effective startup values are still
+    # comparable through CLN listconfigs. Exercise every supported listconfigs
+    # scalar shape plus malformed and transport failures on that alternate
+    # path.
+    expected_constructor_keys = {
+        "boltz-enabled",
+        "boltz-cli-path",
+        "boltz-datadir",
+        "boltz-use-sudo",
+        "boltz-sudo-user",
+        "boltz-timeout-seconds",
+        "boltz-daily-budget-sats",
+        "boltz-enforce-budget",
+        "boltz-btc-wallet",
+        "boltz-lbtc-wallet",
+        "boltz-routing-fee-limit-ppm",
+        "boltz-max-withdraw-sats",
+    }
+    actual_constructor_keys = set(globals().get("CONSTRUCTOR_ONLY_KEYS", set()))
+    constructor_set_ok = actual_constructor_keys == expected_constructor_keys
     print(
-        f"[self-test] option-only key case: exit={rc} statuses={statuses} "
-        f"(expect 0, {{'skipped'}})"
+        f"[self-test] constructor-only key set: {len(actual_constructor_keys)} keys "
+        f"(expect exactly 12) => {'PASS' if constructor_set_ok else 'FAIL'}"
     )
-    ok = ok and rc == 0 and statuses == {"skipped"}
+    ok = ok and constructor_set_ok
+
+    constructor_cases = [
+        ("bool", {"value_bool": True}, {"value": "true"}, "ok"),
+        ("int", {"value_int": 3600}, {"value": "3600"}, "ok"),
+        ("string", {"value_str": "CLN"}, {"value": "CLN"}, "ok"),
+        ("null", {"value_str": None}, {"value": None}, "ok"),
+        ("malformed", {"source": "default"}, {"value": "unused"}, "error"),
+    ]
+    constructor_suffix = "boltz-btc-wallet"
+    constructor_name = f"revenue-ops-{constructor_suffix}"
+    for label, entry, rust_response, expected_status in constructor_cases:
+        calls = []
+
+        def cli_constructor(node, *a, _entry=entry, _rs=rust_response):
+            calls.append(a)
+            if a[0] == "listconfigs":
+                return {"configs": {constructor_name: _entry}}
+            return _rs
+
+        results, total = run_diff(
+            cli_constructor, "node", [{"name": constructor_name}]
+        )
+        result = results[0]
+        expected_first_call = ("listconfigs", constructor_name)
+        case_ok = (
+            result["status"] == expected_status
+            and calls
+            and calls[0] == expected_first_call
+        )
+        print(
+            f"[self-test] constructor option {label}: status={result['status']!r} "
+            f"calls={calls!r} (expect {expected_status!r}, first call "
+            f"{expected_first_call!r}) => {'PASS' if case_ok else 'FAIL'}"
+        )
+        ok = ok and case_ok
+
+    def cli_constructor_transport(node, *a):
+        raise subprocess.CalledProcessError(255, ["ssh"])
+
+    results, total = run_diff(
+        cli_constructor_transport, "node", [{"name": constructor_name}]
+    )
+    result = results[0]
+    transport_ok = result["status"] == "transport" and result.get("side") == "python"
+    print(
+        f"[self-test] constructor option transport: result={result!r} "
+        f"(expect python transport) => {'PASS' if transport_ok else 'FAIL'}"
+    )
+    ok = ok and transport_ok
+
+    def cli_constructor_report(node, *a):
+        if a[0] == "listconfigs":
+            name = a[1]
+            return {"configs": {name: {"value_str": "same"}}}
+        return {"value": "same"}
+
+    constructor_table = [
+        {"name": f"revenue-ops-{suffix}"}
+        for suffix in sorted(expected_constructor_keys)
+    ]
+    results, total = run_diff(cli_constructor_report, "node", constructor_table)
+    report_out = io.StringIO()
+    with contextlib.redirect_stdout(report_out):
+        rc = report(results, total)
+    report_text = report_out.getvalue().strip()
+    report_ok = rc == 0 and "12 option-surface checks" in report_text
+    print(
+        f"[self-test] constructor option report: exit={rc} output={report_text!r} "
+        f"(expect '12 option-surface checks') => {'PASS' if report_ok else 'FAIL'}"
+    )
+    ok = ok and report_ok
 
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1

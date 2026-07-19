@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # tools/diff-harness/diff_fee_decisions.py
-"""Diff the Rust fee-controller's dry-run journal against Python's
-recorded fee decisions, on lnnode (Phase 4 Task 11).
+"""DIAGNOSTIC ONLY: post-cycle Python state is not a valid fee-parity input.
+Use replay_fee_capture against complete fee_cycle_replay v0 envelopes for
+the fee parity gate.
+
+Diff the Rust fee-controller's dry-run journal against Python's recorded fee
+decisions, on lnnode (Phase 4 Task 11).
 
 Usage: ./diff_fee_decisions.py [--node lnnode]
                                 [--journal ~/.lightning/fee_dryrun_journal.jsonl]
@@ -169,7 +173,13 @@ raises the exit code.
 
 Requires Python >= 3.8.
 """
-import argparse, json, shlex, subprocess, sys
+import argparse, contextlib, io, json, shlex, subprocess, sys
+
+DIAGNOSTIC_WARNING = (
+    "DIAGNOSTIC ONLY: post-cycle Python state is not a valid fee-parity input.\n"
+    "Use replay_fee_capture against complete fee_cycle_replay v0 envelopes for\n"
+    "the fee parity gate."
+)
 
 # ---------------------------------------------------------------------------
 # Cluster tolerance -- reused verbatim from
@@ -904,6 +914,28 @@ def self_test():
           f"matched_pairs={len(matched)} (expect 0, 1)")
     ok = ok and rc == 0 and len(matched) == 1
 
+    # -- 11. live execution visibly marks this post-cycle comparison as
+    # diagnostic-only while preserving the existing parity exit code.
+    expected_warning = (
+        "DIAGNOSTIC ONLY: post-cycle Python state is not a valid fee-parity input.\n"
+        "Use replay_fee_capture against complete fee_cycle_replay v0 envelopes for\n"
+        "the fee parity gate."
+    )
+    warning_out = io.StringIO()
+    with contextlib.redirect_stdout(warning_out):
+        warning_rc = main(
+            ["--since", "0"],
+            journal_fn=lambda node, path: "",
+            sqlite_fn=lambda node, db_path, query: "",
+        )
+    warning_text = warning_out.getvalue()
+    warning_ok = warning_rc == 0 and warning_text.startswith(expected_warning)
+    print(
+        f"[self-test] diagnostic-only live warning: exit={warning_rc} "
+        f"present={warning_text.startswith(expected_warning)} (expect 0, True)"
+    )
+    ok = ok and warning_ok
+
     print("[self-test] ALL PASS" if ok else "[self-test] FAILURE")
     return 0 if ok else 1
 
@@ -938,6 +970,7 @@ def main(argv=None, journal_fn=read_journal, sqlite_fn=sqlite_json, cli_fn=cli):
     if args.self_test:
         return self_test()
 
+    print(DIAGNOSTIC_WARNING)
     results = diff_fee_decisions(journal_fn, sqlite_fn, args.node, args.journal,
                                 args.python_db, since_ts=args.since, until_ts=args.until,
                                 tolerance_ppm=args.tolerance_ppm)
