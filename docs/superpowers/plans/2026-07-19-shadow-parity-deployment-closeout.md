@@ -125,7 +125,7 @@
   ```
 
   Confirm all 28 clock sites, four Gaussian call sites, the Vegas random
-  site, the 20 `FeeEvidence` operations, governor request/result, execution
+  site, the 19 `FeeEvidence` operations, governor request/result, execution
   request/result, pre-state, one terminal outcome per ordered channel, and
   post-state are covered by stable labels and ordinals. Confirm capture code
   never re-runs evidence I/O.
