@@ -38,6 +38,17 @@ find and fix bugs, and arrive at a manual fee-subsystem cutover with a frozen,
 well-soaked candidate. The target date is a goal, not permission to waive a
 gate.
 
+Live deployment facts rechecked during design self-review on 2026-07-20:
+
+- the `lightningd` systemd user manager is currently running, but
+  `loginctl show-user lightningd` reports `Linger=no`;
+- the filesystem holding `/data` and `/home/lightningd` is 96% used with
+  approximately 4.3 GiB available;
+- the host timezone is `America/Denver`.
+
+Persistent user timers therefore require one-time lingering activation, and
+capture/report retention must preserve a substantial free-space reserve.
+
 ## Goals
 
 - Exercise the cutover scheduler, state lifecycle, evidence recorders,
@@ -151,7 +162,7 @@ falling back to a mutation-capable executor.
 
 ### Cutover authorizer
 
-Live fee execution requires all of the following at the same time:
+Entering a live-authority process session requires all of the following at the same time:
 
 - `observer=false`;
 - `fee-dryrun=false`;
@@ -161,6 +172,13 @@ Live fee execution requires all of the following at the same time:
 - fresh scheduler evidence and writable Rust state;
 - production governor authorization and a healthy ledger;
 - no unresolved or ambiguous prior execution.
+
+The arm authorizes construction of one live-authority process session; it is
+not a perpetual credential and is not polled from disk before every request.
+The plugin validates and atomically consumes the arm while entering live mode.
+Every broadcast batch then rechecks Python authority, scheduler evidence,
+state, governor, ledger, and quarantine. A Rust process restart loses the
+in-memory authority capability and requires a fresh arm.
 
 The cutover arm is a mode-`0600` JSON object containing:
 
@@ -263,7 +281,10 @@ treated as an empty workload.
 
 All units are installed for and run as `lightningd` through
 `systemctl --user`. No root system unit or `lightningd` daemon restart is
-required.
+required. Because `lightningd` currently has `Linger=no`, deployment has a
+one-time prerequisite to enable lingering for that account and verify the user
+manager survives logout. Enabling linger may require privileged operator
+access, but the runway services and timers remain unprivileged user units.
 
 The units are:
 
@@ -298,6 +319,14 @@ failure. It checks:
 - production database descriptors remaining read-only from Rust;
 - disk usage and bounded-retention headroom.
 
+The watcher also keeps authority captures below their existing 32-envelope
+retention limit. Immediately after a capture reaches six complete natural
+cycles, it closes and drains the run, freezes it atomically, and opens the next
+run. It never triggers a fee cycle. Rotation is expected roughly hourly at the
+current 600-second Python fee interval; if the watcher is delayed, it rotates
+at the first safe opportunity and marks any possible evidence gap. Reaching
+the retention limit before a successful freeze is red.
+
 Individual snapshots are append-only and small. Routine green samples are
 rolled up rather than emitted as operator messages.
 
@@ -305,10 +334,11 @@ rolled up rather than emitted as operator messages.
 
 The daily service:
 
-1. closes and drains the current Python replay-capture run;
-2. freezes its manifest and envelopes atomically;
-3. immediately opens the next observational capture window;
-4. strictly replays the frozen window with the tested replay binary;
+1. closes, drains, and freezes any partial active Python capture run;
+2. immediately opens the next observational capture window;
+3. validates the ordered set of frozen six-cycle and partial windows since
+   the prior rollup;
+4. strictly replays those frozen windows with the tested replay binary;
 5. runs configuration and implemented read-RPC parity;
 6. compares oracle outcomes with autonomous shadow decisions and state;
 7. checks mempool moving-average parity, trigger coverage, state generations,
@@ -338,9 +368,11 @@ Reports live under
 - evidence paths and checksums;
 - next scheduled milestone and current go/no-go state.
 
-Evidence retention has a one-GiB hard ceiling. Green evidence is pruned oldest
-first. Red windows and their minimal reproducer are preferred within the same
-ceiling, but the controller never exceeds the cap. A retention failure or
+Evidence retention has a 512-MiB hard ceiling and must preserve at least 3 GiB
+of filesystem free space. Green envelopes are pruned oldest first after their
+checksums and rollup have been published. Red windows and their minimal
+reproducer are preferred within the same ceiling, but the controller never
+exceeds either the byte cap or the free-space reserve. A retention failure or
 insufficient safe headroom is red rather than an excuse to discard the active
 failure window.
 
@@ -362,7 +394,10 @@ Any of the following resets promotion and prevents cutover:
 - candidate hash/provenance disagreement;
 - production DB opened writable by Rust;
 - a failed rehearsal safety injection;
-- report tampering, non-atomic publication, or exhausted retention headroom.
+- report tampering, non-atomic publication, or exhausted retention headroom;
+- a capture reaching its retention limit before it is safely frozen;
+- the `lightningd` user manager not being persistent while timers are expected
+  to enforce the runway.
 
 ### Yellow gates
 
@@ -439,14 +474,17 @@ socket.
    file type, and dynamic dependencies.
 5. Stage and checksum the Rust plugin, replay tool, runway controller, unit
    files, and rollback artifacts on `lnnode`.
-6. Stop only the Rust dynamic plugin, atomically replace it, and restart it
+6. Enable and verify lingering for `lightningd`; do not continue if the user
+   manager cannot survive logout.
+7. Stop only the Rust dynamic plugin, atomically replace it, and restart it
    explicitly in observer/dry-run/no-broadcast mode.
-7. Verify Python remains authoritative and healthy, Rust's production DB
+8. Verify Python remains authoritative and healthy, Rust's production DB
    descriptors are read-only, the mutation count is zero, and all artifact
    hashes match.
-8. Install and enable the two `lightningd` user timers.
-9. Run both services once manually, inspect their reports, and then let the
-   timers own polling and daily rollup.
+9. Install and enable the two `lightningd` user timers.
+10. Run both services once manually, inspect their reports, log out and verify
+   the user manager and timers remain active, and then let the timers own
+   polling and daily rollup.
 
 Neither deployment creates a cutover arm or disables Python authority.
 
@@ -462,10 +500,11 @@ The cutover order is:
 2. disable Python fee authority and verify positive readback;
 3. verify Rust remains dry-run and produce one final would-broadcast batch;
 4. install the fresh release-bound arm;
-5. switch Rust from shadow to live fee mode;
+5. switch Rust from shadow to live fee mode, which validates and consumes the
+   arm;
 6. observe the first bounded live batch and reconcile its outcomes;
-7. remove/expire the arm after the cutover window while retaining established
-   Rust authority configuration only if the design's renewal policy allows it.
+7. verify the arm no longer exists and that a Rust restart without a fresh arm
+   fails closed rather than reacquiring authority.
 
 Rollback is ordered to prevent authority overlap:
 
@@ -477,9 +516,8 @@ Rollback is ordered to prevent authority overlap:
 6. confirm Rust is observer/dry-run and mutation count is stable;
 7. preserve the incident window and reset promotion status.
 
-The exact arm renewal policy and commands are pinned in the implementation
-runbook after the final interfaces exist. The timer never performs these
-steps.
+The exact re-arm commands are pinned in the implementation runbook after the
+final interfaces exist. The timer never performs these steps.
 
 ## Testing strategy
 
@@ -526,7 +564,7 @@ Cutover preparation is complete only when:
   Rust mempool recording, triggers, governor, ledger, and exact request
   construction;
 - both `lightningd` user timers are enabled and producing valid rolled-up
-  reports;
+  reports, and the user manager has been verified persistent after logout;
 - two copied-state/fake-RPC rehearsals pass, including rollback and every
   fail-closed injection;
 - the frozen candidate has 72 continuous green hours;
