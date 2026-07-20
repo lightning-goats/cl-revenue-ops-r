@@ -17,6 +17,9 @@ EXIT_INPUT = 2
 MIN_CYCLES = 6
 MIN_EVALUATIONS = 100
 MIN_ADJUSTMENTS = 10
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_CAPTURE_BYTES = 32 * 1024 * 1024
+MAX_SELECTED_WINDOW_BYTES = 256 * 1024 * 1024
 
 
 class WindowError(ValueError):
@@ -27,6 +30,8 @@ def _parse_args(argv: Iterable[str]) -> tuple[Path, Path, Path]:
     values: dict[str, Path] = {}
     args = iter(argv)
     for flag in args:
+        if not isinstance(flag, str):
+            raise WindowError("arguments must be strings")
         if flag not in {"--manifest", "--capture-dir", "--replay-bin"}:
             raise WindowError(f"unknown argument {flag!r}")
         if flag in values:
@@ -35,7 +40,7 @@ def _parse_args(argv: Iterable[str]) -> tuple[Path, Path, Path]:
             value = next(args)
         except StopIteration as error:
             raise WindowError(f"{flag} requires one local path") from error
-        if value.startswith("--"):
+        if not isinstance(value, str) or value.startswith("--"):
             raise WindowError(f"{flag} requires one local path")
         values[flag] = Path(value)
     missing = [
@@ -51,14 +56,36 @@ def _parse_args(argv: Iterable[str]) -> tuple[Path, Path, Path]:
     return values["--manifest"], values["--capture-dir"], values["--replay-bin"]
 
 
-def _load_object(path: Path, label: str) -> dict[str, Any]:
+def _read_bounded(path: Path, label: str, maximum: int) -> bytes:
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+        raise WindowError(f"{label} byte limit must be a nonnegative integer")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        with path.open("rb") as source:
+            data = source.read(maximum + 1)
+    except OSError as error:
         raise WindowError(f"cannot read {label} {path}: {error}") from error
+    if len(data) > maximum:
+        raise WindowError(
+            f"{label} {path} is at least {len(data)} bytes; maximum is {maximum}"
+        )
+    return data
+
+
+def _load_object(
+    path: Path, label: str, maximum: int
+) -> tuple[dict[str, Any], int]:
+    data = _read_bounded(path, label, maximum)
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise WindowError(f"{label} {path} is not strict UTF-8: {error}") from error
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise WindowError(f"cannot parse {label} {path}: {error}") from error
     if not isinstance(value, dict):
         raise WindowError(f"{label} {path} must contain one JSON object")
-    return value
+    return value, len(data)
 
 
 def _required_int(obj: dict[str, Any], field: str, *, minimum: int = 0) -> int:
@@ -115,10 +142,22 @@ def _capture_path(capture_dir: Path, filename: Any) -> Path:
     return resolved
 
 
+def _checked_selected_bytes(current: int, additional: int) -> int:
+    total = current + additional
+    if total > MAX_SELECTED_WINDOW_BYTES:
+        raise WindowError(
+            "selected capture aggregate is "
+            f"{total} bytes; maximum is {MAX_SELECTED_WINDOW_BYTES}"
+        )
+    return total
+
+
 def _preflight(
     manifest_path: Path, capture_dir: Path
-) -> tuple[dict[str, Any], list[Path], dict[str, int]]:
-    manifest = _load_object(manifest_path, "manifest")
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
+    manifest, _manifest_bytes = _load_object(
+        manifest_path, "manifest", MAX_MANIFEST_BYTES
+    )
     if manifest.get("schema_name") != "fee_cycle_capture_manifest":
         raise WindowError("schema_name must be 'fee_cycle_capture_manifest'")
     if manifest.get("schema_version") != 0:
@@ -137,9 +176,10 @@ def _preflight(
     if not isinstance(attempts, list):
         raise WindowError("attempts must be an array")
     sequences: list[int] = []
-    paths: list[Path] = []
+    selected: list[dict[str, Any]] = []
     evaluation_count = 0
     adjustment_count = 0
+    selected_bytes = 0
     for index, attempt in enumerate(attempts):
         if not isinstance(attempt, dict):
             raise WindowError(f"attempts[{index}] must be an object")
@@ -149,7 +189,8 @@ def _preflight(
         if attempt.get("eligible") is not True:
             raise WindowError(f"attempts[{index}].eligible must be true")
         path = _capture_path(capture_dir, attempt.get("filename"))
-        capture = _load_object(path, "capture")
+        capture, capture_bytes = _load_object(path, "capture", MAX_CAPTURE_BYTES)
+        selected_bytes = _checked_selected_bytes(selected_bytes, capture_bytes)
         if capture.get("capture_run_id") != run_id:
             raise WindowError(
                 f"capture {path} run ID does not match manifest capture_run_id"
@@ -169,18 +210,36 @@ def _preflight(
         if completeness.get("complete") is not True:
             raise WindowError(f"capture {path} completeness.complete must be true")
         evaluations = _required_int(completeness, "evaluated_channels")
-        outcomes = capture.get("expected", {}).get("ordered_outcomes")
+        expected = capture.get("expected")
+        if not isinstance(expected, dict):
+            raise WindowError(f"capture {path} expected must be an object")
+        outcomes = expected.get("ordered_outcomes")
         if not isinstance(outcomes, list) or len(outcomes) != evaluations:
             raise WindowError(
                 f"capture {path} ordered_outcomes must match evaluated_channels"
             )
-        adjustments = sum(
-            1
-            for outcome in outcomes
-            if isinstance(outcome, dict) and "adjustment" in outcome
-        )
+        adjustments = 0
+        for outcome_index, outcome in enumerate(outcomes):
+            if not isinstance(outcome, dict):
+                raise WindowError(
+                    f"capture {path} ordered_outcomes[{outcome_index}] must be an object"
+                )
+            if "adjustment" in outcome:
+                if not isinstance(outcome["adjustment"], dict):
+                    raise WindowError(
+                        f"capture {path} ordered_outcomes[{outcome_index}].adjustment "
+                        "must be an object"
+                    )
+                adjustments += 1
         sequences.append(sequence)
-        paths.append(path)
+        selected.append(
+            {
+                "file": str(path),
+                "capture_seq": sequence,
+                "evaluated_channel_count": evaluations,
+                "adjustment_count": adjustments,
+            }
+        )
         evaluation_count += evaluations
         adjustment_count += adjustments
 
@@ -202,9 +261,9 @@ def _preflight(
 
     return (
         manifest,
-        paths,
+        selected,
         {
-            "cycles": len(paths),
+            "cycles": len(selected),
             "evaluations": evaluation_count,
             "adjustments": adjustment_count,
         },
@@ -254,18 +313,153 @@ def _emit(verdict: dict[str, Any]) -> None:
     print(json.dumps(verdict, sort_keys=True, separators=(",", ":")))
 
 
-def main(argv: list[str] | None = None) -> int:
+def _decode_child_stream(value: Any, label: str) -> str:
+    if not isinstance(value, bytes):
+        raise WindowError(f"replay binary {label} must be bytes")
     try:
-        manifest_arg, capture_dir_arg, replay_bin_arg = _parse_args(
-            sys.argv[1:] if argv is None else argv
+        return value.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise WindowError(
+            f"replay binary {label} is not strict UTF-8: {error}"
+        ) from error
+
+
+def _validate_child_results(
+    replay: dict[str, Any],
+    selected: list[dict[str, Any]],
+    returncode: int,
+) -> None:
+    results = replay.get("results")
+    if not isinstance(results, list):
+        raise WindowError("replay results must be an array")
+    if len(results) != len(selected):
+        raise WindowError(
+            f"replay results count expected {len(selected)}, got {len(results)}"
         )
-        manifest_path = _resolve_file(manifest_arg, "manifest")
-        capture_dir = _resolve_dir(capture_dir_arg)
-        replay_bin = _resolve_file(replay_bin_arg, "replay binary", executable=True)
-        manifest, _capture_paths, counts = _preflight(manifest_path, capture_dir)
-    except WindowError as error:
-        _emit(_base_verdict(status="error", error=str(error)))
-        return EXIT_INPUT
+
+    expected_by_file = {item["file"]: item for item in selected}
+    actual_by_file: dict[str, dict[str, Any]] = {}
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            raise WindowError(f"replay results[{index}] must be an object")
+        file_value = result.get("file")
+        if not isinstance(file_value, str) or file_value not in expected_by_file:
+            raise WindowError(
+                f"replay results[{index}].file is not one selected capture"
+            )
+        if file_value in actual_by_file:
+            raise WindowError(f"replay results contain duplicate file {file_value!r}")
+        actual_by_file[file_value] = result
+    if set(actual_by_file) != set(expected_by_file):
+        raise WindowError("replay results have missing or extra capture files")
+
+    mismatch_results = 0
+    for file_value, expected in expected_by_file.items():
+        result = actual_by_file[file_value]
+        for field in (
+            "capture_seq",
+            "evaluated_channel_count",
+            "adjustment_count",
+        ):
+            actual = result.get(field)
+            if type(actual) is not type(expected[field]) or actual != expected[field]:
+                raise WindowError(
+                    f"replay result {file_value} {field} expected "
+                    f"{expected[field]!r}, got {actual!r}"
+                )
+        status = result.get("status")
+        mismatch_count = result.get("mismatch_count")
+        if isinstance(mismatch_count, bool) or not isinstance(mismatch_count, int):
+            raise WindowError(
+                f"replay result {file_value} mismatch_count must be an integer"
+            )
+        if returncode == EXIT_EXACT:
+            if status != "exact":
+                raise WindowError(
+                    f"replay result {file_value} status must be 'exact'"
+                )
+            if mismatch_count != 0:
+                raise WindowError(
+                    f"replay result {file_value} mismatch_count must be zero"
+                )
+            if result.get("error") is not None:
+                raise WindowError(
+                    f"replay result {file_value} exact status cannot include an error"
+                )
+        elif returncode == EXIT_GATE_FAILED:
+            if status == "exact":
+                if mismatch_count != 0:
+                    raise WindowError(
+                        f"replay result {file_value} exact mismatch_count must be zero"
+                    )
+            elif status == "mismatch":
+                if mismatch_count != 1:
+                    raise WindowError(
+                        f"replay result {file_value} mismatch_count must be one"
+                    )
+                mismatch_results += 1
+            else:
+                raise WindowError(
+                    f"replay result {file_value} status must be exact or mismatch"
+                )
+    if returncode == EXIT_GATE_FAILED:
+        if mismatch_results == 0 or replay.get("mismatch_count") != mismatch_results:
+            raise WindowError(
+                "replay mismatch_count must equal per-file mismatch results"
+            )
+
+
+def _validate_child_verdict(
+    replay: dict[str, Any],
+    manifest: dict[str, Any],
+    selected: list[dict[str, Any]],
+    counts: dict[str, int],
+    returncode: int,
+) -> None:
+    if returncode not in {EXIT_EXACT, EXIT_GATE_FAILED, EXIT_INPUT}:
+        raise WindowError(f"replay binary returned unsupported exit code {returncode}")
+
+    expected = {
+        "run_id": manifest["capture_run_id"],
+        "capture_count": counts["cycles"],
+        "evaluated_channel_count": counts["evaluations"],
+        "adjustment_count": counts["adjustments"],
+    }
+    inconsistencies = [
+        f"{field} expected {value!r}, got {replay.get(field)!r}"
+        for field, value in expected.items()
+        if type(replay.get(field)) is not type(value) or replay.get(field) != value
+    ]
+    if inconsistencies:
+        raise WindowError(
+            "replay summary disagrees with frozen window: "
+            + "; ".join(inconsistencies)
+        )
+
+    mismatch_count = replay.get("mismatch_count")
+    if isinstance(mismatch_count, bool) or not isinstance(mismatch_count, int):
+        raise WindowError("replay mismatch_count must be a nonnegative integer")
+    if mismatch_count < 0:
+        raise WindowError("replay mismatch_count must be a nonnegative integer")
+
+    if returncode in {EXIT_EXACT, EXIT_GATE_FAILED}:
+        commit = replay.get("commit")
+        if not isinstance(commit, str) or not commit:
+            raise WindowError("replay commit must be a nonempty string")
+        _validate_child_results(replay, selected, returncode)
+    if returncode == EXIT_EXACT:
+        if mismatch_count != 0:
+            raise WindowError("exact replay mismatch_count must be zero")
+        if replay.get("error") is not None:
+            raise WindowError("exact replay error must be null")
+
+
+def _run(argv: list[str]) -> int:
+    manifest_arg, capture_dir_arg, replay_bin_arg = _parse_args(argv)
+    manifest_path = _resolve_file(manifest_arg, "manifest")
+    capture_dir = _resolve_dir(capture_dir_arg)
+    replay_bin = _resolve_file(replay_bin_arg, "replay binary", executable=True)
+    manifest, selected, counts = _preflight(manifest_path, capture_dir)
 
     thresholds = _thresholds(counts)
     if not all(gate["met"] for gate in thresholds.values()):
@@ -288,66 +482,25 @@ def main(argv: list[str] | None = None) -> int:
             str(capture_dir),
         ],
         capture_output=True,
-        text=True,
         check=False,
     )
-    lines = completed.stdout.splitlines()
-    if completed.stderr or len(lines) != 1:
-        verdict = _base_verdict(
-            status="error",
-            error="replay binary must emit exactly one JSON object on stdout and no stderr",
-            run_id=manifest["capture_run_id"],
-            counts=counts,
+    stdout = _decode_child_stream(completed.stdout, "stdout")
+    stderr = _decode_child_stream(completed.stderr, "stderr")
+    lines = stdout.splitlines()
+    if stderr or len(lines) != 1:
+        raise WindowError(
+            "replay binary must emit exactly one JSON object on stdout and no stderr"
         )
-        verdict["replay_exit_code"] = completed.returncode
-        _emit(verdict)
-        return EXIT_INPUT
     try:
         replay = json.loads(lines[0])
     except json.JSONDecodeError as error:
-        verdict = _base_verdict(
-            status="error",
-            error=f"replay binary emitted invalid JSON: {error}",
-            run_id=manifest["capture_run_id"],
-            counts=counts,
-        )
-        verdict["replay_exit_code"] = completed.returncode
-        _emit(verdict)
-        return EXIT_INPUT
+        raise WindowError(f"replay binary emitted invalid JSON: {error}") from error
     if not isinstance(replay, dict):
-        verdict = _base_verdict(
-            status="error",
-            error="replay binary verdict must be one JSON object",
-            run_id=manifest["capture_run_id"],
-            counts=counts,
-        )
-        verdict["replay_exit_code"] = completed.returncode
-        _emit(verdict)
-        return EXIT_INPUT
+        raise WindowError("replay binary verdict must be one JSON object")
 
-    expected = {
-        "run_id": manifest["capture_run_id"],
-        "capture_count": counts["cycles"],
-        "evaluated_channel_count": counts["evaluations"],
-        "adjustment_count": counts["adjustments"],
-    }
-    inconsistencies = [
-        f"{field} expected {value!r}, got {replay.get(field)!r}"
-        for field, value in expected.items()
-        if replay.get(field) != value
-    ]
-    if inconsistencies:
-        verdict = _base_verdict(
-            status="error",
-            error="replay summary disagrees with frozen window: "
-            + "; ".join(inconsistencies),
-            run_id=manifest["capture_run_id"],
-            counts=counts,
-        )
-        verdict["replay_exit_code"] = completed.returncode
-        _emit(verdict)
-        return EXIT_INPUT
-
+    _validate_child_verdict(
+        replay, manifest, selected, counts, completed.returncode
+    )
     verdict = _base_verdict(
         status="error",
         error=replay.get("error"),
@@ -359,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     verdict["thresholds"] = thresholds
     verdict["replay_exit_code"] = completed.returncode
 
-    if completed.returncode == EXIT_EXACT and replay.get("mismatch_count") == 0:
+    if completed.returncode == EXIT_EXACT:
         verdict["status"] = "exact"
         verdict["error"] = None
         _emit(verdict)
@@ -368,15 +521,26 @@ def main(argv: list[str] | None = None) -> int:
         verdict["status"] = "mismatch"
         _emit(verdict)
         return EXIT_GATE_FAILED
-    if completed.returncode == EXIT_INPUT:
-        verdict["status"] = "error"
-        _emit(verdict)
-        return EXIT_INPUT
-
     verdict["status"] = "error"
-    verdict["error"] = f"replay binary returned unsupported exit code {completed.returncode}"
     _emit(verdict)
     return EXIT_INPUT
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return _run(list(sys.argv[1:] if argv is None else argv))
+    except Exception as error:
+        try:
+            message = str(error)
+        except Exception:
+            message = error.__class__.__name__
+        _emit(
+            _base_verdict(
+                status="error",
+                error=message or error.__class__.__name__,
+            )
+        )
+        return EXIT_INPUT
 
 
 if __name__ == "__main__":

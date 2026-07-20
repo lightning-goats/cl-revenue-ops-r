@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use std::env;
-use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -15,6 +16,7 @@ use serde::Serialize;
 const EXIT_EXACT: u8 = 0;
 const EXIT_MISMATCH: u8 = 1;
 const EXIT_INPUT: u8 = 2;
+const MAX_REPLAY_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug)]
 enum Mode {
@@ -32,6 +34,7 @@ struct FileResult {
     capture_seq: Option<u64>,
     evaluated_channel_count: u64,
     adjustment_count: u64,
+    mismatch_count: usize,
     error: Option<String>,
 }
 
@@ -43,6 +46,7 @@ impl FileResult {
             capture_seq: None,
             evaluated_channel_count: 0,
             adjustment_count: 0,
+            mismatch_count: 0,
             error: Some(error.into()),
         }
     }
@@ -126,7 +130,7 @@ fn run(mode: Mode) -> (u8, Verdict) {
 
 fn run_capture(path: PathBuf) -> (u8, Verdict) {
     match read_capture(&path) {
-        Ok(capture) => replay_captures(vec![(path, capture)], None),
+        Ok((capture, _bytes)) => replay_captures(vec![(path, capture)], None),
         Err(error) => (
             EXIT_INPUT,
             Verdict {
@@ -188,8 +192,13 @@ fn run_manifest(manifest_path: &Path, capture_dir: &Path) -> (u8, Verdict) {
             );
         }
     };
-    let mut captures = Vec::with_capacity(manifest.attempts.len());
+    let mut capture_paths = Vec::with_capacity(manifest.attempts.len());
+    let mut capture_values = Vec::with_capacity(manifest.attempts.len());
     let mut input_results = Vec::new();
+    let mut window_bytes = match checked_window_bytes(0, manifest_bytes.len()) {
+        Ok(bytes) => bytes,
+        Err(error) => return manifest_input_error(&manifest, error),
+    };
     for attempt in &manifest.attempts {
         let Some(filename) = attempt.filename.as_deref() else {
             let error = format!(
@@ -206,7 +215,14 @@ fn run_manifest(manifest_path: &Path, capture_dir: &Path) -> (u8, Verdict) {
             }
         };
         match read_capture(&path) {
-            Ok(capture) => captures.push((path, capture)),
+            Ok((capture, bytes)) => match checked_window_bytes(window_bytes, bytes) {
+                Ok(total) => {
+                    window_bytes = total;
+                    capture_paths.push(path);
+                    capture_values.push(capture);
+                }
+                Err(error) => input_results.push(FileResult::input_error(&path, error)),
+            },
             Err(error) => input_results.push(FileResult::input_error(&path, error)),
         }
     }
@@ -222,14 +238,13 @@ fn run_manifest(manifest_path: &Path, capture_dir: &Path) -> (u8, Verdict) {
         );
     }
 
-    let capture_values: Vec<_> = captures
-        .iter()
-        .map(|(_, capture)| capture.clone())
-        .collect();
     if let Err(error) = validate_capture_manifest(&manifest, &capture_values) {
         return manifest_input_error(&manifest, error.to_string());
     }
-    replay_captures(captures, Some(manifest.capture_run_id))
+    replay_captures(
+        capture_paths.into_iter().zip(capture_values).collect(),
+        Some(manifest.capture_run_id),
+    )
 }
 
 fn manifest_input_error(manifest: &FeeCaptureManifestV0, error: String) -> (u8, Verdict) {
@@ -264,26 +279,50 @@ fn confined_capture_path(canonical_dir: &Path, filename: &str) -> Result<PathBuf
     Ok(canonical)
 }
 
-fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
-    if !metadata.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
-    }
-    if metadata.len() > MAX_REPLAY_ENVELOPE_BYTES as u64 {
+fn read_to_limit(mut reader: impl Read, maximum: usize) -> Result<Vec<u8>, String> {
+    let limit =
+        u64::try_from(maximum).map_err(|_| "input byte limit does not fit u64".to_string())?;
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > maximum {
         return Err(format!(
-            "{} is {} bytes; maximum is {}",
-            path.display(),
-            metadata.len(),
-            MAX_REPLAY_ENVELOPE_BYTES
+            "input is at least {} bytes; maximum is {maximum}",
+            bytes.len()
         ));
     }
-    fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    Ok(bytes)
 }
 
-fn read_capture(path: &Path) -> Result<FeeCycleReplayV0, String> {
+fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    let file =
+        File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    read_to_limit(file, MAX_REPLAY_ENVELOPE_BYTES)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))
+}
+
+fn checked_window_bytes(current: u64, additional: usize) -> Result<u64, String> {
+    let additional = u64::try_from(additional)
+        .map_err(|_| "capture window byte count does not fit u64".to_string())?;
+    let total = current
+        .checked_add(additional)
+        .ok_or_else(|| "capture window aggregate byte count overflow".to_string())?;
+    if total > MAX_REPLAY_WINDOW_BYTES {
+        return Err(format!(
+            "capture window aggregate is {total} bytes; maximum is {MAX_REPLAY_WINDOW_BYTES}"
+        ));
+    }
+    Ok(total)
+}
+
+fn read_capture(path: &Path) -> Result<(FeeCycleReplayV0, usize), String> {
     let bytes = read_bounded(path)?;
+    let byte_count = bytes.len();
     parse_fee_capture(&bytes)
+        .map(|capture| (capture, byte_count))
         .map_err(|error| format!("invalid capture {}: {error}", path.display()))
 }
 
@@ -313,6 +352,7 @@ fn replay_captures(
                 capture_seq: Some(capture.capture_seq),
                 evaluated_channel_count: capture.completeness.evaluated_channels,
                 adjustment_count: adjustments,
+                mismatch_count: 0,
                 error: Some(error),
             });
             continue;
@@ -325,6 +365,7 @@ fn replay_captures(
                 capture_seq: Some(capture.capture_seq),
                 evaluated_channel_count: capture.completeness.evaluated_channels,
                 adjustment_count: adjustments,
+                mismatch_count: 0,
                 error: None,
             }),
             Err(error) if replay_error_is_input(&error) => {
@@ -335,6 +376,7 @@ fn replay_captures(
                     capture_seq: Some(capture.capture_seq),
                     evaluated_channel_count: capture.completeness.evaluated_channels,
                     adjustment_count: adjustments,
+                    mismatch_count: 0,
                     error: Some(error.to_string()),
                 });
             }
@@ -346,6 +388,7 @@ fn replay_captures(
                     capture_seq: Some(capture.capture_seq),
                     evaluated_channel_count: capture.completeness.evaluated_channels,
                     adjustment_count: adjustments,
+                    mismatch_count: 1,
                     error: Some(error.to_string()),
                 });
             }
@@ -418,5 +461,28 @@ fn replay_error_is_input(error: &ReplayError) -> bool {
                 || actual.contains("invalid:")
         }
         ReplayError::ValueMismatch { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn bounded_reader_consumes_at_most_limit_plus_one() {
+        let error = read_to_limit(Cursor::new(vec![0_u8; 9]), 8).unwrap_err();
+        assert!(error.contains("maximum is 8"), "{error}");
+    }
+
+    #[test]
+    fn aggregate_window_limit_rejects_overflow_and_excess() {
+        assert_eq!(
+            checked_window_bytes(MAX_REPLAY_WINDOW_BYTES - 1, 1).unwrap(),
+            MAX_REPLAY_WINDOW_BYTES
+        );
+        assert!(checked_window_bytes(MAX_REPLAY_WINDOW_BYTES, 1).is_err());
+        assert!(checked_window_bytes(u64::MAX, 1).is_err());
     }
 }

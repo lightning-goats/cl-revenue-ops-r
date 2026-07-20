@@ -109,9 +109,24 @@ def exact_child_result(run_id):
         "evaluated_channel_count": 100,
         "adjustment_count": 10,
         "mismatch_count": 0,
-        "results": [{"status": "exact"}] * 6,
+        "results": [],
         "error": None,
     }
+
+
+def exact_results(tmp_path: Path, cycles: int = 6):
+    return [
+        {
+            "file": str((tmp_path / f"capture-{sequence:08}.v0.json").resolve()),
+            "status": "exact",
+            "capture_seq": sequence,
+            "evaluated_channel_count": 17 if sequence <= 4 else 16,
+            "adjustment_count": 2 if sequence <= 4 else 1,
+            "mismatch_count": 0,
+            "error": None,
+        }
+        for sequence in range(1, cycles + 1)
+    ]
 
 
 def test_closed_qualified_window_invokes_explicit_local_binary_once(
@@ -126,8 +141,10 @@ def test_closed_qualified_window_invokes_explicit_local_binary_once(
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
+        child = exact_child_result(run_id)
+        child["results"] = exact_results(tmp_path)
         return subprocess.CompletedProcess(
-            args, 0, json.dumps(exact_child_result(run_id)) + "\n", ""
+            args, 0, (json.dumps(child) + "\n").encode(), b""
         )
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
@@ -154,7 +171,6 @@ def test_closed_qualified_window_invokes_explicit_local_binary_once(
     ]
     assert kwargs == {
         "capture_output": True,
-        "text": True,
         "check": False,
     }
     verdict = parse_one_json(capsys)
@@ -326,14 +342,17 @@ def test_replay_failure_is_forwarded_as_machine_json(
     replay_bin.write_text("#!/bin/false\n", encoding="utf-8")
     replay_bin.chmod(0o755)
     child = exact_child_result(run_id)
+    child["results"] = exact_results(tmp_path)
     child["mismatch_count"] = 1 if child_code == 1 else 0
     child["error"] = "fixture failure"
-    child["results"][0] = {"status": child_status}
+    child["results"][0]["status"] = child_status
+    child["results"][0]["mismatch_count"] = 1 if child_code == 1 else 0
+    child["results"][0]["error"] = "fixture failure"
     monkeypatch.setattr(
         runner.subprocess,
         "run",
         lambda args, **kwargs: subprocess.CompletedProcess(
-            args, child_code, json.dumps(child) + "\n", ""
+            args, child_code, (json.dumps(child) + "\n").encode(), b""
         ),
     )
 
@@ -373,3 +392,284 @@ def test_unknown_flags_including_live_surfaces_are_rejected(
     verdict = parse_one_json(capsys)
     assert verdict["status"] == "error"
     assert flag in verdict["error"]
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        None,
+        [],
+        {},
+        {"ordered_outcomes": None},
+        {"ordered_outcomes": "not-an-array"},
+    ],
+)
+def test_malformed_expected_shapes_are_machine_json_input_errors(
+    tmp_path, monkeypatch, capsys, expected
+):
+    runner = load_runner()
+    manifest, _ = make_window(tmp_path)
+    capture_path = tmp_path / "capture-00000001.v0.json"
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    capture["expected"] = expected
+    capture_path.write_text(json.dumps(capture), encoding="utf-8")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("malformed input must not invoke replay"),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            "/bin/false",
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert verdict["error"]
+
+
+@pytest.mark.parametrize("adjustment", [None, 1, "bad", [], True])
+def test_malformed_adjustment_values_are_not_counted_as_actual_adjustments(
+    tmp_path, monkeypatch, capsys, adjustment
+):
+    runner = load_runner()
+    manifest, _ = make_window(tmp_path)
+    capture_path = tmp_path / "capture-00000001.v0.json"
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    capture["expected"]["ordered_outcomes"][0] = {"adjustment": adjustment}
+    capture_path.write_text(json.dumps(capture), encoding="utf-8")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("malformed input must not invoke replay"),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            "/bin/false",
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert "adjustment" in verdict["error"]
+
+
+def test_child_launch_oserror_is_one_machine_json_error(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_runner()
+    manifest, _ = make_window(tmp_path)
+    replay_bin = tmp_path / "replay_fee_capture"
+    replay_bin.write_text("#!/bin/false\n", encoding="utf-8")
+    replay_bin.chmod(0o755)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("launch failed")),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            str(replay_bin),
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert "launch failed" in verdict["error"]
+
+
+def test_non_utf8_child_output_is_one_machine_json_error(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_runner()
+    manifest, _ = make_window(tmp_path)
+    replay_bin = tmp_path / "replay_fee_capture"
+    replay_bin.write_text("#!/bin/false\n", encoding="utf-8")
+    replay_bin.chmod(0o755)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, b"\xff\n", b""),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            str(replay_bin),
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert "UTF-8" in verdict["error"]
+
+
+def test_unexpected_parse_or_preflight_exception_is_one_machine_json_error(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_runner()
+    manifest, _ = make_window(tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_preflight",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("preflight bug")),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            "/bin/false",
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert "preflight bug" in verdict["error"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "needle"),
+    [
+        (lambda child: child.update(commit=""), "commit"),
+        (lambda child: child.update(commit=None), "commit"),
+        (lambda child: child.update(error="impossible exact error"), "error"),
+        (lambda child: child.update(run_id="wrong"), "run_id"),
+        (lambda child: child.update(capture_count=5), "capture_count"),
+        (
+            lambda child: child.update(evaluated_channel_count=99),
+            "evaluated_channel_count",
+        ),
+        (lambda child: child.update(adjustment_count=9), "adjustment_count"),
+        (lambda child: child.update(results=None), "results"),
+        (lambda child: child["results"].pop(), "results"),
+        (
+            lambda child: child["results"].append(dict(child["results"][0])),
+            "results",
+        ),
+        (
+            lambda child: child["results"][0].update(
+                file=child["results"][1]["file"]
+            ),
+            "results",
+        ),
+        (
+            lambda child: child["results"][0].update(capture_seq=True),
+            "capture_seq",
+        ),
+        (lambda child: child["results"][0].update(status="mismatch"), "status"),
+        (
+            lambda child: child["results"][0].update(mismatch_count=1),
+            "mismatch",
+        ),
+    ],
+)
+def test_incomplete_or_wrong_success_verdict_cannot_pass(
+    tmp_path, monkeypatch, capsys, mutation, needle
+):
+    runner = load_runner()
+    manifest, run_id = make_window(tmp_path)
+    replay_bin = tmp_path / "replay_fee_capture"
+    replay_bin.write_text("#!/bin/false\n", encoding="utf-8")
+    replay_bin.chmod(0o755)
+    child = exact_child_result(run_id)
+    child["results"] = exact_results(tmp_path)
+    mutation(child)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 0, (json.dumps(child) + "\n").encode(), b""
+        ),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            str(replay_bin),
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert needle in verdict["error"]
+
+
+@pytest.mark.parametrize("kind", ["manifest", "capture", "aggregate"])
+def test_named_byte_limits_fail_closed_before_replay(
+    tmp_path, monkeypatch, capsys, kind
+):
+    runner = load_runner()
+    manifest, _ = make_window(tmp_path)
+    if kind == "manifest":
+        monkeypatch.setattr(
+            runner, "MAX_MANIFEST_BYTES", manifest.stat().st_size - 1
+        )
+    elif kind == "capture":
+        first_capture = tmp_path / "capture-00000001.v0.json"
+        monkeypatch.setattr(
+            runner, "MAX_CAPTURE_BYTES", first_capture.stat().st_size - 1
+        )
+    else:
+        total = sum(
+            (tmp_path / f"capture-{sequence:08}.v0.json").stat().st_size
+            for sequence in range(1, 7)
+        )
+        monkeypatch.setattr(runner, "MAX_SELECTED_WINDOW_BYTES", total - 1)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("oversize input must not invoke replay"),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            "/bin/false",
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert "maximum" in verdict["error"] or "aggregate" in verdict["error"]

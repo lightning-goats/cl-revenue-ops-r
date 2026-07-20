@@ -57,6 +57,7 @@ fn single_capture_reports_one_exact_machine_result() {
     assert_eq!(verdict["mismatch_count"], json!(0));
     assert_eq!(verdict["results"].as_array().unwrap().len(), 1);
     assert_eq!(verdict["results"][0]["status"], json!("exact"));
+    assert_eq!(verdict["results"][0]["mismatch_count"], json!(0));
     assert_eq!(verdict["results"][0]["capture_seq"], json!(1));
     assert_eq!(verdict["results"][0]["evaluated_channel_count"], json!(1));
     assert_eq!(verdict["results"][0]["adjustment_count"], json!(1));
@@ -78,6 +79,7 @@ fn replay_value_mismatch_exits_one_and_is_reported_as_parity() {
     assert_eq!(verdict["capture_count"], json!(1));
     assert_eq!(verdict["mismatch_count"], json!(1));
     assert_eq!(verdict["results"][0]["status"], json!("mismatch"));
+    assert_eq!(verdict["results"][0]["mismatch_count"], json!(1));
     assert!(verdict["results"][0]["error"]
         .as_str()
         .unwrap()
