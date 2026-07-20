@@ -910,6 +910,321 @@ pub fn load_cycle_state(env: &V2StateEnvelope, _row: &FeeStrategyRow) -> Channel
     state
 }
 
+const REPLAY_CYCLE_KEYS: &[&str] = &[
+    "last_revenue_rate",
+    "last_fee_ppm",
+    "trend_direction",
+    "step_ppm",
+    "last_update",
+    "last_broadcast_at",
+    "consecutive_same_direction",
+    "is_sleeping",
+    "sleep_until",
+    "stable_cycles",
+    "last_broadcast_fee_ppm",
+    "last_state",
+    "forward_count_since_update",
+    "last_volume_sats",
+    "congestion_active",
+    "congestion_quiet_cycles",
+    "congestion_entry_fee_ppm",
+    "pending_target_ppm",
+    "last_gossip_refresh",
+    "dynamic_htlcmin_baseline_msat",
+];
+const REPLAY_FEE_KEYS: &[&str] = &[
+    "algorithm_version",
+    "thompson",
+    "last_revenue_rate",
+    "last_fee_ppm",
+    "last_broadcast_fee_ppm",
+    "last_update",
+    "last_broadcast_at",
+    "last_state",
+    "is_sleeping",
+    "sleep_until",
+    "stable_cycles",
+    "forward_count_since_update",
+    "last_volume_sats",
+    "last_gossip_refresh",
+    "last_vegas_multiplier",
+    "pid",
+    "last_fee_profile",
+    "last_context_key",
+    "last_time_bucket",
+    "last_corridor_role",
+    "last_contextual_sample_used",
+    "dynamic_htlcmin_baseline_msat",
+];
+const REPLAY_PID_KEYS: &[&str] = &[
+    "kp",
+    "ki",
+    "kd",
+    "ewma_error",
+    "integral_error",
+    "prev_ewma_error",
+    "last_update_time",
+    "integral_clamp",
+];
+const REPLAY_THOMPSON_KEYS: &[&str] = &[
+    "prior_mean_fee",
+    "prior_std_fee",
+    "observations",
+    "posterior_mean",
+    "posterior_std",
+    "posterior_coeffs",
+    "posterior_precision",
+    "noise_variance",
+    "contextual_posteriors",
+    "posterior_bias",
+    "charged_fee_mean",
+    "zero_revenue_streak",
+    "zero_run_start_fee",
+    "zero_run_start_ts",
+    "positive_rate_ref",
+    "positive_rate_ref_ts",
+    "meaningful_gap_ema_hours",
+    "last_meaningful_ts",
+    "last_upward_probe_ts",
+    "exploration_boost",
+    "last_sampled_fee",
+    "last_sample_time",
+    "reseeded_at",
+];
+
+fn replay_require_fields(value: &OValue, path: &str, keys: &[&str]) -> Result<(), String> {
+    let OValue::Obj(entries) = value else {
+        return Err(format!("{path} must be an object"));
+    };
+    for (key, _) in entries {
+        if !keys.contains(&key.as_str()) {
+            return Err(format!("{path}.{key} is an unknown state field"));
+        }
+    }
+    for key in keys {
+        if !entries.iter().any(|(actual, _)| actual == key) {
+            return Err(format!("{path}.{key} is required"));
+        }
+    }
+    Ok(())
+}
+
+fn replay_i64(value: &OValue, path: &str, key: &str) -> Result<i64, String> {
+    value
+        .get(key)
+        .and_then(OValue::as_i64)
+        .ok_or_else(|| format!("{path}.{key} must be an integer"))
+}
+fn replay_f64(value: &OValue, path: &str, key: &str) -> Result<f64, String> {
+    value
+        .get(key)
+        .and_then(OValue::as_f64)
+        .ok_or_else(|| format!("{path}.{key} must be a tagged float"))
+}
+fn replay_bool(value: &OValue, path: &str, key: &str) -> Result<bool, String> {
+    match value.get(key) {
+        Some(OValue::Bool(v)) => Ok(*v),
+        _ => Err(format!("{path}.{key} must be a boolean")),
+    }
+}
+fn replay_str(value: &OValue, path: &str, key: &str) -> Result<String, String> {
+    value
+        .get(key)
+        .and_then(OValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("{path}.{key} must be a string"))
+}
+fn replay_opt_i64(value: &OValue, path: &str, key: &str) -> Result<Option<i64>, String> {
+    match value.get(key) {
+        Some(OValue::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("{path}.{key} must be integer or null")),
+        None => Err(format!("{path}.{key} is required")),
+    }
+}
+
+/// Strict replay-only import from the authority's captured dataclass shapes.
+/// Validation happens before the proven Thompson/PID decoders, so they never
+/// supply a missing field or retain an unknown one during replay.
+pub fn replay_import_channel_state(
+    cycle_value: &OValue,
+    fee_value: &OValue,
+    path: &str,
+) -> Result<(ChannelCycleState, ChannelFeeState), String> {
+    let cycle_path = format!("{path}.cycle_state");
+    let fee_path = format!("{path}.fee_state");
+    replay_require_fields(cycle_value, &cycle_path, REPLAY_CYCLE_KEYS)?;
+    replay_require_fields(fee_value, &fee_path, REPLAY_FEE_KEYS)?;
+    let thompson = fee_value
+        .get("thompson")
+        .ok_or_else(|| format!("{fee_path}.thompson is required"))?;
+    let pid_value = fee_value
+        .get("pid")
+        .ok_or_else(|| format!("{fee_path}.pid is required"))?;
+    replay_require_fields(
+        thompson,
+        &format!("{fee_path}.thompson"),
+        REPLAY_THOMPSON_KEYS,
+    )?;
+    replay_require_fields(pid_value, &format!("{fee_path}.pid"), REPLAY_PID_KEYS)?;
+
+    let mut cycle = ChannelCycleState {
+        last_revenue_rate: replay_f64(cycle_value, &cycle_path, "last_revenue_rate")?,
+        last_fee_ppm: replay_i64(cycle_value, &cycle_path, "last_fee_ppm")?,
+        trend_direction: replay_i64(cycle_value, &cycle_path, "trend_direction")?,
+        step_ppm: replay_i64(cycle_value, &cycle_path, "step_ppm")?,
+        last_update: replay_i64(cycle_value, &cycle_path, "last_update")?,
+        last_broadcast_at: replay_i64(cycle_value, &cycle_path, "last_broadcast_at")?,
+        consecutive_same_direction: replay_i64(
+            cycle_value,
+            &cycle_path,
+            "consecutive_same_direction",
+        )?,
+        is_sleeping: replay_bool(cycle_value, &cycle_path, "is_sleeping")?,
+        sleep_until: replay_i64(cycle_value, &cycle_path, "sleep_until")?,
+        stable_cycles: replay_i64(cycle_value, &cycle_path, "stable_cycles")?,
+        last_broadcast_fee_ppm: replay_i64(cycle_value, &cycle_path, "last_broadcast_fee_ppm")?,
+        last_state: replay_str(cycle_value, &cycle_path, "last_state")?,
+        forward_count_since_update: replay_i64(
+            cycle_value,
+            &cycle_path,
+            "forward_count_since_update",
+        )?,
+        last_volume_sats: replay_i64(cycle_value, &cycle_path, "last_volume_sats")?,
+        congestion_active: replay_bool(cycle_value, &cycle_path, "congestion_active")?,
+        congestion_quiet_cycles: replay_i64(cycle_value, &cycle_path, "congestion_quiet_cycles")?,
+        congestion_entry_fee_ppm: replay_i64(cycle_value, &cycle_path, "congestion_entry_fee_ppm")?,
+        pending_target_ppm: replay_i64(cycle_value, &cycle_path, "pending_target_ppm")?,
+        last_gossip_refresh: replay_i64(cycle_value, &cycle_path, "last_gossip_refresh")?,
+        dynamic_htlcmin_baseline_msat: replay_opt_i64(
+            cycle_value,
+            &cycle_path,
+            "dynamic_htlcmin_baseline_msat",
+        )?,
+        explicit_shared: HashSet::new(),
+    };
+    cycle.clear_explicit_shared_fields();
+
+    let mut fee = ChannelFeeState {
+        thompson: gts_from_dict(thompson),
+        last_revenue_rate: replay_f64(fee_value, &fee_path, "last_revenue_rate")?,
+        last_fee_ppm: replay_i64(fee_value, &fee_path, "last_fee_ppm")?,
+        last_broadcast_fee_ppm: replay_i64(fee_value, &fee_path, "last_broadcast_fee_ppm")?,
+        last_update: replay_i64(fee_value, &fee_path, "last_update")?,
+        last_broadcast_at: replay_i64(fee_value, &fee_path, "last_broadcast_at")?,
+        last_state: replay_str(fee_value, &fee_path, "last_state")?,
+        is_sleeping: replay_bool(fee_value, &fee_path, "is_sleeping")?,
+        sleep_until: replay_i64(fee_value, &fee_path, "sleep_until")?,
+        stable_cycles: replay_i64(fee_value, &fee_path, "stable_cycles")?,
+        forward_count_since_update: replay_i64(fee_value, &fee_path, "forward_count_since_update")?,
+        last_volume_sats: replay_i64(fee_value, &fee_path, "last_volume_sats")?,
+        algorithm_version: replay_str(fee_value, &fee_path, "algorithm_version")?,
+        last_gossip_refresh: replay_i64(fee_value, &fee_path, "last_gossip_refresh")?,
+        last_vegas_multiplier: replay_f64(fee_value, &fee_path, "last_vegas_multiplier")?,
+        pid: pid::pid_from_dict(pid_value),
+        last_fee_profile: replay_str(fee_value, &fee_path, "last_fee_profile")?,
+        last_context_key: replay_str(fee_value, &fee_path, "last_context_key")?,
+        last_time_bucket: replay_str(fee_value, &fee_path, "last_time_bucket")?,
+        last_corridor_role: replay_str(fee_value, &fee_path, "last_corridor_role")?,
+        last_contextual_sample_used: replay_bool(
+            fee_value,
+            &fee_path,
+            "last_contextual_sample_used",
+        )?,
+        dynamic_htlcmin_baseline_msat: replay_opt_i64(
+            fee_value,
+            &fee_path,
+            "dynamic_htlcmin_baseline_msat",
+        )?,
+        explicit_shared: HashSet::new(),
+    };
+    fee.clear_explicit_shared_fields();
+    Ok((cycle, fee))
+}
+
+/// Exact authority capture shape for post-state comparison.
+pub fn fee_state_to_capture_value(s: &ChannelFeeState) -> OValue {
+    let thompson = match gts_to_dict(&s.thompson) {
+        OValue::Obj(entries) => OValue::obj(
+            entries
+                .into_iter()
+                .filter(|(key, _)| REPLAY_THOMPSON_KEYS.contains(&key.as_str()))
+                .collect(),
+        ),
+        _ => unreachable!("gts_to_dict always returns an object"),
+    };
+    OValue::obj(vec![
+        ("thompson".to_string(), thompson),
+        (
+            "last_revenue_rate".to_string(),
+            OValue::Float(s.last_revenue_rate),
+        ),
+        ("last_fee_ppm".to_string(), OValue::Int(s.last_fee_ppm)),
+        (
+            "last_broadcast_fee_ppm".to_string(),
+            OValue::Int(s.last_broadcast_fee_ppm),
+        ),
+        ("last_update".to_string(), OValue::Int(s.last_update)),
+        (
+            "last_broadcast_at".to_string(),
+            OValue::Int(s.last_broadcast_at),
+        ),
+        ("last_state".to_string(), OValue::str(s.last_state.clone())),
+        ("is_sleeping".to_string(), OValue::Bool(s.is_sleeping)),
+        ("sleep_until".to_string(), OValue::Int(s.sleep_until)),
+        ("stable_cycles".to_string(), OValue::Int(s.stable_cycles)),
+        (
+            "forward_count_since_update".to_string(),
+            OValue::Int(s.forward_count_since_update),
+        ),
+        (
+            "last_volume_sats".to_string(),
+            OValue::Int(s.last_volume_sats),
+        ),
+        (
+            "algorithm_version".to_string(),
+            OValue::str(s.algorithm_version.clone()),
+        ),
+        (
+            "last_gossip_refresh".to_string(),
+            OValue::Int(s.last_gossip_refresh),
+        ),
+        (
+            "last_vegas_multiplier".to_string(),
+            OValue::Float(s.last_vegas_multiplier),
+        ),
+        ("pid".to_string(), pid::pid_to_dict(&s.pid)),
+        (
+            "last_fee_profile".to_string(),
+            OValue::str(s.last_fee_profile.clone()),
+        ),
+        (
+            "last_context_key".to_string(),
+            OValue::str(s.last_context_key.clone()),
+        ),
+        (
+            "last_time_bucket".to_string(),
+            OValue::str(s.last_time_bucket.clone()),
+        ),
+        (
+            "last_corridor_role".to_string(),
+            OValue::str(s.last_corridor_role.clone()),
+        ),
+        (
+            "last_contextual_sample_used".to_string(),
+            OValue::Bool(s.last_contextual_sample_used),
+        ),
+        (
+            "dynamic_htlcmin_baseline_msat".to_string(),
+            s.dynamic_htlcmin_baseline_msat
+                .map(OValue::Int)
+                .unwrap_or(OValue::Null),
+        ),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // build_merged_row: `_build_merged_fee_strategy_row` (py 3743-3873).
 // ---------------------------------------------------------------------------

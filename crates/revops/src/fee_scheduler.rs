@@ -138,7 +138,7 @@ use revops_fees::cycle::{
     ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot, FixedDecisionClock,
     StateSink,
 };
-use revops_fees::execution::GovernedFeeAuthorizer;
+use revops_fees::execution::{GovernedFeeAuthorizer, PureFeeExecutor};
 use revops_fees::journal::Journal;
 use revops_fees::profiles::fee_profile;
 use revops_fees::pyrand::PyRandom;
@@ -643,12 +643,14 @@ impl CycleOwner {
         // logged loudly. Step (7) below is the single, loud append.
         let governed = self.governor.governed_deps(&prepared.cfg);
         let authorizer = GovernedFeeAuthorizer::new(&governed);
+        let executor = PureFeeExecutor;
         let mut deps = CycleDeps {
             evidence: &snapshot,
             cfg: &prepared.cfg,
             rng: &mut self.rng,
             clock: decision_clock,
             authorizer: Some(&authorizer),
+            executor: &executor,
             journal: None,
             state_sink: self.state_sink.as_ref().map(|s| s as &dyn StateSink),
             min_competitors,

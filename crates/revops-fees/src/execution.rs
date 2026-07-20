@@ -20,6 +20,7 @@ use revops_econ::types::{EconResult, Micro, Msat, SignedMsat, UnixTime};
 use serde_json::{json, Value};
 
 use crate::cycle::FeeCfgSnapshot;
+use crate::pyjson::OValue;
 use crate::pyrand::DecisionInputError;
 
 /// `FeeController.ABS_MIN_FEE_PPM` (py 2917).
@@ -50,6 +51,40 @@ pub struct SetFeeDecision {
     /// The frozen `FEE_LIMIT:` warn line, byte-exact with py 7683-7687,
     /// emitted only when the clamp changed the requested fee.
     pub clamp_log: Option<String>,
+}
+
+/// One in-kernel fee execution request. `wire_request` is the exact Python
+/// `set_channel_fee` kwargs object captured at the observational boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeeExecutionRequest {
+    pub decision: SetFeeRequest,
+    pub wire_request: OValue,
+}
+
+/// Strict execution boundary used by production dry-run and offline replay.
+pub trait FeeExecutor {
+    fn execute(
+        &self,
+        request: &FeeExecutionRequest,
+        cfg: &FeeCfgSnapshot,
+        policy: Option<&PeerPolicy>,
+    ) -> Result<SetFeeDecision, DecisionInputError>;
+}
+
+/// Production-safe adapter: preserves the existing pure decision semantics.
+/// It has no RPC handle and cannot perform a live action.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PureFeeExecutor;
+
+impl FeeExecutor for PureFeeExecutor {
+    fn execute(
+        &self,
+        request: &FeeExecutionRequest,
+        cfg: &FeeCfgSnapshot,
+        policy: Option<&PeerPolicy>,
+    ) -> Result<SetFeeDecision, DecisionInputError> {
+        Ok(decide_set_channel_fee(&request.decision, cfg, policy))
+    }
 }
 
 /// `set_channel_fee` (py 7627-7923) as a PURE decision: the ABS clamp

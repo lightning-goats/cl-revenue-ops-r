@@ -14,7 +14,6 @@
 
 use revops::fee_evidence::{build_evidence_snapshot, prefetch_rpc, EvidenceSnapshot, RpcPrefetch};
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
-use revops_fees::cycle::FeeEvidence;
 use revops_fees::floors::{FlowWindow, PeerLatency};
 use rusqlite::Connection;
 use serde_json::{json, Value};

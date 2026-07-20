@@ -32,14 +32,18 @@ fn parse_value(
 }
 
 fn valid_manifest_value() -> Value {
+    let capture = fixture_value();
+    let capture_run_id = capture["capture_run_id"].as_str().expect("fixture run id");
+    let cycle_id = capture["cycle_id"].as_str().expect("fixture cycle id");
+    let started_at = capture["started_at"].as_str().expect("fixture start");
     json!({
         "schema_name": "fee_cycle_capture_manifest",
         "schema_version": 0,
-        "capture_run_id": "run-a",
+        "capture_run_id": capture_run_id,
         "state": "closed",
         "queue_drained": true,
-        "started_at": "2026-07-19T00:00:00+00:00",
-        "updated_at": "2026-07-19T01:00:00+00:00",
+        "started_at": started_at,
+        "updated_at": started_at,
         "attempted": 1,
         "completed": 1,
         "failed": 0,
@@ -51,10 +55,10 @@ fn valid_manifest_value() -> Value {
         "last_error_category": null,
         "attempts": [{
             "capture_seq": 1,
-            "cycle_id": "run-a:00000001",
+            "cycle_id": cycle_id,
             "status": "completed",
             "eligible": true,
-            "filename": "run-a-00000001-run-a:00000001.json",
+            "filename": format!("{capture_run_id}-00000001-{cycle_id}.json"),
             "bytes": COMPLETE_SKIP.len()
         }]
     })
@@ -70,10 +74,13 @@ fn parses_real_python_sealed_complete_skip_fixture() {
 
     assert_eq!(capture.schema_name, REPLAY_SCHEMA_NAME);
     assert_eq!(capture.schema_version, REPLAY_SCHEMA_VERSION);
-    assert_eq!(capture.started_at, "2026-07-19T00:00:00+00:00");
     assert_eq!(
-        capture.configuration.get("depletion_threshold"),
-        Some(&WireValue::TaggedFloat("0.9500000000000001".to_string()))
+        capture.producer.get("started_at"),
+        Some(&WireValue::String(capture.started_at.clone()))
+    );
+    assert_eq!(
+        capture.configuration.get("capex_exploration_rate"),
+        Some(&WireValue::TaggedFloat("0.1".to_string()))
     );
 }
 
@@ -157,7 +164,7 @@ fn rejects_missing_invalid_and_tampered_payload_digest() {
 #[test]
 fn rejects_untagged_json_float_before_digest_verification() {
     let mut value = fixture_value();
-    value["configuration"]["depletion_threshold"] = json!(0.5);
+    value["configuration"]["capex_exploration_rate"] = json!(0.5);
 
     let error = parse_value(&value).expect_err("untagged float must fail closed");
     assert!(error.to_string().contains("untagged JSON float"), "{error}");
@@ -167,13 +174,13 @@ fn rejects_untagged_json_float_before_digest_verification() {
 fn rejects_non_finite_noncanonical_and_extra_key_tagged_floats() {
     for rendered in ["nan", "inf", "-inf", "NaN", "1"] {
         let mut value = fixture_value();
-        value["configuration"]["depletion_threshold"] = json!({"__f__": rendered});
+        value["configuration"]["capex_exploration_rate"] = json!({"__f__": rendered});
         let error = parse_value(&value).expect_err("invalid tagged float must fail closed");
         assert!(error.to_string().contains("tagged float"), "{error}");
     }
 
     let mut extra = fixture_value();
-    extra["configuration"]["depletion_threshold"] = json!({"__f__": "0.5", "unexpected": true});
+    extra["configuration"]["capex_exploration_rate"] = json!({"__f__": "0.5", "unexpected": true});
     let error = parse_value(&extra).expect_err("tagged-float extra keys must fail closed");
     assert!(error.to_string().contains("tagged float"), "{error}");
 }
@@ -249,7 +256,7 @@ fn rejects_manifest_that_is_not_closed_drained_and_lossless() {
 #[test]
 fn rejects_manifest_capture_from_another_run() {
     let mut capture = parse_fee_capture(COMPLETE_SKIP).expect("fixture must parse");
-    capture.capture_run_id = "run-b".to_string();
+    capture.capture_run_id = "other-run".to_string();
     let manifest = manifest_from(valid_manifest_value());
 
     let error = validate_capture_manifest(&manifest, &[capture])
@@ -262,7 +269,10 @@ fn rejects_nonconsecutive_manifest_capture_sequence() {
     let first = parse_fee_capture(COMPLETE_SKIP).expect("fixture must parse");
     let mut third = first.clone();
     third.capture_seq = 3;
-    third.cycle_id = "run-a:00000003".to_string();
+    third.cycle_id = format!("{}:00000003", first.capture_run_id);
+    let capture_run_id = first.capture_run_id.clone();
+    let first_cycle_id = first.cycle_id.clone();
+    let third_cycle_id = third.cycle_id.clone();
     let mut value = valid_manifest_value();
     value["attempted"] = json!(3);
     value["completed"] = json!(3);
@@ -272,18 +282,18 @@ fn rejects_nonconsecutive_manifest_capture_sequence() {
     value["attempts"] = json!([
         {
             "capture_seq": 1,
-            "cycle_id": "run-a:00000001",
+            "cycle_id": first_cycle_id,
             "status": "completed",
             "eligible": true,
-            "filename": "run-a-00000001-run-a:00000001.json",
+            "filename": format!("{capture_run_id}-00000001-{}.json", first.cycle_id),
             "bytes": COMPLETE_SKIP.len()
         },
         {
             "capture_seq": 3,
-            "cycle_id": "run-a:00000003",
+            "cycle_id": third_cycle_id,
             "status": "completed",
             "eligible": true,
-            "filename": "run-a-00000003-run-a:00000003.json",
+            "filename": format!("{capture_run_id}-00000003-{}.json", third.cycle_id),
             "bytes": COMPLETE_SKIP.len()
         }
     ]);

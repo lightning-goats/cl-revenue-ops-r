@@ -32,7 +32,7 @@ use revops_fees::cycle::{
 };
 use revops_fees::execution::{
     decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, FeeAuthorizationRequest,
-    FeeAuthorizationResult, FeeAuthorizer, GovernedDeps, SetFeeRequest,
+    FeeAuthorizationResult, FeeAuthorizer, GovernedDeps, PureFeeExecutor, SetFeeRequest,
 };
 use revops_fees::floors::{ChainCosts, FlowWindow, PeerLatency, RebalanceCostSample};
 use revops_fees::journal::{FeeDecision, Journal};
@@ -41,6 +41,8 @@ use revops_fees::pid::pid_to_dict;
 use revops_fees::pyjson::{dumps_python, parse, OValue};
 use revops_fees::pyrand::{DecisionInputError, PyRandom};
 use revops_fees::thompson::serde::gts_from_dict;
+
+const PURE_EXECUTOR: PureFeeExecutor = PureFeeExecutor;
 
 fn fixture_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../fixtures/fees/{rel}"))
@@ -163,7 +165,7 @@ impl FixtureEvidence {
     }
 }
 
-impl FeeEvidence for FixtureEvidence {
+impl FixtureEvidence {
     fn our_node_id(&self) -> String {
         self.our_id.clone()
     }
@@ -591,6 +593,7 @@ fn cycle_scenarios_replay_bit_for_bit() {
                     rng: &mut rng,
                     clock: &mut clock,
                     authorizer: None,
+                    executor: &PURE_EXECUTOR,
                     journal: None,
                     state_sink: None,
                     min_competitors,
@@ -1026,7 +1029,7 @@ struct SyntheticEvidence {
     passive_peer: String,
 }
 
-impl FeeEvidence for SyntheticEvidence {
+impl SyntheticEvidence {
     fn our_node_id(&self) -> String {
         "02".to_string() + &"aa".repeat(32)
     }
@@ -1078,6 +1081,9 @@ impl FeeEvidence for SyntheticEvidence {
     }
     fn marginal_roi_percent(&self, _channel_id: &str) -> Option<f64> {
         None
+    }
+    fn temporary_overlay_active(&self, _channel_id: &str) -> bool {
+        false
     }
 }
 
@@ -1249,6 +1255,7 @@ fn run_fixture_case(case: &mut FixtureCycleCase, clock: &mut dyn DecisionClock) 
         rng: &mut case.rng,
         clock,
         authorizer: None,
+        executor: &PURE_EXECUTOR,
         journal: None,
         state_sink: None,
         min_competitors: case.min_competitors,
@@ -1504,6 +1511,7 @@ fn three_channel_synthetic_cycle_end_to_end() {
             rng: &mut rng,
             clock: &mut clock,
             authorizer: Some(&authorizer),
+            executor: &PURE_EXECUTOR,
             journal: Some(&journal),
             state_sink: Some(&sink),
             // No gossip in `SyntheticEvidence` (`gossip_channels` returns
@@ -1657,6 +1665,7 @@ fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String
             rng: &mut rng,
             clock: &mut clock,
             authorizer: None,
+            executor: &PURE_EXECUTOR,
             journal: None,
             state_sink: None,
             min_competitors: revops_fees::market::MIN_COMPETITORS,
@@ -1744,6 +1753,7 @@ fn skip_gate_bootstrap_marks_channel_non_comparable() {
             rng: &mut rng,
             clock: &mut clock,
             authorizer: None,
+            executor: &PURE_EXECUTOR,
             journal: None,
             state_sink: None,
             min_competitors: revops_fees::market::MIN_COMPETITORS,
@@ -1764,3 +1774,95 @@ fn skip_gate_bootstrap_marks_channel_non_comparable() {
         "a bootstrap channel (no cached prior) must be flagged non-comparable in its trace"
     );
 }
+
+macro_rules! wrap_test_evidence {
+    ($ty:ty) => {
+        impl FeeEvidence for $ty {
+            fn our_node_id(&self) -> Result<String, DecisionInputError> {
+                Ok(Self::our_node_id(self))
+            }
+            fn channel_states(&self) -> Result<Vec<ChannelStateRow>, DecisionInputError> {
+                Ok(Self::channel_states(self))
+            }
+            fn channels_info(&self) -> Result<BTreeMap<String, ChannelInfo>, DecisionInputError> {
+                Ok(Self::channels_info(self))
+            }
+            fn chain_costs(&self) -> Result<Option<ChainCosts>, DecisionInputError> {
+                Ok(Self::chain_costs(self))
+            }
+            fn volume_since(
+                &self,
+                channel_id: &str,
+                since: i64,
+            ) -> Result<i64, DecisionInputError> {
+                Ok(Self::volume_since(self, channel_id, since))
+            }
+            fn forward_count_since(
+                &self,
+                channel_id: &str,
+                since: i64,
+            ) -> Result<i64, DecisionInputError> {
+                Ok(Self::forward_count_since(self, channel_id, since))
+            }
+            fn exploration_flag(&self, channel_id: &str) -> Result<bool, DecisionInputError> {
+                Ok(Self::exploration_flag(self, channel_id))
+            }
+            fn clear_exploration_flag(&self, channel_id: &str) -> Result<(), DecisionInputError> {
+                Self::clear_exploration_flag(self, channel_id);
+                Ok(())
+            }
+            fn gossip_channels(&self, peer_id: &str) -> Result<Vec<GossipRow>, DecisionInputError> {
+                Ok(Self::gossip_channels(self, peer_id))
+            }
+            fn peer_latency(
+                &self,
+                peer_id: &str,
+            ) -> Result<Option<PeerLatency>, DecisionInputError> {
+                Ok(Self::peer_latency(self, peer_id))
+            }
+            fn channel_cost_history(
+                &self,
+                channel_id: &str,
+                since: i64,
+            ) -> Result<Vec<RebalanceCostSample>, DecisionInputError> {
+                Ok(Self::channel_cost_history(self, channel_id, since))
+            }
+            fn peer_fee_history(
+                &self,
+                peer_id: &str,
+            ) -> Result<Option<PeerFeeHistory>, DecisionInputError> {
+                Ok(Self::peer_fee_history(self, peer_id))
+            }
+            fn last_forward_time(
+                &self,
+                channel_id: &str,
+            ) -> Result<Option<i64>, DecisionInputError> {
+                Ok(Self::last_forward_time(self, channel_id))
+            }
+            fn flow_window(
+                &self,
+                channel_id: &str,
+            ) -> Result<Option<FlowWindow>, DecisionInputError> {
+                Ok(Self::flow_window(self, channel_id))
+            }
+            fn policy(&self, peer_id: &str) -> Result<Option<PeerPolicy>, DecisionInputError> {
+                Ok(Self::policy(self, peer_id))
+            }
+            fn marginal_roi_percent(
+                &self,
+                channel_id: &str,
+            ) -> Result<Option<f64>, DecisionInputError> {
+                Ok(Self::marginal_roi_percent(self, channel_id))
+            }
+            fn temporary_overlay_active(
+                &self,
+                channel_id: &str,
+            ) -> Result<bool, DecisionInputError> {
+                Ok(Self::temporary_overlay_active(self, channel_id))
+            }
+        }
+    };
+}
+
+wrap_test_evidence!(FixtureEvidence);
+wrap_test_evidence!(SyntheticEvidence);
