@@ -42,7 +42,10 @@ use std::collections::HashSet;
 use crate::pid::{self, PidState};
 use crate::pyjson::OValue;
 use crate::thompson::serde::{gts_from_dict, gts_to_dict};
-use crate::thompson::{CtxPosterior, GaussianThompsonState, Observation};
+use crate::thompson::{
+    CtxPosterior, GaussianThompsonState, Observation, EXPLORATION_BOOST_MAX, EXPLORATION_BOOST_MIN,
+    MAX_BIAS_NUDGES,
+};
 
 /// `FeeController.ABS_MAX_FEE_PPM` (py 2918): hard absolute ceiling used to
 /// sanitize a poisoned/out-of-range persisted `pending_target_ppm` /
@@ -1072,6 +1075,76 @@ fn replay_integer(value: &OValue, path: &str) -> Result<i64, String> {
     }
 }
 
+fn replay_positive_number(value: &OValue, path: &str) -> Result<(f64, bool), String> {
+    let decoded = replay_number(value, path)?;
+    if decoded.0 <= 0.0 {
+        return Err(format!("{path} must be positive"));
+    }
+    Ok(decoded)
+}
+
+fn replay_nonnegative_number(value: &OValue, path: &str) -> Result<(f64, bool), String> {
+    let decoded = replay_number(value, path)?;
+    if decoded.0 < 0.0 {
+        return Err(format!("{path} must be nonnegative"));
+    }
+    Ok(decoded)
+}
+
+fn replay_positive_float(value: &OValue, path: &str) -> Result<f64, String> {
+    let decoded = replay_float(value, path)?;
+    if decoded <= 0.0 {
+        return Err(format!("{path} must be positive"));
+    }
+    Ok(decoded)
+}
+
+fn replay_nonnegative_float(value: &OValue, path: &str) -> Result<f64, String> {
+    let decoded = replay_float(value, path)?;
+    if decoded < 0.0 {
+        return Err(format!("{path} must be nonnegative"));
+    }
+    Ok(decoded)
+}
+
+fn replay_nonnegative_integer(value: &OValue, path: &str) -> Result<i64, String> {
+    let decoded = replay_integer(value, path)?;
+    if decoded < 0 {
+        return Err(format!("{path} must be nonnegative"));
+    }
+    Ok(decoded)
+}
+
+fn replay_positive_f64(value: &OValue, path: &str, key: &str) -> Result<f64, String> {
+    let field_path = format!("{path}.{key}");
+    replay_positive_float(
+        value
+            .get(key)
+            .ok_or_else(|| format!("{field_path} is required"))?,
+        &field_path,
+    )
+}
+
+fn replay_nonnegative_f64(value: &OValue, path: &str, key: &str) -> Result<f64, String> {
+    let field_path = format!("{path}.{key}");
+    replay_nonnegative_float(
+        value
+            .get(key)
+            .ok_or_else(|| format!("{field_path} is required"))?,
+        &field_path,
+    )
+}
+
+fn replay_nonnegative_i64(value: &OValue, path: &str, key: &str) -> Result<i64, String> {
+    let field_path = format!("{path}.{key}");
+    replay_nonnegative_integer(
+        value
+            .get(key)
+            .ok_or_else(|| format!("{field_path} is required"))?,
+        &field_path,
+    )
+}
+
 fn replay_v3(value: &OValue, path: &str) -> Result<[f64; 3], String> {
     let values = replay_array(value, path)?;
     if values.len() != 3 {
@@ -1179,9 +1252,9 @@ fn replay_contextual_posteriors(
                 key.clone(),
                 CtxPosterior {
                     mean: replay_float(&tuple[0], &format!("{item_path}[0]"))?,
-                    precision: replay_float(&tuple[1], &format!("{item_path}[1]"))?,
-                    count: replay_integer(&tuple[2], &format!("{item_path}[2]"))?,
-                    last_update: replay_integer(&tuple[3], &format!("{item_path}[3]"))?,
+                    precision: replay_positive_float(&tuple[1], &format!("{item_path}[1]"))?,
+                    count: replay_nonnegative_integer(&tuple[2], &format!("{item_path}[2]"))?,
+                    last_update: replay_nonnegative_integer(&tuple[3], &format!("{item_path}[3]"))?,
                     was_legacy_3tuple: false,
                 },
             ))
@@ -1190,7 +1263,13 @@ fn replay_contextual_posteriors(
 }
 
 fn replay_posterior_bias(value: &OValue, path: &str) -> Result<Vec<(f64, f64, i64)>, String> {
-    replay_array(value, path)?
+    let entries = replay_array(value, path)?;
+    if entries.len() > MAX_BIAS_NUDGES {
+        return Err(format!(
+            "{path} must contain at most {MAX_BIAS_NUDGES} entries"
+        ));
+    }
+    entries
         .iter()
         .enumerate()
         .map(|(index, value)| {
@@ -1201,27 +1280,23 @@ fn replay_posterior_bias(value: &OValue, path: &str) -> Result<Vec<(f64, f64, i6
                     "{item_path} must be an exact 3-element posterior bias tuple"
                 ));
             }
-            let target_fee = replay_float(&tuple[0], &format!("{item_path}[0]"))?;
-            let weight = replay_float(&tuple[1], &format!("{item_path}[1]"))?;
-            let ts = replay_integer(&tuple[2], &format!("{item_path}[2]"))?;
-            if target_fee < 0.0 || weight <= 0.0 {
-                return Err(format!(
-                    "{item_path} target fee must be nonnegative and weight must be positive"
-                ));
-            }
-            Ok((target_fee, weight, ts))
+            Ok((
+                replay_nonnegative_float(&tuple[0], &format!("{item_path}[0]"))?,
+                replay_positive_float(&tuple[1], &format!("{item_path}[1]"))?,
+                replay_nonnegative_integer(&tuple[2], &format!("{item_path}[2]"))?,
+            ))
         })
         .collect()
 }
 
 fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonState, String> {
-    let (prior_mean_fee, prior_mean_fee_is_int) = replay_number(
+    let (prior_mean_fee, prior_mean_fee_is_int) = replay_nonnegative_number(
         value
             .get("prior_mean_fee")
             .ok_or_else(|| format!("{path}.prior_mean_fee is required"))?,
         &format!("{path}.prior_mean_fee"),
     )?;
-    let (prior_std_fee, prior_std_fee_is_int) = replay_number(
+    let (prior_std_fee, prior_std_fee_is_int) = replay_positive_number(
         value
             .get("prior_std_fee")
             .ok_or_else(|| format!("{path}.prior_std_fee is required"))?,
@@ -1265,10 +1340,10 @@ fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonS
         prior_std_fee_is_int,
         observations,
         posterior_mean: replay_f64(value, path, "posterior_mean")?,
-        posterior_std: replay_f64(value, path, "posterior_std")?,
+        posterior_std: replay_positive_f64(value, path, "posterior_std")?,
         posterior_coeffs,
         posterior_precision,
-        noise_variance: replay_f64(value, path, "noise_variance")?,
+        noise_variance: replay_positive_f64(value, path, "noise_variance")?,
         // These private Python dataclass fields are intentionally absent from
         // the replay schema. Their constructor values are fixed, not inferred
         // from malformed or missing captured input.
@@ -1278,19 +1353,27 @@ fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonS
         last_fee_max: 0.0,
         contextual_posteriors,
         posterior_bias,
-        charged_fee_mean: replay_f64(value, path, "charged_fee_mean")?,
-        zero_revenue_streak: replay_i64(value, path, "zero_revenue_streak")?,
-        zero_run_start_fee: replay_f64(value, path, "zero_run_start_fee")?,
-        zero_run_start_ts: replay_i64(value, path, "zero_run_start_ts")?,
-        positive_rate_ref: replay_f64(value, path, "positive_rate_ref")?,
-        positive_rate_ref_ts: replay_i64(value, path, "positive_rate_ref_ts")?,
-        meaningful_gap_ema_hours: replay_f64(value, path, "meaningful_gap_ema_hours")?,
-        last_meaningful_ts: replay_i64(value, path, "last_meaningful_ts")?,
-        last_upward_probe_ts: replay_i64(value, path, "last_upward_probe_ts")?,
-        exploration_boost: replay_f64(value, path, "exploration_boost")?,
-        last_sampled_fee: replay_i64(value, path, "last_sampled_fee")?,
-        last_sample_time: replay_i64(value, path, "last_sample_time")?,
-        reseeded_at: replay_i64(value, path, "reseeded_at")?,
+        charged_fee_mean: replay_nonnegative_f64(value, path, "charged_fee_mean")?,
+        zero_revenue_streak: replay_nonnegative_i64(value, path, "zero_revenue_streak")?,
+        zero_run_start_fee: replay_nonnegative_f64(value, path, "zero_run_start_fee")?,
+        zero_run_start_ts: replay_nonnegative_i64(value, path, "zero_run_start_ts")?,
+        positive_rate_ref: replay_nonnegative_f64(value, path, "positive_rate_ref")?,
+        positive_rate_ref_ts: replay_nonnegative_i64(value, path, "positive_rate_ref_ts")?,
+        meaningful_gap_ema_hours: replay_nonnegative_f64(value, path, "meaningful_gap_ema_hours")?,
+        last_meaningful_ts: replay_nonnegative_i64(value, path, "last_meaningful_ts")?,
+        last_upward_probe_ts: replay_nonnegative_i64(value, path, "last_upward_probe_ts")?,
+        exploration_boost: {
+            let boost = replay_f64(value, path, "exploration_boost")?;
+            if !(EXPLORATION_BOOST_MIN..=EXPLORATION_BOOST_MAX).contains(&boost) {
+                return Err(format!(
+                    "{path}.exploration_boost must be within [{EXPLORATION_BOOST_MIN}, {EXPLORATION_BOOST_MAX}]"
+                ));
+            }
+            boost
+        },
+        last_sampled_fee: replay_nonnegative_i64(value, path, "last_sampled_fee")?,
+        last_sample_time: replay_nonnegative_i64(value, path, "last_sample_time")?,
+        reseeded_at: replay_nonnegative_i64(value, path, "reseeded_at")?,
         extra: Vec::new(),
     })
 }

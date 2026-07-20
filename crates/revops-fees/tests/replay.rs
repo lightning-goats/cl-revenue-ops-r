@@ -595,6 +595,115 @@ fn pre_state_rejects_corrupted_nested_pid_and_thompson_shapes_at_source_path() {
 }
 
 #[test]
+fn pre_state_rejects_invalid_thompson_semantic_domains_at_exact_paths() {
+    let thompson_path = "$.pre_state.ordered_channels[0].fee_state.thompson";
+    let scalar_corruptions = [
+        ("prior_mean_fee", json!(-1)),
+        ("prior_std_fee", json!(0)),
+        ("posterior_std", json!({"__f__": "0.0"})),
+        ("noise_variance", json!({"__f__": "-1.0"})),
+        ("charged_fee_mean", json!({"__f__": "-1.0"})),
+        ("zero_revenue_streak", json!(-1)),
+        ("zero_run_start_fee", json!({"__f__": "-1.0"})),
+        ("zero_run_start_ts", json!(-1)),
+        ("positive_rate_ref", json!({"__f__": "-1.0"})),
+        ("positive_rate_ref_ts", json!(-1)),
+        ("meaningful_gap_ema_hours", json!({"__f__": "-1.0"})),
+        ("last_meaningful_ts", json!(-1)),
+        ("last_upward_probe_ts", json!(-1)),
+        ("exploration_boost", json!({"__f__": "0.749999"})),
+        ("exploration_boost", json!({"__f__": "2.000001"})),
+        ("last_sampled_fee", json!(-1)),
+        ("last_sample_time", json!(-1)),
+        ("reseeded_at", json!(-1)),
+    ];
+
+    for (field, replacement) in scalar_corruptions {
+        let mut wrong = fixture_value();
+        wrong["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"][field] = replacement;
+        let error = replay_fee_capture(&parse_mutated(wrong))
+            .expect_err("invalid Thompson scalar must fail closed");
+        let expected_path = format!("{thompson_path}.{field}");
+        assert!(
+            error.to_string().contains(&expected_path),
+            "{field}: expected {expected_path}, got {error}"
+        );
+    }
+
+    let contextual_corruptions = [(1, json!({"__f__": "0.0"})), (2, json!(-1)), (3, json!(-1))];
+    for (index, replacement) in contextual_corruptions {
+        let mut wrong = fixture_value();
+        wrong["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"]
+            ["contextual_posteriors"] = json!({"ctx": [{"__f__": "1.0"}, {"__f__": "2.0"}, 0, 0]});
+        wrong["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"]
+            ["contextual_posteriors"]["ctx"][index] = replacement;
+        let error = replay_fee_capture(&parse_mutated(wrong))
+            .expect_err("invalid contextual posterior scalar must fail closed");
+        let expected_path = format!("{thompson_path}.contextual_posteriors.ctx[{index}]");
+        assert!(
+            error.to_string().contains(&expected_path),
+            "contextual index {index}: expected {expected_path}, got {error}"
+        );
+    }
+
+    let bias_corruptions = [
+        (0, json!({"__f__": "-1.0"})),
+        (1, json!({"__f__": "0.0"})),
+        (2, json!(-1)),
+    ];
+    for (index, replacement) in bias_corruptions {
+        let mut wrong = fixture_value();
+        wrong["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"]["posterior_bias"] =
+            json!([[{"__f__": "1.0"}, {"__f__": "1.0"}, 0]]);
+        wrong["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"]["posterior_bias"][0]
+            [index] = replacement;
+        let error = replay_fee_capture(&parse_mutated(wrong))
+            .expect_err("invalid posterior bias scalar must fail closed");
+        let expected_path = format!("{thompson_path}.posterior_bias[0][{index}]");
+        assert!(
+            error.to_string().contains(&expected_path),
+            "posterior bias index {index}: expected {expected_path}, got {error}"
+        );
+    }
+
+    let mut oversized_bias = fixture_value();
+    oversized_bias["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"]["posterior_bias"] =
+        Value::Array(
+            (0..51)
+                .map(|_| json!([{"__f__": "1.0"}, {"__f__": "1.0"}, 0]))
+                .collect(),
+        );
+    let error = replay_fee_capture(&parse_mutated(oversized_bias))
+        .expect_err("oversized posterior bias must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("{thompson_path}.posterior_bias")),
+        "oversized posterior bias: {error}"
+    );
+}
+
+#[test]
+fn pre_state_preserves_valid_thompson_semantic_edges_exactly() {
+    for boost in ["0.75", "2.0"] {
+        let mut edge = fixture_value();
+        let thompson = &mut edge["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"];
+        thompson["prior_mean_fee"] = json!(0);
+        thompson["prior_std_fee"] = json!(1);
+        thompson["posterior_std"] = json!({"__f__": "1e-06"});
+        thompson["noise_variance"] = json!({"__f__": "1e-06"});
+        thompson["contextual_posteriors"] =
+            json!({"edge": [{"__f__": "-1.0"}, {"__f__": "1e-06"}, 0, 0]});
+        thompson["posterior_bias"] = json!([[{"__f__": "0.0"}, {"__f__": "1e-06"}, 0]]);
+        thompson["exploration_boost"] = json!({"__f__": boost});
+        edge["expected"]["post_channel_state"][0]["fee_state"]["thompson"] = thompson.clone();
+
+        let capture = parse_mutated(edge);
+        replay_fee_capture(&capture).expect("valid semantic edges replay exactly");
+    }
+}
+
+#[test]
 fn malformed_transcript_matrix_is_structured_and_never_panics() {
     let cases = [
         (
