@@ -2140,8 +2140,13 @@ pub fn adjust_channel_fee(
         }
 
         // Neighbor market context (py 6458-6676).
-        let captured_neighbor_median = evidence.captured_neighbor_fee_median(peer_id)?;
+        let captured_neighbor_median_before_gossip =
+            evidence.captured_neighbor_fee_median(peer_id)?;
         let gossip_rows = evidence.gossip_channels(peer_id)?;
+        let captured_neighbor_median = match captured_neighbor_median_before_gossip {
+            some @ Some(_) => some,
+            None => evidence.captured_neighbor_fee_median(peer_id)?,
+        };
         let our_id = evidence.our_node_id()?;
         let active_channels: Vec<GossipChannel> = gossip_rows
             .iter()

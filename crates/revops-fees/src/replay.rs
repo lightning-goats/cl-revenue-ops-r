@@ -256,6 +256,17 @@ fn optional_i64(value: &WireValue, path: &str) -> Result<Option<i64>, ReplayErro
     }
 }
 
+fn decode_effective_neighbor_fee(
+    value: &WireValue,
+    path: &str,
+) -> Result<Option<i64>, ReplayError> {
+    match value {
+        WireValue::Null => Ok(None),
+        WireValue::Integer(value) if (1..=10_000).contains(value) => Ok(Some(*value)),
+        _ => Err(shape(path, "must be null or an integer in 1..=10000")),
+    }
+}
+
 pub fn decode_tagged_float(value: &WireValue, path: &str) -> Result<f64, ReplayError> {
     let WireValue::TaggedFloat(rendered) = value else {
         return Err(shape(path, "must be a tagged float"));
@@ -570,6 +581,8 @@ pub struct TranscriptEvidence {
     cursor: RefCell<Cursor>,
     channels: BTreeMap<String, ChannelInfo>,
     gossip: RefCell<BTreeMap<String, Vec<GossipRow>>>,
+    neighbor_medians: RefCell<BTreeMap<String, Option<i64>>>,
+    neighbor_percentiles: RefCell<BTreeMap<(String, String), Option<i64>>>,
     prefetched_gossip: BTreeMap<String, Vec<GossipRow>>,
     our_id: String,
     temporary_overlay_active_available: bool,
@@ -646,6 +659,8 @@ impl TranscriptEvidence {
             cursor: RefCell::new(cursor),
             channels,
             gossip: RefCell::new(gossip),
+            neighbor_medians: RefCell::new(BTreeMap::new()),
+            neighbor_percentiles: RefCell::new(BTreeMap::new()),
             prefetched_gossip,
             our_id,
             temporary_overlay_active_available,
@@ -662,6 +677,15 @@ impl TranscriptEvidence {
 
     fn consumed_ordinal(&self) -> usize {
         self.cursor.borrow().position.saturating_sub(1)
+    }
+
+    fn next_evidence_op_is(&self, expected: &str) -> bool {
+        let cursor = self.cursor.borrow();
+        matches!(
+            cursor.entries.get(cursor.position),
+            Some(WireValue::Object(entry))
+                if matches!(entry.get("op"), Some(WireValue::String(op)) if op == expected)
+        )
     }
 
     fn decode_error(&self, error: ReplayError) -> DecisionInputError {
@@ -946,15 +970,7 @@ impl FeeEvidence for TranscriptEvidence {
         if let Some(rows) = self.gossip.borrow().get(peer_id).cloned() {
             return Ok(rows);
         }
-        let next_is_gossip = {
-            let cursor = self.cursor.borrow();
-            matches!(
-                cursor.entries.get(cursor.position),
-                Some(WireValue::Object(entry))
-                    if matches!(entry.get("op"), Some(WireValue::String(op)) if op == "gossip_channels")
-            )
-        };
-        if !next_is_gossip {
+        if !self.next_evidence_op_is("gossip_channels") {
             if let Some(rows) = self.prefetched_gossip.get(peer_id).cloned() {
                 self.gossip
                     .borrow_mut()
@@ -982,16 +998,25 @@ impl FeeEvidence for TranscriptEvidence {
         &self,
         peer_id: &str,
     ) -> Result<Option<Option<i64>>, DecisionInputError> {
+        if let Some(value) = self.neighbor_medians.borrow().get(peer_id).copied() {
+            return Ok(Some(value));
+        }
+        if !self.next_evidence_op_is("neighbor_fee_median") {
+            return Ok(None);
+        }
         let value = self.consume(
             "neighbor_fee_median",
             WireValue::Array(vec![WireValue::String(peer_id.to_string())]),
         )?;
-        match value {
-            WireValue::Null => Ok(Some(None)),
-            _ => integer(&value, "$.observations.evidence.neighbor_fee_median.result")
-                .map(|value| Some(Some(value)))
-                .map_err(|error| self.decode_error(error)),
-        }
+        let value = decode_effective_neighbor_fee(
+            &value,
+            "$.observations.evidence.neighbor_fee_median.result",
+        )
+        .map_err(|error| self.decode_error(error))?;
+        self.neighbor_medians
+            .borrow_mut()
+            .insert(peer_id.to_string(), value);
+        Ok(Some(value))
     }
 
     fn captured_neighbor_fee_percentile(
@@ -999,22 +1024,30 @@ impl FeeEvidence for TranscriptEvidence {
         peer_id: &str,
         pct: f64,
     ) -> Result<Option<Option<i64>>, DecisionInputError> {
+        let pct_repr = revops_econ::pyfloat::py_repr(pct);
+        let cache_key = (peer_id.to_string(), pct_repr.clone());
+        if let Some(value) = self.neighbor_percentiles.borrow().get(&cache_key).copied() {
+            return Ok(Some(value));
+        }
+        if !self.next_evidence_op_is("neighbor_fee_percentile") {
+            return Ok(None);
+        }
         let value = self.consume(
             "neighbor_fee_percentile",
             WireValue::Array(vec![
                 WireValue::String(peer_id.to_string()),
-                WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(pct)),
+                WireValue::TaggedFloat(pct_repr),
             ]),
         )?;
-        match value {
-            WireValue::Null => Ok(Some(None)),
-            _ => integer(
-                &value,
-                "$.observations.evidence.neighbor_fee_percentile.result",
-            )
-            .map(|value| Some(Some(value)))
-            .map_err(|error| self.decode_error(error)),
-        }
+        let value = decode_effective_neighbor_fee(
+            &value,
+            "$.observations.evidence.neighbor_fee_percentile.result",
+        )
+        .map_err(|error| self.decode_error(error))?;
+        self.neighbor_percentiles
+            .borrow_mut()
+            .insert(cache_key, value);
+        Ok(Some(value))
     }
 
     fn peer_latency(&self, peer_id: &str) -> Result<Option<PeerLatency>, DecisionInputError> {
@@ -3094,11 +3127,130 @@ mod strict_decoder_tests {
         );
         assert_eq!(
             evidence
+                .captured_neighbor_fee_median("peer")
+                .expect("cached median"),
+            Some(Some(360))
+        );
+        assert_eq!(evidence.cursor.borrow().position, 3);
+        assert_eq!(
+            evidence
                 .captured_neighbor_fee_percentile("peer", 0.25)
                 .expect("captured percentile"),
             Some(None)
         );
+        assert_eq!(
+            evidence
+                .captured_neighbor_fee_percentile("peer", 0.25)
+                .expect("cached percentile"),
+            Some(None)
+        );
         assert_eq!(evidence.cursor.borrow().position, 4);
+    }
+
+    #[test]
+    fn effective_neighbor_cache_miss_consumes_nested_gossip_before_median() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "evidence".to_string(),
+            WireValue::Array(vec![
+                evidence_entry(
+                    0,
+                    "channels_info",
+                    WireValue::Array(Vec::new()),
+                    WireValue::Object(WireObject::new()),
+                ),
+                evidence_entry(
+                    1,
+                    "our_node_id",
+                    WireValue::Array(Vec::new()),
+                    WireValue::String("our-node".to_string()),
+                ),
+                evidence_entry(
+                    2,
+                    "gossip_channels",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Array(Vec::new()),
+                ),
+                evidence_entry(
+                    3,
+                    "neighbor_fee_median",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Integer(360),
+                ),
+            ]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let evidence =
+            TranscriptEvidence::new(&observations, true, errors).expect("strict evidence");
+
+        assert_eq!(
+            evidence
+                .captured_neighbor_fee_median("peer")
+                .expect("deferred median"),
+            None
+        );
+        assert_eq!(evidence.cursor.borrow().position, 2);
+        assert_eq!(
+            evidence.gossip_channels("peer").expect("nested gossip"),
+            Vec::<GossipRow>::new()
+        );
+        assert_eq!(evidence.cursor.borrow().position, 3);
+        assert_eq!(
+            evidence
+                .captured_neighbor_fee_median("peer")
+                .expect("captured median"),
+            Some(Some(360))
+        );
+        assert_eq!(evidence.cursor.borrow().position, 4);
+        assert_eq!(
+            evidence
+                .captured_neighbor_fee_median("peer")
+                .expect("cached median"),
+            Some(Some(360))
+        );
+        assert_eq!(evidence.cursor.borrow().position, 4);
+    }
+
+    #[test]
+    fn effective_neighbor_values_reject_fees_outside_python_domain() {
+        for invalid in [0, -1, 10_001, i64::MAX] {
+            let mut observations = WireObject::new();
+            observations.insert(
+                "evidence".to_string(),
+                WireValue::Array(vec![
+                    evidence_entry(
+                        0,
+                        "channels_info",
+                        WireValue::Array(Vec::new()),
+                        WireValue::Object(WireObject::new()),
+                    ),
+                    evidence_entry(
+                        1,
+                        "our_node_id",
+                        WireValue::Array(Vec::new()),
+                        WireValue::String("our-node".to_string()),
+                    ),
+                    evidence_entry(
+                        2,
+                        "neighbor_fee_median",
+                        WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                        WireValue::Integer(invalid),
+                    ),
+                ]),
+            );
+            let errors = Rc::new(RefCell::new(None));
+            let evidence = TranscriptEvidence::new(&observations, true, errors)
+                .expect("strict evidence prefix");
+
+            let error = evidence
+                .captured_neighbor_fee_median("peer")
+                .expect_err("out-of-domain effective fee must fail closed");
+            assert!(
+                error.to_string().contains("neighbor_fee_median.result"),
+                "{error}"
+            );
+            assert!(error.to_string().contains("1..=10000"), "{error}");
+        }
     }
 
     #[test]
