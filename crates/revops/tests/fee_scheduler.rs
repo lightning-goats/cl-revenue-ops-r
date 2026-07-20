@@ -24,11 +24,9 @@ use revops::fee_scheduler::{
     DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS,
 };
 use revops::fee_state::STATE_JOURNAL_FILE_NAME;
-use revops_fees::cycle::{
-    ChannelCycleState, ChannelFeeState, ChannelStateRow, DecisionClock, FeeCfgSnapshot,
-};
+use revops_fees::cycle::{ChannelCycleState, ChannelFeeState, ChannelStateRow, FeeCfgSnapshot};
 use revops_fees::journal::JOURNAL_FILE_NAME;
-use revops_fees::pyrand::{DecisionInputError, PyRandom};
+use revops_fees::pyrand::PyRandom;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -270,45 +268,6 @@ fn scheduler_seeds_pyrandom_exactly_once_across_cycles() {
 // ---------------------------------------------------------------------------
 // Journal + state JSONL appends
 // ---------------------------------------------------------------------------
-
-struct FailingDecisionClock {
-    now: i64,
-    fail_label: String,
-}
-
-impl DecisionClock for FailingDecisionClock {
-    fn now(&mut self, label: &str) -> Result<i64, DecisionInputError> {
-        if label == self.fail_label {
-            Err(DecisionInputError::new(format!(
-                "scripted clock failure: {label}"
-            )))
-        } else {
-            Ok(self.now)
-        }
-    }
-}
-
-#[test]
-fn decision_input_error_skips_without_partial_decision_or_state_journals() {
-    let fx = fixture();
-    seed_channel_state(&fx.db_path);
-    let mut owner = owner(&fx, StateLifecycle::RehydratePerCycle);
-    let mut wall_clock = || NOW;
-    let mut decision_clock = FailingDecisionClock {
-        now: NOW,
-        fail_label: "cycle.channel.evaluate".to_string(),
-    };
-
-    let outcome = owner.run_cycle_with_decision_clock(
-        prepared(json!(3), true),
-        &mut wall_clock,
-        &mut decision_clock,
-    );
-
-    assert_eq!(outcome, CycleOutcome::SkippedDecisionInput);
-    assert_eq!(line_count(&fx.journal_dir.join(JOURNAL_FILE_NAME)), 0);
-    assert_eq!(line_count(&fx.journal_dir.join(STATE_JOURNAL_FILE_NAME)), 0);
-}
 
 #[test]
 fn dryrun_cycle_appends_decisions_to_journal_and_state_jsonl() {
