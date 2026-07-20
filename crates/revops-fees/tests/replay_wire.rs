@@ -6,7 +6,13 @@ use revops_fees::replay_wire::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+const COMPLETE_ADJUSTMENT: &[u8] =
+    include_bytes!("../../../fixtures/fees/replay/complete_adjustment.v0.json");
 const COMPLETE_SKIP: &[u8] = include_bytes!("../../../fixtures/fees/replay/complete_skip.v0.json");
+const EFFECTIVE_FALLBACK: &[u8] =
+    include_bytes!("../../../fixtures/fees/replay/effective_fallback.v0.json");
+const FAILURE_RECOVERY: &[u8] =
+    include_bytes!("../../../fixtures/fees/replay/failure_recovery.v0.json");
 
 fn fixture_value() -> Value {
     serde_json::from_slice(COMPLETE_SKIP).expect("Python fixture must be JSON")
@@ -82,6 +88,51 @@ fn parses_real_python_sealed_complete_skip_fixture() {
         capture.configuration.get("capex_exploration_rate"),
         Some(&WireValue::TaggedFloat("0.1".to_string()))
     );
+}
+
+#[test]
+fn all_replay_fixtures_are_exact_python_writer_artifact_bytes() {
+    for (name, bytes, writer_sha256) in [
+        (
+            "complete_adjustment.v0.json",
+            COMPLETE_ADJUSTMENT,
+            "5068bab23b6df6814addeb95e13c97b34b162c8ef18f734bcd280f7f491686c5",
+        ),
+        (
+            "complete_skip.v0.json",
+            COMPLETE_SKIP,
+            "fe8996b0d491c40cd73f94f951d16a0d3d8cb1b5ccf35c2fa46372746b12f119",
+        ),
+        (
+            "effective_fallback.v0.json",
+            EFFECTIVE_FALLBACK,
+            "31a548a817e904d9ce0264a1ffebd09e5d048af1d4041348bb97802daf32f4d2",
+        ),
+        (
+            "failure_recovery.v0.json",
+            FAILURE_RECOVERY,
+            "afc8e7befffc9c84cf2d84ffe2997fc9a0eec14a3958bda048bf5632680092d8",
+        ),
+    ] {
+        let value: Value =
+            serde_json::from_slice(bytes).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let canonical = canonical_json(&value)
+            .unwrap_or_else(|error| panic!("{name}: canonical encoding failed: {error}"));
+        assert_eq!(
+            bytes,
+            canonical.as_bytes(),
+            "{name} must exactly match Python production _json_bytes output"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(bytes)),
+            writer_sha256,
+            "{name} must exactly match the committed Python writer artifact"
+        );
+        assert_eq!(
+            value["producer"]["python_commit"], "4736b13fdd1eb0710416be4d91603ca5608db26d",
+            "{name} must identify the committed Python producer"
+        );
+    }
 }
 
 #[test]
