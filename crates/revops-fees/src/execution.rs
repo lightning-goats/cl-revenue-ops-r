@@ -59,6 +59,10 @@ pub struct SetFeeDecision {
 pub struct FeeExecutionRequest {
     pub decision: SetFeeRequest,
     pub wire_request: OValue,
+    /// Pre-execution fee captured in the Python result contract.
+    pub old_fee_ppm: i64,
+    /// Effective base fee expected in the Python result contract.
+    pub expected_base_fee_msat: i64,
 }
 
 /// Strict execution boundary used by production dry-run and offline replay.

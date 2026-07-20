@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use thiserror::Error;
@@ -70,8 +71,10 @@ pub struct FeeReplayResultV0 {
     pub ordered_outcomes: WireValue,
     pub decisions: Vec<WireValue>,
     pub decision_summary: WireValue,
+    pub governor: WireValue,
     pub execution: WireValue,
     pub post_channel_state: WireValue,
+    pub state_flush: WireValue,
     pub post_global: WireValue,
     pub consumed: ConsumedTranscriptCounts,
 }
@@ -97,6 +100,98 @@ fn transcript(
         actual: actual.into(),
         path: path.into(),
     }
+}
+
+fn require_exact_wire_fields(
+    object: &WireObject,
+    expected: &[&str],
+    path: &str,
+    family: &'static str,
+    ordinal: usize,
+    label: &str,
+) -> Result<(), ReplayError> {
+    for key in object.keys() {
+        if !expected.contains(&key.as_str()) {
+            return Err(transcript(
+                family,
+                ordinal,
+                label,
+                format!("unknown field {key}"),
+                format!("{path}.{key}"),
+            ));
+        }
+    }
+    for key in expected {
+        if !object.contains_key(*key) {
+            return Err(transcript(
+                family,
+                ordinal,
+                label,
+                format!("missing field {key}"),
+                format!("{path}.{key}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_observation_families(observations: &WireObject) -> Result<(), ReplayError> {
+    const FAMILIES: &[&str] = &["evidence", "clock", "entropy", "governor", "execution"];
+    for family in observations.keys() {
+        if !FAMILIES.contains(&family.as_str()) {
+            return Err(transcript(
+                "observations",
+                0,
+                "exact evidence/clock/entropy/governor/execution families",
+                format!("unknown family {family}"),
+                format!("$.observations.{family}"),
+            ));
+        }
+    }
+    for family in FAMILIES {
+        if !observations.contains_key(*family) {
+            return Err(transcript(
+                "observations",
+                0,
+                "exact evidence/clock/entropy/governor/execution families",
+                format!("missing family {family}"),
+                format!("$.observations.{family}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+type ReplayErrorSlot = Rc<RefCell<Option<ReplayError>>>;
+
+fn structured_transcript_error(
+    family: &'static str,
+    ordinal: usize,
+    expected_label: &str,
+    error: ReplayError,
+) -> ReplayError {
+    if matches!(error, ReplayError::Transcript { .. }) {
+        return error;
+    }
+    let path = match &error {
+        ReplayError::Shape { path, .. } | ReplayError::ValueMismatch { path, .. } => path.clone(),
+        ReplayError::DecisionInput(_) => format!("$.observations.{family}[{ordinal}]"),
+        ReplayError::Transcript { .. } => unreachable!(),
+    };
+    transcript(
+        family,
+        ordinal,
+        format!("{expected_label} valid transcript entry"),
+        format!("{expected_label} invalid: {error}"),
+        path,
+    )
+}
+
+fn remember_decision_error(slot: &ReplayErrorSlot, error: ReplayError) -> DecisionInputError {
+    if slot.borrow().is_none() {
+        *slot.borrow_mut() = Some(error.clone());
+    }
+    DecisionInputError::new(error.to_string())
 }
 
 fn object<'a>(value: &'a WireValue, path: &str) -> Result<&'a WireObject, ReplayError> {
@@ -219,7 +314,11 @@ struct Cursor {
 impl Cursor {
     fn new(observations: &WireObject, family: &'static str) -> Result<Self, ReplayError> {
         let path = format!("$.observations.{family}");
-        let entries = array(field(observations, family, "$.observations")?, &path)?.to_vec();
+        let family_value = field(observations, family, "$.observations")
+            .map_err(|error| structured_transcript_error(family, 0, "transcript", error))?;
+        let entries = array(family_value, &path)
+            .map_err(|error| structured_transcript_error(family, 0, "transcript array", error))?
+            .to_vec();
         Ok(Self {
             family,
             entries,
@@ -239,9 +338,14 @@ impl Cursor {
                 base,
             ));
         };
-        let entry = object(value, &base)?;
+        let entry = object(value, &base).map_err(|error| {
+            structured_transcript_error(self.family, ordinal, expected_name, error)
+        })?;
         let actual_ordinal = field(entry, "ordinal", &base)
-            .and_then(|value| integer(value, &format!("{base}.ordinal")))?;
+            .and_then(|value| integer(value, &format!("{base}.ordinal")))
+            .map_err(|error| {
+                structured_transcript_error(self.family, ordinal, expected_name, error)
+            })?;
         if usize::try_from(actual_ordinal).ok() != Some(ordinal) {
             return Err(transcript(
                 self.family,
@@ -255,7 +359,10 @@ impl Cursor {
             expected_name.to_string()
         } else {
             field(entry, name_field, &base)
-                .and_then(|value| string(value, &format!("{base}.{name_field}")))?
+                .and_then(|value| string(value, &format!("{base}.{name_field}")))
+                .map_err(|error| {
+                    structured_transcript_error(self.family, ordinal, expected_name, error)
+                })?
         };
         if actual_name != expected_name {
             return Err(transcript(
@@ -297,12 +404,14 @@ impl Cursor {
 
 pub struct TranscriptClock {
     cursor: Cursor,
+    errors: ReplayErrorSlot,
 }
 
 impl TranscriptClock {
-    fn new(observations: &WireObject) -> Result<Self, ReplayError> {
+    fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
         Ok(Self {
             cursor: Cursor::new(observations, "clock")?,
+            errors,
         })
     }
 }
@@ -313,7 +422,9 @@ impl DecisionClock for TranscriptClock {
         let entry = self
             .cursor
             .take(label, "label")
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| remember_decision_error(&self.errors, error))?;
+        reject_error_entry(&entry, "clock", ordinal)
+            .map_err(|error| remember_decision_error(&self.errors, error))?;
         integer(
             entry
                 .get("value")
@@ -323,21 +434,33 @@ impl DecisionClock for TranscriptClock {
                         "is required",
                     )
                 })
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| {
+                    remember_decision_error(
+                        &self.errors,
+                        structured_transcript_error("clock", ordinal, label, error),
+                    )
+                })?,
             &format!("$.observations.clock[{ordinal}].value"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))
+        .map_err(|error| {
+            remember_decision_error(
+                &self.errors,
+                structured_transcript_error("clock", ordinal, label, error),
+            )
+        })
     }
 }
 
 pub struct TranscriptEntropy {
     cursor: Cursor,
+    errors: ReplayErrorSlot,
 }
 
 impl TranscriptEntropy {
-    fn new(observations: &WireObject) -> Result<Self, ReplayError> {
+    fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
         Ok(Self {
             cursor: Cursor::new(observations, "entropy")?,
+            errors,
         })
     }
 
@@ -345,7 +468,13 @@ impl TranscriptEntropy {
         let ordinal = self.cursor.position;
         let base = format!("$.observations.entropy[{ordinal}]");
         let entry = self.cursor.take(op, "op")?;
-        let actual_label = string(field(&entry, "label", &base)?, &format!("{base}.label"))?;
+        reject_error_entry(&entry, "entropy", ordinal)?;
+        let actual_label = string(
+            field(&entry, "label", &base)
+                .map_err(|error| structured_transcript_error("entropy", ordinal, label, error))?,
+            &format!("{base}.label"),
+        )
+        .map_err(|error| structured_transcript_error("entropy", ordinal, label, error))?;
         if actual_label != label {
             return Err(transcript(
                 "entropy",
@@ -355,7 +484,8 @@ impl TranscriptEntropy {
                 format!("{base}.label"),
             ));
         }
-        let actual_args = field(&entry, "args", &base)?;
+        let actual_args = field(&entry, "args", &base)
+            .map_err(|error| structured_transcript_error("entropy", ordinal, label, error))?;
         if actual_args != &args {
             return Err(transcript(
                 "entropy",
@@ -365,14 +495,17 @@ impl TranscriptEntropy {
                 format!("{base}.args"),
             ));
         }
-        decode_tagged_float(field(&entry, "result", &base)?, &format!("{base}.result"))
+        let result = field(&entry, "result", &base)
+            .map_err(|error| structured_transcript_error("entropy", ordinal, label, error))?;
+        decode_tagged_float(result, &format!("{base}.result"))
+            .map_err(|error| structured_transcript_error("entropy", ordinal, label, error))
     }
 }
 
 impl DecisionEntropy for TranscriptEntropy {
     fn random(&mut self, label: &str) -> Result<f64, DecisionInputError> {
         self.consume("random", label, WireValue::Array(Vec::new()))
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+            .map_err(|error| remember_decision_error(&self.errors, error))
     }
 
     fn gauss(&mut self, label: &str, mu: f64, sigma: f64) -> Result<f64, DecisionInputError> {
@@ -384,7 +517,7 @@ impl DecisionEntropy for TranscriptEntropy {
                 WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(sigma)),
             ]),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))
+        .map_err(|error| remember_decision_error(&self.errors, error))
     }
 }
 
@@ -393,16 +526,20 @@ pub struct TranscriptEvidence {
     channels: BTreeMap<String, ChannelInfo>,
     gossip: BTreeMap<String, Vec<GossipRow>>,
     our_id: String,
+    errors: ReplayErrorSlot,
 }
 
 impl TranscriptEvidence {
-    fn new(observations: &WireObject) -> Result<Self, ReplayError> {
+    fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
         let mut cursor = Cursor::new(observations, "evidence")?;
         let channels_entry = cursor.take("channels_info", "op")?;
         require_args(&channels_entry, 0, "evidence", WireValue::Array(Vec::new()))?;
         reject_error_entry(&channels_entry, "evidence", 0)?;
-        let raw_channels = field(&channels_entry, "result", "$.observations.evidence[0]")?.clone();
-        let channels = decode_channels_info(&raw_channels, "$.observations.evidence[0].result")?;
+        let raw_channels = field(&channels_entry, "result", "$.observations.evidence[0]")
+            .map_err(|error| structured_transcript_error("evidence", 0, "channels_info", error))?
+            .clone();
+        let channels = decode_channels_info(&raw_channels, "$.observations.evidence[0].result")
+            .map_err(|error| structured_transcript_error("evidence", 0, "channels_info", error))?;
 
         let mut gossip = BTreeMap::new();
         while let Some(WireValue::Object(entry)) = cursor.entries.get(cursor.position) {
@@ -417,9 +554,15 @@ impl TranscriptEvidence {
                     &entry,
                     "args",
                     &format!("$.observations.evidence[{ordinal}]"),
-                )?,
+                )
+                .map_err(|error| {
+                    structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+                })?,
                 &format!("$.observations.evidence[{ordinal}].args"),
-            )?;
+            )
+            .map_err(|error| {
+                structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+            })?;
             if args.len() != 1 {
                 return Err(transcript(
                     "evidence",
@@ -432,15 +575,24 @@ impl TranscriptEvidence {
             let peer = string(
                 &args[0],
                 &format!("$.observations.evidence[{ordinal}].args[0]"),
-            )?;
+            )
+            .map_err(|error| {
+                structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+            })?;
             let result = decode_gossip(
                 field(
                     &entry,
                     "result",
                     &format!("$.observations.evidence[{ordinal}]"),
-                )?,
+                )
+                .map_err(|error| {
+                    structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+                })?,
                 &format!("$.observations.evidence[{ordinal}].result"),
-            )?;
+            )
+            .map_err(|error| {
+                structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+            })?;
             gossip.insert(peer, result);
         }
         let ordinal = cursor.position;
@@ -452,15 +604,50 @@ impl TranscriptEvidence {
                 &our,
                 "result",
                 &format!("$.observations.evidence[{ordinal}]"),
-            )?,
+            )
+            .map_err(|error| {
+                structured_transcript_error("evidence", ordinal, "our_node_id", error)
+            })?,
             &format!("$.observations.evidence[{ordinal}].result"),
-        )?;
+        )
+        .map_err(|error| structured_transcript_error("evidence", ordinal, "our_node_id", error))?;
         Ok(Self {
             cursor: RefCell::new(cursor),
             channels,
             gossip,
             our_id,
+            errors,
         })
+    }
+
+    fn decision_error(&self, ordinal: usize, op: &str, error: ReplayError) -> DecisionInputError {
+        remember_decision_error(
+            &self.errors,
+            structured_transcript_error("evidence", ordinal, op, error),
+        )
+    }
+
+    fn consumed_ordinal(&self) -> usize {
+        self.cursor.borrow().position.saturating_sub(1)
+    }
+
+    fn decode_error(&self, error: ReplayError) -> DecisionInputError {
+        let ordinal = self.consumed_ordinal();
+        let cursor = self.cursor.borrow();
+        let op = cursor
+            .entries
+            .get(ordinal)
+            .and_then(|entry| match entry {
+                WireValue::Object(entry) => entry.get("op"),
+                _ => None,
+            })
+            .and_then(|op| match op {
+                WireValue::String(op) => Some(op.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "evidence".to_string());
+        drop(cursor);
+        self.decision_error(ordinal, &op, error)
     }
 
     fn consume(&self, op: &str, args: WireValue) -> Result<WireValue, DecisionInputError> {
@@ -478,7 +665,7 @@ impl TranscriptEvidence {
                 )
                 .cloned()
             })
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, op, error))?;
         Ok(entry)
     }
 }
@@ -490,7 +677,8 @@ fn require_args(
     expected: WireValue,
 ) -> Result<(), ReplayError> {
     let base = format!("$.observations.{family}[{ordinal}]");
-    let actual = field(entry, "args", &base)?;
+    let actual = field(entry, "args", &base)
+        .map_err(|error| structured_transcript_error(family, ordinal, "args", error))?;
     if actual != &expected {
         return Err(transcript(
             family,
@@ -530,8 +718,12 @@ impl FeeEvidence for TranscriptEvidence {
 
     fn channel_states(&self) -> Result<Vec<ChannelStateRow>, DecisionInputError> {
         let value = self.consume("channel_states", WireValue::Array(Vec::new()))?;
-        decode_channel_states(&value, "$.observations.evidence.result")
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+        let ordinal = self.cursor.borrow().position.saturating_sub(1);
+        decode_channel_states(
+            &value,
+            &format!("$.observations.evidence[{ordinal}].result"),
+        )
+        .map_err(|error| self.decision_error(ordinal, "channel_states", error))
     }
 
     fn channels_info(&self) -> Result<BTreeMap<String, ChannelInfo>, DecisionInputError> {
@@ -544,7 +736,7 @@ impl FeeEvidence for TranscriptEvidence {
             return Ok(None);
         }
         let object = object(&value, "$.observations.evidence.chain_costs")
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decode_error(error))?;
         Ok(Some(ChainCosts {
             open_cost_sats: object
                 .get("open_cost_sats")
@@ -566,10 +758,10 @@ impl FeeEvidence for TranscriptEvidence {
                     "sat_per_vbyte",
                     "$.observations.evidence.chain_costs",
                 )
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decode_error(error))?,
                 "$.observations.evidence.chain_costs.sat_per_vbyte",
             )
-            .map_err(|error| DecisionInputError::new(error.to_string()))?,
+            .map_err(|error| self.decode_error(error))?,
         }))
     }
 
@@ -582,7 +774,7 @@ impl FeeEvidence for TranscriptEvidence {
             ]),
         )?;
         integer(&value, "$.observations.evidence.volume_since.result")
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+            .map_err(|error| self.decode_error(error))
     }
 
     fn forward_count_since(&self, channel_id: &str, since: i64) -> Result<i64, DecisionInputError> {
@@ -594,7 +786,7 @@ impl FeeEvidence for TranscriptEvidence {
             ]),
         )?;
         integer(&value, "$.observations.evidence.forward_count_since.result")
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+            .map_err(|error| self.decode_error(error))
     }
 
     fn exploration_flag(&self, channel_id: &str) -> Result<bool, DecisionInputError> {
@@ -603,7 +795,7 @@ impl FeeEvidence for TranscriptEvidence {
             WireValue::Array(vec![WireValue::String(channel_id.to_string())]),
         )?;
         boolean(&value, "$.observations.evidence.exploration_flag.result")
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+            .map_err(|error| self.decode_error(error))
     }
 
     fn clear_exploration_flag(&self, channel_id: &str) -> Result<(), DecisionInputError> {
@@ -615,16 +807,18 @@ impl FeeEvidence for TranscriptEvidence {
     }
 
     fn gossip_channels(&self, peer_id: &str) -> Result<Vec<GossipRow>, DecisionInputError> {
+        let ordinal = self.cursor.borrow().position;
         self.gossip.get(peer_id).cloned().ok_or_else(|| {
-            DecisionInputError::new(
+            self.decision_error(
+                ordinal,
+                "gossip_channels",
                 transcript(
                     "evidence",
-                    self.cursor.borrow().position,
+                    ordinal,
                     format!("prefetched gossip_channels {peer_id}"),
                     "<missing>",
                     "$.observations.evidence",
-                )
-                .to_string(),
+                ),
             )
         })
     }
@@ -634,7 +828,7 @@ impl FeeEvidence for TranscriptEvidence {
             "peer_latency",
             WireValue::Array(vec![WireValue::String(peer_id.to_string())]),
         )?;
-        decode_peer_latency(&value).map_err(|error| DecisionInputError::new(error.to_string()))
+        decode_peer_latency(&value).map_err(|error| self.decode_error(error))
     }
 
     fn channel_cost_history(
@@ -649,7 +843,7 @@ impl FeeEvidence for TranscriptEvidence {
                 WireValue::Integer(since),
             ]),
         )?;
-        decode_cost_history(&value).map_err(|error| DecisionInputError::new(error.to_string()))
+        decode_cost_history(&value).map_err(|error| self.decode_error(error))
     }
 
     fn peer_fee_history(
@@ -660,7 +854,7 @@ impl FeeEvidence for TranscriptEvidence {
             "peer_fee_history",
             WireValue::Array(vec![WireValue::String(peer_id.to_string())]),
         )?;
-        decode_peer_fee_history(&value).map_err(|error| DecisionInputError::new(error.to_string()))
+        decode_peer_fee_history(&value).map_err(|error| self.decode_error(error))
     }
 
     fn last_forward_time(&self, channel_id: &str) -> Result<Option<i64>, DecisionInputError> {
@@ -669,7 +863,7 @@ impl FeeEvidence for TranscriptEvidence {
             WireValue::Array(vec![WireValue::String(channel_id.to_string())]),
         )?;
         optional_i64(&value, "$.observations.evidence.last_forward_time.result")
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+            .map_err(|error| self.decode_error(error))
     }
 
     fn flow_window(&self, channel_id: &str) -> Result<Option<FlowWindow>, DecisionInputError> {
@@ -677,7 +871,7 @@ impl FeeEvidence for TranscriptEvidence {
             "flow_window",
             WireValue::Array(vec![WireValue::String(channel_id.to_string())]),
         )?;
-        decode_flow_window(&value).map_err(|error| DecisionInputError::new(error.to_string()))
+        decode_flow_window(&value).map_err(|error| self.decode_error(error))
     }
 
     fn policy(&self, peer_id: &str) -> Result<Option<PeerPolicy>, DecisionInputError> {
@@ -685,7 +879,14 @@ impl FeeEvidence for TranscriptEvidence {
             "policy",
             WireValue::Array(vec![WireValue::String(peer_id.to_string())]),
         )?;
-        decode_policy(&value, peer_id).map_err(|error| DecisionInputError::new(error.to_string()))
+        let ordinal = self.cursor.borrow().position.saturating_sub(1);
+        decode_policy(
+            &value,
+            peer_id,
+            &format!("$.observations.evidence[{ordinal}].result"),
+            ordinal,
+        )
+        .map_err(|error| self.decision_error(ordinal, "policy", error))
     }
 
     fn marginal_roi_percent(&self, channel_id: &str) -> Result<Option<f64>, DecisionInputError> {
@@ -700,7 +901,7 @@ impl FeeEvidence for TranscriptEvidence {
                 "$.observations.evidence.marginal_roi_percent.result",
             )
             .map(Some)
-            .map_err(|error| DecisionInputError::new(error.to_string())),
+            .map_err(|error| self.decode_error(error)),
         }
     }
 
@@ -713,30 +914,41 @@ impl FeeEvidence for TranscriptEvidence {
             &value,
             "$.observations.evidence.temporary_overlay_active.result",
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))
+        .map_err(|error| self.decode_error(error))
     }
 
     fn mempool_ma_24h(&self) -> Result<f64, DecisionInputError> {
         let value = self.consume("mempool_ma_24h", WireValue::Array(Vec::new()))?;
         number(&value, "$.observations.evidence.mempool_ma_24h.result")
-            .map_err(|error| DecisionInputError::new(error.to_string()))
+            .map_err(|error| self.decode_error(error))
     }
 
     fn node_channels(&self) -> Result<Vec<NodeChannel>, DecisionInputError> {
         let value = self.consume("node_channels", WireValue::Array(Vec::new()))?;
-        decode_node_channels(&value).map_err(|error| DecisionInputError::new(error.to_string()))
+        decode_node_channels(&value).map_err(|error| self.decode_error(error))
     }
 }
 
 pub struct TranscriptAuthorizer {
     cursor: RefCell<Cursor>,
+    consumed: RefCell<Vec<WireValue>>,
+    errors: ReplayErrorSlot,
 }
 
 impl TranscriptAuthorizer {
-    fn new(observations: &WireObject) -> Result<Self, ReplayError> {
+    fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
         Ok(Self {
             cursor: RefCell::new(Cursor::new(observations, "governor")?),
+            consumed: RefCell::new(Vec::new()),
+            errors,
         })
+    }
+
+    fn decision_error(&self, ordinal: usize, error: ReplayError) -> DecisionInputError {
+        remember_decision_error(
+            &self.errors,
+            structured_transcript_error("governor", ordinal, "authorize", error),
+        )
     }
 }
 
@@ -750,7 +962,7 @@ impl FeeAuthorizer for TranscriptAuthorizer {
         let base = format!("$.observations.governor[{ordinal}]");
         let entry = cursor
             .take("authorize", "")
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         let expected = WireValue::Object(
             [
                 (
@@ -784,45 +996,57 @@ impl FeeAuthorizer for TranscriptAuthorizer {
         let actual = entry
             .get("request")
             .ok_or_else(|| shape(format!("{base}.request"), "is required"))
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         if actual != &expected {
-            return Err(DecisionInputError::new(
+            return Err(self.decision_error(
+                ordinal,
                 transcript(
                     "governor",
                     ordinal,
                     format!("authorize request {expected:?}"),
                     format!("authorize request {actual:?}"),
                     format!("{base}.request"),
-                )
-                .to_string(),
+                ),
             ));
         }
         reject_error_entry(&entry, "governor", ordinal)
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         let result = object(
             entry
                 .get("result")
                 .ok_or_else(|| shape(format!("{base}.result"), "is required"))
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decision_error(ordinal, error))?,
             &format!("{base}.result"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))?;
+        .map_err(|error| self.decision_error(ordinal, error))?;
+        require_exact_wire_fields(
+            result,
+            &["authorized", "reason"],
+            &format!("{base}.result"),
+            "governor",
+            ordinal,
+            "authorize result",
+        )
+        .map_err(|error| self.decision_error(ordinal, error))?;
         let authorized = boolean(
             result
                 .get("authorized")
                 .ok_or_else(|| shape(format!("{base}.result.authorized"), "is required"))
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decision_error(ordinal, error))?,
             &format!("{base}.result.authorized"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))?;
+        .map_err(|error| self.decision_error(ordinal, error))?;
         let reason_code = string(
             result
                 .get("reason")
                 .ok_or_else(|| shape(format!("{base}.result.reason"), "is required"))
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decision_error(ordinal, error))?,
             &format!("{base}.result.reason"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))?;
+        .map_err(|error| self.decision_error(ordinal, error))?;
+        self.consumed
+            .borrow_mut()
+            .push(WireValue::Object(entry.clone()));
         Ok(FeeAuthorizationResult {
             authorized,
             reason_code,
@@ -834,14 +1058,23 @@ impl FeeAuthorizer for TranscriptAuthorizer {
 pub struct TranscriptExecution {
     cursor: RefCell<Cursor>,
     consumed: RefCell<Vec<WireValue>>,
+    errors: ReplayErrorSlot,
 }
 
 impl TranscriptExecution {
-    fn new(observations: &WireObject) -> Result<Self, ReplayError> {
+    fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
         Ok(Self {
             cursor: RefCell::new(Cursor::new(observations, "execution")?),
             consumed: RefCell::new(Vec::new()),
+            errors,
         })
+    }
+
+    fn decision_error(&self, ordinal: usize, error: ReplayError) -> DecisionInputError {
+        remember_decision_error(
+            &self.errors,
+            structured_transcript_error("execution", ordinal, "execute", error),
+        )
     }
 }
 
@@ -857,56 +1090,135 @@ impl FeeExecutor for TranscriptExecution {
         let base = format!("$.observations.execution[{ordinal}]");
         let entry = cursor
             .take("execute", "")
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         let expected = ovalue_to_wire(&request.wire_request);
         let actual = entry
             .get("request")
             .ok_or_else(|| shape(format!("{base}.request"), "is required"))
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         if actual != &expected {
-            return Err(DecisionInputError::new(
+            return Err(self.decision_error(
+                ordinal,
                 transcript(
                     "execution",
                     ordinal,
                     format!("execute request {expected:?}"),
                     format!("execute request {actual:?}"),
                     format!("{base}.request"),
-                )
-                .to_string(),
+                ),
             ));
         }
         reject_error_entry(&entry, "execution", ordinal)
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         let result_value = entry
             .get("result")
             .ok_or_else(|| shape(format!("{base}.result"), "is required"))
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
         let result = object(result_value, &format!("{base}.result"))
-            .map_err(|error| DecisionInputError::new(error.to_string()))?;
+            .map_err(|error| self.decision_error(ordinal, error))?;
+        require_exact_wire_fields(
+            result,
+            &[
+                "success",
+                "channel_id",
+                "fee_ppm",
+                "old_fee_ppm",
+                "base_fee_msat",
+                "message",
+            ],
+            &format!("{base}.result"),
+            "execution",
+            ordinal,
+            "execute result",
+        )
+        .map_err(|error| self.decision_error(ordinal, error))?;
         let success = boolean(
             result
                 .get("success")
                 .ok_or_else(|| shape(format!("{base}.result.success"), "is required"))
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decision_error(ordinal, error))?,
             &format!("{base}.result.success"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))?;
+        .map_err(|error| self.decision_error(ordinal, error))?;
         let fee_ppm = integer(
             result
                 .get("fee_ppm")
                 .ok_or_else(|| shape(format!("{base}.result.fee_ppm"), "is required"))
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decision_error(ordinal, error))?,
             &format!("{base}.result.fee_ppm"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))?;
+        .map_err(|error| self.decision_error(ordinal, error))?;
         let message = string(
             result
                 .get("message")
                 .ok_or_else(|| shape(format!("{base}.result.message"), "is required"))
-                .map_err(|error| DecisionInputError::new(error.to_string()))?,
+                .map_err(|error| self.decision_error(ordinal, error))?,
             &format!("{base}.result.message"),
         )
-        .map_err(|error| DecisionInputError::new(error.to_string()))?;
+        .map_err(|error| self.decision_error(ordinal, error))?;
+        let channel_id = string(
+            result
+                .get("channel_id")
+                .ok_or_else(|| shape(format!("{base}.result.channel_id"), "is required"))
+                .map_err(|error| self.decision_error(ordinal, error))?,
+            &format!("{base}.result.channel_id"),
+        )
+        .map_err(|error| self.decision_error(ordinal, error))?;
+        if channel_id != request.decision.channel_id {
+            return Err(self.decision_error(
+                ordinal,
+                transcript(
+                    "execution",
+                    ordinal,
+                    format!("execute result channel_id {}", request.decision.channel_id),
+                    format!("execute result channel_id {channel_id}"),
+                    format!("{base}.result.channel_id"),
+                ),
+            ));
+        }
+        let old_fee_ppm = integer(
+            result
+                .get("old_fee_ppm")
+                .ok_or_else(|| shape(format!("{base}.result.old_fee_ppm"), "is required"))
+                .map_err(|error| self.decision_error(ordinal, error))?,
+            &format!("{base}.result.old_fee_ppm"),
+        )
+        .map_err(|error| self.decision_error(ordinal, error))?;
+        if old_fee_ppm != request.old_fee_ppm {
+            return Err(self.decision_error(
+                ordinal,
+                transcript(
+                    "execution",
+                    ordinal,
+                    format!("execute result old_fee_ppm {}", request.old_fee_ppm),
+                    format!("execute result old_fee_ppm {old_fee_ppm}"),
+                    format!("{base}.result.old_fee_ppm"),
+                ),
+            ));
+        }
+        let base_fee_msat = integer(
+            result
+                .get("base_fee_msat")
+                .ok_or_else(|| shape(format!("{base}.result.base_fee_msat"), "is required"))
+                .map_err(|error| self.decision_error(ordinal, error))?,
+            &format!("{base}.result.base_fee_msat"),
+        )
+        .map_err(|error| self.decision_error(ordinal, error))?;
+        if base_fee_msat != request.expected_base_fee_msat {
+            return Err(self.decision_error(
+                ordinal,
+                transcript(
+                    "execution",
+                    ordinal,
+                    format!(
+                        "execute result base_fee_msat {}",
+                        request.expected_base_fee_msat
+                    ),
+                    format!("execute result base_fee_msat {base_fee_msat}"),
+                    format!("{base}.result.base_fee_msat"),
+                ),
+            ));
+        }
         let pure = decide_set_channel_fee(&request.decision, cfg, policy);
         self.consumed
             .borrow_mut()
@@ -1309,6 +1621,78 @@ fn post_channel_state(
     Ok(WireValue::Array(output))
 }
 
+fn state_flush_post_channel_state(
+    capture: &FeeCycleReplayV0,
+    flushes: &[Vec<(String, ChannelCycleState, ChannelFeeState)>],
+) -> Result<WireValue, ReplayError> {
+    let rows = flushes.first().ok_or_else(|| {
+        transcript(
+            "state_flush",
+            0,
+            "exactly one flush",
+            "missing flush",
+            "$.expected.post_channel_state",
+        )
+    })?;
+    let channels = array(
+        field(&capture.pre_state, "ordered_channels", "$.pre_state")?,
+        "$.pre_state.ordered_channels",
+    )?;
+    if rows.len() != channels.len() {
+        return Err(transcript(
+            "state_flush",
+            rows.len().min(channels.len()),
+            format!("{} ordered channel rows", channels.len()),
+            format!("{} flushed rows", rows.len()),
+            "$.expected.post_channel_state",
+        ));
+    }
+
+    let mut output = Vec::with_capacity(rows.len());
+    for (index, ((actual_channel_id, cycle, fee), channel)) in rows.iter().zip(channels).enumerate()
+    {
+        let pre_path = format!("$.pre_state.ordered_channels[{index}]");
+        let channel = object(channel, &pre_path)?;
+        let expected_channel_id = string(
+            field(channel, "channel_id", &pre_path)?,
+            &format!("{pre_path}.channel_id"),
+        )?;
+        if actual_channel_id != &expected_channel_id {
+            return Err(transcript(
+                "state_flush",
+                index,
+                format!("channel_id {expected_channel_id}"),
+                format!("channel_id {actual_channel_id}"),
+                format!("$.expected.post_channel_state[{index}].channel_id"),
+            ));
+        }
+        let peer_id = string(
+            field(channel, "peer_id", &pre_path)?,
+            &format!("{pre_path}.peer_id"),
+        )?;
+        output.push(WireValue::Object(
+            [
+                (
+                    "channel_id".to_string(),
+                    WireValue::String(expected_channel_id),
+                ),
+                ("peer_id".to_string(), WireValue::String(peer_id)),
+                (
+                    "cycle_state".to_string(),
+                    ovalue_to_wire(&serialize_cycle_state_payload(cycle)),
+                ),
+                (
+                    "fee_state".to_string(),
+                    ovalue_to_wire(&fee_state_to_capture_value(fee)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+    }
+    Ok(WireValue::Array(output))
+}
+
 fn ordered_outcomes(decisions: &[FeeDecision]) -> WireValue {
     WireValue::Array(
         decisions
@@ -1379,7 +1763,13 @@ fn ordered_outcomes(decisions: &[FeeDecision]) -> WireValue {
     )
 }
 
-fn post_global_wire(state: &ControllerState, cfg: &FeeCfgSnapshot) -> WireValue {
+fn optional_tagged_float(value: Option<f64>) -> WireValue {
+    value
+        .map(|value| WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(value)))
+        .unwrap_or(WireValue::Null)
+}
+
+fn post_global_wire(state: &ControllerState) -> WireValue {
     WireValue::Object(
         [
             (
@@ -1429,13 +1819,17 @@ fn post_global_wire(state: &ControllerState, cfg: &FeeCfgSnapshot) -> WireValue 
                 "drain_values".to_string(),
                 WireValue::Object(
                     [
-                        ("node_receivable_ratio".to_string(), WireValue::Null),
-                        ("node_drain_pressure".to_string(), WireValue::Null),
+                        (
+                            "node_receivable_ratio".to_string(),
+                            optional_tagged_float(state.last_node_receivable_ratio),
+                        ),
+                        (
+                            "node_drain_pressure".to_string(),
+                            optional_tagged_float(state.last_node_drain_pressure),
+                        ),
                         (
                             "effective_drain_discount_max".to_string(),
-                            WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(
-                                cfg.drain_fee_discount_max,
-                            )),
+                            optional_tagged_float(state.last_effective_drain_discount_max),
                         ),
                     ]
                     .into_iter()
@@ -1464,11 +1858,13 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
     let cfg = decode_cfg(&capture.configuration)?;
     let mut state = import_state(capture)?;
     let observations = &capture.observations;
-    let evidence = TranscriptEvidence::new(observations)?;
-    let mut clock = TranscriptClock::new(observations)?;
-    let mut entropy = TranscriptEntropy::new(observations)?;
-    let authorizer = TranscriptAuthorizer::new(observations)?;
-    let executor = TranscriptExecution::new(observations)?;
+    validate_observation_families(observations)?;
+    let errors: ReplayErrorSlot = Rc::new(RefCell::new(None));
+    let evidence = TranscriptEvidence::new(observations, Rc::clone(&errors))?;
+    let mut clock = TranscriptClock::new(observations, Rc::clone(&errors))?;
+    let mut entropy = TranscriptEntropy::new(observations, Rc::clone(&errors))?;
+    let authorizer = TranscriptAuthorizer::new(observations, Rc::clone(&errors))?;
+    let executor = TranscriptExecution::new(observations, Rc::clone(&errors))?;
     let sink = MemoryStateSink::default();
     let mut deps = CycleDeps {
         evidence: &evidence,
@@ -1494,8 +1890,15 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
             )
         })?,
     };
-    let decisions = run_fee_cycle(&mut state, &mut deps)
-        .map_err(|error| ReplayError::DecisionInput(error.to_string()))?;
+    let decisions = match run_fee_cycle(&mut state, &mut deps) {
+        Ok(decisions) => decisions,
+        Err(error) => {
+            if let Some(replay_error) = errors.borrow_mut().take() {
+                return Err(replay_error);
+            }
+            return Err(ReplayError::DecisionInput(error.to_string()));
+        }
+    };
 
     // Compare the semantic outputs before checking transcript exhaustion. A
     // captured negative execution/governor result may intentionally prevent
@@ -1522,15 +1925,20 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
             "$.expected.post_channel_state",
         ));
     }
-
-    let post_channels = post_channel_state(capture, &state)?;
     let expected_post_channels = field(&capture.expected, "post_channel_state", "$.expected")?;
+    let post_channels = post_channel_state(capture, &state)?;
     compare(
         "$.expected.post_channel_state",
         expected_post_channels,
         &post_channels,
     )?;
-    let post_global = post_global_wire(&state, &cfg);
+    let state_flush = state_flush_post_channel_state(capture, &sink.flushes.borrow())?;
+    compare(
+        "$.expected.post_channel_state",
+        expected_post_channels,
+        &state_flush,
+    )?;
+    let post_global = post_global_wire(&state);
     let expected_post_global = field(&capture.expected, "post_global", "$.expected")?;
     let expected_post_global_object = object(expected_post_global, "$.expected.post_global")?;
     let mut expected_without_random = expected_post_global_object.clone();
@@ -1545,8 +1953,10 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
         ordered_outcomes: outcomes,
         decisions: decisions.iter().map(FeeDecision::to_replay_wire).collect(),
         decision_summary: summary_wire(&state.last_decision_summary),
+        governor: WireValue::Array(authorizer.consumed.into_inner()),
         execution: WireValue::Array(executor.consumed.into_inner()),
         post_channel_state: post_channels,
+        state_flush,
         post_global,
         consumed: counts,
     })
@@ -1691,14 +2101,47 @@ fn decode_gossip(value: &WireValue, path: &str) -> Result<Vec<GossipRow>, Replay
         .collect()
 }
 
-fn decode_policy(value: &WireValue, peer_id: &str) -> Result<Option<PeerPolicy>, ReplayError> {
+fn decode_policy(
+    value: &WireValue,
+    peer_id: &str,
+    path: &str,
+    ordinal: usize,
+) -> Result<Option<PeerPolicy>, ReplayError> {
     if value == &WireValue::Null {
         return Ok(None);
     }
-    let object = object(value, "$.observations.evidence.policy.result")?;
+    let object = object(value, path)?;
+    require_exact_wire_fields(
+        object,
+        &[
+            "peer_id",
+            "strategy",
+            "fee_ppm_target",
+            "fee_multiplier_min",
+            "fee_multiplier_max",
+            "rebalance_mode",
+            "tags",
+            "updated_at",
+            "expires_at",
+        ],
+        path,
+        "evidence",
+        ordinal,
+        "policy result",
+    )?;
+    let captured_peer_id = string(field(object, "peer_id", path)?, &format!("{path}.peer_id"))?;
+    if captured_peer_id != peer_id {
+        return Err(transcript(
+            "evidence",
+            ordinal,
+            format!("policy peer_id {peer_id}"),
+            format!("policy peer_id {captured_peer_id}"),
+            format!("{path}.peer_id"),
+        ));
+    }
     let strategy = match string(
-        field(object, "strategy", "$.observations.evidence.policy.result")?,
-        "$.observations.evidence.policy.result.strategy",
+        field(object, "strategy", path)?,
+        &format!("{path}.strategy"),
     )?
     .as_str()
     {
@@ -1707,59 +2150,59 @@ fn decode_policy(value: &WireValue, peer_id: &str) -> Result<Option<PeerPolicy>,
         "dynamic" => FeeStrategy::Dynamic,
         other => {
             return Err(shape(
-                "$.observations.evidence.policy.result.strategy",
+                format!("{path}.strategy"),
                 format!("unknown strategy {other}"),
             ))
         }
     };
-    let rebalance_mode = match object.get("rebalance_mode") {
-        Some(WireValue::String(value)) if value == "disabled" => RebalanceMode::Disabled,
-        _ => RebalanceMode::Enabled,
+    let rebalance_mode = match string(
+        field(object, "rebalance_mode", path)?,
+        &format!("{path}.rebalance_mode"),
+    )?
+    .as_str()
+    {
+        "disabled" => RebalanceMode::Disabled,
+        "enabled" => RebalanceMode::Enabled,
+        other => {
+            return Err(shape(
+                format!("{path}.rebalance_mode"),
+                format!("unknown rebalance mode {other}"),
+            ))
+        }
+    };
+    let tags = array(field(object, "tags", path)?, &format!("{path}.tags"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| string(value, &format!("{path}.tags[{index}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let fee_ppm_target = optional_i64(
+        field(object, "fee_ppm_target", path)?,
+        &format!("{path}.fee_ppm_target"),
+    )?;
+    let fee_multiplier_min = match field(object, "fee_multiplier_min", path)? {
+        WireValue::Null => None,
+        value => Some(number(value, &format!("{path}.fee_multiplier_min"))?),
+    };
+    let fee_multiplier_max = match field(object, "fee_multiplier_max", path)? {
+        WireValue::Null => None,
+        value => Some(number(value, &format!("{path}.fee_multiplier_max"))?),
     };
     Ok(Some(PeerPolicy {
-        peer_id: peer_id.to_string(),
+        peer_id: captured_peer_id,
         strategy,
-        fee_ppm_target: object
-            .get("fee_ppm_target")
-            .map(|v| optional_i64(v, "$.observations.evidence.policy.result.fee_ppm_target"))
-            .transpose()?
-            .flatten(),
-        fee_multiplier_min: object
-            .get("fee_multiplier_min")
-            .map(|v| match v {
-                WireValue::Null => Ok(None),
-                _ => number(
-                    v,
-                    "$.observations.evidence.policy.result.fee_multiplier_min",
-                )
-                .map(Some),
-            })
-            .transpose()?
-            .flatten(),
-        fee_multiplier_max: object
-            .get("fee_multiplier_max")
-            .map(|v| match v {
-                WireValue::Null => Ok(None),
-                _ => number(
-                    v,
-                    "$.observations.evidence.policy.result.fee_multiplier_max",
-                )
-                .map(Some),
-            })
-            .transpose()?
-            .flatten(),
+        fee_ppm_target,
+        fee_multiplier_min,
+        fee_multiplier_max,
         rebalance_mode,
-        tags: Vec::new(),
-        updated_at: object
-            .get("updated_at")
-            .map(|v| integer(v, "$.observations.evidence.policy.result.updated_at"))
-            .transpose()?
-            .unwrap_or(0),
-        expires_at: object
-            .get("expires_at")
-            .map(|v| optional_i64(v, "$.observations.evidence.policy.result.expires_at"))
-            .transpose()?
-            .flatten(),
+        tags,
+        updated_at: integer(
+            field(object, "updated_at", path)?,
+            &format!("{path}.updated_at"),
+        )?,
+        expires_at: optional_i64(
+            field(object, "expires_at", path)?,
+            &format!("{path}.expires_at"),
+        )?,
     }))
 }
 
@@ -1854,6 +2297,13 @@ fn decode_flow_window(value: &WireValue) -> Result<Option<FlowWindow>, ReplayErr
             "must be the Python [out_sats, in_sats, count] tuple",
         ));
     }
+    let count = integer(&values[2], "$.observations.evidence.flow_window.result[2]")?;
+    if count < 0 {
+        return Err(shape(
+            "$.observations.evidence.flow_window.result[2]",
+            "count must be nonnegative",
+        ));
+    }
     Ok(Some(FlowWindow {
         out_sats: integer(&values[0], "$.observations.evidence.flow_window.result[0]")?,
         in_sats: integer(&values[1], "$.observations.evidence.flow_window.result[1]")?,
@@ -1889,4 +2339,25 @@ fn decode_node_channels(value: &WireValue) -> Result<Vec<NodeChannel>, ReplayErr
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod strict_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn flow_window_validates_the_count_tuple_element() {
+        let malformed = WireValue::Array(vec![
+            WireValue::Integer(10),
+            WireValue::Integer(20),
+            WireValue::String("bad-count".to_string()),
+        ]);
+        let error = decode_flow_window(&malformed).expect_err("count must be consumed");
+        assert!(
+            error
+                .to_string()
+                .contains("$.observations.evidence.flow_window.result[2]"),
+            "{error}"
+        );
+    }
 }

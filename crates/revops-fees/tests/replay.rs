@@ -1,5 +1,5 @@
 use revops_core::canonical::canonical_json;
-use revops_fees::replay::{decode_tagged_float, replay_fee_capture};
+use revops_fees::replay::{decode_tagged_float, replay_fee_capture, ReplayError};
 use revops_fees::replay_wire::{parse_fee_capture, FeeCycleReplayV0, WireValue};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -63,6 +63,11 @@ fn strict_complete_adjustment_replays_exactly() {
             .clone()
     );
     assert_eq!(replay.execution, capture.observations["execution"]);
+    assert_eq!(replay.governor, capture.observations["governor"]);
+    assert_eq!(
+        replay.state_flush, capture.expected["post_channel_state"],
+        "the captured MemoryStateSink rows are the exact persisted output"
+    );
     assert_eq!(replay.consumed.evidence, 8);
     assert_eq!(replay.consumed.clock, 5);
     assert_eq!(replay.consumed.entropy, 1);
@@ -90,6 +95,64 @@ fn strict_complete_adjustment_replays_exactly() {
 }
 
 #[test]
+fn enabled_node_drain_reports_kernel_derived_ratio_pressure_and_effective_cap() {
+    let mut enabled = fixture_value();
+    enabled["configuration"]["node_drain_bias_enabled"] = json!(true);
+    enabled["configuration"]["drain_fee_discount_max"] = json!({"__f__": "0.3"});
+
+    let evidence = enabled["observations"]["evidence"]
+        .as_array_mut()
+        .expect("evidence transcript");
+    evidence.insert(
+        6,
+        json!({
+            "ordinal": 6,
+            "op": "node_channels",
+            "args": [],
+            "result": [
+                {
+                    "state": "CHANNELD_NORMAL",
+                    "to_us_msat": 750,
+                    "total_msat": 1000
+                },
+                {
+                    "state": "CHANNELD_NORMAL",
+                    "to_us_msat": 150,
+                    "total_msat": 1000
+                },
+                {
+                    "state": "ONCHAIN",
+                    "to_us_msat": 1000,
+                    "total_msat": 1000
+                }
+            ]
+        }),
+    );
+    for (ordinal, entry) in evidence.iter_mut().enumerate().skip(7) {
+        entry["ordinal"] = json!(ordinal);
+    }
+    enabled["completeness"]["evidence_entries"] = json!(9);
+    enabled["expected"]["post_global"]["drain_values"] = json!({
+        "node_receivable_ratio": {"__f__": "0.55"},
+        "node_drain_pressure": {"__f__": "0.0"},
+        "effective_drain_discount_max": {"__f__": "0.3"}
+    });
+
+    let capture = parse_mutated(enabled);
+    let replay = replay_fee_capture(&capture).expect("enabled node drain replay");
+    let WireValue::Object(post_global) = replay.post_global else {
+        panic!("post_global object");
+    };
+    let WireValue::Object(expected_post_global) = &capture.expected["post_global"] else {
+        panic!("expected post_global object");
+    };
+    assert_eq!(
+        post_global.get("drain_values"),
+        expected_post_global.get("drain_values")
+    );
+}
+
+#[test]
 fn strict_complete_passive_skip_replays_exactly() {
     let capture = parse_fee_capture(COMPLETE_SKIP).expect("sealed Python skip fixture");
     let replay = replay_fee_capture(&capture).expect("strict offline skip replay");
@@ -109,6 +172,11 @@ fn strict_complete_passive_skip_replays_exactly() {
     assert_eq!(replay.consumed.execution, 0);
     assert_eq!(replay.consumed.state_flush, 1);
     assert_eq!(replay.decisions.len(), 1);
+    assert_eq!(replay.governor, capture.observations["governor"]);
+    let WireValue::Object(skip_decision) = &replay.decisions[0] else {
+        panic!("skip decision object");
+    };
+    assert_eq!(skip_decision.get("governed"), Some(&WireValue::Null));
 }
 
 #[test]
@@ -197,6 +265,28 @@ fn strict_governor_rejects_request_and_result_drift() {
 }
 
 #[test]
+fn strict_governor_result_rejects_partial_and_extra_shapes() {
+    let mut missing = fixture_value();
+    missing["observations"]["governor"][0]["result"]
+        .as_object_mut()
+        .expect("governor result")
+        .remove("reason");
+    assert_path_error(
+        &parse_mutated(missing),
+        "governor",
+        "$.observations.governor[0].result.reason",
+    );
+
+    let mut extra = fixture_value();
+    extra["observations"]["governor"][0]["result"]["surprise"] = json!(true);
+    assert_path_error(
+        &parse_mutated(extra),
+        "governor",
+        "$.observations.governor[0].result.surprise",
+    );
+}
+
+#[test]
 fn strict_execution_result_drives_terminal_outcome_and_request_is_exact() {
     let mut wrong_request = fixture_value();
     wrong_request["observations"]["execution"][0]["request"]["reason"] = json!("other");
@@ -242,6 +332,167 @@ fn strict_rejects_unconsumed_extra_transcript_entries() {
 }
 
 #[test]
+fn strict_observation_family_set_rejects_unknown_and_missing_families() {
+    let mut wrong = fixture_value();
+    wrong["observations"]["surprise"] = json!([]);
+    let error = replay_fee_capture(&parse_mutated(wrong))
+        .expect_err("unknown observation family must fail closed");
+    assert!(
+        error.to_string().contains("$.observations.surprise"),
+        "{error}"
+    );
+
+    for family in ["evidence", "clock", "entropy", "governor", "execution"] {
+        let mut missing = parse_fee_capture(COMPLETE_ADJUSTMENT).expect("fixture");
+        missing.observations.remove(family);
+        let error = replay_fee_capture(&missing).expect_err("missing family must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("$.observations.{family}")),
+            "{family}: {error}"
+        );
+    }
+}
+
+#[test]
+fn strict_clock_and_entropy_reject_error_metadata_even_with_valid_values() {
+    for (family, field, path) in [
+        ("clock", "error", "$.observations.clock[0].error"),
+        (
+            "clock",
+            "fallback_error",
+            "$.observations.clock[0].fallback_error",
+        ),
+        ("entropy", "error", "$.observations.entropy[0].error"),
+        (
+            "entropy",
+            "fallback_error",
+            "$.observations.entropy[0].fallback_error",
+        ),
+    ] {
+        let mut wrong = fixture_value();
+        wrong["observations"][family][0][field] =
+            json!({"category": "RuntimeError", "message": "fallback used"});
+        let capture = parse_mutated(wrong);
+        assert_path_error(&capture, family, path);
+    }
+}
+
+#[test]
+fn strict_execution_result_validates_full_shape_and_values() {
+    for (field, replacement, path) in [
+        (
+            "channel_id",
+            json!("other-channel"),
+            "$.observations.execution[0].result.channel_id",
+        ),
+        (
+            "old_fee_ppm",
+            json!(999),
+            "$.observations.execution[0].result.old_fee_ppm",
+        ),
+        (
+            "base_fee_msat",
+            json!(999),
+            "$.observations.execution[0].result.base_fee_msat",
+        ),
+    ] {
+        let mut wrong = fixture_value();
+        wrong["observations"]["execution"][0]["result"][field] = replacement;
+        let capture = parse_mutated(wrong);
+        assert_path_error(&capture, "execution", path);
+    }
+
+    let mut extra = fixture_value();
+    extra["observations"]["execution"][0]["result"]["surprise"] = json!(true);
+    assert_path_error(
+        &parse_mutated(extra),
+        "execution",
+        "$.observations.execution[0].result.surprise",
+    );
+
+    let mut missing = fixture_value();
+    missing["observations"]["execution"][0]["result"]
+        .as_object_mut()
+        .expect("execution result")
+        .remove("base_fee_msat");
+    assert_path_error(
+        &parse_mutated(missing),
+        "execution",
+        "$.observations.execution[0].result.base_fee_msat",
+    );
+}
+
+#[test]
+fn strict_policy_requires_exact_fields_types_enums_and_identity() {
+    let policy_index = 7;
+    for (field, replacement, path) in [
+        (
+            "rebalance_mode",
+            json!("bogus"),
+            "$.observations.evidence[7].result.rebalance_mode",
+        ),
+        (
+            "updated_at",
+            json!("bad"),
+            "$.observations.evidence[7].result.updated_at",
+        ),
+        (
+            "tags",
+            json!("not-an-array"),
+            "$.observations.evidence[7].result.tags",
+        ),
+        (
+            "peer_id",
+            json!("other-peer"),
+            "$.observations.evidence[7].result.peer_id",
+        ),
+    ] {
+        let mut wrong = fixture_value();
+        wrong["observations"]["evidence"][policy_index]["result"][field] = replacement;
+        assert_path_error(&parse_mutated(wrong), "evidence", path);
+    }
+
+    let mut missing = fixture_value();
+    missing["observations"]["evidence"][policy_index]["result"]
+        .as_object_mut()
+        .expect("policy result")
+        .remove("updated_at");
+    assert_path_error(
+        &parse_mutated(missing),
+        "evidence",
+        "$.observations.evidence[7].result.updated_at",
+    );
+
+    let mut extra = fixture_value();
+    extra["observations"]["evidence"][policy_index]["result"]["surprise"] = json!(true);
+    assert_path_error(
+        &parse_mutated(extra),
+        "evidence",
+        "$.observations.evidence[7].result.surprise",
+    );
+}
+
+#[test]
+fn transcript_shape_failures_preserve_structured_context() {
+    for (family, mutate, path) in [
+        ("clock", "value", "$.observations.clock[0].value"),
+        ("entropy", "result", "$.observations.entropy[0].result"),
+    ] {
+        let mut wrong = fixture_value();
+        wrong["observations"][family][0][mutate] = json!("wrong-type");
+        let error = replay_fee_capture(&parse_mutated(wrong))
+            .expect_err("transcript value type mismatch must fail closed");
+        assert!(
+            matches!(error, ReplayError::Transcript { .. }),
+            "{family} mismatch lost structured transcript context: {error}"
+        );
+        assert!(error.to_string().contains(path), "{error}");
+    }
+}
+
+#[test]
 fn pre_state_rejects_unknown_missing_duplicate_and_order_drift() {
     let mut unknown = fixture_value();
     unknown["pre_state"]["global"]["unexpected"] = json!(true);
@@ -280,6 +531,161 @@ fn pre_state_rejects_unknown_missing_duplicate_and_order_drift() {
     assert!(error
         .to_string()
         .contains("$.pre_state.ordered_channels[0]"));
+}
+
+#[test]
+fn pre_state_rejects_corrupted_nested_pid_and_thompson_shapes_at_source_path() {
+    let corruptions = [
+        (
+            "pid.kp type",
+            "$.pre_state.ordered_channels[0].fee_state.pid.kp",
+            vec!["fee_state", "pid", "kp"],
+            json!("bad"),
+        ),
+        (
+            "posterior coeff length",
+            "$.pre_state.ordered_channels[0].fee_state.thompson.posterior_coeffs",
+            vec!["fee_state", "thompson", "posterior_coeffs"],
+            json!([{"__f__": "0.0"}, {"__f__": "1.0"}]),
+        ),
+        (
+            "posterior precision shape",
+            "$.pre_state.ordered_channels[0].fee_state.thompson.posterior_precision[1]",
+            vec!["fee_state", "thompson", "posterior_precision"],
+            json!([
+                [{"__f__": "1.0"}, {"__f__": "0.0"}, {"__f__": "0.0"}],
+                [{"__f__": "0.0"}],
+                [{"__f__": "0.0"}, {"__f__": "0.0"}, {"__f__": "1.0"}]
+            ]),
+        ),
+        (
+            "observation tuple type",
+            "$.pre_state.ordered_channels[0].fee_state.thompson.observations[0]",
+            vec!["fee_state", "thompson", "observations"],
+            json!(["not-a-tuple"]),
+        ),
+        (
+            "contextual posterior tuple shape",
+            "$.pre_state.ordered_channels[0].fee_state.thompson.contextual_posteriors.ctx",
+            vec!["fee_state", "thompson", "contextual_posteriors"],
+            json!({"ctx": [{"__f__": "1.0"}, {"__f__": "2.0"}]}),
+        ),
+        (
+            "posterior bias tuple shape",
+            "$.pre_state.ordered_channels[0].fee_state.thompson.posterior_bias[0]",
+            vec!["fee_state", "thompson", "posterior_bias"],
+            json!([[{"__f__": "1.0"}, {"__f__": "2.0"}]]),
+        ),
+    ];
+
+    for (name, expected_path, keys, replacement) in corruptions {
+        let mut wrong = fixture_value();
+        let mut cursor = &mut wrong["pre_state"]["ordered_channels"][0];
+        for key in keys {
+            cursor = &mut cursor[key];
+        }
+        *cursor = replacement;
+        let error = replay_fee_capture(&parse_mutated(wrong))
+            .expect_err("nested replay state corruption must fail closed");
+        assert!(
+            error.to_string().contains(expected_path),
+            "{name}: expected {expected_path}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn malformed_transcript_matrix_is_structured_and_never_panics() {
+    let cases = [
+        (
+            "initial evidence result",
+            "evidence",
+            0,
+            "channels_info",
+            "$.observations.evidence[0].result",
+        ),
+        (
+            "in-kernel evidence result",
+            "evidence",
+            3,
+            "channel_states",
+            "$.observations.evidence[3].result",
+        ),
+        (
+            "clock value",
+            "clock",
+            0,
+            "cycle.started_at",
+            "$.observations.clock[0].value",
+        ),
+        (
+            "entropy result",
+            "entropy",
+            0,
+            "vegas.boost",
+            "$.observations.entropy[0].result",
+        ),
+        (
+            "governor result",
+            "governor",
+            0,
+            "authorize",
+            "$.observations.governor[0].result.authorized",
+        ),
+        (
+            "execution result",
+            "execution",
+            0,
+            "execute",
+            "$.observations.execution[0].result.success",
+        ),
+    ];
+
+    for (name, family, ordinal, label_or_op, path) in cases {
+        let mut wrong = fixture_value();
+        match name {
+            "initial evidence result" => {
+                wrong["observations"]["evidence"][0]["result"] = json!("bad")
+            }
+            "in-kernel evidence result" => {
+                wrong["observations"]["evidence"][3]["result"] = json!("bad")
+            }
+            "clock value" => wrong["observations"]["clock"][0]["value"] = json!("bad"),
+            "entropy result" => wrong["observations"]["entropy"][0]["result"] = json!("bad"),
+            "governor result" => {
+                wrong["observations"]["governor"][0]["result"]["authorized"] = json!("bad")
+            }
+            "execution result" => {
+                wrong["observations"]["execution"][0]["result"]["success"] = json!("bad")
+            }
+            _ => unreachable!("known malformed case"),
+        }
+        let capture = parse_mutated(wrong);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replay_fee_capture(&capture)
+        }));
+        assert!(outcome.is_ok(), "{name} panicked");
+        let error = outcome
+            .expect("checked no panic")
+            .expect_err("malformed transcript must fail closed");
+        assert!(
+            matches!(error, ReplayError::Transcript { .. }),
+            "{name} lost structured context: {error}"
+        );
+        let rendered = error.to_string();
+        for needle in [
+            family,
+            &format!("expected ordinal {ordinal}"),
+            label_or_op,
+            "actual",
+            path,
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "{name}: {needle:?} missing from {rendered}"
+            );
+        }
+    }
 }
 
 #[test]

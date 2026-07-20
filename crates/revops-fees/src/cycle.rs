@@ -515,6 +515,11 @@ pub struct ControllerState {
     /// `skip_gate_prev` at the next `rehydrate`. Never read by the gate
     /// directly.
     pub skip_gate_seen: BTreeMap<String, SkipGateEpoch>,
+    /// Diagnostics computed by the most recent fee-cycle kernel run. They
+    /// are observational outputs only and never authorize or execute work.
+    pub last_node_receivable_ratio: Option<f64>,
+    pub last_node_drain_pressure: Option<f64>,
+    pub last_effective_drain_discount_max: Option<f64>,
 }
 
 impl ControllerState {
@@ -527,6 +532,9 @@ impl ControllerState {
             last_decision_summary: DecisionSummary::default(),
             skip_gate_prev: BTreeMap::new(),
             skip_gate_seen: BTreeMap::new(),
+            last_node_receivable_ratio: None,
+            last_node_drain_pressure: None,
+            last_effective_drain_discount_max: None,
         }
     }
 
@@ -1017,12 +1025,14 @@ fn tag_skip_gate_non_comparable(trace: OValue) -> OValue {
 
 fn fee_execution_request(
     decision: SetFeeRequest,
+    old_fee_ppm: i64,
     reason: &str,
     reason_code: Option<&str>,
     channel_info: Option<OValue>,
     htlcmin_msat: Option<i64>,
     base_fee_msat_override: Option<i64>,
 ) -> FeeExecutionRequest {
+    let expected_base_fee_msat = base_fee_msat_override.unwrap_or(decision.base_fee_msat);
     let wire_request = OValue::obj(vec![
         (
             "channel_id".to_string(),
@@ -1071,6 +1081,8 @@ fn fee_execution_request(
     FeeExecutionRequest {
         decision,
         wire_request,
+        old_fee_ppm,
+        expected_base_fee_msat,
     }
 }
 
@@ -1160,6 +1172,7 @@ fn static_policy_branch(
             htlcmax_msat: None,
             base_fee_msat: cfg.base_fee_msat,
         },
+        current_fee,
         "Policy: STATIC",
         Some(FeeReasonCode::PolicyStatic.as_str()),
         None,
@@ -2569,6 +2582,7 @@ pub fn adjust_channel_fee(
             htlcmax_msat,
             base_fee_msat: target_base_fee_msat,
         },
+        raw_chain_fee,
         &reason,
         Some(fee_reason_code.as_str()),
         Some(channel_info_capture_value(info)),
@@ -3022,6 +3036,7 @@ fn create_gossip_refresh_adjustment(
             htlcmax_msat: None,
             base_fee_msat: cfg.base_fee_msat,
         },
+        current_fee_ppm,
         "gossip_refresh",
         Some(FeeReasonCode::GossipRefresh.as_str()),
         None,
@@ -3213,6 +3228,9 @@ pub fn run_fee_cycle(
     let (profile_name, profile) = fee_profile(&cfg.fee_profile);
     let _ = profile_name;
     let mut decisions: Vec<FeeDecision> = Vec::new();
+    state.last_node_receivable_ratio = None;
+    state.last_node_drain_pressure = None;
+    state.last_effective_drain_discount_max = None;
     let cycle_id = format!("fee-dryrun-{now}");
 
     if cfg.paused {
@@ -3274,6 +3292,9 @@ pub fn run_fee_cycle(
             pressure,
         ))
     };
+    state.last_node_receivable_ratio = node_receivable_ratio_value;
+    state.last_node_drain_pressure = node_drain_pressure_value;
+    state.last_effective_drain_discount_max = node_drain_bias_effective_cap;
 
     // Skip-reason tallies (py 4541-4553).
     let mut skip_reasons: BTreeMap<&'static str, i64> = BTreeMap::new();
