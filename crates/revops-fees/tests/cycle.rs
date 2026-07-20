@@ -147,6 +147,8 @@ struct FixtureEvidence {
     forward_map: RefCell<BTreeMap<String, i64>>,
     probe_flag: Cell<bool>,
     gossip: Vec<GossipRow>,
+    gossip_calls: Cell<usize>,
+    captured_neighbor_median: Option<Option<i64>>,
     latency: Option<PeerLatency>,
     cost_history: Vec<RebalanceCostSample>,
     peer_fee_history: Option<PeerFeeHistory>,
@@ -195,7 +197,12 @@ impl FixtureEvidence {
         self.probe_flag.set(false);
     }
     fn gossip_channels(&self, _peer_id: &str) -> Vec<GossipRow> {
+        self.gossip_calls
+            .set(self.gossip_calls.get().saturating_add(1));
         self.gossip.clone()
+    }
+    fn captured_neighbor_fee_median(&self, _peer_id: &str) -> Option<Option<i64>> {
+        self.captured_neighbor_median
     }
     fn peer_latency(&self, _peer_id: &str) -> Option<PeerLatency> {
         self.latency
@@ -1070,6 +1077,9 @@ impl SyntheticEvidence {
     fn gossip_channels(&self, _peer_id: &str) -> Vec<GossipRow> {
         Vec::new()
     }
+    fn captured_neighbor_fee_median(&self, _peer_id: &str) -> Option<Option<i64>> {
+        None
+    }
     fn peer_latency(&self, _peer_id: &str) -> Option<PeerLatency> {
         None
     }
@@ -1202,6 +1212,8 @@ fn fixture_cycle_case(name: &str) -> FixtureCycleCase {
                 .unwrap_or_else(|| getb(scenario, "probe_flag")),
         ),
         gossip: parse_gossip(scenario.get("gossip").unwrap_or(&OValue::Null)),
+        gossip_calls: Cell::new(0),
+        captured_neighbor_median: None,
         latency: scenario.get("latency").map(|latency| PeerLatency {
             avg: getf(latency, "avg"),
             std: getf(latency, "std"),
@@ -1440,6 +1452,47 @@ fn sparse_neighbor_nudge_consumes_its_semantic_clock() {
             .filter(|label| label.as_str() == "thompson.posterior_nudge")
             .count(),
         1
+    );
+}
+
+#[test]
+fn captured_none_neighbor_median_skips_gossip_like_python_cache_hit() {
+    let mut case = fixture_cycle_case("dts_pid_undercut");
+    case.evidence.captured_neighbor_median = Some(None);
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(
+        case.evidence.gossip_calls.get(),
+        0,
+        "a captured effective None is a Python cache hit and must not trigger nested gossip"
+    );
+}
+
+#[test]
+fn high_fee_with_prior_forward_consumes_flow_ceiling_clock_before_thompson() {
+    let mut case = fixture_cycle_case("dts_pid_undercut");
+    case.info.fee_proportional_millionths = revops_fees::rails::ZERO_FLOW_FEE_THRESHOLD;
+    case.evidence.last_forward.set(Some(case.now - 86_400));
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    let flow_index = clock
+        .labels
+        .iter()
+        .position(|label| label == "flow_ceiling.last_forward_age")
+        .expect("high-fee channel with a prior forward must read the flow-ceiling clock");
+    let thompson_index = clock
+        .labels
+        .iter()
+        .position(|label| label.starts_with("thompson."))
+        .expect("fixture must reach Thompson sampling");
+    assert!(
+        flow_index < thompson_index,
+        "flow-ceiling clock must precede Thompson clocks: {:?}",
+        clock.labels
     );
 }
 
@@ -2020,6 +2073,12 @@ macro_rules! wrap_test_evidence {
             }
             fn gossip_channels(&self, peer_id: &str) -> Result<Vec<GossipRow>, DecisionInputError> {
                 Ok(Self::gossip_channels(self, peer_id))
+            }
+            fn captured_neighbor_fee_median(
+                &self,
+                peer_id: &str,
+            ) -> Result<Option<Option<i64>>, DecisionInputError> {
+                Ok(Self::captured_neighbor_fee_median(self, peer_id))
             }
             fn peer_latency(
                 &self,

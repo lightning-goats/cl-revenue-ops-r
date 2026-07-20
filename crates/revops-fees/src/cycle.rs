@@ -1747,8 +1747,17 @@ pub fn adjust_channel_fee(
     } else {
         None
     };
-    let base_ceiling_ppm =
-        floors::flow_adjusted_ceiling(current_fee_ppm, cfg.max_fee_ppm, last_forward_ts, now);
+    let flow_ceiling_now = if matches!(last_forward_ts, Some(ts) if ts != 0) {
+        deps.clock.now("flow_ceiling.last_forward_age")?
+    } else {
+        now
+    };
+    let base_ceiling_ppm = floors::flow_adjusted_ceiling(
+        current_fee_ppm,
+        cfg.max_fee_ppm,
+        last_forward_ts,
+        flow_ceiling_now,
+    );
 
     let mut floor_ppm = base_floor_ppm;
     let mut ceiling_ppm = base_ceiling_ppm;
@@ -2142,21 +2151,30 @@ pub fn adjust_channel_fee(
         // Neighbor market context (py 6458-6676).
         let captured_neighbor_median_before_gossip =
             evidence.captured_neighbor_fee_median(peer_id)?;
-        let gossip_rows = evidence.gossip_channels(peer_id)?;
-        let captured_neighbor_median = match captured_neighbor_median_before_gossip {
-            some @ Some(_) => some,
-            None => evidence.captured_neighbor_fee_median(peer_id)?,
-        };
-        let our_id = evidence.our_node_id()?;
-        let active_channels: Vec<GossipChannel> = gossip_rows
-            .iter()
-            .filter(|r| r.active)
-            .map(|r| r.to_gossip_channel(peer_id))
-            .collect();
-        let neighbor_median = match captured_neighbor_median {
+        let mut gossip_rows = None;
+        let neighbor_median = match captured_neighbor_median_before_gossip {
             Some(value) => value,
             None => {
-                market::neighbor_fee_median(&active_channels, &our_id, deps.min_competitors, now)
+                gossip_rows = Some(evidence.gossip_channels(peer_id)?);
+                match evidence.captured_neighbor_fee_median(peer_id)? {
+                    Some(value) => value,
+                    None => {
+                        let our_id = evidence.our_node_id()?;
+                        let active_channels: Vec<GossipChannel> = gossip_rows
+                            .as_ref()
+                            .expect("gossip rows loaded above")
+                            .iter()
+                            .filter(|r| r.active)
+                            .map(|r| r.to_gossip_channel(peer_id))
+                            .collect();
+                        market::neighbor_fee_median(
+                            &active_channels,
+                            &our_id,
+                            deps.min_competitors,
+                            now,
+                        )
+                    }
+                }
             }
         };
         let neighbor_market_usable = matches!(neighbor_median, Some(m) if m > floor_ppm);
@@ -2185,10 +2203,20 @@ pub fn adjust_channel_fee(
 
         // Market-fee policy modes (py 6513-6676).
         if neighbor_market_usable {
+            if gossip_rows.is_none() {
+                gossip_rows = Some(evidence.gossip_channels(peer_id)?);
+            }
+            let gossip_rows = gossip_rows.as_ref().expect("gossip rows loaded above");
+            let our_id = evidence.our_node_id()?;
+            let active_channels: Vec<GossipChannel> = gossip_rows
+                .iter()
+                .filter(|r| r.active)
+                .map(|r| r.to_gossip_channel(peer_id))
+                .collect();
             let median = neighbor_median.unwrap_or(0);
             let mode = cfg.market_fee_mode.as_str();
             let undercut_pct =
-                competitive_undercut_pct(&gossip_rows, &our_id, neighbor_median, mode == "premium");
+                competitive_undercut_pct(gossip_rows, &our_id, neighbor_median, mode == "premium");
 
             if mode == "premium" {
                 let mut target = Some((median as f64 * (1.0 + undercut_pct)) as i64);
