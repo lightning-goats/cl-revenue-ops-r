@@ -196,8 +196,12 @@ fn rejects_incomplete_capture_even_when_resealed() {
 }
 
 #[test]
-fn rejects_evaluated_and_terminal_count_mismatches_even_when_resealed() {
-    for field in ["evaluated_channels", "terminal_outcomes"] {
+fn rejects_evaluated_terminal_and_trace_count_mismatches_even_when_resealed() {
+    for field in [
+        "evaluated_channels",
+        "terminal_outcomes",
+        "decision_trace_entries",
+    ] {
         let mut value = fixture_value();
         value["completeness"][field] = json!(2);
         reseal(&mut value);

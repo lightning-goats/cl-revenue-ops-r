@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 const COMPLETE_ADJUSTMENT: &[u8] =
     include_bytes!("../../../fixtures/fees/replay/complete_adjustment.v0.json");
 const COMPLETE_SKIP: &[u8] = include_bytes!("../../../fixtures/fees/replay/complete_skip.v0.json");
+const FAILURE_RECOVERY: &[u8] =
+    include_bytes!("../../../fixtures/fees/replay/failure_recovery.v0.json");
+const EFFECTIVE_FALLBACK: &[u8] =
+    include_bytes!("../../../fixtures/fees/replay/effective_fallback.v0.json");
 
 fn fixture_value() -> Value {
     serde_json::from_slice(COMPLETE_ADJUSTMENT).expect("Python fixture is JSON")
@@ -177,6 +181,53 @@ fn strict_complete_passive_skip_replays_exactly() {
         panic!("skip decision object");
     };
     assert_eq!(skip_decision.get("governed"), Some(&WireValue::Null));
+}
+
+#[test]
+fn python_owned_trace_only_mutation_is_a_parity_mismatch() {
+    let mut wrong = fixture_value();
+    wrong["expected"]["ordered_decision_traces"] = json!([{
+        "channel_id": "123x456x0",
+        "peer_id": "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "terminal_kind": "adjustment",
+        "terminal_reason": "trace-only-corruption",
+        "decision_source": "policy_static",
+        "current_fee_ppm": 100,
+        "target_fee_ppm": 250,
+        "applied_fee_ppm": 250,
+        "algorithm_values": wrong["expected"]["ordered_outcomes"][0]["adjustment"]["algorithm_values"].clone(),
+        "governor": wrong["observations"]["governor"].clone(),
+        "execution": wrong["observations"]["execution"].clone()
+    }]);
+    wrong["completeness"]["decision_trace_entries"] = json!(1);
+    let capture = parse_mutated(wrong);
+
+    let error =
+        replay_fee_capture(&capture).expect_err("Python trace-only corruption must fail parity");
+    assert!(
+        error
+            .to_string()
+            .contains("$.expected.ordered_decision_traces"),
+        "{error}"
+    );
+}
+
+#[test]
+fn evidence_error_prelude_then_same_call_recovery_replays_exactly() {
+    let capture =
+        parse_fee_capture(FAILURE_RECOVERY).expect("Python-produced failure/recovery fixture");
+
+    replay_fee_capture(&capture)
+        .expect("captured failure/retry transition must replay the successful value");
+}
+
+#[test]
+fn effective_result_with_fallback_provenance_replays_exactly() {
+    let capture =
+        parse_fee_capture(EFFECTIVE_FALLBACK).expect("Python-produced effective-fallback fixture");
+
+    replay_fee_capture(&capture)
+        .expect("captured effective result with validated provenance must replay");
 }
 
 #[test]
@@ -515,13 +566,20 @@ fn pre_state_rejects_unknown_missing_duplicate_and_order_drift() {
         .as_array_mut()
         .expect("channels")
         .push(channel);
-    let outcome = duplicate["expected"]["ordered_outcomes"][0].clone();
-    duplicate["expected"]["ordered_outcomes"]
-        .as_array_mut()
-        .expect("outcomes")
-        .push(outcome);
+    for field in [
+        "ordered_outcomes",
+        "ordered_decision_traces",
+        "post_channel_state",
+    ] {
+        let value = duplicate["expected"][field][0].clone();
+        duplicate["expected"][field]
+            .as_array_mut()
+            .expect("ordered expected section")
+            .push(value);
+    }
     duplicate["completeness"]["evaluated_channels"] = json!(2);
     duplicate["completeness"]["terminal_outcomes"] = json!(2);
+    duplicate["completeness"]["decision_trace_entries"] = json!(2);
     let error = replay_fee_capture(&parse_mutated(duplicate)).expect_err("duplicate channel");
     assert!(error.to_string().contains("duplicate channel_id"));
 

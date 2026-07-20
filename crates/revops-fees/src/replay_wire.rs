@@ -199,6 +199,7 @@ pub struct FeeCycleReplayV0 {
 pub struct FeeCaptureCompletenessV0 {
     pub evaluated_channels: u64,
     pub terminal_outcomes: u64,
+    pub decision_trace_entries: u64,
     pub evidence_entries: u64,
     pub clock_entries: u64,
     pub entropy_entries: u64,
@@ -401,6 +402,11 @@ fn validate_capture_completeness(capture: &FeeCycleReplayV0) -> Result<(), Repla
         array_len(&capture.expected, "ordered_outcomes")?,
     )?;
     validate_count(
+        "decision_trace_entries",
+        capture.completeness.decision_trace_entries,
+        array_len(&capture.expected, "ordered_decision_traces")?,
+    )?;
+    validate_count(
         "evidence_entries",
         capture.completeness.evidence_entries,
         array_len(&capture.observations, "evidence")?,
@@ -415,9 +421,11 @@ fn validate_capture_completeness(capture: &FeeCycleReplayV0) -> Result<(), Repla
         capture.completeness.entropy_entries,
         array_len(&capture.observations, "entropy")?,
     )?;
-    if capture.completeness.evaluated_channels != capture.completeness.terminal_outcomes {
+    if capture.completeness.evaluated_channels != capture.completeness.terminal_outcomes
+        || capture.completeness.evaluated_channels != capture.completeness.decision_trace_entries
+    {
         return Err(ReplayWireError::ManifestInvariant(
-            "evaluated-channel and terminal-outcome counts differ".to_string(),
+            "evaluated-channel, terminal-outcome, and decision-trace counts differ".to_string(),
         ));
     }
     Ok(())

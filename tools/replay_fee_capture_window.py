@@ -166,15 +166,25 @@ def _preflight(
         raise WindowError(f"state must be 'closed', got {manifest.get('state')!r}")
     if manifest.get("queue_drained") is not True:
         raise WindowError("queue_drained must be true")
-    if _required_int(manifest, "failed") != 0:
+    failed = _required_int(manifest, "failed")
+    dropped = _required_int(manifest, "dropped")
+    if failed != 0:
         raise WindowError("failed must be zero")
-    if _required_int(manifest, "dropped") != 0:
+    if dropped != 0:
         raise WindowError("dropped must be zero")
 
     run_id = _required_string(manifest, "capture_run_id")
     attempts = manifest.get("attempts")
     if not isinstance(attempts, list):
         raise WindowError("attempts must be an array")
+    attempted = _required_int(manifest, "attempted")
+    completed = _required_int(manifest, "completed")
+    if attempted != completed + failed + dropped:
+        raise WindowError(
+            "attempted must equal completed plus failed plus dropped"
+        )
+    if completed != len(attempts):
+        raise WindowError("completed must equal the number of retained attempts")
     sequences: list[int] = []
     selected: list[dict[str, Any]] = []
     evaluation_count = 0
@@ -249,6 +259,16 @@ def _preflight(
             raise WindowError(
                 f"retained capture sequences must be strictly consecutive: {sequences}"
             )
+    expected_last_sequence = sequences[-1] if sequences else None
+    if manifest.get("last_attempted_seq") != expected_last_sequence:
+        raise WindowError(
+            "last_attempted_seq must match the final retained attempt"
+        )
+    if manifest.get("last_completed_seq") != expected_last_sequence:
+        raise WindowError(
+            "last_completed_seq must match the final retained attempt"
+        )
+
     retained = manifest.get("retained_sequence_range")
     if not isinstance(retained, dict):
         raise WindowError("retained_sequence_range must be an object")
@@ -368,6 +388,11 @@ def _validate_child_results(
                     f"{expected[field]!r}, got {actual!r}"
                 )
         status = result.get("status")
+        if "error" not in result:
+            raise WindowError(
+                f"replay result {file_value} error key must be present"
+            )
+        child_error = result["error"]
         mismatch_count = result.get("mismatch_count")
         if isinstance(mismatch_count, bool) or not isinstance(mismatch_count, int):
             raise WindowError(
@@ -382,9 +407,9 @@ def _validate_child_results(
                 raise WindowError(
                     f"replay result {file_value} mismatch_count must be zero"
                 )
-            if result.get("error") is not None:
+            if child_error is not None:
                 raise WindowError(
-                    f"replay result {file_value} exact status cannot include an error"
+                    f"replay result {file_value} exact status requires error null"
                 )
         elif returncode == EXIT_GATE_FAILED:
             if status == "exact":
@@ -392,10 +417,19 @@ def _validate_child_results(
                     raise WindowError(
                         f"replay result {file_value} exact mismatch_count must be zero"
                     )
+                if child_error is not None:
+                    raise WindowError(
+                        f"replay result {file_value} exact status requires error null"
+                    )
             elif status == "mismatch":
                 if mismatch_count != 1:
                     raise WindowError(
                         f"replay result {file_value} mismatch_count must be one"
+                    )
+                if not isinstance(child_error, str) or not child_error:
+                    raise WindowError(
+                        f"replay result {file_value} mismatch status requires a "
+                        "nonempty error string"
                     )
                 mismatch_results += 1
             else:

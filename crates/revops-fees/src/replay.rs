@@ -69,6 +69,7 @@ pub struct ConsumedTranscriptCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeeReplayResultV0 {
     pub ordered_outcomes: WireValue,
+    pub ordered_decision_traces: WireValue,
     pub decisions: Vec<WireValue>,
     pub decision_summary: WireValue,
     pub governor: WireValue,
@@ -532,14 +533,12 @@ pub struct TranscriptEvidence {
 impl TranscriptEvidence {
     fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
         let mut cursor = Cursor::new(observations, "evidence")?;
-        let channels_entry = cursor.take("channels_info", "op")?;
-        require_args(&channels_entry, 0, "evidence", WireValue::Array(Vec::new()))?;
-        reject_error_entry(&channels_entry, "evidence", 0)?;
-        let raw_channels = field(&channels_entry, "result", "$.observations.evidence[0]")
-            .map_err(|error| structured_transcript_error("evidence", 0, "channels_info", error))?
-            .clone();
-        let channels = decode_channels_info(&raw_channels, "$.observations.evidence[0].result")
-            .map_err(|error| structured_transcript_error("evidence", 0, "channels_info", error))?;
+        let (channels_ordinal, raw_channels) =
+            take_evidence_result(&mut cursor, "channels_info", WireValue::Array(Vec::new()))?;
+        let channels_path = format!("$.observations.evidence[{channels_ordinal}].result");
+        let channels = decode_channels_info(&raw_channels, &channels_path).map_err(|error| {
+            structured_transcript_error("evidence", channels_ordinal, "channels_info", error)
+        })?;
 
         let mut gossip = BTreeMap::new();
         while let Some(WireValue::Object(entry)) = cursor.entries.get(cursor.position) {
@@ -547,22 +546,14 @@ impl TranscriptEvidence {
                 break;
             }
             let ordinal = cursor.position;
-            let entry = cursor.take("gossip_channels", "op")?;
-            reject_error_entry(&entry, "evidence", ordinal)?;
-            let args = array(
-                field(
-                    &entry,
-                    "args",
-                    &format!("$.observations.evidence[{ordinal}]"),
-                )
-                .map_err(|error| {
-                    structured_transcript_error("evidence", ordinal, "gossip_channels", error)
-                })?,
-                &format!("$.observations.evidence[{ordinal}].args"),
-            )
-            .map_err(|error| {
+            let base = format!("$.observations.evidence[{ordinal}]");
+            let entry = object(&cursor.entries[ordinal], &base).map_err(|error| {
                 structured_transcript_error("evidence", ordinal, "gossip_channels", error)
             })?;
+            let args =
+                array(field(entry, "args", &base)?, &format!("{base}.args")).map_err(|error| {
+                    structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+                })?;
             if args.len() != 1 {
                 return Err(transcript(
                     "evidence",
@@ -579,38 +570,23 @@ impl TranscriptEvidence {
             .map_err(|error| {
                 structured_transcript_error("evidence", ordinal, "gossip_channels", error)
             })?;
+            let expected_args = WireValue::Array(args.to_vec());
+            let (result_ordinal, result_value) =
+                take_evidence_result(&mut cursor, "gossip_channels", expected_args)?;
             let result = decode_gossip(
-                field(
-                    &entry,
-                    "result",
-                    &format!("$.observations.evidence[{ordinal}]"),
-                )
-                .map_err(|error| {
-                    structured_transcript_error("evidence", ordinal, "gossip_channels", error)
-                })?,
-                &format!("$.observations.evidence[{ordinal}].result"),
+                &result_value,
+                &format!("$.observations.evidence[{result_ordinal}].result"),
             )
             .map_err(|error| {
-                structured_transcript_error("evidence", ordinal, "gossip_channels", error)
+                structured_transcript_error("evidence", result_ordinal, "gossip_channels", error)
             })?;
             gossip.insert(peer, result);
         }
-        let ordinal = cursor.position;
-        let our = cursor.take("our_node_id", "op")?;
-        require_args(&our, ordinal, "evidence", WireValue::Array(Vec::new()))?;
-        reject_error_entry(&our, "evidence", ordinal)?;
-        let our_id = string(
-            field(
-                &our,
-                "result",
-                &format!("$.observations.evidence[{ordinal}]"),
-            )
-            .map_err(|error| {
-                structured_transcript_error("evidence", ordinal, "our_node_id", error)
-            })?,
-            &format!("$.observations.evidence[{ordinal}].result"),
-        )
-        .map_err(|error| structured_transcript_error("evidence", ordinal, "our_node_id", error))?;
+        let (ordinal, our) =
+            take_evidence_result(&mut cursor, "our_node_id", WireValue::Array(Vec::new()))?;
+        let our_id = string(&our, &format!("$.observations.evidence[{ordinal}].result")).map_err(
+            |error| structured_transcript_error("evidence", ordinal, "our_node_id", error),
+        )?;
         Ok(Self {
             cursor: RefCell::new(cursor),
             channels,
@@ -653,20 +629,9 @@ impl TranscriptEvidence {
     fn consume(&self, op: &str, args: WireValue) -> Result<WireValue, DecisionInputError> {
         let mut cursor = self.cursor.borrow_mut();
         let ordinal = cursor.position;
-        let entry = cursor
-            .take(op, "op")
-            .and_then(|entry| {
-                require_args(&entry, ordinal, "evidence", args)?;
-                reject_error_entry(&entry, "evidence", ordinal)?;
-                field(
-                    &entry,
-                    "result",
-                    &format!("$.observations.evidence[{ordinal}]"),
-                )
-                .cloned()
-            })
+        let (_, result) = take_evidence_result(&mut cursor, op, args)
             .map_err(|error| self.decision_error(ordinal, op, error))?;
-        Ok(entry)
+        Ok(result)
     }
 }
 
@@ -689,6 +654,120 @@ fn require_args(
         ));
     }
     Ok(())
+}
+
+fn validate_evidence_failure(
+    value: &WireValue,
+    ordinal: usize,
+    key: &str,
+) -> Result<(), ReplayError> {
+    let base = format!("$.observations.evidence[{ordinal}].{key}");
+    let failure = object(value, &base)
+        .map_err(|error| structured_transcript_error("evidence", ordinal, key, error))?;
+    require_exact_wire_fields(
+        failure,
+        &["category", "message"],
+        &base,
+        "evidence",
+        ordinal,
+        key,
+    )?;
+    for field_name in ["category", "message"] {
+        let value = string(
+            field(failure, field_name, &base)?,
+            &format!("{base}.{field_name}"),
+        )?;
+        if value.is_empty() {
+            return Err(transcript(
+                "evidence",
+                ordinal,
+                format!("nonempty {key}.{field_name}"),
+                "empty string",
+                format!("{base}.{field_name}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn take_evidence_success(
+    cursor: &mut Cursor,
+    op: &str,
+    args: WireValue,
+) -> Result<(usize, WireValue), ReplayError> {
+    let ordinal = cursor.position;
+    let entry = cursor.take(op, "op")?;
+    require_args(&entry, ordinal, "evidence", args)?;
+    let base = format!("$.observations.evidence[{ordinal}]");
+    if let Some(fallback_error) = entry.get("fallback_error") {
+        require_exact_wire_fields(
+            &entry,
+            &["ordinal", "op", "args", "result", "fallback_error"],
+            &base,
+            "evidence",
+            ordinal,
+            "result with fallback provenance",
+        )?;
+        validate_evidence_failure(fallback_error, ordinal, "fallback_error")?;
+    } else {
+        require_exact_wire_fields(
+            &entry,
+            &["ordinal", "op", "args", "result"],
+            &base,
+            "evidence",
+            ordinal,
+            "result",
+        )?;
+    }
+    let result = field(&entry, "result", &base)?.clone();
+    Ok((ordinal, result))
+}
+
+fn take_evidence_result(
+    cursor: &mut Cursor,
+    op: &str,
+    args: WireValue,
+) -> Result<(usize, WireValue), ReplayError> {
+    let ordinal = cursor.position;
+    let base = format!("$.observations.evidence[{ordinal}]");
+    let entry = cursor.take(op, "op")?;
+    require_args(&entry, ordinal, "evidence", args.clone())?;
+    if let Some(error) = entry.get("error") {
+        require_exact_wire_fields(
+            &entry,
+            &["ordinal", "op", "args", "error"],
+            &base,
+            "evidence",
+            ordinal,
+            "recoverable error prelude",
+        )?;
+        validate_evidence_failure(error, ordinal, "error")?;
+        let recovery_ordinal = cursor.position;
+        let recovery_base = format!("$.observations.evidence[{recovery_ordinal}]");
+        let recoverable = cursor
+            .entries
+            .get(recovery_ordinal)
+            .and_then(|value| object(value, &recovery_base).ok())
+            .is_some_and(|next| {
+                next.get("op") == Some(&WireValue::String(op.to_string()))
+                    && next.get("args") == Some(&args)
+                    && next.contains_key("result")
+                    && !next.contains_key("error")
+            });
+        if !recoverable {
+            return Err(transcript(
+                "evidence",
+                ordinal,
+                format!("recoverable {op} error followed by same-call result"),
+                "error without matching recovery result",
+                format!("{base}.error"),
+            ));
+        }
+        return take_evidence_success(cursor, op, args);
+    }
+
+    cursor.position -= 1;
+    take_evidence_success(cursor, op, args)
 }
 
 fn reject_error_entry(
@@ -1700,43 +1779,53 @@ fn ordered_outcomes(decisions: &[FeeDecision]) -> WireValue {
             .map(|decision| {
                 if decision.would_broadcast {
                     WireValue::Object(
-                        [(
-                            "adjustment".to_string(),
-                            WireValue::Object(
-                                [
-                                    (
-                                        "channel_id".to_string(),
-                                        WireValue::String(decision.channel_id.clone()),
-                                    ),
-                                    (
-                                        "peer_id".to_string(),
-                                        WireValue::String(decision.peer_id.clone()),
-                                    ),
-                                    (
-                                        "old_fee_ppm".to_string(),
-                                        WireValue::Integer(decision.old_fee_ppm),
-                                    ),
-                                    (
-                                        "new_fee_ppm".to_string(),
-                                        WireValue::Integer(decision.new_fee_ppm),
-                                    ),
-                                    (
-                                        "reason".to_string(),
-                                        WireValue::String(decision.reason.clone()),
-                                    ),
-                                    (
-                                        "algorithm_values".to_string(),
-                                        ovalue_to_wire(&decision.algorithm_values),
-                                    ),
-                                    (
-                                        "reason_code".to_string(),
-                                        WireValue::String(decision.reason_code.clone()),
-                                    ),
-                                ]
-                                .into_iter()
-                                .collect(),
+                        [
+                            (
+                                "channel_id".to_string(),
+                                WireValue::String(decision.channel_id.clone()),
                             ),
-                        )]
+                            (
+                                "peer_id".to_string(),
+                                WireValue::String(decision.peer_id.clone()),
+                            ),
+                            (
+                                "adjustment".to_string(),
+                                WireValue::Object(
+                                    [
+                                        (
+                                            "channel_id".to_string(),
+                                            WireValue::String(decision.channel_id.clone()),
+                                        ),
+                                        (
+                                            "peer_id".to_string(),
+                                            WireValue::String(decision.peer_id.clone()),
+                                        ),
+                                        (
+                                            "old_fee_ppm".to_string(),
+                                            WireValue::Integer(decision.old_fee_ppm),
+                                        ),
+                                        (
+                                            "new_fee_ppm".to_string(),
+                                            WireValue::Integer(decision.new_fee_ppm),
+                                        ),
+                                        (
+                                            "reason".to_string(),
+                                            WireValue::String(decision.reason.clone()),
+                                        ),
+                                        (
+                                            "algorithm_values".to_string(),
+                                            ovalue_to_wire(&decision.algorithm_values),
+                                        ),
+                                        (
+                                            "reason_code".to_string(),
+                                            WireValue::String(decision.reason_code.clone()),
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                ),
+                            ),
+                        ]
                         .into_iter()
                         .collect(),
                     )
@@ -1746,14 +1835,29 @@ fn ordered_outcomes(decisions: &[FeeDecision]) -> WireValue {
                         .strip_prefix("skip: ")
                         .unwrap_or(&decision.reason);
                     WireValue::Object(
-                        [(
-                            "skip".to_string(),
-                            WireValue::Object(
-                                [("reason".to_string(), WireValue::String(reason.to_string()))]
+                        [
+                            (
+                                "channel_id".to_string(),
+                                WireValue::String(decision.channel_id.clone()),
+                            ),
+                            (
+                                "peer_id".to_string(),
+                                WireValue::String(decision.peer_id.clone()),
+                            ),
+                            (
+                                "skip".to_string(),
+                                WireValue::Object(
+                                    [
+                                        (
+                                            "reason".to_string(),
+                                            WireValue::String(reason.to_string()),
+                                        ),
+                                    ]
                                     .into_iter()
                                     .collect(),
+                                ),
                             ),
-                        )]
+                        ]
                         .into_iter()
                         .collect(),
                     )
@@ -1761,6 +1865,191 @@ fn ordered_outcomes(decisions: &[FeeDecision]) -> WireValue {
             })
             .collect(),
     )
+}
+
+fn consumed_entries_for_channel(
+    entries: &[WireValue],
+    family: &str,
+    channel_id: &str,
+) -> Result<Vec<WireValue>, ReplayError> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, value)| {
+            let base = format!("$.observations.{family}[{ordinal}]");
+            let result = (|| {
+                let entry = object(value, &base)?;
+                let request = object(field(entry, "request", &base)?, &format!("{base}.request"))?;
+                let entry_channel = string(
+                    field(request, "channel_id", &format!("{base}.request"))?,
+                    &format!("{base}.request.channel_id"),
+                )?;
+                Ok::<_, ReplayError>((entry_channel == channel_id).then(|| value.clone()))
+            })();
+            match result {
+                Ok(Some(value)) => Some(Ok(value)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect()
+}
+
+fn ordered_decision_traces(
+    decisions: &[FeeDecision],
+    governor_entries: &[WireValue],
+    execution_entries: &[WireValue],
+) -> Result<WireValue, ReplayError> {
+    let mut traces = Vec::with_capacity(decisions.len());
+    for decision in decisions {
+        let governor =
+            consumed_entries_for_channel(governor_entries, "governor", &decision.channel_id)?;
+        let execution =
+            consumed_entries_for_channel(execution_entries, "execution", &decision.channel_id)?;
+        let terminal_reason = if decision.would_broadcast {
+            decision.reason.clone()
+        } else {
+            decision
+                .reason
+                .strip_prefix("skip: ")
+                .unwrap_or(&decision.reason)
+                .to_string()
+        };
+        let target_fee_ppm = if let Some(last) = execution.last() {
+            let entry = object(last, "$.observations.execution.consumed")?;
+            let request = object(
+                field(entry, "request", "$.observations.execution.consumed")?,
+                "$.observations.execution.consumed.request",
+            )?;
+            WireValue::Integer(integer(
+                field(
+                    request,
+                    "fee_ppm",
+                    "$.observations.execution.consumed.request",
+                )?,
+                "$.observations.execution.consumed.request.fee_ppm",
+            )?)
+        } else if decision.would_broadcast {
+            WireValue::Integer(decision.new_fee_ppm)
+        } else {
+            WireValue::Null
+        };
+        traces.push(WireValue::Object(
+            [
+                (
+                    "channel_id".to_string(),
+                    WireValue::String(decision.channel_id.clone()),
+                ),
+                (
+                    "peer_id".to_string(),
+                    WireValue::String(decision.peer_id.clone()),
+                ),
+                (
+                    "terminal_kind".to_string(),
+                    WireValue::String(
+                        if decision.would_broadcast {
+                            "adjustment"
+                        } else {
+                            "skip"
+                        }
+                        .to_string(),
+                    ),
+                ),
+                (
+                    "terminal_reason".to_string(),
+                    WireValue::String(terminal_reason.clone()),
+                ),
+                (
+                    "decision_source".to_string(),
+                    WireValue::String(if decision.would_broadcast {
+                        decision.reason_code.clone()
+                    } else {
+                        terminal_reason
+                    }),
+                ),
+                (
+                    "current_fee_ppm".to_string(),
+                    WireValue::Integer(decision.old_fee_ppm),
+                ),
+                ("target_fee_ppm".to_string(), target_fee_ppm),
+                (
+                    "applied_fee_ppm".to_string(),
+                    WireValue::Integer(if decision.would_broadcast {
+                        decision.new_fee_ppm
+                    } else {
+                        decision.old_fee_ppm
+                    }),
+                ),
+                (
+                    "algorithm_values".to_string(),
+                    if decision.would_broadcast {
+                        ovalue_to_wire(&decision.algorithm_values)
+                    } else {
+                        WireValue::Null
+                    },
+                ),
+                ("governor".to_string(), WireValue::Array(governor)),
+                ("execution".to_string(), WireValue::Array(execution)),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+    }
+    Ok(WireValue::Array(traces))
+}
+
+fn ordered_identities(value: &WireValue, path: &str) -> Result<WireValue, ReplayError> {
+    let entries = array(value, path)?;
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let entry_path = format!("{path}[{index}]");
+            let entry = object(value, &entry_path)?;
+            Ok(WireValue::Object(
+                [
+                    (
+                        "channel_id".to_string(),
+                        WireValue::String(string(
+                            field(entry, "channel_id", &entry_path)?,
+                            &format!("{entry_path}.channel_id"),
+                        )?),
+                    ),
+                    (
+                        "peer_id".to_string(),
+                        WireValue::String(string(
+                            field(entry, "peer_id", &entry_path)?,
+                            &format!("{entry_path}.peer_id"),
+                        )?),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(WireValue::Array)
+}
+
+fn validate_expected_channel_order(capture: &FeeCycleReplayV0) -> Result<(), ReplayError> {
+    let pre_path = "$.pre_state.ordered_channels";
+    let pre = ordered_identities(
+        field(&capture.pre_state, "ordered_channels", "$.pre_state")?,
+        pre_path,
+    )?;
+    for (field_name, path) in [
+        ("ordered_outcomes", "$.expected.ordered_outcomes"),
+        (
+            "ordered_decision_traces",
+            "$.expected.ordered_decision_traces",
+        ),
+        ("post_channel_state", "$.expected.post_channel_state"),
+    ] {
+        let identities =
+            ordered_identities(field(&capture.expected, field_name, "$.expected")?, path)?;
+        compare(path, &pre, &identities)?;
+    }
+    Ok(())
 }
 
 fn optional_tagged_float(value: Option<f64>) -> WireValue {
@@ -1855,6 +2144,7 @@ fn compare(path: &str, expected: &WireValue, actual: &WireValue) -> Result<(), R
 }
 
 pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV0, ReplayError> {
+    validate_expected_channel_order(capture)?;
     let cfg = decode_cfg(&capture.configuration)?;
     let mut state = import_state(capture)?;
     let observations = &capture.observations;
@@ -1907,6 +2197,17 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
     let outcomes = ordered_outcomes(&decisions);
     let expected_outcomes = field(&capture.expected, "ordered_outcomes", "$.expected")?;
     compare("$.expected.ordered_outcomes", expected_outcomes, &outcomes)?;
+    let governor_entries = authorizer.consumed.borrow().clone();
+    let execution_entries = executor.consumed.borrow().clone();
+    let decision_traces =
+        ordered_decision_traces(&decisions, &governor_entries, &execution_entries)?;
+    let expected_decision_traces =
+        field(&capture.expected, "ordered_decision_traces", "$.expected")?;
+    compare(
+        "$.expected.ordered_decision_traces",
+        expected_decision_traces,
+        &decision_traces,
+    )?;
 
     let counts = ConsumedTranscriptCounts {
         evidence: evidence.cursor.borrow().finish()?,
@@ -1951,10 +2252,11 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
 
     Ok(FeeReplayResultV0 {
         ordered_outcomes: outcomes,
+        ordered_decision_traces: decision_traces,
         decisions: decisions.iter().map(FeeDecision::to_replay_wire).collect(),
         decision_summary: summary_wire(&state.last_decision_summary),
-        governor: WireValue::Array(authorizer.consumed.into_inner()),
-        execution: WireValue::Array(executor.consumed.into_inner()),
+        governor: WireValue::Array(governor_entries),
+        execution: WireValue::Array(execution_entries),
         post_channel_state: post_channels,
         state_flush,
         post_global,

@@ -565,6 +565,7 @@ def test_unexpected_parse_or_preflight_exception_is_one_machine_json_error(
         (lambda child: child.update(commit=""), "commit"),
         (lambda child: child.update(commit=None), "commit"),
         (lambda child: child.update(error="impossible exact error"), "error"),
+        (lambda child: child["results"][0].pop("error"), "error"),
         (lambda child: child.update(run_id="wrong"), "run_id"),
         (lambda child: child.update(capture_count=5), "capture_count"),
         (
@@ -629,6 +630,91 @@ def test_incomplete_or_wrong_success_verdict_cannot_pass(
     verdict = parse_one_json(capsys)
     assert verdict["status"] == "error"
     assert needle in verdict["error"]
+
+
+@pytest.mark.parametrize("child_error", [None, "", 7])
+def test_mismatch_child_requires_present_nonempty_string_error(
+    tmp_path, monkeypatch, capsys, child_error
+):
+    runner = load_runner()
+    manifest, run_id = make_window(tmp_path)
+    replay_bin = tmp_path / "replay_fee_capture"
+    replay_bin.write_text("#!/bin/false\n", encoding="utf-8")
+    replay_bin.chmod(0o755)
+    child = exact_child_result(run_id)
+    child["results"] = exact_results(tmp_path)
+    child["mismatch_count"] = 1
+    child["error"] = "fixture mismatch"
+    child["results"][0].update(
+        status="mismatch", mismatch_count=1, error=child_error
+    )
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 1, (json.dumps(child) + "\n").encode(), b""
+        ),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            str(replay_bin),
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert "error" in verdict["error"]
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("attempted", 2),
+        ("completed", 2),
+        ("last_attempted_seq", 2),
+        ("last_completed_seq", 2),
+    ],
+)
+def test_inconsistent_undersized_manifest_is_malformed_before_thresholds(
+    tmp_path, monkeypatch, capsys, field, wrong
+):
+    runner = load_runner()
+    manifest, _ = make_window(
+        tmp_path, cycles=1, evaluations=1, adjustments=0
+    )
+    body = json.loads(manifest.read_text(encoding="utf-8"))
+    body[field] = wrong
+    manifest.write_text(json.dumps(body), encoding="utf-8")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed undersized manifest must not invoke replay"
+        ),
+    )
+
+    code = runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--capture-dir",
+            str(tmp_path),
+            "--replay-bin",
+            "/bin/false",
+        ]
+    )
+
+    assert code == 2
+    verdict = parse_one_json(capsys)
+    assert verdict["status"] == "error"
+    assert field in verdict["error"]
 
 
 @pytest.mark.parametrize("kind", ["manifest", "capture", "aggregate"])

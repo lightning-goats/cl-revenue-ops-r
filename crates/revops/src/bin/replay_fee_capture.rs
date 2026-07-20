@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -192,6 +192,26 @@ fn run_manifest(manifest_path: &Path, capture_dir: &Path) -> (u8, Verdict) {
             );
         }
     };
+    let mut declared_window_bytes = match checked_window_bytes(0, manifest_bytes.len()) {
+        Ok(bytes) => bytes,
+        Err(error) => return manifest_input_error(&manifest, error),
+    };
+    for attempt in &manifest.attempts {
+        let Some(bytes) = attempt.bytes else {
+            return manifest_input_error(
+                &manifest,
+                format!(
+                    "manifest attempt {} has no capture byte count",
+                    attempt.capture_seq
+                ),
+            );
+        };
+        declared_window_bytes = match checked_window_bytes_u64(declared_window_bytes, bytes) {
+            Ok(total) => total,
+            Err(error) => return manifest_input_error(&manifest, error),
+        };
+    }
+
     let mut capture_paths = Vec::with_capacity(manifest.attempts.len());
     let mut capture_values = Vec::with_capacity(manifest.attempts.len());
     let mut input_results = Vec::new();
@@ -298,6 +318,11 @@ fn read_to_limit(mut reader: impl Read, maximum: usize) -> Result<Vec<u8>, Strin
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("input {} is not a regular file", path.display()));
+    }
     let file =
         File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     read_to_limit(file, MAX_REPLAY_ENVELOPE_BYTES)
@@ -307,6 +332,10 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
 fn checked_window_bytes(current: u64, additional: usize) -> Result<u64, String> {
     let additional = u64::try_from(additional)
         .map_err(|_| "capture window byte count does not fit u64".to_string())?;
+    checked_window_bytes_u64(current, additional)
+}
+
+fn checked_window_bytes_u64(current: u64, additional: u64) -> Result<u64, String> {
     let total = current
         .checked_add(additional)
         .ok_or_else(|| "capture window aggregate byte count overflow".to_string())?;
