@@ -135,7 +135,8 @@ use cln_plugin::options::Value as OptValue;
 use revops_db::actor::DbHandle;
 use revops_fees::cycle::{
     handle_policy_change, maybe_wake_for_vegas_spike, run_fee_cycle, wake_all_sleeping_channels,
-    ChannelStateRow, ControllerState, CycleDeps, FeeCfgSnapshot, FixedDecisionClock, StateSink,
+    ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot, FixedDecisionClock,
+    StateSink,
 };
 use revops_fees::execution::GovernedFeeAuthorizer;
 use revops_fees::journal::Journal;
@@ -578,7 +579,29 @@ impl CycleOwner {
     ) -> CycleOutcome {
         // (1) The cycle's single clock read.
         let now = clock();
+        let mut decision_clock = FixedDecisionClock::new(now);
+        self.run_cycle_at(prepared, now, &mut decision_clock)
+    }
 
+    /// Replay/test seam for a strict semantic clock. Production always uses
+    /// [`run_cycle`](Self::run_cycle), which constructs `FixedDecisionClock`.
+    #[doc(hidden)]
+    pub fn run_cycle_with_decision_clock(
+        &mut self,
+        prepared: PreparedCycle,
+        clock: &mut dyn FnMut() -> i64,
+        decision_clock: &mut dyn DecisionClock,
+    ) -> CycleOutcome {
+        let now = clock();
+        self.run_cycle_at(prepared, now, decision_clock)
+    }
+
+    fn run_cycle_at(
+        &mut self,
+        prepared: PreparedCycle,
+        now: i64,
+        decision_clock: &mut dyn DecisionClock,
+    ) -> CycleOutcome {
         // T7: capture this cycle's resolved profile name for the
         // out-of-cycle wake handlers (see `last_profile`'s doc comment).
         // Captured even on a skip path below -- config still resolved
@@ -633,12 +656,11 @@ impl CycleOwner {
         // logged loudly. Step (7) below is the single, loud append.
         let governed = self.governor.governed_deps(&prepared.cfg);
         let authorizer = GovernedFeeAuthorizer::new(&governed);
-        let mut decision_clock = FixedDecisionClock::new(now);
         let mut deps = CycleDeps {
             evidence: &snapshot,
             cfg: &prepared.cfg,
             rng: &mut self.rng,
-            clock: &mut decision_clock,
+            clock: decision_clock,
             authorizer: Some(&authorizer),
             journal: None,
             state_sink: self.state_sink.as_ref().map(|s| s as &dyn StateSink),

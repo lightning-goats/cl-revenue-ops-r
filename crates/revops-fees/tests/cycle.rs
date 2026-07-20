@@ -26,8 +26,9 @@ use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_econ::pyfloat::py_repr;
 use revops_fees::cycle::{
     self, process_channel, run_fee_cycle, ChannelCycleState, ChannelFeeState, ChannelInfo,
-    ChannelOutcome, ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot,
-    FeeEvidence, FixedDecisionClock, GossipRow, PeerFeeHistory, SkipGateEpoch, StateSink,
+    ChannelOutcome, ChannelResult, ChannelStateRow, ControllerState, CycleDeps, DecisionClock,
+    FeeCfgSnapshot, FeeEvidence, FixedDecisionClock, GossipRow, PeerFeeHistory, SkipGateEpoch,
+    StateSink,
 };
 use revops_fees::execution::{
     decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, FeeAuthorizationRequest,
@@ -150,6 +151,7 @@ struct FixtureEvidence {
     last_forward: Cell<Option<i64>>,
     policy: Option<PeerPolicy>,
     marginal_roi: Option<f64>,
+    overlay_active: Cell<bool>,
 }
 
 impl FixtureEvidence {
@@ -209,6 +211,9 @@ impl FeeEvidence for FixtureEvidence {
     }
     fn marginal_roi_percent(&self, _channel_id: &str) -> Option<f64> {
         self.marginal_roi
+    }
+    fn temporary_overlay_active(&self, _channel_id: &str) -> bool {
+        self.overlay_active.get()
     }
 }
 
@@ -1101,6 +1106,272 @@ impl DecisionClock for RecordingClock {
     }
 }
 
+struct SemanticClock {
+    base: i64,
+    labels: Vec<String>,
+}
+
+impl SemanticClock {
+    fn new(base: i64) -> Self {
+        Self {
+            base,
+            labels: Vec::new(),
+        }
+    }
+}
+
+impl DecisionClock for SemanticClock {
+    fn now(&mut self, label: &str) -> Result<i64, DecisionInputError> {
+        self.labels.push(label.to_string());
+        Ok(match label {
+            "fee.apply" => self.base + 10,
+            "fee.state_sync" => self.base + 20,
+            _ => self.base,
+        })
+    }
+}
+
+struct FixtureCycleCase {
+    channel_id: String,
+    cfg: FeeCfgSnapshot,
+    min_competitors: usize,
+    evidence: FixtureEvidence,
+    state: ControllerState,
+    rng: PyRandom,
+    row: ChannelStateRow,
+    info: ChannelInfo,
+    chain_costs: Option<ChainCosts>,
+    now: i64,
+}
+
+fn fixture_cycle_case(name: &str) -> FixtureCycleCase {
+    let root = load_scenarios();
+    let scenario = root
+        .get("scenarios")
+        .and_then(|s| s.as_arr())
+        .expect("scenarios")
+        .iter()
+        .find(|s| gets(s, "name") == name)
+        .unwrap_or_else(|| panic!("missing fixture scenario {name}"));
+    let cycle = scenario
+        .get("cycles")
+        .and_then(|c| c.as_arr())
+        .expect("cycles")
+        .first()
+        .expect("first cycle");
+    let channel_id = gets(scenario, "channel_id");
+    let peer_id = gets(scenario, "peer_id");
+    let cfg = parse_cfg(scenario.get("cfg").expect("cfg"));
+    let min_competitors = parse_min_competitors(scenario.get("cfg").expect("cfg"));
+    let mut policy = parse_policy(scenario.get("policy").unwrap_or(&OValue::Null));
+    if let Some(policy) = &mut policy {
+        policy.peer_id = peer_id.clone();
+    }
+    let evidence = FixtureEvidence {
+        our_id: gets(scenario, "our_id"),
+        volume_map: RefCell::new(parse_map(cycle.get("volume_since"))),
+        forward_map: RefCell::new(parse_map(cycle.get("forward_count_since"))),
+        probe_flag: Cell::new(
+            cycle
+                .get("probe_flag")
+                .and_then(|v| match v {
+                    OValue::Bool(value) => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or_else(|| getb(scenario, "probe_flag")),
+        ),
+        gossip: parse_gossip(scenario.get("gossip").unwrap_or(&OValue::Null)),
+        latency: scenario.get("latency").map(|latency| PeerLatency {
+            avg: getf(latency, "avg"),
+            std: getf(latency, "std"),
+        }),
+        cost_history: parse_cost_history(scenario.get("cost_history").unwrap_or(&OValue::Null)),
+        peer_fee_history: match scenario.get("peer_fee_history") {
+            Some(OValue::Obj(_)) => {
+                let history = scenario.get("peer_fee_history").expect("checked");
+                Some(PeerFeeHistory {
+                    confidence: gets(history, "confidence"),
+                    avg_fee_ppm: geti(history, "avg_fee_ppm"),
+                })
+            }
+            _ => None,
+        },
+        last_forward: Cell::new(opt_i64(cycle, "last_forward_time")),
+        policy,
+        marginal_roi: opt_f64(scenario, "marginal_roi"),
+        overlay_active: Cell::new(false),
+    };
+    let initial = scenario.get("initial_state").expect("initial_state");
+    let mut state = ControllerState::new();
+    state.vegas.intensity = getf(scenario, "vegas_intensity");
+    state.cycle_states.insert(
+        channel_id.clone(),
+        parse_cycle_state(initial.get("cycle").expect("cycle")),
+    );
+    state.fee_states.insert(
+        channel_id.clone(),
+        parse_fee_state(initial.get("fee").expect("fee")),
+    );
+    let chain_costs = match cycle.get("chain_costs") {
+        Some(OValue::Obj(_)) => {
+            let costs = cycle.get("chain_costs").expect("checked");
+            Some(ChainCosts {
+                open_cost_sats: geti(costs, "open_cost_sats"),
+                close_cost_sats: geti(costs, "close_cost_sats"),
+                sat_per_vbyte: getf(costs, "sat_per_vbyte"),
+            })
+        }
+        _ => None,
+    };
+    let row = parse_state_row(
+        cycle.get("state_row").expect("state_row"),
+        &channel_id,
+        &peer_id,
+    );
+    FixtureCycleCase {
+        channel_id,
+        cfg,
+        min_competitors,
+        evidence,
+        state,
+        rng: PyRandom::seed_from_u64(geti(scenario, "seed") as u64),
+        row,
+        info: parse_channel_info(cycle.get("channel_info").expect("channel_info")),
+        chain_costs,
+        now: geti(cycle, "now"),
+    }
+}
+
+fn run_fixture_case(case: &mut FixtureCycleCase, clock: &mut dyn DecisionClock) -> ChannelResult {
+    let mut deps = CycleDeps {
+        evidence: &case.evidence,
+        cfg: &case.cfg,
+        rng: &mut case.rng,
+        clock,
+        authorizer: None,
+        journal: None,
+        state_sink: None,
+        min_competitors: case.min_competitors,
+    };
+    process_channel(
+        &mut case.state,
+        &mut deps,
+        &case.row,
+        &case.info,
+        case.chain_costs.as_ref(),
+        None,
+        None,
+        None,
+    )
+    .expect("scripted decision inputs")
+}
+
+fn assert_optimizer_timestamps(case: &FixtureCycleCase, expected: i64) {
+    let cycle = case
+        .state
+        .cycle_states
+        .get(&case.channel_id)
+        .expect("cycle state");
+    let fee = case
+        .state
+        .fee_states
+        .get(&case.channel_id)
+        .expect("fee state");
+    assert_eq!(cycle.last_update, expected, "cycle last_update");
+    assert_eq!(cycle.last_broadcast_at(), expected, "cycle broadcast time");
+    assert_eq!(fee.last_update, expected, "fee last_update");
+    assert_eq!(fee.last_broadcast_at(), expected, "fee broadcast time");
+}
+
+#[test]
+fn temporary_overlay_does_not_consume_channel_evaluation_time() {
+    let mut case = fixture_cycle_case("policy_passive");
+    case.evidence.overlay_active.set(true);
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(
+        result.outcome,
+        ChannelOutcome::Skipped("temporary_overlay")
+    ));
+    assert!(clock.labels.is_empty(), "{:?}", clock.labels);
+}
+
+#[test]
+fn passive_policy_does_not_consume_channel_evaluation_time() {
+    let mut case = fixture_cycle_case("policy_passive");
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(
+        result.outcome,
+        ChannelOutcome::Skipped("policy_passive")
+    ));
+    assert!(clock.labels.is_empty(), "{:?}", clock.labels);
+}
+
+#[test]
+fn static_policy_starts_its_clock_at_the_explicit_set_fee_path() {
+    let mut case = fixture_cycle_case("policy_static");
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
+    assert_eq!(clock.labels, ["fee.apply", "fee.state_sync"]);
+    assert_optimizer_timestamps(&case, case.now + 20);
+}
+
+#[test]
+fn ordinary_dts_success_does_not_consume_fee_state_sync() {
+    let mut case = fixture_cycle_case("dts_pid_undercut");
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
+    assert_eq!(
+        clock.labels,
+        ["cycle.channel.evaluate", "pid.calculate", "fee.apply"]
+    );
+    assert_optimizer_timestamps(&case, case.now);
+}
+
+#[test]
+fn congestion_success_does_not_consume_fee_state_sync() {
+    let mut case = fixture_cycle_case("congestion_episode");
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
+    assert_eq!(clock.labels, ["cycle.channel.evaluate", "fee.apply"]);
+    assert_optimizer_timestamps(&case, case.now);
+}
+
+#[test]
+fn exploration_consumes_inner_state_sync_but_outer_state_keeps_evaluation_time() {
+    let mut case = fixture_cycle_case("exploration_low_fee");
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
+    assert_eq!(
+        clock.labels,
+        ["cycle.channel.evaluate", "fee.apply", "fee.state_sync"]
+    );
+    assert_optimizer_timestamps(&case, case.now);
+}
+
+#[test]
+fn gossip_consumes_inner_state_sync_but_outer_state_keeps_evaluation_time() {
+    let mut case = fixture_cycle_case("gossip_refresh_nudge");
+    let mut clock = SemanticClock::new(case.now);
+    let result = run_fixture_case(&mut case, &mut clock);
+    assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
+    assert_eq!(
+        clock.labels,
+        [
+            "cycle.channel.evaluate",
+            "pid.calculate",
+            "fee.apply",
+            "fee.state_sync"
+        ]
+    );
+    assert_optimizer_timestamps(&case, case.now);
+}
+
 #[derive(Default)]
 struct RecordingAuthorizer {
     requests: RefCell<Vec<FeeAuthorizationRequest>>,
@@ -1252,8 +1523,6 @@ fn three_channel_synthetic_cycle_end_to_end() {
             "pid.calculate",
             "governor.authorize",
             "fee.apply",
-            "fee.state_sync",
-            "cycle.channel.evaluate",
             "cycle.channel.evaluate",
         ],
         "clock transcript must follow Python semantic branch order"

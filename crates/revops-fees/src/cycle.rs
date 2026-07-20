@@ -847,8 +847,6 @@ pub fn process_channel(
 ) -> Result<ChannelResult, DecisionInputError> {
     let channel_id = row.channel_id.as_str();
     let peer_id = row.peer_id.as_str();
-    let now = deps.clock.now("cycle.channel.evaluate")?;
-    let (profile_name, profile) = fee_profile(&deps.cfg.fee_profile);
 
     if deps.evidence.temporary_overlay_active(channel_id) {
         return Ok(ChannelResult {
@@ -885,6 +883,11 @@ pub fn process_channel(
             FeeStrategy::Dynamic => {}
         }
     }
+
+    // Python reads the per-channel evaluation time only after the overlay
+    // and PASSIVE/STATIC policy gates have fallen through to DYNAMIC.
+    let now = deps.clock.now("cycle.channel.evaluate")?;
+    let (profile_name, profile) = fee_profile(&deps.cfg.fee_profile);
 
     // py 4828-4846: pre-call snapshot for skip classification.
     let actual_fee = info.fee_proportional_millionths;
@@ -2473,7 +2476,25 @@ pub fn adjust_channel_fee(
 
     if success {
         let _applied_at = deps.clock.now("fee.apply")?;
-        let now = deps.clock.now("fee.state_sync")?;
+        let should_sync_state = matches!(
+            fee_reason_code,
+            FeeReasonCode::LowFeeExploration
+                | FeeReasonCode::LowFeeExplorationSuccess
+                | FeeReasonCode::ZeroFeeProbe
+                | FeeReasonCode::ZeroFeeProbeSuccess
+        );
+        if should_sync_state {
+            let _state_sync_at = deps.clock.now("fee.state_sync")?;
+            // Python set_channel_fee performs this inner state sync for
+            // exploration reasons; the outer optimizer then overwrites
+            // its timestamps with the earlier channel-evaluation time.
+            cycle.is_sleeping = false;
+            cycle.sleep_until = 0;
+            cycle.stable_cycles = 0;
+            ts.is_sleeping = false;
+            ts.sleep_until = 0;
+            ts.stable_cycles = 0;
+        }
         // Read back the (clamped) applied fee (py 7217-7219).
         let new_fee_ppm = decision.clamped_fee_ppm;
 
@@ -2896,10 +2917,11 @@ fn create_gossip_refresh_adjustment(
     }
     let nudge_fee = decision.clamped_fee_ppm;
     let _applied_at = clock.now("fee.apply")?;
-    let now = clock.now("fee.state_sync")?;
+    let _state_sync_at = clock.now("fee.state_sync")?;
 
     // set_channel_fee should_sync_state (py 7862-7892) + helper updates
-    // (py 5044-5068).
+    // (py 5044-5068). The helper owns the final timestamps and uses its
+    // earlier current_time argument, just like Python.
     cycle.is_sleeping = false;
     cycle.sleep_until = 0;
     cycle.stable_cycles = 0;
