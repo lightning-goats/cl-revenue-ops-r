@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::execution::GovernedTrace;
 use crate::pyjson::{dumps_python, OValue};
+use crate::replay_wire::WireValue;
 
 /// Default journal file name under the Rust plugin's DB directory.
 pub const JOURNAL_FILE_NAME: &str = "fee_dryrun_journal.jsonl";
@@ -50,6 +51,30 @@ pub struct FeeDecision {
 }
 
 impl FeeDecision {
+    /// Canonical replay-wire representation used for exact capture comparison.
+    pub fn to_replay_wire(&self) -> WireValue {
+        fn convert(value: &OValue) -> WireValue {
+            match value {
+                OValue::Null => WireValue::Null,
+                OValue::Bool(value) => WireValue::Bool(*value),
+                OValue::Int(value) => WireValue::Integer(*value),
+                OValue::Float(value) => {
+                    WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(*value))
+                }
+                OValue::Str(value) => WireValue::String(value.clone()),
+                OValue::Arr(items) => WireValue::Array(items.iter().map(convert).collect()),
+                OValue::Obj(entries) => WireValue::Object(
+                    entries
+                        .iter()
+                        .map(|(key, value)| (key.clone(), convert(value)))
+                        .collect(),
+                ),
+            }
+        }
+
+        convert(&self.to_ovalue())
+    }
+
     /// Ordered wire object; key order frozen for journal readers.
     pub fn to_ovalue(&self) -> OValue {
         let governed = match &self.governed {

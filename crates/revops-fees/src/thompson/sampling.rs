@@ -6,7 +6,7 @@
 //!
 //! # RNG stream discipline (THE contract — fixture-enforced)
 //!
-//! All draws go through the injected `&mut PyRandom`. `sample_fee`
+//! All decision draws go through the injected `DecisionEntropy`. `sample_fee`
 //! consumes, exactly:
 //! - sparse path (fewer than MIN_OBSERVATIONS real observations): ONE
 //!   `gauss` (prior draw, std `max(10, prior_std*1.1) * boost`);
@@ -28,7 +28,7 @@ use super::dynamics::{posterior_bias_shift, real_observation_count};
 use super::recompute::{CTX_CONFIDENCE_COUNT, CTX_OFFSET_CAP_FRAC, MIN_OBSERVATIONS};
 use super::{GaussianThompsonState, EXPLORATION_BOOST_MAX, EXPLORATION_BOOST_MIN, MIN_STD};
 use crate::mat3::{cholesky3, invert3, matvec3, V3};
-use crate::pyrand::PyRandom;
+use crate::pyrand::{DecisionEntropy, DecisionInputError, PyRandom};
 
 /// `int(max(floor, min(ceiling, sampled)))` — Python `int()` truncates
 /// toward zero, which `as i64` matches for finite in-range values.
@@ -48,6 +48,18 @@ pub fn sample_fee(
     rng: &mut PyRandom,
     now: i64,
 ) -> i64 {
+    sample_fee_with_entropy(state, floor, ceiling, exploration_multiplier, rng, now)
+        .expect("PyRandom with static non-empty labels cannot fail")
+}
+
+pub fn sample_fee_with_entropy(
+    state: &mut GaussianThompsonState,
+    floor: i64,
+    ceiling: i64,
+    exploration_multiplier: Option<f64>,
+    rng: &mut dyn DecisionEntropy,
+    now: i64,
+) -> Result<i64, DecisionInputError> {
     // Python: float(None) raises -> 1.0; then finite/positive guard.
     let mut boost = exploration_multiplier.unwrap_or(1.0);
     if !boost.is_finite() || boost <= 0.0 {
@@ -61,12 +73,12 @@ pub fn sample_fee(
         // like the normal path). The prior ignores posterior_mean, so
         // advisory nudges must be applied here.
         let explore_std = MIN_STD.max(state.prior_std_fee * 1.1) * boost;
-        let mut s = rng.gauss(state.prior_mean_fee, explore_std);
+        let mut s = rng.gauss("thompson.prior", state.prior_mean_fee, explore_std)?;
         s += posterior_bias_shift(state, s, now);
         sampled = s;
     } else {
         // Try polynomial posterior sampling; fall back to Gaussian.
-        if let Some(mut s) = sample_from_polynomial_posterior(state, floor, ceiling, boost, rng) {
+        if let Some(mut s) = sample_from_polynomial_posterior(state, floor, ceiling, boost, rng)? {
             // Polynomial draws come from the regression coefficients and
             // ignore posterior_mean entirely — apply the durable nudge
             // shift here so advisory signals reach the sampled fee.
@@ -74,18 +86,18 @@ pub fn sample_fee(
             let sampled_fee = clamp_fee(floor, ceiling, s);
             state.last_sampled_fee = sampled_fee;
             state.last_sample_time = now;
-            return sampled_fee;
+            return Ok(sampled_fee);
         }
         // Fallback: sample from Gaussian posterior. No extra bias shift:
         // posterior_mean already carries the nudges.
         let modulated_std = MIN_STD.max(state.posterior_std) * boost;
-        sampled = rng.gauss(state.posterior_mean, modulated_std);
+        sampled = rng.gauss("thompson.posterior", state.posterior_mean, modulated_std)?;
     }
 
     let sampled_fee = clamp_fee(floor, ceiling, sampled);
     state.last_sampled_fee = sampled_fee;
     state.last_sample_time = now;
-    sampled_fee
+    Ok(sampled_fee)
 }
 
 /// `sample_fee_contextual` (py 604-669): base draw from the global
@@ -104,9 +116,30 @@ pub fn sample_fee_contextual(
     rng: &mut PyRandom,
     now: i64,
 ) -> i64 {
+    sample_fee_contextual_with_entropy(
+        state,
+        context_key,
+        floor,
+        ceiling,
+        exploration_multiplier,
+        rng,
+        now,
+    )
+    .expect("PyRandom with static non-empty labels cannot fail")
+}
+
+pub fn sample_fee_contextual_with_entropy(
+    state: &mut GaussianThompsonState,
+    context_key: &str,
+    floor: i64,
+    ceiling: i64,
+    exploration_multiplier: Option<f64>,
+    rng: &mut dyn DecisionEntropy,
+    now: i64,
+) -> Result<i64, DecisionInputError> {
     // Python only forwards the kwarg when explicitly given; both spellings
     // reach the same None-tolerant handling in sample_fee.
-    let base = sample_fee(state, floor, ceiling, exploration_multiplier, rng, now);
+    let base = sample_fee_with_entropy(state, floor, ceiling, exploration_multiplier, rng, now)?;
 
     let ctx = match state
         .contextual_posteriors
@@ -114,7 +147,7 @@ pub fn sample_fee_contextual(
         .find(|(k, _)| k == context_key)
     {
         Some((_, ctx)) => *ctx,
-        None => return base,
+        None => return Ok(base),
     };
 
     // Both the 4-tuple and legacy 3-tuple layouts expose (mean, count) —
@@ -123,10 +156,10 @@ pub fn sample_fee_contextual(
     let ctx_count = ctx.count;
 
     if ctx_count < MIN_OBSERVATIONS {
-        return base;
+        return Ok(base);
     }
     if !ctx_mean.is_finite() {
-        return base;
+        return Ok(base);
     }
 
     // Confidence saturates smoothly with observation count.
@@ -144,7 +177,7 @@ pub fn sample_fee_contextual(
     let sampled_fee = clamp_fee(floor, ceiling, base as f64 + offset);
     state.last_sampled_fee = sampled_fee;
     state.last_sample_time = now;
-    sampled_fee
+    Ok(sampled_fee)
 }
 
 /// `_sample_from_polynomial_posterior` (py 671-723): draw
@@ -158,18 +191,20 @@ fn sample_from_polynomial_posterior(
     _floor: i64,
     _ceiling: i64,
     noise_scale: f64,
-    rng: &mut PyRandom,
-) -> Option<f64> {
+    rng: &mut dyn DecisionEntropy,
+) -> Result<Option<f64>, DecisionInputError> {
     // Use the fee range from the last recompute to match normalization.
     let fee_min = state.last_fee_min;
     let fee_max = state.last_fee_max;
     let fee_range = fee_max - fee_min;
     if fee_range < 5.0 {
-        return None;
+        return Ok(None);
     }
 
     // Invert precision to covariance.
-    let sigma = invert3(&state.posterior_precision)?;
+    let Some(sigma) = invert3(&state.posterior_precision) else {
+        return Ok(None);
+    };
 
     // Cholesky decompose for sampling.
     let beta_sampled: V3 = match cholesky3(&sigma) {
@@ -182,9 +217,9 @@ fn sample_from_polynomial_posterior(
                 sigma[2][2].max(1e-6),
             ];
             let z = [
-                rng.gauss(0.0, 1.0) * noise_scale,
-                rng.gauss(0.0, 1.0) * noise_scale,
-                rng.gauss(0.0, 1.0) * noise_scale,
+                rng.gauss("thompson.polynomial.coefficient.0", 0.0, 1.0)? * noise_scale,
+                rng.gauss("thompson.polynomial.coefficient.1", 0.0, 1.0)? * noise_scale,
+                rng.gauss("thompson.polynomial.coefficient.2", 0.0, 1.0)? * noise_scale,
             ];
             [
                 state.posterior_coeffs[0] + z[0] * diag[0].sqrt(),
@@ -194,9 +229,9 @@ fn sample_from_polynomial_posterior(
         }
         Some(l) => {
             let z = [
-                rng.gauss(0.0, 1.0) * noise_scale,
-                rng.gauss(0.0, 1.0) * noise_scale,
-                rng.gauss(0.0, 1.0) * noise_scale,
+                rng.gauss("thompson.polynomial.coefficient.0", 0.0, 1.0)? * noise_scale,
+                rng.gauss("thompson.polynomial.coefficient.1", 0.0, 1.0)? * noise_scale,
+                rng.gauss("thompson.polynomial.coefficient.2", 0.0, 1.0)? * noise_scale,
             ];
             let lz = matvec3(&l, &z);
             [
@@ -213,10 +248,10 @@ fn sample_from_polynomial_posterior(
         // extrapolation allowed.
         let f_star_norm = -b_s / (2.0 * a_s);
         let f_star_norm = (-0.2f64).max(1.2f64.min(f_star_norm));
-        Some(f_star_norm * fee_range + fee_min)
+        Ok(Some(f_star_norm * fee_range + fee_min))
     } else {
         // Non-concave sample: fall back to Gaussian (draws already spent).
-        None
+        Ok(None)
     }
 }
 

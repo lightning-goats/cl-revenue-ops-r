@@ -60,6 +60,7 @@ use revops_fees::floors::{
     REBALANCE_FLOOR_WINDOW_DAYS,
 };
 use revops_fees::market::FrozenObservations;
+use revops_fees::pyrand::DecisionInputError;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
@@ -762,19 +763,19 @@ impl EvidenceSnapshot {
     }
 }
 
-impl FeeEvidence for EvidenceSnapshot {
-    fn our_node_id(&self) -> String {
+impl EvidenceSnapshot {
+    pub fn our_node_id(&self) -> String {
         self.our_node_id.clone()
     }
 
     /// Contract point 1: Python's row order (`ORDER BY state, flow_ratio
     /// DESC` -- see [`read_channel_states`] for the verbatim SQL) is
     /// preserved into the returned `Vec`.
-    fn channel_states(&self) -> Vec<ChannelStateRow> {
+    pub fn channel_states(&self) -> Vec<ChannelStateRow> {
         self.channel_states.clone()
     }
 
-    fn channels_info(&self) -> BTreeMap<String, ChannelInfo> {
+    pub fn channels_info(&self) -> BTreeMap<String, ChannelInfo> {
         self.channels_info.clone()
     }
 
@@ -796,14 +797,14 @@ impl FeeEvidence for EvidenceSnapshot {
     /// `max(300,..)` sanity clamps (py 8270-8295) guarantee a truthy
     /// 3-key dict, so an "empty dict / all-zero row" can only mean
     /// `None` was already the answer.
-    fn chain_costs(&self) -> Option<ChainCosts> {
+    pub fn chain_costs(&self) -> Option<ChainCosts> {
         self.chain_costs
     }
 
     /// Port of `Database.get_volume_since` (database.py:5380-5404):
     /// `SUM(out_msat)` over `out_channel = ? AND timestamp > ?` (strict),
     /// msat -> sats via floor.
-    fn volume_since(&self, channel_id: &str, since: i64) -> i64 {
+    pub fn volume_since(&self, channel_id: &str, since: i64) -> i64 {
         let msat = self.query_i64(
             "SELECT COALESCE(SUM(out_msat), 0) as total_out_msat
             FROM forwards
@@ -815,7 +816,7 @@ impl FeeEvidence for EvidenceSnapshot {
     }
 
     /// Port of `Database.get_forward_count_since` (database.py:5406-5428).
-    fn forward_count_since(&self, channel_id: &str, since: i64) -> i64 {
+    pub fn forward_count_since(&self, channel_id: &str, since: i64) -> i64 {
         self.query_i64(
             "SELECT COUNT(*) as forward_count
             FROM forwards
@@ -831,7 +832,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// row as a side effect of reading it; this read-only surface returns
     /// the same value without the delete (module docs, "Write behavior").
     /// Expiry uses the snapshot's frozen `now`.
-    fn exploration_flag(&self, channel_id: &str) -> bool {
+    pub fn exploration_flag(&self, channel_id: &str) -> bool {
         let started_at: Option<i64> = match self
             .conn
             .query_row(
@@ -866,7 +867,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// takes effect for the NEXT cycle's evidence, which re-hydrates from
     /// the DB after Python's own cycle performed the same clear.
     /// `clear_exploration_flag_is_strict_noop` pins this.
-    fn clear_exploration_flag(&self, _channel_id: &str) {}
+    pub fn clear_exploration_flag(&self, _channel_id: &str) {}
 
     /// Contract point 2: `_get_peer_inbound_channels` (py 3147-3153) --
     /// the ONE `listchannels` prefetch, grouped by destination at build
@@ -874,7 +875,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// the Python cycle wraps around its gossip reads (key mirrors py's
     /// `("inbound_channels", peer_id)` tuple). Never a per-peer RPC: the
     /// snapshot holds no RPC handle at all.
-    fn gossip_channels(&self, peer_id: &str) -> Vec<GossipRow> {
+    pub fn gossip_channels(&self, peer_id: &str) -> Vec<GossipRow> {
         let key = format!("inbound_channels:{peer_id}");
         let mut memo = self.gossip_memo.borrow_mut();
         let value = match memo.get_or_compute(&key, || {
@@ -900,7 +901,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// mean + SAMPLE stddev (n-1). Python always returns a dict, so this
     /// always returns `Some` (the `{avg: 0.0, std: 0.0}` shape behaves
     /// identically to "no latency data" at every use site).
-    fn peer_latency(&self, peer_id: &str) -> Option<PeerLatency> {
+    pub fn peer_latency(&self, peer_id: &str) -> Option<PeerLatency> {
         let since = self.now - 86_400;
         let times: Vec<f64> = {
             let mut stmt = match self.conn.prepare(
@@ -950,7 +951,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// (database.py:5817-5846): scid-alias `IN` lookup, `timestamp >=
     /// since`, `ORDER BY timestamp DESC`, trimmed to the three columns
     /// `RebalanceCostSample` carries.
-    fn channel_cost_history(&self, channel_id: &str, since: i64) -> Vec<RebalanceCostSample> {
+    pub fn channel_cost_history(&self, channel_id: &str, since: i64) -> Vec<RebalanceCostSample> {
         let aliases = scid_aliases(channel_id);
         let sql = format!(
             "SELECT cost_sats, amount_sats, timestamp FROM rebalance_costs
@@ -998,7 +999,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// `actual_fee_msat`, so Python's `sqlite3.OperationalError` legacy
     /// fallback has no equivalent path (same rationale as
     /// `queries::total_rebalance_fees_since`).
-    fn peer_fee_history(&self, peer_id: &str) -> Option<PeerFeeHistory> {
+    pub fn peer_fee_history(&self, peer_id: &str) -> Option<PeerFeeHistory> {
         // py: channels for this peer; none -> None.
         let channel_ids: Vec<String> = {
             let mut stmt = self
@@ -1073,7 +1074,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// Port of `Database.get_last_forward_time` (database.py:5508-5529):
     /// `MAX(timestamp)` over `out_channel`; Python's falsy check maps a
     /// `NULL`-or-zero max to `None`.
-    fn last_forward_time(&self, channel_id: &str) -> Option<i64> {
+    pub fn last_forward_time(&self, channel_id: &str) -> Option<i64> {
         let ts = self.query_i64(
             "SELECT MAX(timestamp) as last_ts
             FROM forwards
@@ -1092,7 +1093,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// (fee_controller.py:2777-2793): the batched 7d directional flow,
     /// computed ONCE at build time (the per-cycle cache and this frozen
     /// snapshot coincide); a channel absent from the map is `None`.
-    fn flow_window(&self, channel_id: &str) -> Option<FlowWindow> {
+    pub fn flow_window(&self, channel_id: &str) -> Option<FlowWindow> {
         self.flow_windows.get(channel_id).copied()
     }
 
@@ -1103,7 +1104,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// plugin always has), so this always returns `Some`. Expired rows
     /// were already dropped at load ([`read_policies`]) -- without
     /// Python's side-effect delete.
-    fn policy(&self, peer_id: &str) -> Option<PeerPolicy> {
+    pub fn policy(&self, peer_id: &str) -> Option<PeerPolicy> {
         Some(
             self.policies
                 .get(peer_id)
@@ -1137,7 +1138,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// the prefetched `channels_info` key set. The bkpr/datastore parts of
     /// `analyze_channel` feed fields the fee cycle never reads and are
     /// out of this port's scope.
-    fn marginal_roi_percent(&self, channel_id: &str) -> Option<f64> {
+    pub fn marginal_roi_percent(&self, channel_id: &str) -> Option<f64> {
         let canonical = normalize_scid(channel_id);
         if !self.channels_info.contains_key(&canonical) {
             return None;
@@ -1234,7 +1235,7 @@ impl FeeEvidence for EvidenceSnapshot {
     /// fee_controller.py:4753-4755; only tests inject one), so `false` is
     /// exact parity, made explicit here rather than inherited from the
     /// trait default.
-    fn temporary_overlay_active(&self, _channel_id: &str) -> bool {
+    pub fn temporary_overlay_active(&self, _channel_id: &str) -> bool {
         false
     }
 
@@ -1250,14 +1251,82 @@ impl FeeEvidence for EvidenceSnapshot {
     /// and this average degrades toward the stale window (ultimately the
     /// `1.0` fallback) until the Rust recorder exists (checklist item 9's
     /// cutover work). Do NOT ship cutover without that recorder.
-    fn mempool_ma_24h(&self) -> f64 {
+    pub fn mempool_ma_24h(&self) -> f64 {
         self.mempool_ma_24h
     }
 
     /// py `listpeerchannels` rows for the node-drain-bias aggregate
     /// (fee_controller.py:4613-4623) -- the same prefetched snapshot as
     /// `channels_info`, unfiltered (see [`build_node_channels`]).
-    fn node_channels(&self) -> Vec<NodeChannel> {
+    pub fn node_channels(&self) -> Vec<NodeChannel> {
         self.node_channels.clone()
+    }
+}
+
+impl FeeEvidence for EvidenceSnapshot {
+    fn our_node_id(&self) -> Result<String, DecisionInputError> {
+        Ok(Self::our_node_id(self))
+    }
+    fn channel_states(&self) -> Result<Vec<ChannelStateRow>, DecisionInputError> {
+        Ok(Self::channel_states(self))
+    }
+    fn channels_info(&self) -> Result<BTreeMap<String, ChannelInfo>, DecisionInputError> {
+        Ok(Self::channels_info(self))
+    }
+    fn chain_costs(&self) -> Result<Option<ChainCosts>, DecisionInputError> {
+        Ok(Self::chain_costs(self))
+    }
+    fn volume_since(&self, channel_id: &str, since: i64) -> Result<i64, DecisionInputError> {
+        Ok(Self::volume_since(self, channel_id, since))
+    }
+    fn forward_count_since(&self, channel_id: &str, since: i64) -> Result<i64, DecisionInputError> {
+        Ok(Self::forward_count_since(self, channel_id, since))
+    }
+    fn exploration_flag(&self, channel_id: &str) -> Result<bool, DecisionInputError> {
+        Ok(Self::exploration_flag(self, channel_id))
+    }
+    fn clear_exploration_flag(&self, channel_id: &str) -> Result<(), DecisionInputError> {
+        Self::clear_exploration_flag(self, channel_id);
+        Ok(())
+    }
+    fn gossip_channels(&self, peer_id: &str) -> Result<Vec<GossipRow>, DecisionInputError> {
+        Ok(Self::gossip_channels(self, peer_id))
+    }
+    fn peer_latency(&self, peer_id: &str) -> Result<Option<PeerLatency>, DecisionInputError> {
+        Ok(Self::peer_latency(self, peer_id))
+    }
+    fn channel_cost_history(
+        &self,
+        channel_id: &str,
+        since: i64,
+    ) -> Result<Vec<RebalanceCostSample>, DecisionInputError> {
+        Ok(Self::channel_cost_history(self, channel_id, since))
+    }
+    fn peer_fee_history(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<PeerFeeHistory>, DecisionInputError> {
+        Ok(Self::peer_fee_history(self, peer_id))
+    }
+    fn last_forward_time(&self, channel_id: &str) -> Result<Option<i64>, DecisionInputError> {
+        Ok(Self::last_forward_time(self, channel_id))
+    }
+    fn flow_window(&self, channel_id: &str) -> Result<Option<FlowWindow>, DecisionInputError> {
+        Ok(Self::flow_window(self, channel_id))
+    }
+    fn policy(&self, peer_id: &str) -> Result<Option<PeerPolicy>, DecisionInputError> {
+        Ok(Self::policy(self, peer_id))
+    }
+    fn marginal_roi_percent(&self, channel_id: &str) -> Result<Option<f64>, DecisionInputError> {
+        Ok(Self::marginal_roi_percent(self, channel_id))
+    }
+    fn temporary_overlay_active(&self, channel_id: &str) -> Result<bool, DecisionInputError> {
+        Ok(Self::temporary_overlay_active(self, channel_id))
+    }
+    fn mempool_ma_24h(&self) -> Result<f64, DecisionInputError> {
+        Ok(Self::mempool_ma_24h(self))
+    }
+    fn node_channels(&self) -> Result<Vec<NodeChannel>, DecisionInputError> {
+        Ok(Self::node_channels(self))
     }
 }

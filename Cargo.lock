@@ -590,6 +590,7 @@ dependencies = [
  "anyhow",
  "cln-plugin",
  "cln-rpc",
+ "hex",
  "revops-analytics",
  "revops-core",
  "revops-db",
@@ -599,6 +600,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
@@ -657,12 +659,14 @@ dependencies = [
 name = "revops-fees"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "revops-analytics",
  "revops-core",
  "revops-econ",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

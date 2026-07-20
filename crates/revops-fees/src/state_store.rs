@@ -42,7 +42,10 @@ use std::collections::HashSet;
 use crate::pid::{self, PidState};
 use crate::pyjson::OValue;
 use crate::thompson::serde::{gts_from_dict, gts_to_dict};
-use crate::thompson::GaussianThompsonState;
+use crate::thompson::{
+    CtxPosterior, GaussianThompsonState, Observation, EXPLORATION_BOOST_MAX, EXPLORATION_BOOST_MIN,
+    MAX_BIAS_NUDGES,
+};
 
 /// `FeeController.ABS_MAX_FEE_PPM` (py 2918): hard absolute ceiling used to
 /// sanitize a poisoned/out-of-range persisted `pending_target_ppm` /
@@ -908,6 +911,651 @@ pub fn load_cycle_state(env: &V2StateEnvelope, _row: &FeeStrategyRow) -> Channel
     };
     state.clear_explicit_shared_fields();
     state
+}
+
+const REPLAY_CYCLE_KEYS: &[&str] = &[
+    "last_revenue_rate",
+    "last_fee_ppm",
+    "trend_direction",
+    "step_ppm",
+    "last_update",
+    "last_broadcast_at",
+    "consecutive_same_direction",
+    "is_sleeping",
+    "sleep_until",
+    "stable_cycles",
+    "last_broadcast_fee_ppm",
+    "last_state",
+    "forward_count_since_update",
+    "last_volume_sats",
+    "congestion_active",
+    "congestion_quiet_cycles",
+    "congestion_entry_fee_ppm",
+    "pending_target_ppm",
+    "last_gossip_refresh",
+    "dynamic_htlcmin_baseline_msat",
+];
+const REPLAY_FEE_KEYS: &[&str] = &[
+    "algorithm_version",
+    "thompson",
+    "last_revenue_rate",
+    "last_fee_ppm",
+    "last_broadcast_fee_ppm",
+    "last_update",
+    "last_broadcast_at",
+    "last_state",
+    "is_sleeping",
+    "sleep_until",
+    "stable_cycles",
+    "forward_count_since_update",
+    "last_volume_sats",
+    "last_gossip_refresh",
+    "last_vegas_multiplier",
+    "pid",
+    "last_fee_profile",
+    "last_context_key",
+    "last_time_bucket",
+    "last_corridor_role",
+    "last_contextual_sample_used",
+    "dynamic_htlcmin_baseline_msat",
+];
+const REPLAY_PID_KEYS: &[&str] = &[
+    "kp",
+    "ki",
+    "kd",
+    "ewma_error",
+    "integral_error",
+    "prev_ewma_error",
+    "last_update_time",
+    "integral_clamp",
+];
+const REPLAY_THOMPSON_KEYS: &[&str] = &[
+    "prior_mean_fee",
+    "prior_std_fee",
+    "observations",
+    "posterior_mean",
+    "posterior_std",
+    "posterior_coeffs",
+    "posterior_precision",
+    "noise_variance",
+    "contextual_posteriors",
+    "posterior_bias",
+    "charged_fee_mean",
+    "zero_revenue_streak",
+    "zero_run_start_fee",
+    "zero_run_start_ts",
+    "positive_rate_ref",
+    "positive_rate_ref_ts",
+    "meaningful_gap_ema_hours",
+    "last_meaningful_ts",
+    "last_upward_probe_ts",
+    "exploration_boost",
+    "last_sampled_fee",
+    "last_sample_time",
+    "reseeded_at",
+];
+
+fn replay_require_fields(value: &OValue, path: &str, keys: &[&str]) -> Result<(), String> {
+    let OValue::Obj(entries) = value else {
+        return Err(format!("{path} must be an object"));
+    };
+    for (key, _) in entries {
+        if !keys.contains(&key.as_str()) {
+            return Err(format!("{path}.{key} is an unknown state field"));
+        }
+    }
+    for key in keys {
+        if !entries.iter().any(|(actual, _)| actual == key) {
+            return Err(format!("{path}.{key} is required"));
+        }
+    }
+    Ok(())
+}
+
+fn replay_i64(value: &OValue, path: &str, key: &str) -> Result<i64, String> {
+    match value.get(key) {
+        Some(OValue::Int(value)) => Ok(*value),
+        _ => Err(format!("{path}.{key} must be an integer")),
+    }
+}
+fn replay_f64(value: &OValue, path: &str, key: &str) -> Result<f64, String> {
+    match value.get(key) {
+        Some(OValue::Float(value)) if value.is_finite() => Ok(*value),
+        _ => Err(format!("{path}.{key} must be a finite tagged float")),
+    }
+}
+fn replay_bool(value: &OValue, path: &str, key: &str) -> Result<bool, String> {
+    match value.get(key) {
+        Some(OValue::Bool(v)) => Ok(*v),
+        _ => Err(format!("{path}.{key} must be a boolean")),
+    }
+}
+fn replay_str(value: &OValue, path: &str, key: &str) -> Result<String, String> {
+    value
+        .get(key)
+        .and_then(OValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("{path}.{key} must be a string"))
+}
+fn replay_opt_i64(value: &OValue, path: &str, key: &str) -> Result<Option<i64>, String> {
+    match value.get(key) {
+        Some(OValue::Null) => Ok(None),
+        Some(OValue::Int(value)) => Ok(Some(*value)),
+        Some(_) => Err(format!("{path}.{key} must be integer or null")),
+        None => Err(format!("{path}.{key} is required")),
+    }
+}
+
+fn replay_array(value: &OValue, path: &str) -> Result<Vec<OValue>, String> {
+    value
+        .as_arr()
+        .map(<[OValue]>::to_vec)
+        .ok_or_else(|| format!("{path} must be an array"))
+}
+
+fn replay_number(value: &OValue, path: &str) -> Result<(f64, bool), String> {
+    match value {
+        OValue::Int(value) => Ok((*value as f64, true)),
+        OValue::Float(value) if value.is_finite() => Ok((*value, false)),
+        _ => Err(format!("{path} must be a finite integer or tagged float")),
+    }
+}
+
+fn replay_float(value: &OValue, path: &str) -> Result<f64, String> {
+    match value {
+        OValue::Float(value) if value.is_finite() => Ok(*value),
+        _ => Err(format!("{path} must be a finite tagged float")),
+    }
+}
+
+fn replay_integer(value: &OValue, path: &str) -> Result<i64, String> {
+    match value {
+        OValue::Int(value) => Ok(*value),
+        _ => Err(format!("{path} must be an integer")),
+    }
+}
+
+fn replay_positive_number(value: &OValue, path: &str) -> Result<(f64, bool), String> {
+    let decoded = replay_number(value, path)?;
+    if decoded.0 <= 0.0 {
+        return Err(format!("{path} must be positive"));
+    }
+    Ok(decoded)
+}
+
+fn replay_nonnegative_number(value: &OValue, path: &str) -> Result<(f64, bool), String> {
+    let decoded = replay_number(value, path)?;
+    if decoded.0 < 0.0 {
+        return Err(format!("{path} must be nonnegative"));
+    }
+    Ok(decoded)
+}
+
+fn replay_positive_float(value: &OValue, path: &str) -> Result<f64, String> {
+    let decoded = replay_float(value, path)?;
+    if decoded <= 0.0 {
+        return Err(format!("{path} must be positive"));
+    }
+    Ok(decoded)
+}
+
+fn replay_nonnegative_float(value: &OValue, path: &str) -> Result<f64, String> {
+    let decoded = replay_float(value, path)?;
+    if decoded < 0.0 {
+        return Err(format!("{path} must be nonnegative"));
+    }
+    Ok(decoded)
+}
+
+fn replay_nonnegative_integer(value: &OValue, path: &str) -> Result<i64, String> {
+    let decoded = replay_integer(value, path)?;
+    if decoded < 0 {
+        return Err(format!("{path} must be nonnegative"));
+    }
+    Ok(decoded)
+}
+
+fn replay_positive_f64(value: &OValue, path: &str, key: &str) -> Result<f64, String> {
+    let field_path = format!("{path}.{key}");
+    replay_positive_float(
+        value
+            .get(key)
+            .ok_or_else(|| format!("{field_path} is required"))?,
+        &field_path,
+    )
+}
+
+fn replay_nonnegative_f64(value: &OValue, path: &str, key: &str) -> Result<f64, String> {
+    let field_path = format!("{path}.{key}");
+    replay_nonnegative_float(
+        value
+            .get(key)
+            .ok_or_else(|| format!("{field_path} is required"))?,
+        &field_path,
+    )
+}
+
+fn replay_nonnegative_i64(value: &OValue, path: &str, key: &str) -> Result<i64, String> {
+    let field_path = format!("{path}.{key}");
+    replay_nonnegative_integer(
+        value
+            .get(key)
+            .ok_or_else(|| format!("{field_path} is required"))?,
+        &field_path,
+    )
+}
+
+fn replay_v3(value: &OValue, path: &str) -> Result<[f64; 3], String> {
+    let values = replay_array(value, path)?;
+    if values.len() != 3 {
+        return Err(format!("{path} must contain exactly 3 tagged floats"));
+    }
+    Ok([
+        replay_float(&values[0], &format!("{path}[0]"))?,
+        replay_float(&values[1], &format!("{path}[1]"))?,
+        replay_float(&values[2], &format!("{path}[2]"))?,
+    ])
+}
+
+fn replay_m3(value: &OValue, path: &str) -> Result<[[f64; 3]; 3], String> {
+    let rows = replay_array(value, path)?;
+    if rows.len() != 3 {
+        return Err(format!("{path} must contain exactly 3 rows"));
+    }
+    let matrix = [
+        replay_v3(&rows[0], &format!("{path}[0]"))?,
+        replay_v3(&rows[1], &format!("{path}[1]"))?,
+        replay_v3(&rows[2], &format!("{path}[2]"))?,
+    ];
+    for (index, row) in matrix.iter().enumerate() {
+        if row[index] <= 0.0 {
+            return Err(format!("{path}[{index}][{index}] must be positive"));
+        }
+    }
+    Ok(matrix)
+}
+
+fn replay_pid_state(value: &OValue, path: &str) -> Result<PidState, String> {
+    Ok(PidState {
+        kp: replay_f64(value, path, "kp")?,
+        ki: replay_f64(value, path, "ki")?,
+        kd: replay_f64(value, path, "kd")?,
+        ewma_error: replay_f64(value, path, "ewma_error")?,
+        integral_error: replay_f64(value, path, "integral_error")?,
+        prev_ewma_error: replay_f64(value, path, "prev_ewma_error")?,
+        last_update_time: replay_i64(value, path, "last_update_time")?,
+        integral_clamp: replay_f64(value, path, "integral_clamp")?,
+    })
+}
+
+fn replay_observations(value: &OValue, path: &str) -> Result<Vec<Observation>, String> {
+    replay_array(value, path)?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let item_path = format!("{path}[{index}]");
+            let tuple = replay_array(value, &item_path)?;
+            if tuple.len() != 5 && tuple.len() != 6 {
+                return Err(format!(
+                    "{item_path} must be an exact 5- or 6-element observation tuple"
+                ));
+            }
+            let (fee, fee_is_int) = replay_number(&tuple[0], &format!("{item_path}[0]"))?;
+            let revenue_rate = replay_float(&tuple[1], &format!("{item_path}[1]"))?;
+            let weight = replay_float(&tuple[2], &format!("{item_path}[2]"))?;
+            let ts = replay_integer(&tuple[3], &format!("{item_path}[3]"))?;
+            let time_bucket = tuple[4]
+                .as_str()
+                .ok_or_else(|| format!("{item_path}[4] must be a string"))?
+                .to_string();
+            let flag = tuple
+                .get(5)
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("{item_path}[5] must be a string"))
+                })
+                .transpose()?;
+            Ok(Observation {
+                fee,
+                fee_is_int,
+                revenue_rate,
+                weight,
+                ts,
+                time_bucket,
+                flag,
+                extra: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn replay_contextual_posteriors(
+    value: &OValue,
+    path: &str,
+) -> Result<Vec<(String, CtxPosterior)>, String> {
+    let entries = value
+        .as_obj()
+        .ok_or_else(|| format!("{path} must be an object"))?;
+    entries
+        .iter()
+        .map(|(key, value)| {
+            let item_path = format!("{path}.{key}");
+            let tuple = replay_array(value, &item_path)?;
+            if tuple.len() != 4 {
+                return Err(format!(
+                    "{item_path} must be an exact 4-element contextual posterior tuple"
+                ));
+            }
+            Ok((
+                key.clone(),
+                CtxPosterior {
+                    mean: replay_float(&tuple[0], &format!("{item_path}[0]"))?,
+                    precision: replay_positive_float(&tuple[1], &format!("{item_path}[1]"))?,
+                    count: replay_nonnegative_integer(&tuple[2], &format!("{item_path}[2]"))?,
+                    last_update: replay_nonnegative_integer(&tuple[3], &format!("{item_path}[3]"))?,
+                    was_legacy_3tuple: false,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn replay_posterior_bias(value: &OValue, path: &str) -> Result<Vec<(f64, f64, i64)>, String> {
+    let entries = replay_array(value, path)?;
+    if entries.len() > MAX_BIAS_NUDGES {
+        return Err(format!(
+            "{path} must contain at most {MAX_BIAS_NUDGES} entries"
+        ));
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let item_path = format!("{path}[{index}]");
+            let tuple = replay_array(value, &item_path)?;
+            if tuple.len() != 3 {
+                return Err(format!(
+                    "{item_path} must be an exact 3-element posterior bias tuple"
+                ));
+            }
+            Ok((
+                replay_nonnegative_float(&tuple[0], &format!("{item_path}[0]"))?,
+                replay_positive_float(&tuple[1], &format!("{item_path}[1]"))?,
+                replay_nonnegative_integer(&tuple[2], &format!("{item_path}[2]"))?,
+            ))
+        })
+        .collect()
+}
+
+fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonState, String> {
+    let (prior_mean_fee, prior_mean_fee_is_int) = replay_nonnegative_number(
+        value
+            .get("prior_mean_fee")
+            .ok_or_else(|| format!("{path}.prior_mean_fee is required"))?,
+        &format!("{path}.prior_mean_fee"),
+    )?;
+    let (prior_std_fee, prior_std_fee_is_int) = replay_positive_number(
+        value
+            .get("prior_std_fee")
+            .ok_or_else(|| format!("{path}.prior_std_fee is required"))?,
+        &format!("{path}.prior_std_fee"),
+    )?;
+    let observations = replay_observations(
+        value
+            .get("observations")
+            .ok_or_else(|| format!("{path}.observations is required"))?,
+        &format!("{path}.observations"),
+    )?;
+    let posterior_coeffs = replay_v3(
+        value
+            .get("posterior_coeffs")
+            .ok_or_else(|| format!("{path}.posterior_coeffs is required"))?,
+        &format!("{path}.posterior_coeffs"),
+    )?;
+    let posterior_precision = replay_m3(
+        value
+            .get("posterior_precision")
+            .ok_or_else(|| format!("{path}.posterior_precision is required"))?,
+        &format!("{path}.posterior_precision"),
+    )?;
+    let contextual_posteriors = replay_contextual_posteriors(
+        value
+            .get("contextual_posteriors")
+            .ok_or_else(|| format!("{path}.contextual_posteriors is required"))?,
+        &format!("{path}.contextual_posteriors"),
+    )?;
+    let posterior_bias = replay_posterior_bias(
+        value
+            .get("posterior_bias")
+            .ok_or_else(|| format!("{path}.posterior_bias is required"))?,
+        &format!("{path}.posterior_bias"),
+    )?;
+
+    Ok(GaussianThompsonState {
+        prior_mean_fee,
+        prior_std_fee,
+        prior_mean_fee_is_int,
+        prior_std_fee_is_int,
+        observations,
+        posterior_mean: replay_f64(value, path, "posterior_mean")?,
+        posterior_std: replay_positive_f64(value, path, "posterior_std")?,
+        posterior_coeffs,
+        posterior_precision,
+        noise_variance: replay_positive_f64(value, path, "noise_variance")?,
+        // These private Python dataclass fields are intentionally absent from
+        // the replay schema. Their constructor values are fixed, not inferred
+        // from malformed or missing captured input.
+        prior_coeffs: [0.0, 1.0, 0.0],
+        prior_precision: [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]],
+        last_fee_min: 0.0,
+        last_fee_max: 0.0,
+        contextual_posteriors,
+        posterior_bias,
+        charged_fee_mean: replay_nonnegative_f64(value, path, "charged_fee_mean")?,
+        zero_revenue_streak: replay_nonnegative_i64(value, path, "zero_revenue_streak")?,
+        zero_run_start_fee: replay_nonnegative_f64(value, path, "zero_run_start_fee")?,
+        zero_run_start_ts: replay_nonnegative_i64(value, path, "zero_run_start_ts")?,
+        positive_rate_ref: replay_nonnegative_f64(value, path, "positive_rate_ref")?,
+        positive_rate_ref_ts: replay_nonnegative_i64(value, path, "positive_rate_ref_ts")?,
+        meaningful_gap_ema_hours: replay_nonnegative_f64(value, path, "meaningful_gap_ema_hours")?,
+        last_meaningful_ts: replay_nonnegative_i64(value, path, "last_meaningful_ts")?,
+        last_upward_probe_ts: replay_nonnegative_i64(value, path, "last_upward_probe_ts")?,
+        exploration_boost: {
+            let boost = replay_f64(value, path, "exploration_boost")?;
+            if !(EXPLORATION_BOOST_MIN..=EXPLORATION_BOOST_MAX).contains(&boost) {
+                return Err(format!(
+                    "{path}.exploration_boost must be within [{EXPLORATION_BOOST_MIN}, {EXPLORATION_BOOST_MAX}]"
+                ));
+            }
+            boost
+        },
+        last_sampled_fee: replay_nonnegative_i64(value, path, "last_sampled_fee")?,
+        last_sample_time: replay_nonnegative_i64(value, path, "last_sample_time")?,
+        reseeded_at: replay_nonnegative_i64(value, path, "reseeded_at")?,
+        extra: Vec::new(),
+    })
+}
+
+/// Strict replay-only import from the authority's captured dataclass shapes.
+/// Validation happens before the proven Thompson/PID decoders, so they never
+/// supply a missing field or retain an unknown one during replay.
+pub fn replay_import_channel_state(
+    cycle_value: &OValue,
+    fee_value: &OValue,
+    path: &str,
+) -> Result<(ChannelCycleState, ChannelFeeState), String> {
+    let cycle_path = format!("{path}.cycle_state");
+    let fee_path = format!("{path}.fee_state");
+    replay_require_fields(cycle_value, &cycle_path, REPLAY_CYCLE_KEYS)?;
+    replay_require_fields(fee_value, &fee_path, REPLAY_FEE_KEYS)?;
+    let thompson = fee_value
+        .get("thompson")
+        .ok_or_else(|| format!("{fee_path}.thompson is required"))?;
+    let pid_value = fee_value
+        .get("pid")
+        .ok_or_else(|| format!("{fee_path}.pid is required"))?;
+    replay_require_fields(
+        thompson,
+        &format!("{fee_path}.thompson"),
+        REPLAY_THOMPSON_KEYS,
+    )?;
+    replay_require_fields(pid_value, &format!("{fee_path}.pid"), REPLAY_PID_KEYS)?;
+
+    let mut cycle = ChannelCycleState {
+        last_revenue_rate: replay_f64(cycle_value, &cycle_path, "last_revenue_rate")?,
+        last_fee_ppm: replay_i64(cycle_value, &cycle_path, "last_fee_ppm")?,
+        trend_direction: replay_i64(cycle_value, &cycle_path, "trend_direction")?,
+        step_ppm: replay_i64(cycle_value, &cycle_path, "step_ppm")?,
+        last_update: replay_i64(cycle_value, &cycle_path, "last_update")?,
+        last_broadcast_at: replay_i64(cycle_value, &cycle_path, "last_broadcast_at")?,
+        consecutive_same_direction: replay_i64(
+            cycle_value,
+            &cycle_path,
+            "consecutive_same_direction",
+        )?,
+        is_sleeping: replay_bool(cycle_value, &cycle_path, "is_sleeping")?,
+        sleep_until: replay_i64(cycle_value, &cycle_path, "sleep_until")?,
+        stable_cycles: replay_i64(cycle_value, &cycle_path, "stable_cycles")?,
+        last_broadcast_fee_ppm: replay_i64(cycle_value, &cycle_path, "last_broadcast_fee_ppm")?,
+        last_state: replay_str(cycle_value, &cycle_path, "last_state")?,
+        forward_count_since_update: replay_i64(
+            cycle_value,
+            &cycle_path,
+            "forward_count_since_update",
+        )?,
+        last_volume_sats: replay_i64(cycle_value, &cycle_path, "last_volume_sats")?,
+        congestion_active: replay_bool(cycle_value, &cycle_path, "congestion_active")?,
+        congestion_quiet_cycles: replay_i64(cycle_value, &cycle_path, "congestion_quiet_cycles")?,
+        congestion_entry_fee_ppm: replay_i64(cycle_value, &cycle_path, "congestion_entry_fee_ppm")?,
+        pending_target_ppm: replay_i64(cycle_value, &cycle_path, "pending_target_ppm")?,
+        last_gossip_refresh: replay_i64(cycle_value, &cycle_path, "last_gossip_refresh")?,
+        dynamic_htlcmin_baseline_msat: replay_opt_i64(
+            cycle_value,
+            &cycle_path,
+            "dynamic_htlcmin_baseline_msat",
+        )?,
+        explicit_shared: HashSet::new(),
+    };
+    cycle.clear_explicit_shared_fields();
+
+    let mut fee = ChannelFeeState {
+        thompson: replay_thompson_state(thompson, &format!("{fee_path}.thompson"))?,
+        last_revenue_rate: replay_f64(fee_value, &fee_path, "last_revenue_rate")?,
+        last_fee_ppm: replay_i64(fee_value, &fee_path, "last_fee_ppm")?,
+        last_broadcast_fee_ppm: replay_i64(fee_value, &fee_path, "last_broadcast_fee_ppm")?,
+        last_update: replay_i64(fee_value, &fee_path, "last_update")?,
+        last_broadcast_at: replay_i64(fee_value, &fee_path, "last_broadcast_at")?,
+        last_state: replay_str(fee_value, &fee_path, "last_state")?,
+        is_sleeping: replay_bool(fee_value, &fee_path, "is_sleeping")?,
+        sleep_until: replay_i64(fee_value, &fee_path, "sleep_until")?,
+        stable_cycles: replay_i64(fee_value, &fee_path, "stable_cycles")?,
+        forward_count_since_update: replay_i64(fee_value, &fee_path, "forward_count_since_update")?,
+        last_volume_sats: replay_i64(fee_value, &fee_path, "last_volume_sats")?,
+        algorithm_version: replay_str(fee_value, &fee_path, "algorithm_version")?,
+        last_gossip_refresh: replay_i64(fee_value, &fee_path, "last_gossip_refresh")?,
+        last_vegas_multiplier: replay_f64(fee_value, &fee_path, "last_vegas_multiplier")?,
+        pid: replay_pid_state(pid_value, &format!("{fee_path}.pid"))?,
+        last_fee_profile: replay_str(fee_value, &fee_path, "last_fee_profile")?,
+        last_context_key: replay_str(fee_value, &fee_path, "last_context_key")?,
+        last_time_bucket: replay_str(fee_value, &fee_path, "last_time_bucket")?,
+        last_corridor_role: replay_str(fee_value, &fee_path, "last_corridor_role")?,
+        last_contextual_sample_used: replay_bool(
+            fee_value,
+            &fee_path,
+            "last_contextual_sample_used",
+        )?,
+        dynamic_htlcmin_baseline_msat: replay_opt_i64(
+            fee_value,
+            &fee_path,
+            "dynamic_htlcmin_baseline_msat",
+        )?,
+        explicit_shared: HashSet::new(),
+    };
+    fee.clear_explicit_shared_fields();
+    Ok((cycle, fee))
+}
+
+/// Exact authority capture shape for post-state comparison.
+pub fn fee_state_to_capture_value(s: &ChannelFeeState) -> OValue {
+    let thompson = match gts_to_dict(&s.thompson) {
+        OValue::Obj(entries) => OValue::obj(
+            entries
+                .into_iter()
+                .filter(|(key, _)| REPLAY_THOMPSON_KEYS.contains(&key.as_str()))
+                .collect(),
+        ),
+        _ => unreachable!("gts_to_dict always returns an object"),
+    };
+    OValue::obj(vec![
+        ("thompson".to_string(), thompson),
+        (
+            "last_revenue_rate".to_string(),
+            OValue::Float(s.last_revenue_rate),
+        ),
+        ("last_fee_ppm".to_string(), OValue::Int(s.last_fee_ppm)),
+        (
+            "last_broadcast_fee_ppm".to_string(),
+            OValue::Int(s.last_broadcast_fee_ppm),
+        ),
+        ("last_update".to_string(), OValue::Int(s.last_update)),
+        (
+            "last_broadcast_at".to_string(),
+            OValue::Int(s.last_broadcast_at),
+        ),
+        ("last_state".to_string(), OValue::str(s.last_state.clone())),
+        ("is_sleeping".to_string(), OValue::Bool(s.is_sleeping)),
+        ("sleep_until".to_string(), OValue::Int(s.sleep_until)),
+        ("stable_cycles".to_string(), OValue::Int(s.stable_cycles)),
+        (
+            "forward_count_since_update".to_string(),
+            OValue::Int(s.forward_count_since_update),
+        ),
+        (
+            "last_volume_sats".to_string(),
+            OValue::Int(s.last_volume_sats),
+        ),
+        (
+            "algorithm_version".to_string(),
+            OValue::str(s.algorithm_version.clone()),
+        ),
+        (
+            "last_gossip_refresh".to_string(),
+            OValue::Int(s.last_gossip_refresh),
+        ),
+        (
+            "last_vegas_multiplier".to_string(),
+            OValue::Float(s.last_vegas_multiplier),
+        ),
+        ("pid".to_string(), pid::pid_to_dict(&s.pid)),
+        (
+            "last_fee_profile".to_string(),
+            OValue::str(s.last_fee_profile.clone()),
+        ),
+        (
+            "last_context_key".to_string(),
+            OValue::str(s.last_context_key.clone()),
+        ),
+        (
+            "last_time_bucket".to_string(),
+            OValue::str(s.last_time_bucket.clone()),
+        ),
+        (
+            "last_corridor_role".to_string(),
+            OValue::str(s.last_corridor_role.clone()),
+        ),
+        (
+            "last_contextual_sample_used".to_string(),
+            OValue::Bool(s.last_contextual_sample_used),
+        ),
+        (
+            "dynamic_htlcmin_baseline_msat".to_string(),
+            s.dynamic_htlcmin_baseline_msat
+                .map(OValue::Int)
+                .unwrap_or(OValue::Null),
+        ),
+    ])
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,8 @@ use revops_econ::types::{EconResult, Micro, Msat, SignedMsat, UnixTime};
 use serde_json::{json, Value};
 
 use crate::cycle::FeeCfgSnapshot;
+use crate::pyjson::OValue;
+use crate::pyrand::DecisionInputError;
 
 /// `FeeController.ABS_MIN_FEE_PPM` (py 2917).
 pub const ABS_MIN_FEE_PPM: i64 = 0;
@@ -49,6 +51,44 @@ pub struct SetFeeDecision {
     /// The frozen `FEE_LIMIT:` warn line, byte-exact with py 7683-7687,
     /// emitted only when the clamp changed the requested fee.
     pub clamp_log: Option<String>,
+}
+
+/// One in-kernel fee execution request. `wire_request` is the exact Python
+/// `set_channel_fee` kwargs object captured at the observational boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeeExecutionRequest {
+    pub decision: SetFeeRequest,
+    pub wire_request: OValue,
+    /// Pre-execution fee captured in the Python result contract.
+    pub old_fee_ppm: i64,
+    /// Effective base fee expected in the Python result contract.
+    pub expected_base_fee_msat: i64,
+}
+
+/// Strict execution boundary used by production dry-run and offline replay.
+pub trait FeeExecutor {
+    fn execute(
+        &self,
+        request: &FeeExecutionRequest,
+        cfg: &FeeCfgSnapshot,
+        policy: Option<&PeerPolicy>,
+    ) -> Result<SetFeeDecision, DecisionInputError>;
+}
+
+/// Production-safe adapter: preserves the existing pure decision semantics.
+/// It has no RPC handle and cannot perform a live action.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PureFeeExecutor;
+
+impl FeeExecutor for PureFeeExecutor {
+    fn execute(
+        &self,
+        request: &FeeExecutionRequest,
+        cfg: &FeeCfgSnapshot,
+        policy: Option<&PeerPolicy>,
+    ) -> Result<SetFeeDecision, DecisionInputError> {
+        Ok(decide_set_channel_fee(&request.decision, cfg, policy))
+    }
 }
 
 /// `set_channel_fee` (py 7627-7923) as a PURE decision: the ABS clamp
@@ -152,6 +192,67 @@ pub struct GovernedTrace {
     pub reason_code: String,
     pub intent_id: String,
     pub idempotency_key: String,
+}
+
+/// One replayable request to authorize a would-be fee broadcast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeAuthorizationRequest {
+    pub channel_id: String,
+    pub fee_ppm: i64,
+    pub old_fee_ppm: Option<i64>,
+    pub reason: String,
+    pub reason_code: Option<String>,
+    pub now: i64,
+}
+
+/// The authorization result consumed by the fee kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeAuthorizationResult {
+    pub authorized: bool,
+    pub reason_code: String,
+    pub trace: Option<GovernedTrace>,
+}
+
+/// Replayable fee-governor decision boundary.
+pub trait FeeAuthorizer {
+    fn authorize(
+        &self,
+        request: &FeeAuthorizationRequest,
+    ) -> Result<FeeAuthorizationResult, DecisionInputError>;
+}
+
+/// Production adapter that preserves the existing governed facade, ledger,
+/// registry, trace, and fail-closed reason-string behavior.
+pub struct GovernedFeeAuthorizer<'deps, 'resources> {
+    deps: &'deps GovernedDeps<'resources>,
+}
+
+impl<'deps, 'resources> GovernedFeeAuthorizer<'deps, 'resources> {
+    pub fn new(deps: &'deps GovernedDeps<'resources>) -> Self {
+        Self { deps }
+    }
+}
+
+impl FeeAuthorizer for GovernedFeeAuthorizer<'_, '_> {
+    fn authorize(
+        &self,
+        request: &FeeAuthorizationRequest,
+    ) -> Result<FeeAuthorizationResult, DecisionInputError> {
+        let (authorized, reason_code, trace) = governed_authorize_fee_broadcast(
+            self.deps,
+            &request.channel_id,
+            request.fee_ppm,
+            request.old_fee_ppm,
+            &request.reason,
+            request.reason_code.as_deref(),
+            request.now,
+        );
+        Ok(FeeAuthorizationResult {
+            authorized,
+            reason_code,
+            trace,
+        })
+    }
 }
 
 /// Convert a float component to the py_repr string form BEFORE it enters

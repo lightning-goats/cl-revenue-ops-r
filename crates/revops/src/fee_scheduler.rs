@@ -59,7 +59,7 @@
 //!
 //! `now_unix()` is read EXACTLY once per cycle, at the top of
 //! [`CycleOwner::run_cycle`], and that single value is threaded through
-//! `CycleDeps::now` / `build_evidence_snapshot` to every downstream
+//! `FixedDecisionClock` / `build_evidence_snapshot` to every downstream
 //! consumer (Global Constraint: "clock once per cycle"). The clock is an
 //! injected `FnMut() -> i64` so tests can count reads; production passes
 //! `crate::now_unix`.
@@ -135,8 +135,10 @@ use cln_plugin::options::Value as OptValue;
 use revops_db::actor::DbHandle;
 use revops_fees::cycle::{
     handle_policy_change, maybe_wake_for_vegas_spike, run_fee_cycle, wake_all_sleeping_channels,
-    ChannelStateRow, ControllerState, CycleDeps, FeeCfgSnapshot, StateSink,
+    ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot, FixedDecisionClock,
+    StateSink,
 };
+use revops_fees::execution::{GovernedFeeAuthorizer, PureFeeExecutor};
 use revops_fees::journal::Journal;
 use revops_fees::profiles::fee_profile;
 use revops_fees::pyrand::PyRandom;
@@ -459,6 +461,9 @@ pub enum CycleOutcome {
     SkippedMinCompetitors,
     /// `build_evidence_snapshot` failed (DB open/read error).
     SkippedEvidence,
+    /// A replayable clock, entropy, or authorizer input failed. The cycle
+    /// stops before journaling any partial decision set.
+    SkippedDecisionInput,
 }
 
 /// The single owner of `ControllerState` + the ONE long-lived `PyRandom`.
@@ -555,7 +560,7 @@ impl CycleOwner {
     /// `tests/fee_scheduler.rs`:
     ///
     /// 1. `clock()` EXACTLY once; the value feeds every downstream
-    ///    consumer (evidence snapshot windows, `CycleDeps::now`).
+    ///    consumer (evidence snapshot windows, `FixedDecisionClock`).
     /// 2. Fail closed if `neighbor_median_min_competitors` is unresolvable
     ///    (Phase 4b Task 8a; any resolvable positive integer threads
     ///    through to `CycleDeps::min_competitors` instead of the old
@@ -574,7 +579,16 @@ impl CycleOwner {
     ) -> CycleOutcome {
         // (1) The cycle's single clock read.
         let now = clock();
+        let mut decision_clock = FixedDecisionClock::new(now);
+        self.run_cycle_at(prepared, now, &mut decision_clock)
+    }
 
+    fn run_cycle_at(
+        &mut self,
+        prepared: PreparedCycle,
+        now: i64,
+        decision_clock: &mut dyn DecisionClock,
+    ) -> CycleOutcome {
         // T7: capture this cycle's resolved profile name for the
         // out-of-cycle wake handlers (see `last_profile`'s doc comment).
         // Captured even on a skip path below -- config still resolved
@@ -628,17 +642,26 @@ impl CycleOwner {
         // append alone would lose failures the window contract requires
         // logged loudly. Step (7) below is the single, loud append.
         let governed = self.governor.governed_deps(&prepared.cfg);
+        let authorizer = GovernedFeeAuthorizer::new(&governed);
+        let executor = PureFeeExecutor;
         let mut deps = CycleDeps {
             evidence: &snapshot,
             cfg: &prepared.cfg,
             rng: &mut self.rng,
-            now,
-            governed: Some(&governed),
+            clock: decision_clock,
+            authorizer: Some(&authorizer),
+            executor: &executor,
             journal: None,
             state_sink: self.state_sink.as_ref().map(|s| s as &dyn StateSink),
             min_competitors,
         };
-        let decisions = run_fee_cycle(&mut self.state, &mut deps);
+        let decisions = match run_fee_cycle(&mut self.state, &mut deps) {
+            Ok(decisions) => decisions,
+            Err(error) => {
+                eprintln!("revops: fee cycle stopped: replayable decision input failed: {error}");
+                return CycleOutcome::SkippedDecisionInput;
+            }
+        };
 
         // (7) The one journal append -- loud on failure, never fatal.
         if let Some(journal) = &self.journal {
@@ -1025,5 +1048,141 @@ async fn trigger_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod decision_clock_tests {
+    use super::*;
+    use crate::fee_state::STATE_JOURNAL_FILE_NAME;
+    use revops_fees::journal::JOURNAL_FILE_NAME;
+    use revops_fees::pyrand::DecisionInputError;
+    use rusqlite::Connection;
+    use serde_json::{json, Value};
+
+    const TEST_NOW: i64 = 1_800_000_000;
+
+    struct ExhaustOnSecondEvaluation {
+        evaluation_calls: usize,
+        labels: Vec<String>,
+    }
+
+    impl DecisionClock for ExhaustOnSecondEvaluation {
+        fn now(&mut self, label: &str) -> Result<i64, DecisionInputError> {
+            self.labels.push(label.to_string());
+            if label == "cycle.channel.evaluate" {
+                self.evaluation_calls += 1;
+                if self.evaluation_calls == 2 {
+                    return Err(DecisionInputError::new(
+                        "scripted clock exhausted on second channel",
+                    ));
+                }
+            }
+            Ok(TEST_NOW)
+        }
+    }
+
+    fn peer(byte: &str) -> String {
+        format!("02{}", byte.repeat(32))
+    }
+
+    fn channel(scid: &str, full_id: &str, peer_id: &str, fee_ppm: i64) -> Value {
+        json!({
+            "state": "CHANNELD_NORMAL",
+            "short_channel_id": scid,
+            "channel_id": full_id,
+            "peer_id": peer_id,
+            "total_msat": 2_000_000_000_i64,
+            "to_us_msat": 1_100_000_000_i64,
+            "spendable_msat": 1_000_000_000_i64,
+            "receivable_msat": 900_000_000_i64,
+            "updates": {"local": {
+                "fee_base_msat": 0,
+                "fee_proportional_millionths": fee_ppm,
+                "htlc_minimum_msat": 1000,
+                "htlc_maximum_msat": 1_980_000_000_i64,
+            }},
+            "opener": "local",
+            "max_accepted_htlcs": 483,
+            "htlcs": [],
+        })
+    }
+
+    fn line_count(path: &Path) -> usize {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    #[test]
+    fn second_channel_clock_exhaustion_discards_all_cycle_journal_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("prod.db");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+        std::fs::copy(fixture, &db_path).expect("copy fixture db");
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("wal");
+        for (scid, peer_id) in [("100x1x0", peer("aa")), ("200x1x0", peer("bb"))] {
+            conn.execute(
+                "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, \
+                 sats_out, capacity, updated_at, kalman_flow_ratio, kalman_velocity) \
+                 VALUES (?1, ?2, 'balanced', 0.1, 0, 0, 2000000, ?3, 0.05, 0.01)",
+                rusqlite::params![scid, peer_id, TEST_NOW - 60],
+            )
+            .expect("insert channel state");
+        }
+        drop(conn);
+
+        let journal_dir = dir.path().join("journal");
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path,
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            42,
+        );
+        let prepared = PreparedCycle {
+            cfg: FeeCfgSnapshot {
+                enable_vegas_reflex: false,
+                ..FeeCfgSnapshot::default()
+            },
+            min_competitors: json!(3),
+            rpc: RpcPrefetch {
+                our_node_id: peer("ee"),
+                peer_channels: vec![
+                    channel("100:1:0", "full_a", &peer("aa"), 150),
+                    channel("200:1:0", "full_b", &peer("bb"), 250),
+                ],
+                gossip_channels: Vec::new(),
+                feerates: None,
+            },
+        };
+        let mut decision_clock = ExhaustOnSecondEvaluation {
+            evaluation_calls: 0,
+            labels: Vec::new(),
+        };
+
+        let outcome = owner.run_cycle_at(prepared, TEST_NOW, &mut decision_clock);
+
+        assert_eq!(outcome, CycleOutcome::SkippedDecisionInput);
+        assert_eq!(decision_clock.evaluation_calls, 2);
+        assert_eq!(
+            owner.state().cycle_states.len(),
+            1,
+            "the first channel must finish before the second transcript read fails"
+        );
+        assert_eq!(line_count(&journal_dir.join(JOURNAL_FILE_NAME)), 0);
+        assert_eq!(line_count(&journal_dir.join(STATE_JOURNAL_FILE_NAME)), 0);
+
+        let exported_bypass = ["pub fn run_cycle_with_", "decision_clock"].concat();
+        assert!(
+            !include_str!("fee_scheduler.rs").contains(&exported_bypass),
+            "downstream crates must not be able to inject a semantic decision clock"
+        );
     }
 }

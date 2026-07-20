@@ -27,6 +27,8 @@ pub mod pyjson;
 pub mod pyrand;
 pub mod rails;
 pub mod reason;
+pub mod replay;
+pub mod replay_wire;
 pub mod state_store;
 pub mod thompson;
 pub mod vegas;

@@ -3,7 +3,7 @@
 """Diff the Rust observer's read RPCs against Python's, on lnnode.
 
 Usage: ./diff_read_rpcs.py [--node lnnode] [--window-days 30]
-                            [--observer-db ~/.lightning/revops-r-observer.db]
+                            [--observer-db /data/lightningd/.lightning/revops-r-observer.db]
                             [--python-db /data/lightningd/.lightning/revenue_ops.db]
                             [--tolerance 2] [--since <unix-ts>]
 
@@ -104,6 +104,11 @@ GENERATED_AT_SKIP = frozenset({"generated_at"})
 # leaf paths (Phase 1b gap table). Always skipped itself; its listed
 # leaves are self-derived and skipped too (see diff_rpc()).
 GAP_KEY = "_phase1b_gaps"
+
+# Confirmed production observer database path. A tilde-relative default is
+# unsafe because sqlite_query() shell-quotes the path for the remote command,
+# which suppresses tilde expansion.
+DEFAULT_OBSERVER_DB = "/data/lightningd/.lightning/revops-r-observer.db"
 
 
 def cli(node, *args):
@@ -466,6 +471,21 @@ def self_test():
     ssh/node needed). Invoke via: python3 diff_read_rpcs.py --self-test"""
     ok = True
 
+    # -- 0. parser default is the confirmed absolute observer DB path --
+    # build_parser() is shared with main(), so this pins the live parser rather
+    # than a self-test-only duplicate.
+    observer_default = build_parser().parse_args([]).observer_db
+    default_ok = (
+        observer_default == DEFAULT_OBSERVER_DB
+        and not observer_default.startswith("~")
+    )
+    print(
+        f"[self-test] observer-db default: {observer_default!r} "
+        f"(expect {DEFAULT_OBSERVER_DB!r}, absolute) => "
+        f"{'PASS' if default_ok else 'FAIL'}"
+    )
+    ok = ok and default_ok
+
     # -- 1. parity pass (revenue-history, no params) --
     def cli_hist_parity(node, *args):
         return copy.deepcopy(HISTORY_STUB)
@@ -630,15 +650,16 @@ def self_test():
     return 0 if ok else 1
 
 
-def main(argv=None, cli_fn=cli, sqlite_fn=sqlite_query):
+def build_parser():
+    """Build the CLI parser shared by main() and the no-node self-test."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--node", default="lnnode")
     ap.add_argument("--self-test", action="store_true",
                     help="run the built-in self-test (stubbed CLI/sqlite, no live node) and exit")
     ap.add_argument("--window-days", type=int, default=30,
                     help="window_days passed to both revenue-dashboard and revenue-r-dashboard (default: 30)")
-    ap.add_argument("--observer-db", default="~/.lightning/revops-r-observer.db",
-                    help="Rust observer's own writable sqlite db, on --node (default: ~/.lightning/revops-r-observer.db)")
+    ap.add_argument("--observer-db", default=DEFAULT_OBSERVER_DB,
+                    help=f"Rust observer's own writable sqlite db, on --node (default: {DEFAULT_OBSERVER_DB})")
     ap.add_argument("--python-db", default="/data/lightningd/.lightning/revenue_ops.db",
                     help="Python plugin's production sqlite db, on --node (default: "
                          "/data/lightningd/.lightning/revenue_ops.db -- the CONFIRMED absolute "
@@ -652,7 +673,11 @@ def main(argv=None, cli_fn=cli, sqlite_fn=sqlite_query):
                     help="override the ingestion cross-check's window start (unix ts) instead of "
                          "deriving it from the observer db's own MIN(timestamp), clamped to a "
                          "7-day floor (see module docstring's ingestion-window note)")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None, cli_fn=cli, sqlite_fn=sqlite_query):
+    args = build_parser().parse_args(argv)
 
     if args.self_test:
         return self_test()
