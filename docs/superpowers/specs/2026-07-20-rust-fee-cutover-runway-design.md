@@ -92,7 +92,8 @@ capture/report retention must preserve a substantial free-space reserve.
 7. The Python fee-authority switch defaults to enabled and preserves current
    behavior until explicitly disabled during a manual cutover.
 8. Python's scheduled, triggered, and manual fee mutation paths all consult
-   the same authority switch.
+   the same authority switch. Disabling authority for cutover uses CLN
+   `setconfig` with `transient=false` so the handoff survives restart.
 9. Rust verifies Python fee authority is disabled before every live broadcast
    batch. Missing, malformed, stale, or conflicting evidence denies the batch.
 10. State-persistence failure, governor denial, ledger failure, ambiguous RPC
@@ -226,7 +227,11 @@ the batch. This is a positive handoff; Rust never infers safety merely because
 Python appears stopped or quiet.
 
 Python deployment happens first with authority still enabled. The default-on
-change must be behaviorally neutral and independently rollbackable.
+change must be behaviorally neutral and independently rollbackable. Shadow
+tests of the switch use `setconfig ... transient=true` and immediately restore
+authority. The manual cutover uses `transient=false` (CLN v26.06.1's default),
+then verifies the returned `config.setconfig` source so Python cannot silently
+reacquire authority after a restart.
 
 ## Stateful cutover shadow
 
@@ -322,10 +327,12 @@ failure. It checks:
 The watcher also keeps authority captures below their existing 32-envelope
 retention limit. Immediately after a capture reaches six complete natural
 cycles, it closes and drains the run, freezes it atomically, and opens the next
-run. It never triggers a fee cycle. Rotation is expected roughly hourly at the
-current 600-second Python fee interval; if the watcher is delayed, it rotates
-at the first safe opportunity and marks any possible evidence gap. Reaching
-the retention limit before a successful freeze is red.
+run. It never triggers a fee cycle. Capture enable/disable calls use
+`setconfig transient=true` so hourly rotation does not append durable config
+entries. Rotation is expected roughly hourly at the current 600-second Python
+fee interval; if the watcher is delayed, it rotates at the first safe
+opportunity and marks any possible evidence gap. Reaching the retention limit
+before a successful freeze is red.
 
 Individual snapshots are append-only and small. Routine green samples are
 rolled up rather than emitted as operator messages.
@@ -497,7 +504,9 @@ for the exact installed binary, and execute the documented subsystem handoff.
 The cutover order is:
 
 1. freeze configuration changes and take a final green snapshot;
-2. disable Python fee authority and verify positive readback;
+2. disable Python fee authority persistently with `setconfig
+   transient=false`, verify positive readback, and verify the returned
+   `config.setconfig` source;
 3. verify Rust remains dry-run and produce one final would-broadcast batch;
 4. install the fresh release-bound arm;
 5. switch Rust from shadow to live fee mode, which validates and consumes the
