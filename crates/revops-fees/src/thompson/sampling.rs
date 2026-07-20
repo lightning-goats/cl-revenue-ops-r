@@ -60,6 +60,24 @@ pub fn sample_fee_with_entropy(
     rng: &mut dyn DecisionEntropy,
     now: i64,
 ) -> Result<i64, DecisionInputError> {
+    sample_fee_with_entropy_and_clock(
+        state,
+        floor,
+        ceiling,
+        exploration_multiplier,
+        rng,
+        &mut |_| Ok(now),
+    )
+}
+
+pub fn sample_fee_with_entropy_and_clock(
+    state: &mut GaussianThompsonState,
+    floor: i64,
+    ceiling: i64,
+    exploration_multiplier: Option<f64>,
+    rng: &mut dyn DecisionEntropy,
+    clock: &mut dyn FnMut(&str) -> Result<i64, DecisionInputError>,
+) -> Result<i64, DecisionInputError> {
     // Python: float(None) raises -> 1.0; then finite/positive guard.
     let mut boost = exploration_multiplier.unwrap_or(1.0);
     if !boost.is_finite() || boost <= 0.0 {
@@ -73,8 +91,15 @@ pub fn sample_fee_with_entropy(
         // like the normal path). The prior ignores posterior_mean, so
         // advisory nudges must be applied here.
         let explore_std = MIN_STD.max(state.prior_std_fee * 1.1) * boost;
-        let mut s = rng.gauss("thompson.prior", state.prior_mean_fee, explore_std)?;
-        s += posterior_bias_shift(state, s, now);
+        let mut s = if state.prior_mean_fee_is_int {
+            rng.gauss_i64_f64("thompson.prior", state.prior_mean_fee as i64, explore_std)?
+        } else {
+            rng.gauss("thompson.prior", state.prior_mean_fee, explore_std)?
+        };
+        if !state.posterior_bias.is_empty() {
+            let bias_now = clock("thompson.posterior_bias.shift")?;
+            s += posterior_bias_shift(state, s, bias_now);
+        }
         sampled = s;
     } else {
         // Try polynomial posterior sampling; fall back to Gaussian.
@@ -82,10 +107,13 @@ pub fn sample_fee_with_entropy(
             // Polynomial draws come from the regression coefficients and
             // ignore posterior_mean entirely — apply the durable nudge
             // shift here so advisory signals reach the sampled fee.
-            s += posterior_bias_shift(state, s, now);
+            if !state.posterior_bias.is_empty() {
+                let bias_now = clock("thompson.posterior_bias.shift")?;
+                s += posterior_bias_shift(state, s, bias_now);
+            }
             let sampled_fee = clamp_fee(floor, ceiling, s);
             state.last_sampled_fee = sampled_fee;
-            state.last_sample_time = now;
+            state.last_sample_time = clock("thompson.last_sample_time")?;
             return Ok(sampled_fee);
         }
         // Fallback: sample from Gaussian posterior. No extra bias shift:
@@ -96,7 +124,7 @@ pub fn sample_fee_with_entropy(
 
     let sampled_fee = clamp_fee(floor, ceiling, sampled);
     state.last_sampled_fee = sampled_fee;
-    state.last_sample_time = now;
+    state.last_sample_time = clock("thompson.last_sample_time")?;
     Ok(sampled_fee)
 }
 
@@ -137,9 +165,36 @@ pub fn sample_fee_contextual_with_entropy(
     rng: &mut dyn DecisionEntropy,
     now: i64,
 ) -> Result<i64, DecisionInputError> {
+    sample_fee_contextual_with_entropy_and_clock(
+        state,
+        context_key,
+        floor,
+        ceiling,
+        exploration_multiplier,
+        rng,
+        &mut |_| Ok(now),
+    )
+}
+
+pub fn sample_fee_contextual_with_entropy_and_clock(
+    state: &mut GaussianThompsonState,
+    context_key: &str,
+    floor: i64,
+    ceiling: i64,
+    exploration_multiplier: Option<f64>,
+    rng: &mut dyn DecisionEntropy,
+    clock: &mut dyn FnMut(&str) -> Result<i64, DecisionInputError>,
+) -> Result<i64, DecisionInputError> {
     // Python only forwards the kwarg when explicitly given; both spellings
     // reach the same None-tolerant handling in sample_fee.
-    let base = sample_fee_with_entropy(state, floor, ceiling, exploration_multiplier, rng, now)?;
+    let base = sample_fee_with_entropy_and_clock(
+        state,
+        floor,
+        ceiling,
+        exploration_multiplier,
+        rng,
+        clock,
+    )?;
 
     let ctx = match state
         .contextual_posteriors
@@ -176,7 +231,7 @@ pub fn sample_fee_contextual_with_entropy(
 
     let sampled_fee = clamp_fee(floor, ceiling, base as f64 + offset);
     state.last_sampled_fee = sampled_fee;
-    state.last_sample_time = now;
+    state.last_sample_time = clock("thompson.last_sample_time")?;
     Ok(sampled_fee)
 }
 
@@ -217,9 +272,9 @@ fn sample_from_polynomial_posterior(
                 sigma[2][2].max(1e-6),
             ];
             let z = [
-                rng.gauss("thompson.polynomial.coefficient.0", 0.0, 1.0)? * noise_scale,
-                rng.gauss("thompson.polynomial.coefficient.1", 0.0, 1.0)? * noise_scale,
-                rng.gauss("thompson.polynomial.coefficient.2", 0.0, 1.0)? * noise_scale,
+                rng.gauss_i64("thompson.polynomial.coefficient.0", 0, 1)? * noise_scale,
+                rng.gauss_i64("thompson.polynomial.coefficient.1", 0, 1)? * noise_scale,
+                rng.gauss_i64("thompson.polynomial.coefficient.2", 0, 1)? * noise_scale,
             ];
             [
                 state.posterior_coeffs[0] + z[0] * diag[0].sqrt(),
@@ -229,9 +284,9 @@ fn sample_from_polynomial_posterior(
         }
         Some(l) => {
             let z = [
-                rng.gauss("thompson.polynomial.coefficient.0", 0.0, 1.0)? * noise_scale,
-                rng.gauss("thompson.polynomial.coefficient.1", 0.0, 1.0)? * noise_scale,
-                rng.gauss("thompson.polynomial.coefficient.2", 0.0, 1.0)? * noise_scale,
+                rng.gauss_i64("thompson.polynomial.coefficient.0", 0, 1)? * noise_scale,
+                rng.gauss_i64("thompson.polynomial.coefficient.1", 0, 1)? * noise_scale,
+                rng.gauss_i64("thompson.polynomial.coefficient.2", 0, 1)? * noise_scale,
             ];
             let lz = matvec3(&l, &z);
             [

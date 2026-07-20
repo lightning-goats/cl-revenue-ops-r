@@ -226,6 +226,7 @@ impl Default for FeeCfgSnapshot {
 pub struct ChannelInfo {
     pub channel_id: String,
     pub short_channel_id: String,
+    pub full_channel_id: String,
     pub peer_id: String,
     /// py `capacity` (sats); `0` means "missing/falsy" — use sites apply
     /// Python's `or 2_000_000` default.
@@ -235,7 +236,9 @@ pub struct ChannelInfo {
     pub fee_base_msat: i64,
     pub fee_proportional_millionths: i64,
     pub htlc_minimum_msat: i64,
+    pub htlc_min_msat: i64,
     pub htlc_maximum_msat: i64,
+    pub htlc_max_msat: i64,
     pub opener: String,
     pub has_htlc_data: bool,
     pub max_accepted_htlcs: i64,
@@ -347,6 +350,25 @@ pub trait FeeEvidence {
     /// frozen — implementations should memoize per cycle like PR 3e's
     /// `FrozenObservations`).
     fn gossip_channels(&self, peer_id: &str) -> Result<Vec<GossipRow>, DecisionInputError>;
+    /// Captured effective result of py `_get_neighbor_fee_median`.
+    /// Outer `None` means unavailable and asks the production path to
+    /// derive from gossip; inner `None` is a captured Python `None`.
+    fn captured_neighbor_fee_median(
+        &self,
+        _peer_id: &str,
+    ) -> Result<Option<Option<i64>>, DecisionInputError> {
+        Ok(None)
+    }
+    /// Captured effective result of py `_get_neighbor_fee_percentile`.
+    /// Outer `None` means unavailable and asks the production path to
+    /// derive from gossip; inner `None` is a captured Python `None`.
+    fn captured_neighbor_fee_percentile(
+        &self,
+        _peer_id: &str,
+        _pct: f64,
+    ) -> Result<Option<Option<i64>>, DecisionInputError> {
+        Ok(None)
+    }
     /// py `database.get_peer_latency_stats(peer_id, 86400)`.
     fn peer_latency(&self, peer_id: &str) -> Result<Option<PeerLatency>, DecisionInputError>;
     /// py `database.get_channel_cost_history(channel_id, since)`.
@@ -777,6 +799,37 @@ fn channel_rebalance_cost_ppm(flow_state: &str, history: &[RebalanceCostSample],
     cost_ppm.min(5000)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn update_posterior_with_semantic_clock(
+    clock: &mut dyn DecisionClock,
+    state: &mut crate::thompson::GaussianThompsonState,
+    fee: f64,
+    revenue_rate: f64,
+    hours: f64,
+    time_bucket: &str,
+    congested: bool,
+) -> Result<(), DecisionInputError> {
+    let update_now = clock.now("thompson.posterior.update")?;
+    let recompute_now = clock.now("thompson.posterior.recompute")?;
+    let bias_now = if state.posterior_bias.is_empty() {
+        recompute_now
+    } else {
+        clock.now("thompson.posterior_bias.apply")?
+    };
+    dynamics::update_posterior_at_times(
+        state,
+        fee,
+        revenue_rate,
+        hours,
+        time_bucket,
+        congested,
+        update_now,
+        recompute_now,
+        bias_now,
+    );
+    Ok(())
+}
+
 /// Python `"True"`/`"False"` capitalization for f-string bools.
 fn py_bool_str(b: bool) -> &'static str {
     if b {
@@ -1096,6 +1149,10 @@ fn channel_info_capture_value(info: &ChannelInfo) -> OValue {
             "short_channel_id".to_string(),
             OValue::str(info.short_channel_id.clone()),
         ),
+        (
+            "full_channel_id".to_string(),
+            OValue::str(info.full_channel_id.clone()),
+        ),
         ("peer_id".to_string(), OValue::str(info.peer_id.clone())),
         ("capacity".to_string(), OValue::Int(info.capacity_sats)),
         (
@@ -1115,10 +1172,12 @@ fn channel_info_capture_value(info: &ChannelInfo) -> OValue {
             "htlc_minimum_msat".to_string(),
             OValue::Int(info.htlc_minimum_msat),
         ),
+        ("htlc_min_msat".to_string(), OValue::Int(info.htlc_min_msat)),
         (
             "htlc_maximum_msat".to_string(),
             OValue::Int(info.htlc_maximum_msat),
         ),
+        ("htlc_max_msat".to_string(), OValue::Int(info.htlc_max_msat)),
         ("opener".to_string(), OValue::str(info.opener.clone())),
         (
             "has_htlc_data".to_string(),
@@ -1417,6 +1476,11 @@ pub fn adjust_channel_fee(
     // py 5586-5587.
     let is_under_exploration = evidence.exploration_flag(channel_id)?;
 
+    // Python reads a fresh semantic adjustment time after the exploration
+    // evidence lookup; the outer cycle evaluation time remains reserved for
+    // skip classification in `process_channel`.
+    let now = deps.clock.now("channel.adjust")?;
+
     // py 5592-5597.
     let raw_chain_fee = info.fee_proportional_millionths;
     let mut current_fee_ppm = raw_chain_fee;
@@ -1607,6 +1671,14 @@ pub fn adjust_channel_fee(
     // =====================================================================
     // Floors / ceiling (py 5844-5955) — ADR stage 1 rails.
     // =====================================================================
+    let flow_window = if cfg.min_fee_ppm_saturated >= 0
+        && cfg.min_fee_ppm_saturated < cfg.min_fee_ppm
+        && (flow_state == "source" || outbound_ratio >= floors::SATURATED_OUTBOUND_RATIO)
+    {
+        evidence.flow_window(channel_id)?
+    } else {
+        None
+    };
     let effective_min_fee_ppm = floors::effective_min_fee_ppm(
         &MinFeeCfg {
             min_fee_ppm: cfg.min_fee_ppm,
@@ -1615,7 +1687,7 @@ pub fn adjust_channel_fee(
         Some(flow_state),
         Some(outbound_ratio),
         capacity,
-        evidence.flow_window(channel_id)?.as_ref(),
+        flow_window.as_ref(),
     );
     let opener = info.opener.as_str();
     let latency = evidence.peer_latency(peer_id)?;
@@ -1630,15 +1702,27 @@ pub fn adjust_channel_fee(
         base_floor_ppm = (base_floor_ppm as f64 * vegas_multiplier) as i64;
     }
 
-    // py 5866-5884: rebalance cost-aware hard floor.
-    let cost_cutoff = now - REBALANCE_FLOOR_WINDOW_DAYS * 86400;
-    let cost_history = evidence.channel_cost_history(channel_id, cost_cutoff)?;
-    let peer_history = evidence.peer_fee_history(peer_id)?;
-    let peer_fallback = peer_history
-        .as_ref()
-        .map(|h| (h.confidence.as_str(), h.avg_fee_ppm));
-    let rebalance_floor_ppm =
-        floors::rebalance_cost_floor(flow_state, &cost_history, peer_fallback, now);
+    // py 5866-5884: rebalance cost-aware hard floor. Preserve Python's
+    // evidence/clock boundaries exactly: sink/dormant channels read
+    // neither source, peer history is a cold-start fallback only, and the
+    // soft-cost path below performs its own clocked history read.
+    let rebalance_floor_ppm = if flow_state == "sink" || flow_state == "dormant" {
+        None
+    } else {
+        let floor_now = deps.clock.now("rebalance_cost_floor.cutoff")?;
+        let cost_cutoff = floor_now - REBALANCE_FLOOR_WINDOW_DAYS * 86400;
+        let cost_history = evidence.channel_cost_history(channel_id, cost_cutoff)?;
+        match floors::rebalance_cost_floor(flow_state, &cost_history, None, floor_now) {
+            some @ Some(_) => some,
+            None => {
+                let peer_history = evidence.peer_fee_history(peer_id)?;
+                let peer_fallback = peer_history
+                    .as_ref()
+                    .map(|h| (h.confidence.as_str(), h.avg_fee_ppm));
+                floors::rebalance_cost_floor(flow_state, &cost_history, peer_fallback, floor_now)
+            }
+        }
+    };
     let rebalance_floor_active = rebalance_floor_ppm.is_some();
     if let Some(rf) = rebalance_floor_ppm {
         if rf > base_floor_ppm {
@@ -1647,19 +1731,24 @@ pub fn adjust_channel_fee(
     }
 
     // py 5886-5898: soft nudge input (only when the hard floor is off).
-    let rebalance_cost_ppm = if !rebalance_floor_active {
-        channel_rebalance_cost_ppm(flow_state, &cost_history, now)
-    } else {
-        0
-    };
+    let rebalance_cost_ppm =
+        if !rebalance_floor_active && flow_state != "sink" && flow_state != "dormant" {
+            let cost_now = deps.clock.now("rebalance_cost_history.cutoff")?;
+            let cost_cutoff = cost_now - REBALANCE_FLOOR_WINDOW_DAYS * 86400;
+            let cost_history = evidence.channel_cost_history(channel_id, cost_cutoff)?;
+            channel_rebalance_cost_ppm(flow_state, &cost_history, cost_now)
+        } else {
+            0
+        };
 
     // py 5900-5912: flow-adjusted ceiling.
-    let base_ceiling_ppm = floors::flow_adjusted_ceiling(
-        current_fee_ppm,
-        cfg.max_fee_ppm,
-        evidence.last_forward_time(channel_id)?,
-        now,
-    );
+    let last_forward_ts = if current_fee_ppm >= rails::ZERO_FLOW_FEE_THRESHOLD {
+        evidence.last_forward_time(channel_id)?
+    } else {
+        None
+    };
+    let base_ceiling_ppm =
+        floors::flow_adjusted_ceiling(current_fee_ppm, cfg.max_fee_ppm, last_forward_ts, now);
 
     let mut floor_ppm = base_floor_ppm;
     let mut ceiling_ppm = base_ceiling_ppm;
@@ -1724,15 +1813,15 @@ pub fn adjust_channel_fee(
             let (_ck, congestion_time_bucket, _role) =
                 context_with_values(now, outbound_ratio, flow_state);
             if !rails::is_unroutable_zero_window(current_revenue_rate, spendable as f64) {
-                dynamics::update_posterior(
+                update_posterior_with_semantic_clock(
+                    deps.clock,
                     &mut ts.thompson,
                     raw_chain_fee as f64,
                     current_revenue_rate,
                     hours_elapsed,
                     &congestion_time_bucket,
                     prev_congestion_active,
-                    now,
-                );
+                )?;
             }
         }
 
@@ -1810,15 +1899,15 @@ pub fn adjust_channel_fee(
         {
             let (_ck, exploration_time_bucket, _role) =
                 context_with_values(now, outbound_ratio, flow_state);
-            dynamics::update_posterior(
+            update_posterior_with_semantic_clock(
+                deps.clock,
                 &mut ts.thompson,
                 raw_chain_fee as f64,
                 current_revenue_rate,
                 hours_elapsed,
                 &exploration_time_bucket,
                 false,
-                now,
-            );
+            )?;
         }
 
         sparse_data_conservative = is_sparse_data_channel(
@@ -1909,30 +1998,40 @@ pub fn adjust_channel_fee(
         }
 
         // Shared single recording site (py 6255-6285).
-        let record_window = |ts: &mut ChannelFeeState, now: i64| -> bool {
+        let mut record_window = |ts: &mut ChannelFeeState| -> Result<bool, DecisionInputError> {
             if raw_chain_fee > 0
                 && !rails::is_unroutable_zero_window(adjusted_revenue_rate, spendable as f64)
             {
-                dynamics::update_posterior(
+                let update_now = deps.clock.now("thompson.posterior.update")?;
+                let recompute_now = deps.clock.now("thompson.posterior.recompute")?;
+                let bias_now = if ts.thompson.posterior_bias.is_empty() {
+                    recompute_now
+                } else {
+                    deps.clock.now("thompson.posterior_bias.apply")?
+                };
+                dynamics::update_posterior_at_times(
                     &mut ts.thompson,
                     raw_chain_fee as f64,
                     adjusted_revenue_rate,
                     hours_elapsed,
                     &time_bucket,
                     prev_congestion_active,
-                    now,
+                    update_now,
+                    recompute_now,
+                    bias_now,
                 );
+                let contextual_now = deps.clock.now("thompson.contextual.update")?;
                 dynamics::update_contextual(
                     &mut ts.thompson,
                     &context_key,
                     raw_chain_fee as f64,
                     adjusted_revenue_rate,
                     &time_bucket,
-                    now,
+                    contextual_now,
                 );
-                true
+                Ok(true)
             } else {
-                false
+                Ok(false)
             }
         };
 
@@ -1941,7 +2040,7 @@ pub fn adjust_channel_fee(
             ts.stable_cycles += 1;
             let zero_rev_exploring = current_revenue_rate <= 0.0 && current_fee_ppm > floor_ppm;
             if ts.stable_cycles >= STABLE_CYCLES_REQUIRED && !zero_rev_exploring {
-                record_window(ts, now);
+                record_window(ts)?;
                 let sleep_duration_seconds = cfg.fee_interval * SLEEP_CYCLES;
                 ts.is_sleeping = true;
                 ts.sleep_until = now + sleep_duration_seconds;
@@ -1967,7 +2066,7 @@ pub fn adjust_channel_fee(
         }
 
         // Update posterior + contextual (py 6357-6363).
-        record_window(ts, now);
+        record_window(ts)?;
 
         // DTS discount before sampling (py 6365-6373) — frozen order:
         // update → discount → sample.
@@ -2003,14 +2102,14 @@ pub fn adjust_channel_fee(
             .contextual_posteriors
             .iter()
             .any(|(k, _)| k == &context_key);
-        let dts_fee = sampling::sample_fee_contextual_with_entropy(
+        let dts_fee = sampling::sample_fee_contextual_with_entropy_and_clock(
             &mut ts.thompson,
             &context_key,
             floor_ppm,
             ceiling_ppm,
             None,
             deps.rng,
-            now,
+            &mut |label| deps.clock.now(label),
         )?;
         contextual_sample_used = ctx_exists && context_observation_count >= MIN_OBSERVATIONS;
         ts.last_fee_profile = fee_profile_name.to_string();
@@ -2041,6 +2140,7 @@ pub fn adjust_channel_fee(
         }
 
         // Neighbor market context (py 6458-6676).
+        let captured_neighbor_median = evidence.captured_neighbor_fee_median(peer_id)?;
         let gossip_rows = evidence.gossip_channels(peer_id)?;
         let our_id = evidence.our_node_id()?;
         let active_channels: Vec<GossipChannel> = gossip_rows
@@ -2048,8 +2148,12 @@ pub fn adjust_channel_fee(
             .filter(|r| r.active)
             .map(|r| r.to_gossip_channel(peer_id))
             .collect();
-        let neighbor_median =
-            market::neighbor_fee_median(&active_channels, &our_id, deps.min_competitors, now);
+        let neighbor_median = match captured_neighbor_median {
+            Some(value) => value,
+            None => {
+                market::neighbor_fee_median(&active_channels, &our_id, deps.min_competitors, now)
+            }
+        };
         let neighbor_market_usable = matches!(neighbor_median, Some(m) if m > floor_ppm);
 
         let median_pull_mode = cfg.market_fee_mode.as_str();
@@ -2069,7 +2173,8 @@ pub fn adjust_channel_fee(
         if neighbor_market_usable && sparse_data_conservative {
             let median = neighbor_median.unwrap_or(0);
             if ts.thompson.posterior_std > rails::exploration_std_threshold(current_fee_ppm) {
-                dynamics::record_posterior_nudge(&mut ts.thompson, median as f64, 0.15, now);
+                let nudge_now = deps.clock.now("thompson.posterior_nudge")?;
+                dynamics::record_posterior_nudge(&mut ts.thompson, median as f64, 0.15, nudge_now);
             }
         }
 
@@ -2100,13 +2205,18 @@ pub fn adjust_channel_fee(
                     post_pid = target;
                 }
             } else if mode == "competition_aware" {
-                let preserve_threshold = market::neighbor_fee_percentile(
-                    &active_channels,
-                    &our_id,
-                    0.25,
-                    deps.min_competitors,
-                    now,
-                );
+                let captured_preserve_threshold =
+                    evidence.captured_neighbor_fee_percentile(peer_id, 0.25)?;
+                let preserve_threshold = match captured_preserve_threshold {
+                    Some(value) => value,
+                    None => market::neighbor_fee_percentile(
+                        &active_channels,
+                        &our_id,
+                        0.25,
+                        deps.min_competitors,
+                        now,
+                    ),
+                };
                 let undercut_target = (median as f64 * (1.0 - undercut_pct)) as i64;
                 let exploring =
                     ts.thompson.posterior_std > rails::exploration_std_threshold(current_fee_ppm);
@@ -2143,11 +2253,12 @@ pub fn adjust_channel_fee(
                     && ts.thompson.posterior_mean > undercut_target as f64
                     && ts.thompson.posterior_std >= 50.0
                 {
+                    let nudge_now = deps.clock.now("thompson.posterior_nudge")?;
                     dynamics::record_posterior_nudge(
                         &mut ts.thompson,
                         undercut_target as f64,
                         0.10,
-                        now,
+                        nudge_now,
                     );
                 }
             }
@@ -2167,11 +2278,15 @@ pub fn adjust_channel_fee(
         }
 
         // Supported-fee ceiling + upward-probe stretch (py 6713-6763).
+        let supported_now = deps.clock.now("thompson.supported_fee_ceiling")?;
         let mut supported_cap =
-            dynamics::supported_fee_ceiling(&ts.thompson, now, Some(floor_ppm as f64));
+            dynamics::supported_fee_ceiling(&ts.thompson, supported_now, Some(floor_ppm as f64));
         if let Some(cap) = supported_cap {
             if (post_pid as f64) > cap {
-                if let Some(probe_cap) = dynamics::maybe_upward_probe_cap(&ts.thompson, now, cap) {
+                let probe_now = deps.clock.now("thompson.upward_probe_cap")?;
+                if let Some(probe_cap) =
+                    dynamics::maybe_upward_probe_cap(&ts.thompson, probe_now, cap)
+                {
                     if probe_cap > cap {
                         // L1: budget consumed only after the applied fee
                         // actually crosses the pre-stretch cap (py 7224).
@@ -2234,7 +2349,8 @@ pub fn adjust_channel_fee(
         let mut blended_val = blended;
         target_blend_ratio = blend_info.blend_ratio;
         zero_revenue_streak = Some(ts.thompson.zero_revenue_streak);
-        let earning_anchor_ppm = recompute::earning_region_fee(&ts.thompson, now);
+        let earning_now = deps.clock.now("thompson.earning_region")?;
+        let earning_anchor_ppm = recompute::earning_region_fee(&ts.thompson, earning_now);
         let cycle_hours = {
             let interval = if cfg.fee_interval != 0 {
                 cfg.fee_interval
@@ -2245,10 +2361,11 @@ pub fn adjust_channel_fee(
         };
         let (guard_streak, downshift_streak) =
             rails::zero_flow_streak_thresholds(ts.thompson.meaningful_gap_ema_hours, cycle_hours);
+        let meaningful_now = deps.clock.now("thompson.meaningful_rate")?;
         let rate_is_meaningful = Some(dynamics::is_meaningful_rate(
             &ts.thompson,
             adjusted_revenue_rate,
-            now,
+            meaningful_now,
         ));
         let (guarded, guard_reason) =
             rails::apply_zero_flow_ratchet_guard(&rails::ZeroFlowInputs {

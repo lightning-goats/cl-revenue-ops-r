@@ -99,6 +99,90 @@ fn strict_complete_adjustment_replays_exactly() {
 }
 
 #[test]
+fn post_state_mismatch_reports_the_first_nested_field_path() {
+    let mut value = fixture_value();
+    value["expected"]["post_channel_state"][0]["fee_state"]["last_fee_ppm"] = json!(999);
+    let capture = parse_mutated(value);
+
+    let error = replay_fee_capture(&capture).expect_err("post-state mutation must mismatch");
+    assert!(
+        error
+            .to_string()
+            .contains("$.expected.post_channel_state[0].fee_state.last_fee_ppm"),
+        "{error}"
+    );
+}
+
+#[test]
+fn complete_thompson_private_sampling_state_is_imported_exactly() {
+    let mut value = fixture_value();
+    let thompson = &mut value["pre_state"]["ordered_channels"][0]["fee_state"]["thompson"];
+    thompson["posterior_variance"] = json!({"__f__": "10000.0"});
+    thompson["_prior_coeffs"] = json!([{"__f__": "0.0"}, {"__f__": "1.0"}, {"__f__": "0.0"}]);
+    thompson["_prior_precision"] = json!([
+        [{"__f__": "0.01"}, {"__f__": "0.0"}, {"__f__": "0.0"}],
+        [{"__f__": "0.0"}, {"__f__": "0.01"}, {"__f__": "0.0"}],
+        [{"__f__": "0.0"}, {"__f__": "0.0"}, {"__f__": "0.01"}]
+    ]);
+    thompson["_last_fee_min"] = json!({"__f__": "75.0"});
+    thompson["_last_fee_max"] = json!({"__f__": "225.0"});
+    thompson["weight_scheme"] = json!("exposure_v2");
+    value["expected"]["post_channel_state"][0]["fee_state"]["thompson"] = thompson.clone();
+
+    let capture = parse_mutated(value);
+    let replay = replay_fee_capture(&capture).expect("complete private state must replay");
+    assert_eq!(
+        replay.post_channel_state,
+        capture.expected["post_channel_state"]
+    );
+}
+
+#[test]
+fn unavailable_temporary_overlay_callback_consumes_no_evidence_and_returns_false() {
+    let mut value = fixture_value();
+    value["producer"]["temporary_overlay_active_available"] = json!(false);
+    let evidence = value["observations"]["evidence"]
+        .as_array_mut()
+        .expect("evidence transcript");
+    let overlay_index = evidence
+        .iter()
+        .position(|entry| entry["op"] == "temporary_overlay_active")
+        .expect("overlay evidence");
+    evidence.remove(overlay_index);
+    for (ordinal, entry) in evidence.iter_mut().enumerate() {
+        entry["ordinal"] = json!(ordinal);
+    }
+    value["completeness"]["evidence_entries"] = json!(evidence.len());
+
+    let capture = parse_mutated(value);
+    let replay = replay_fee_capture(&capture)
+        .expect("captured unavailable callback must replay as structural false");
+    assert_eq!(replay.consumed.evidence, 7);
+    assert_eq!(
+        replay.ordered_outcomes,
+        capture.expected["ordered_outcomes"]
+    );
+}
+
+#[test]
+fn missing_temporary_overlay_capability_fails_closed_at_producer_path() {
+    let mut value = fixture_value();
+    value["producer"]
+        .as_object_mut()
+        .expect("producer object")
+        .remove("temporary_overlay_active_available");
+    let capture = parse_mutated(value);
+
+    let error = replay_fee_capture(&capture).expect_err("missing capability must fail closed");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("$.producer.temporary_overlay_active_available")
+            && rendered.contains("is required"),
+        "{error}"
+    );
+}
+
+#[test]
 fn enabled_node_drain_reports_kernel_derived_ratio_pressure_and_effective_cap() {
     let mut enabled = fixture_value();
     enabled["configuration"]["node_drain_bias_enabled"] = json!(true);
@@ -476,6 +560,29 @@ fn strict_execution_result_validates_full_shape_and_values() {
 }
 
 #[test]
+fn execution_result_accepts_typed_applied_htlc_readback_fields_only() {
+    let mut with_readback = fixture_value();
+    with_readback["observations"]["execution"][0]["result"]["applied_htlcmin_msat"] = json!(1_000);
+    with_readback["observations"]["execution"][0]["result"]["applied_htlcmax_msat"] =
+        json!(2_500_000);
+    with_readback["expected"]["ordered_decision_traces"][0]["execution"][0]["result"]
+        ["applied_htlcmin_msat"] = json!(1_000);
+    with_readback["expected"]["ordered_decision_traces"][0]["execution"][0]["result"]
+        ["applied_htlcmax_msat"] = json!(2_500_000);
+    let capture = parse_mutated(with_readback);
+    replay_fee_capture(&capture).expect("typed setchannel readback fields");
+
+    let mut wrong_type = fixture_value();
+    wrong_type["observations"]["execution"][0]["result"]["applied_htlcmax_msat"] =
+        json!("2500000msat");
+    assert_path_error(
+        &parse_mutated(wrong_type),
+        "execution",
+        "$.observations.execution[0].result.applied_htlcmax_msat",
+    );
+}
+
+#[test]
 fn strict_policy_requires_exact_fields_types_enums_and_identity() {
     let policy_index = 7;
     for (field, replacement, path) in [
@@ -749,6 +856,7 @@ fn pre_state_preserves_valid_thompson_semantic_edges_exactly() {
         thompson["prior_mean_fee"] = json!(0);
         thompson["prior_std_fee"] = json!(1);
         thompson["posterior_std"] = json!({"__f__": "1e-06"});
+        thompson["posterior_variance"] = json!({"__f__": "1e-12"});
         thompson["noise_variance"] = json!({"__f__": "1e-06"});
         thompson["contextual_posteriors"] =
             json!({"edge": [{"__f__": "-1.0"}, {"__f__": "1e-06"}, 0, 0]});

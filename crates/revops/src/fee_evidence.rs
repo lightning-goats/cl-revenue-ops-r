@@ -346,6 +346,7 @@ fn build_channels_info(peer_channels: &[Value]) -> BTreeMap<String, ChannelInfo>
             ChannelInfo {
                 channel_id: canonical,
                 short_channel_id,
+                full_channel_id: json_str(channel, "channel_id", ""),
                 peer_id: json_str(channel, "peer_id", ""),
                 capacity_sats,
                 spendable_msat,
@@ -353,7 +354,9 @@ fn build_channels_info(peer_channels: &[Value]) -> BTreeMap<String, ChannelInfo>
                 fee_base_msat,
                 fee_proportional_millionths,
                 htlc_minimum_msat,
+                htlc_min_msat: htlc_minimum_msat,
                 htlc_maximum_msat,
+                htlc_max_msat: htlc_maximum_msat,
                 opener: json_str(channel, "opener", "local"),
                 has_htlc_data,
                 max_accepted_htlcs: json_i64(channel, "max_accepted_htlcs", 483),

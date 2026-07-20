@@ -111,8 +111,20 @@ fn require_exact_wire_fields(
     ordinal: usize,
     label: &str,
 ) -> Result<(), ReplayError> {
+    require_wire_fields(object, expected, &[], path, family, ordinal, label)
+}
+
+fn require_wire_fields(
+    object: &WireObject,
+    required: &[&str],
+    optional: &[&str],
+    path: &str,
+    family: &'static str,
+    ordinal: usize,
+    label: &str,
+) -> Result<(), ReplayError> {
     for key in object.keys() {
-        if !expected.contains(&key.as_str()) {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
             return Err(transcript(
                 family,
                 ordinal,
@@ -122,7 +134,7 @@ fn require_exact_wire_fields(
             ));
         }
     }
-    for key in expected {
+    for key in required {
         if !object.contains_key(*key) {
             return Err(transcript(
                 family,
@@ -268,6 +280,12 @@ fn wire_to_ovalue(value: &WireValue, path: &str) -> Result<OValue, ReplayError> 
         WireValue::Null => OValue::Null,
         WireValue::Bool(value) => OValue::Bool(*value),
         WireValue::Integer(value) => OValue::Int(*value),
+        WireValue::Unsigned(value) => OValue::Int(i64::try_from(*value).map_err(|_| {
+            shape(
+                path,
+                "unsigned integer exceeds the internal signed 64-bit range",
+            )
+        })?),
         WireValue::String(value) => OValue::Str(value.clone()),
         WireValue::TaggedFloat(_) => OValue::Float(decode_tagged_float(value, path)?),
         WireValue::Array(items) => OValue::Arr(
@@ -520,18 +538,50 @@ impl DecisionEntropy for TranscriptEntropy {
         )
         .map_err(|error| remember_decision_error(&self.errors, error))
     }
+
+    fn gauss_i64(&mut self, label: &str, mu: i64, sigma: i64) -> Result<f64, DecisionInputError> {
+        self.consume(
+            "gauss",
+            label,
+            WireValue::Array(vec![WireValue::Integer(mu), WireValue::Integer(sigma)]),
+        )
+        .map_err(|error| remember_decision_error(&self.errors, error))
+    }
+
+    fn gauss_i64_f64(
+        &mut self,
+        label: &str,
+        mu: i64,
+        sigma: f64,
+    ) -> Result<f64, DecisionInputError> {
+        self.consume(
+            "gauss",
+            label,
+            WireValue::Array(vec![
+                WireValue::Integer(mu),
+                WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(sigma)),
+            ]),
+        )
+        .map_err(|error| remember_decision_error(&self.errors, error))
+    }
 }
 
 pub struct TranscriptEvidence {
     cursor: RefCell<Cursor>,
     channels: BTreeMap<String, ChannelInfo>,
-    gossip: BTreeMap<String, Vec<GossipRow>>,
+    gossip: RefCell<BTreeMap<String, Vec<GossipRow>>>,
+    prefetched_gossip: BTreeMap<String, Vec<GossipRow>>,
     our_id: String,
+    temporary_overlay_active_available: bool,
     errors: ReplayErrorSlot,
 }
 
 impl TranscriptEvidence {
-    fn new(observations: &WireObject, errors: ReplayErrorSlot) -> Result<Self, ReplayError> {
+    fn new(
+        observations: &WireObject,
+        temporary_overlay_active_available: bool,
+        errors: ReplayErrorSlot,
+    ) -> Result<Self, ReplayError> {
         let mut cursor = Cursor::new(observations, "evidence")?;
         let (channels_ordinal, raw_channels) =
             take_evidence_result(&mut cursor, "channels_info", WireValue::Array(Vec::new()))?;
@@ -540,7 +590,12 @@ impl TranscriptEvidence {
             structured_transcript_error("evidence", channels_ordinal, "channels_info", error)
         })?;
 
-        let mut gossip = BTreeMap::new();
+        // Prefix gossip belongs to Python's pre-lock RPC-cache warm-up.
+        // Validate and consume it here, but do not seed the in-cycle memo:
+        // Python starts `_cycle_observations` after prefetch and records the
+        // first in-loop gossip read again.
+        let gossip: BTreeMap<String, Vec<GossipRow>> = BTreeMap::new();
+        let mut prefetched_gossip: BTreeMap<String, Vec<GossipRow>> = BTreeMap::new();
         while let Some(WireValue::Object(entry)) = cursor.entries.get(cursor.position) {
             if entry.get("op") != Some(&WireValue::String("gossip_channels".to_string())) {
                 break;
@@ -580,7 +635,7 @@ impl TranscriptEvidence {
             .map_err(|error| {
                 structured_transcript_error("evidence", result_ordinal, "gossip_channels", error)
             })?;
-            gossip.insert(peer, result);
+            prefetched_gossip.insert(peer, result);
         }
         let (ordinal, our) =
             take_evidence_result(&mut cursor, "our_node_id", WireValue::Array(Vec::new()))?;
@@ -590,8 +645,10 @@ impl TranscriptEvidence {
         Ok(Self {
             cursor: RefCell::new(cursor),
             channels,
-            gossip,
+            gossip: RefCell::new(gossip),
+            prefetched_gossip,
             our_id,
+            temporary_overlay_active_available,
             errors,
         })
     }
@@ -886,20 +943,78 @@ impl FeeEvidence for TranscriptEvidence {
     }
 
     fn gossip_channels(&self, peer_id: &str) -> Result<Vec<GossipRow>, DecisionInputError> {
-        let ordinal = self.cursor.borrow().position;
-        self.gossip.get(peer_id).cloned().ok_or_else(|| {
-            self.decision_error(
-                ordinal,
-                "gossip_channels",
-                transcript(
-                    "evidence",
-                    ordinal,
-                    format!("prefetched gossip_channels {peer_id}"),
-                    "<missing>",
-                    "$.observations.evidence",
-                ),
+        if let Some(rows) = self.gossip.borrow().get(peer_id).cloned() {
+            return Ok(rows);
+        }
+        let next_is_gossip = {
+            let cursor = self.cursor.borrow();
+            matches!(
+                cursor.entries.get(cursor.position),
+                Some(WireValue::Object(entry))
+                    if matches!(entry.get("op"), Some(WireValue::String(op)) if op == "gossip_channels")
             )
-        })
+        };
+        if !next_is_gossip {
+            if let Some(rows) = self.prefetched_gossip.get(peer_id).cloned() {
+                self.gossip
+                    .borrow_mut()
+                    .insert(peer_id.to_string(), rows.clone());
+                return Ok(rows);
+            }
+        }
+        let value = self.consume(
+            "gossip_channels",
+            WireValue::Array(vec![WireValue::String(peer_id.to_string())]),
+        )?;
+        let ordinal = self.cursor.borrow().position.saturating_sub(1);
+        let rows = decode_gossip(
+            &value,
+            &format!("$.observations.evidence[{ordinal}].result"),
+        )
+        .map_err(|error| self.decision_error(ordinal, "gossip_channels", error))?;
+        self.gossip
+            .borrow_mut()
+            .insert(peer_id.to_string(), rows.clone());
+        Ok(rows)
+    }
+
+    fn captured_neighbor_fee_median(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<Option<i64>>, DecisionInputError> {
+        let value = self.consume(
+            "neighbor_fee_median",
+            WireValue::Array(vec![WireValue::String(peer_id.to_string())]),
+        )?;
+        match value {
+            WireValue::Null => Ok(Some(None)),
+            _ => integer(&value, "$.observations.evidence.neighbor_fee_median.result")
+                .map(|value| Some(Some(value)))
+                .map_err(|error| self.decode_error(error)),
+        }
+    }
+
+    fn captured_neighbor_fee_percentile(
+        &self,
+        peer_id: &str,
+        pct: f64,
+    ) -> Result<Option<Option<i64>>, DecisionInputError> {
+        let value = self.consume(
+            "neighbor_fee_percentile",
+            WireValue::Array(vec![
+                WireValue::String(peer_id.to_string()),
+                WireValue::TaggedFloat(revops_econ::pyfloat::py_repr(pct)),
+            ]),
+        )?;
+        match value {
+            WireValue::Null => Ok(Some(None)),
+            _ => integer(
+                &value,
+                "$.observations.evidence.neighbor_fee_percentile.result",
+            )
+            .map(|value| Some(Some(value)))
+            .map_err(|error| self.decode_error(error)),
+        }
     }
 
     fn peer_latency(&self, peer_id: &str) -> Result<Option<PeerLatency>, DecisionInputError> {
@@ -985,6 +1100,9 @@ impl FeeEvidence for TranscriptEvidence {
     }
 
     fn temporary_overlay_active(&self, channel_id: &str) -> Result<bool, DecisionInputError> {
+        if !self.temporary_overlay_active_available {
+            return Ok(false);
+        }
         let value = self.consume(
             "temporary_overlay_active",
             WireValue::Array(vec![WireValue::String(channel_id.to_string())]),
@@ -1195,7 +1313,7 @@ impl FeeExecutor for TranscriptExecution {
             .map_err(|error| self.decision_error(ordinal, error))?;
         let result = object(result_value, &format!("{base}.result"))
             .map_err(|error| self.decision_error(ordinal, error))?;
-        require_exact_wire_fields(
+        require_wire_fields(
             result,
             &[
                 "success",
@@ -1205,12 +1323,28 @@ impl FeeExecutor for TranscriptExecution {
                 "base_fee_msat",
                 "message",
             ],
+            &["applied_htlcmin_msat", "applied_htlcmax_msat"],
             &format!("{base}.result"),
             "execution",
             ordinal,
             "execute result",
         )
         .map_err(|error| self.decision_error(ordinal, error))?;
+        for field_name in ["applied_htlcmin_msat", "applied_htlcmax_msat"] {
+            if let Some(value) = result.get(field_name) {
+                let applied = integer(value, &format!("{base}.result.{field_name}"))
+                    .map_err(|error| self.decision_error(ordinal, error))?;
+                if applied < 0 {
+                    return Err(self.decision_error(
+                        ordinal,
+                        shape(
+                            format!("{base}.result.{field_name}"),
+                            "must be a nonnegative integer",
+                        ),
+                    ));
+                }
+            }
+        }
         let success = boolean(
             result
                 .get("success")
@@ -1415,6 +1549,7 @@ fn wire_to_json(value: &WireValue) -> Result<serde_json::Value, ReplayError> {
         WireValue::Null => serde_json::Value::Null,
         WireValue::Bool(value) => serde_json::Value::Bool(*value),
         WireValue::Integer(value) => serde_json::Value::Number((*value).into()),
+        WireValue::Unsigned(value) => serde_json::Value::Number((*value).into()),
         WireValue::String(value) => serde_json::Value::String(value.clone()),
         WireValue::TaggedFloat(_) => serde_json::Value::Number(
             serde_json::Number::from_f64(decode_tagged_float(value, "$.configuration")?)
@@ -2133,13 +2268,34 @@ fn post_global_wire(state: &ControllerState) -> WireValue {
 
 fn compare(path: &str, expected: &WireValue, actual: &WireValue) -> Result<(), ReplayError> {
     if expected == actual {
-        Ok(())
-    } else {
-        Err(ReplayError::ValueMismatch {
+        return Ok(());
+    }
+    match (expected, actual) {
+        (WireValue::Array(expected), WireValue::Array(actual))
+            if expected.len() == actual.len() =>
+        {
+            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+                compare(&format!("{path}[{index}]"), expected, actual)?;
+            }
+            Ok(())
+        }
+        (WireValue::Object(expected), WireValue::Object(actual))
+            if expected.len() == actual.len() && expected.keys().eq(actual.keys()) =>
+        {
+            for (key, expected) in expected {
+                compare(
+                    &format!("{path}.{key}"),
+                    expected,
+                    actual.get(key).expect("equal key sets"),
+                )?;
+            }
+            Ok(())
+        }
+        _ => Err(ReplayError::ValueMismatch {
             path: path.to_string(),
             expected: expected.clone(),
             actual: actual.clone(),
-        })
+        }),
     }
 }
 
@@ -2150,7 +2306,19 @@ pub fn replay_fee_capture(capture: &FeeCycleReplayV0) -> Result<FeeReplayResultV
     let observations = &capture.observations;
     validate_observation_families(observations)?;
     let errors: ReplayErrorSlot = Rc::new(RefCell::new(None));
-    let evidence = TranscriptEvidence::new(observations, Rc::clone(&errors))?;
+    let temporary_overlay_active_available = boolean(
+        field(
+            &capture.producer,
+            "temporary_overlay_active_available",
+            "$.producer",
+        )?,
+        "$.producer.temporary_overlay_active_available",
+    )?;
+    let evidence = TranscriptEvidence::new(
+        observations,
+        temporary_overlay_active_available,
+        Rc::clone(&errors),
+    )?;
     let mut clock = TranscriptClock::new(observations, Rc::clone(&errors))?;
     let mut entropy = TranscriptEntropy::new(observations, Rc::clone(&errors))?;
     let authorizer = TranscriptAuthorizer::new(observations, Rc::clone(&errors))?;
@@ -2285,6 +2453,10 @@ fn decode_channels_info(
                         field(object, "short_channel_id", &p)?,
                         &format!("{p}.short_channel_id"),
                     )?,
+                    full_channel_id: string(
+                        field(object, "full_channel_id", &p)?,
+                        &format!("{p}.full_channel_id"),
+                    )?,
                     peer_id: string(field(object, "peer_id", &p)?, &format!("{p}.peer_id"))?,
                     capacity_sats: integer(
                         field(object, "capacity", &p)?,
@@ -2310,9 +2482,17 @@ fn decode_channels_info(
                         field(object, "htlc_minimum_msat", &p)?,
                         &format!("{p}.htlc_minimum_msat"),
                     )?,
+                    htlc_min_msat: integer(
+                        field(object, "htlc_min_msat", &p)?,
+                        &format!("{p}.htlc_min_msat"),
+                    )?,
                     htlc_maximum_msat: integer(
                         field(object, "htlc_maximum_msat", &p)?,
                         &format!("{p}.htlc_maximum_msat"),
+                    )?,
+                    htlc_max_msat: integer(
+                        field(object, "htlc_max_msat", &p)?,
+                        &format!("{p}.htlc_max_msat"),
                     )?,
                     opener: string(field(object, "opener", &p)?, &format!("{p}.opener"))?,
                     has_htlc_data: boolean(
@@ -2646,6 +2826,280 @@ fn decode_node_channels(value: &WireValue) -> Result<Vec<NodeChannel>, ReplayErr
 #[cfg(test)]
 mod strict_decoder_tests {
     use super::*;
+
+    fn evidence_entry(ordinal: i64, op: &str, args: WireValue, result: WireValue) -> WireValue {
+        WireValue::Object(
+            [
+                ("ordinal".to_string(), WireValue::Integer(ordinal)),
+                ("op".to_string(), WireValue::String(op.to_string())),
+                ("args".to_string(), args),
+                ("result".to_string(), result),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    #[test]
+    fn polynomial_entropy_preserves_python_integer_argument_identity() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "entropy".to_string(),
+            WireValue::Array(vec![WireValue::Object(
+                [
+                    ("ordinal".to_string(), WireValue::Integer(0)),
+                    ("op".to_string(), WireValue::String("gauss".to_string())),
+                    (
+                        "label".to_string(),
+                        WireValue::String("thompson.polynomial.coefficient.0".to_string()),
+                    ),
+                    (
+                        "args".to_string(),
+                        WireValue::Array(vec![WireValue::Integer(0), WireValue::Integer(1)]),
+                    ),
+                    (
+                        "result".to_string(),
+                        WireValue::TaggedFloat("0.25".to_string()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let mut entropy = TranscriptEntropy::new(&observations, errors).expect("strict entropy");
+
+        assert_eq!(
+            entropy
+                .gauss_i64("thompson.polynomial.coefficient.0", 0, 1)
+                .expect("integer-argument Gaussian draw"),
+            0.25
+        );
+    }
+
+    #[test]
+    fn prior_entropy_preserves_python_mixed_argument_identity() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "entropy".to_string(),
+            WireValue::Array(vec![WireValue::Object(
+                [
+                    ("ordinal".to_string(), WireValue::Integer(0)),
+                    ("op".to_string(), WireValue::String("gauss".to_string())),
+                    (
+                        "label".to_string(),
+                        WireValue::String("thompson.prior".to_string()),
+                    ),
+                    (
+                        "args".to_string(),
+                        WireValue::Array(vec![
+                            WireValue::Integer(855),
+                            WireValue::TaggedFloat("5498.900000000001".to_string()),
+                        ]),
+                    ),
+                    (
+                        "result".to_string(),
+                        WireValue::TaggedFloat("900.0".to_string()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let mut entropy = TranscriptEntropy::new(&observations, errors).expect("strict entropy");
+
+        assert_eq!(
+            entropy
+                .gauss_i64_f64("thompson.prior", 855, 5498.900000000001)
+                .expect("mixed-argument Gaussian draw"),
+            900.0
+        );
+    }
+
+    #[test]
+    fn gossip_recorded_at_first_in_loop_use_is_consumed_and_memoized() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "evidence".to_string(),
+            WireValue::Array(vec![
+                evidence_entry(
+                    0,
+                    "channels_info",
+                    WireValue::Array(Vec::new()),
+                    WireValue::Object(WireObject::new()),
+                ),
+                evidence_entry(
+                    1,
+                    "our_node_id",
+                    WireValue::Array(Vec::new()),
+                    WireValue::String("our-node".to_string()),
+                ),
+                evidence_entry(
+                    2,
+                    "gossip_channels",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Array(Vec::new()),
+                ),
+            ]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let evidence =
+            TranscriptEvidence::new(&observations, true, errors).expect("strict evidence");
+
+        assert_eq!(
+            evidence
+                .gossip_channels("peer")
+                .expect("first in-loop read"),
+            Vec::<GossipRow>::new()
+        );
+        assert_eq!(evidence.cursor.borrow().position, 3);
+        assert_eq!(
+            evidence.gossip_channels("peer").expect("memoized read"),
+            Vec::<GossipRow>::new()
+        );
+        assert_eq!(evidence.cursor.borrow().position, 3);
+    }
+
+    #[test]
+    fn prefetched_gossip_does_not_replace_first_in_loop_capture() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "evidence".to_string(),
+            WireValue::Array(vec![
+                evidence_entry(
+                    0,
+                    "channels_info",
+                    WireValue::Array(Vec::new()),
+                    WireValue::Object(WireObject::new()),
+                ),
+                evidence_entry(
+                    1,
+                    "gossip_channels",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Array(Vec::new()),
+                ),
+                evidence_entry(
+                    2,
+                    "our_node_id",
+                    WireValue::Array(Vec::new()),
+                    WireValue::String("our-node".to_string()),
+                ),
+                evidence_entry(
+                    3,
+                    "gossip_channels",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Array(Vec::new()),
+                ),
+            ]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let evidence =
+            TranscriptEvidence::new(&observations, true, errors).expect("strict evidence");
+
+        assert_eq!(
+            evidence.gossip_channels("peer").expect("in-loop capture"),
+            Vec::<GossipRow>::new()
+        );
+        assert_eq!(evidence.cursor.borrow().position, 4);
+    }
+
+    #[test]
+    fn prefetched_gossip_supplies_python_derived_cache_hit_without_second_capture() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "evidence".to_string(),
+            WireValue::Array(vec![
+                evidence_entry(
+                    0,
+                    "channels_info",
+                    WireValue::Array(Vec::new()),
+                    WireValue::Object(WireObject::new()),
+                ),
+                evidence_entry(
+                    1,
+                    "gossip_channels",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Array(Vec::new()),
+                ),
+                evidence_entry(
+                    2,
+                    "our_node_id",
+                    WireValue::Array(Vec::new()),
+                    WireValue::String("our-node".to_string()),
+                ),
+                evidence_entry(
+                    3,
+                    "policy",
+                    WireValue::Array(vec![WireValue::String("next-peer".to_string())]),
+                    WireValue::Null,
+                ),
+            ]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let evidence =
+            TranscriptEvidence::new(&observations, true, errors).expect("strict evidence");
+
+        assert_eq!(
+            evidence.gossip_channels("peer").expect("prefetch fallback"),
+            Vec::<GossipRow>::new()
+        );
+        assert_eq!(evidence.cursor.borrow().position, 3);
+    }
+
+    #[test]
+    fn effective_neighbor_values_consume_integer_and_nullable_transcript_results() {
+        let mut observations = WireObject::new();
+        observations.insert(
+            "evidence".to_string(),
+            WireValue::Array(vec![
+                evidence_entry(
+                    0,
+                    "channels_info",
+                    WireValue::Array(Vec::new()),
+                    WireValue::Object(WireObject::new()),
+                ),
+                evidence_entry(
+                    1,
+                    "our_node_id",
+                    WireValue::Array(Vec::new()),
+                    WireValue::String("our-node".to_string()),
+                ),
+                evidence_entry(
+                    2,
+                    "neighbor_fee_median",
+                    WireValue::Array(vec![WireValue::String("peer".to_string())]),
+                    WireValue::Integer(360),
+                ),
+                evidence_entry(
+                    3,
+                    "neighbor_fee_percentile",
+                    WireValue::Array(vec![
+                        WireValue::String("peer".to_string()),
+                        WireValue::TaggedFloat("0.25".to_string()),
+                    ]),
+                    WireValue::Null,
+                ),
+            ]),
+        );
+        let errors = Rc::new(RefCell::new(None));
+        let evidence =
+            TranscriptEvidence::new(&observations, true, errors).expect("strict evidence");
+
+        assert_eq!(
+            evidence
+                .captured_neighbor_fee_median("peer")
+                .expect("captured median"),
+            Some(Some(360))
+        );
+        assert_eq!(
+            evidence
+                .captured_neighbor_fee_percentile("peer", 0.25)
+                .expect("captured percentile"),
+            Some(None)
+        );
+        assert_eq!(evidence.cursor.borrow().position, 4);
+    }
 
     #[test]
     fn flow_window_validates_the_count_tuple_element() {

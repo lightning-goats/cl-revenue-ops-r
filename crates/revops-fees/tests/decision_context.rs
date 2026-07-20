@@ -4,7 +4,9 @@ use revops_fees::execution::{
     GovernedFeeAuthorizer, GovernedTrace,
 };
 use revops_fees::pyrand::{DecisionEntropy, DecisionInputError, PyRandom};
-use revops_fees::thompson::sampling::sample_fee_with_entropy;
+use revops_fees::thompson::sampling::{
+    sample_fee_contextual_with_entropy_and_clock, sample_fee_with_entropy,
+};
 use revops_fees::thompson::{GaussianThompsonState, Observation};
 use revops_fees::vegas::{vegas_update_with_entropy, VegasReflexState};
 
@@ -132,6 +134,41 @@ fn entropy_errors_propagate_without_substitution() {
     let error = sample_fee_with_entropy(&mut state, 10, 500, None, &mut entropy, 1234)
         .expect_err("strict entropy exhaustion must fail closed");
     assert_eq!(error.to_string(), "missing entropy: thompson.prior");
+}
+
+#[test]
+fn thompson_sampling_consumes_bias_clock_before_sample_clock() {
+    let mut state = GaussianThompsonState {
+        posterior_bias: vec![(300.0, 0.5, 1_000)],
+        ..GaussianThompsonState::default()
+    };
+    let mut entropy = RecordingEntropy {
+        gauss_values: [200.0].into(),
+        ..RecordingEntropy::default()
+    };
+    let mut labels = Vec::new();
+    let mut values: std::collections::VecDeque<i64> = [2_000, 2_001].into();
+    sample_fee_contextual_with_entropy_and_clock(
+        &mut state,
+        "missing",
+        10,
+        500,
+        None,
+        &mut entropy,
+        &mut |label| {
+            labels.push(label.to_string());
+            values
+                .pop_front()
+                .ok_or_else(|| DecisionInputError::new(format!("missing clock: {label}")))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        labels,
+        ["thompson.posterior_bias.shift", "thompson.last_sample_time",]
+    );
+    assert_eq!(state.last_sample_time, 2_001);
 }
 
 #[derive(Default)]

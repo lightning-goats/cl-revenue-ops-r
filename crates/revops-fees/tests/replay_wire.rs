@@ -91,27 +91,56 @@ fn parses_real_python_sealed_complete_skip_fixture() {
 }
 
 #[test]
+fn parses_u64_max_from_live_cln_evidence_without_losing_integer_identity() {
+    let mut value = fixture_value();
+    value["observations"]["evidence"][0]["result"]["123x456x0"]
+        ["our_max_htlc_value_in_flight_msat"] = json!(u64::MAX);
+    reseal(&mut value);
+
+    let capture = parse_value(&value).expect("live CLN u64 evidence must parse");
+    let evidence = match capture.observations.get("evidence") {
+        Some(WireValue::Array(entries)) => entries,
+        other => panic!("evidence must be an array, got {other:?}"),
+    };
+    let result = match &evidence[0] {
+        WireValue::Object(entry) => entry.get("result").expect("evidence result"),
+        other => panic!("evidence entry must be an object, got {other:?}"),
+    };
+    let channel = match result {
+        WireValue::Object(result) => result.get("123x456x0").expect("channel row"),
+        other => panic!("evidence result must be an object, got {other:?}"),
+    };
+    let value = match channel {
+        WireValue::Object(channel) => channel
+            .get("our_max_htlc_value_in_flight_msat")
+            .expect("u64 field"),
+        other => panic!("channel row must be an object, got {other:?}"),
+    };
+    assert_eq!(value, &WireValue::Unsigned(u64::MAX));
+}
+
+#[test]
 fn all_replay_fixtures_are_exact_python_writer_artifact_bytes() {
     for (name, bytes, writer_sha256) in [
         (
             "complete_adjustment.v0.json",
             COMPLETE_ADJUSTMENT,
-            "5068bab23b6df6814addeb95e13c97b34b162c8ef18f734bcd280f7f491686c5",
+            "52fbd5e3b7c44bb361fea1c700e9ca9c6ede375413c64a62eac58fa61955f75c",
         ),
         (
             "complete_skip.v0.json",
             COMPLETE_SKIP,
-            "fe8996b0d491c40cd73f94f951d16a0d3d8cb1b5ccf35c2fa46372746b12f119",
+            "e3a119958c037bce18056ad42bfd8582e93cb4ed51b1a72a2bcb155c1c1e46f4",
         ),
         (
             "effective_fallback.v0.json",
             EFFECTIVE_FALLBACK,
-            "31a548a817e904d9ce0264a1ffebd09e5d048af1d4041348bb97802daf32f4d2",
+            "ba9bd50d3bf8acb504a9b8e72a965b63ede847adc759df06fff6b105673824dc",
         ),
         (
             "failure_recovery.v0.json",
             FAILURE_RECOVERY,
-            "afc8e7befffc9c84cf2d84ffe2997fc9a0eec14a3958bda048bf5632680092d8",
+            "c68e195387a981c0f1aeeda7af4ade98d3e49ede633f939e95c703c074f17555",
         ),
     ] {
         let value: Value =
@@ -129,7 +158,7 @@ fn all_replay_fixtures_are_exact_python_writer_artifact_bytes() {
             "{name} must exactly match the committed Python writer artifact"
         );
         assert_eq!(
-            value["producer"]["python_commit"], "4736b13fdd1eb0710416be4d91603ca5608db26d",
+            value["producer"]["python_commit"], "76c352885f2d23569e76da38b13e2d6111e64799",
             "{name} must identify the committed Python producer"
         );
     }

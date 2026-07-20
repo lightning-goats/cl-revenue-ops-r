@@ -150,7 +150,11 @@ struct FixtureEvidence {
     latency: Option<PeerLatency>,
     cost_history: Vec<RebalanceCostSample>,
     peer_fee_history: Option<PeerFeeHistory>,
+    channel_cost_history_calls: Cell<usize>,
+    peer_fee_history_calls: Cell<usize>,
     last_forward: Cell<Option<i64>>,
+    last_forward_calls: Cell<usize>,
+    flow_window_calls: Cell<usize>,
     policy: Option<PeerPolicy>,
     marginal_roi: Option<f64>,
     overlay_active: Cell<bool>,
@@ -197,15 +201,23 @@ impl FixtureEvidence {
         self.latency
     }
     fn channel_cost_history(&self, _channel_id: &str, _since: i64) -> Vec<RebalanceCostSample> {
+        self.channel_cost_history_calls
+            .set(self.channel_cost_history_calls.get().saturating_add(1));
         self.cost_history.clone()
     }
     fn peer_fee_history(&self, _peer_id: &str) -> Option<PeerFeeHistory> {
+        self.peer_fee_history_calls
+            .set(self.peer_fee_history_calls.get().saturating_add(1));
         self.peer_fee_history.clone()
     }
     fn last_forward_time(&self, _channel_id: &str) -> Option<i64> {
+        self.last_forward_calls
+            .set(self.last_forward_calls.get().saturating_add(1));
         self.last_forward.get()
     }
     fn flow_window(&self, _channel_id: &str) -> Option<FlowWindow> {
+        self.flow_window_calls
+            .set(self.flow_window_calls.get().saturating_add(1));
         None
     }
     fn policy(&self, _peer_id: &str) -> Option<PeerPolicy> {
@@ -387,6 +399,7 @@ fn parse_channel_info(v: &OValue) -> ChannelInfo {
     ChannelInfo {
         channel_id: gets(v, "channel_id"),
         short_channel_id: gets(v, "short_channel_id"),
+        full_channel_id: gets(v, "full_channel_id"),
         peer_id: gets(v, "peer_id"),
         capacity_sats: geti(v, "capacity"),
         spendable_msat: geti(v, "spendable_msat"),
@@ -394,7 +407,9 @@ fn parse_channel_info(v: &OValue) -> ChannelInfo {
         fee_base_msat: geti(v, "fee_base_msat"),
         fee_proportional_millionths: geti(v, "fee_proportional_millionths"),
         htlc_minimum_msat: geti(v, "htlc_minimum_msat"),
+        htlc_min_msat: geti(v, "htlc_min_msat"),
         htlc_maximum_msat: geti(v, "htlc_maximum_msat"),
+        htlc_max_msat: geti(v, "htlc_max_msat"),
         opener: gets(v, "opener"),
         has_htlc_data: getb(v, "has_htlc_data"),
         max_accepted_htlcs: geti(v, "max_accepted_htlcs"),
@@ -1203,6 +1218,10 @@ fn fixture_cycle_case(name: &str) -> FixtureCycleCase {
             _ => None,
         },
         last_forward: Cell::new(opt_i64(cycle, "last_forward_time")),
+        last_forward_calls: Cell::new(0),
+        channel_cost_history_calls: Cell::new(0),
+        peer_fee_history_calls: Cell::new(0),
+        flow_window_calls: Cell::new(0),
         policy,
         marginal_roi: opt_f64(scenario, "marginal_roi"),
         overlay_active: Cell::new(false),
@@ -1291,6 +1310,78 @@ fn assert_optimizer_timestamps(case: &FixtureCycleCase, expected: i64) {
 }
 
 #[test]
+fn balanced_non_saturated_channel_does_not_read_flow_window() {
+    let mut case = fixture_cycle_case("dts_pid_undercut");
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(
+        case.evidence.flow_window_calls.get(),
+        0,
+        "Python only reads flow-window evidence for source or saturated channels"
+    );
+}
+
+#[test]
+fn fee_below_zero_flow_threshold_does_not_read_last_forward() {
+    let mut case = fixture_cycle_case("congestion_episode");
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(case.evidence.last_forward_calls.get(), 0);
+}
+
+#[test]
+fn inactive_hard_floor_reads_python_cost_evidence_and_clocks_in_order() {
+    let mut case = fixture_cycle_case("dts_pid_undercut");
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(case.evidence.channel_cost_history_calls.get(), 2);
+    assert_eq!(case.evidence.peer_fee_history_calls.get(), 1);
+    assert_eq!(
+        clock.labels,
+        [
+            "cycle.channel.evaluate",
+            "channel.adjust",
+            "rebalance_cost_floor.cutoff",
+            "rebalance_cost_history.cutoff",
+            "thompson.posterior.update",
+            "thompson.posterior.recompute",
+            "thompson.contextual.update",
+            "thompson.last_sample_time",
+            "pid.calculate",
+            "thompson.supported_fee_ceiling",
+            "thompson.earning_region",
+            "thompson.meaningful_rate",
+            "fee.apply"
+        ]
+    );
+}
+
+#[test]
+fn active_hard_floor_skips_peer_fallback_and_soft_cost_history() {
+    let mut case = fixture_cycle_case("floor_inversion");
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(case.evidence.channel_cost_history_calls.get(), 1);
+    assert_eq!(case.evidence.peer_fee_history_calls.get(), 0);
+    assert!(clock
+        .labels
+        .iter()
+        .any(|label| label == "rebalance_cost_floor.cutoff"));
+    assert!(!clock
+        .labels
+        .iter()
+        .any(|label| label == "rebalance_cost_history.cutoff"));
+}
+
+#[test]
 fn temporary_overlay_does_not_consume_channel_evaluation_time() {
     let mut case = fixture_cycle_case("policy_passive");
     case.evidence.overlay_active.set(true);
@@ -1326,6 +1417,63 @@ fn static_policy_starts_its_clock_at_the_explicit_set_fee_path() {
 }
 
 #[test]
+fn sparse_neighbor_nudge_consumes_its_semantic_clock() {
+    let mut case = fixture_cycle_case("sparse_median_nudge");
+    case.info.spendable_msat = 0;
+    for volume in case.evidence.volume_map.borrow_mut().values_mut() {
+        *volume = 0;
+    }
+    case.state
+        .fee_states
+        .get_mut(&case.channel_id)
+        .expect("fee state")
+        .thompson
+        .posterior_std = 500.0;
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(
+        clock
+            .labels
+            .iter()
+            .filter(|label| label.as_str() == "thompson.posterior_nudge")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn target_above_supported_cap_consumes_upward_probe_clock() {
+    let mut case = fixture_cycle_case("dts_pid_undercut");
+    case.info.spendable_msat = 0;
+    for volume in case.evidence.volume_map.borrow_mut().values_mut() {
+        *volume = 0;
+    }
+    let thompson = &mut case
+        .state
+        .fee_states
+        .get_mut(&case.channel_id)
+        .expect("fee state")
+        .thompson;
+    for observation in &mut thompson.observations {
+        observation.fee = 50.0;
+    }
+    let mut clock = SemanticClock::new(case.now);
+
+    run_fixture_case(&mut case, &mut clock);
+
+    assert_eq!(
+        clock
+            .labels
+            .iter()
+            .filter(|label| label.as_str() == "thompson.upward_probe_cap")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn ordinary_dts_success_does_not_consume_fee_state_sync() {
     let mut case = fixture_cycle_case("dts_pid_undercut");
     let mut clock = SemanticClock::new(case.now);
@@ -1333,7 +1481,21 @@ fn ordinary_dts_success_does_not_consume_fee_state_sync() {
     assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
     assert_eq!(
         clock.labels,
-        ["cycle.channel.evaluate", "pid.calculate", "fee.apply"]
+        [
+            "cycle.channel.evaluate",
+            "channel.adjust",
+            "rebalance_cost_floor.cutoff",
+            "rebalance_cost_history.cutoff",
+            "thompson.posterior.update",
+            "thompson.posterior.recompute",
+            "thompson.contextual.update",
+            "thompson.last_sample_time",
+            "pid.calculate",
+            "thompson.supported_fee_ceiling",
+            "thompson.earning_region",
+            "thompson.meaningful_rate",
+            "fee.apply"
+        ]
     );
     assert_optimizer_timestamps(&case, case.now);
 }
@@ -1344,7 +1506,18 @@ fn congestion_success_does_not_consume_fee_state_sync() {
     let mut clock = SemanticClock::new(case.now);
     let result = run_fixture_case(&mut case, &mut clock);
     assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
-    assert_eq!(clock.labels, ["cycle.channel.evaluate", "fee.apply"]);
+    assert_eq!(
+        clock.labels,
+        [
+            "cycle.channel.evaluate",
+            "channel.adjust",
+            "rebalance_cost_floor.cutoff",
+            "rebalance_cost_history.cutoff",
+            "thompson.posterior.update",
+            "thompson.posterior.recompute",
+            "fee.apply"
+        ]
+    );
     assert_optimizer_timestamps(&case, case.now);
 }
 
@@ -1356,7 +1529,16 @@ fn exploration_consumes_inner_state_sync_but_outer_state_keeps_evaluation_time()
     assert!(matches!(result.outcome, ChannelOutcome::Adjusted(_)));
     assert_eq!(
         clock.labels,
-        ["cycle.channel.evaluate", "fee.apply", "fee.state_sync"]
+        [
+            "cycle.channel.evaluate",
+            "channel.adjust",
+            "rebalance_cost_floor.cutoff",
+            "rebalance_cost_history.cutoff",
+            "thompson.posterior.update",
+            "thompson.posterior.recompute",
+            "fee.apply",
+            "fee.state_sync"
+        ]
     );
     assert_optimizer_timestamps(&case, case.now);
 }
@@ -1371,7 +1553,17 @@ fn gossip_consumes_inner_state_sync_but_outer_state_keeps_evaluation_time() {
         clock.labels,
         [
             "cycle.channel.evaluate",
+            "channel.adjust",
+            "rebalance_cost_floor.cutoff",
+            "rebalance_cost_history.cutoff",
+            "thompson.posterior.update",
+            "thompson.posterior.recompute",
+            "thompson.contextual.update",
+            "thompson.last_sample_time",
             "pid.calculate",
+            "thompson.supported_fee_ceiling",
+            "thompson.earning_region",
+            "thompson.meaningful_rate",
             "fee.apply",
             "fee.state_sync"
         ]
@@ -1402,6 +1594,7 @@ fn synthetic_info(cid: &str, peer: &str, fee: i64) -> ChannelInfo {
     ChannelInfo {
         channel_id: cid.to_string(),
         short_channel_id: cid.to_string(),
+        full_channel_id: cid.to_string(),
         peer_id: peer.to_string(),
         capacity_sats: 2_000_000,
         spendable_msat: 1_000_000_000,
@@ -1409,7 +1602,9 @@ fn synthetic_info(cid: &str, peer: &str, fee: i64) -> ChannelInfo {
         fee_base_msat: 0,
         fee_proportional_millionths: fee,
         htlc_minimum_msat: 0,
+        htlc_min_msat: 0,
         htlc_maximum_msat: 0,
+        htlc_max_msat: 0,
         opener: "local".to_string(),
         has_htlc_data: false,
         max_accepted_htlcs: 483,
@@ -1528,10 +1723,22 @@ fn three_channel_synthetic_cycle_end_to_end() {
         [
             "cycle.started_at",
             "cycle.channel.evaluate",
+            "channel.adjust",
+            "rebalance_cost_floor.cutoff",
+            "rebalance_cost_history.cutoff",
+            "thompson.posterior.update",
+            "thompson.posterior.recompute",
+            "thompson.contextual.update",
+            "thompson.last_sample_time",
             "pid.calculate",
+            "thompson.supported_fee_ceiling",
+            "thompson.upward_probe_cap",
+            "thompson.earning_region",
+            "thompson.meaningful_rate",
             "governor.authorize",
             "fee.apply",
             "cycle.channel.evaluate",
+            "channel.adjust",
         ],
         "clock transcript must follow Python semantic branch order"
     );

@@ -58,11 +58,8 @@ fn single_capture_reports_one_exact_machine_result() {
     assert_eq!(output.status.code(), Some(0));
     let verdict = one_json(&output);
 
-    assert_eq!(
-        verdict["commit"],
-        json!("4736b13fdd1eb0710416be4d91603ca5608db26d")
-    );
     let fixture: Value = serde_json::from_str(COMPLETE_ADJUSTMENT).unwrap();
+    assert_eq!(verdict["commit"], fixture["producer"]["python_commit"]);
     assert_eq!(verdict["run_id"], fixture["capture_run_id"]);
     assert_eq!(verdict["capture_count"], json!(1));
     assert_eq!(verdict["evaluated_channel_count"], json!(1));

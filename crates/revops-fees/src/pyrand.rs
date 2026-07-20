@@ -55,6 +55,19 @@ pub trait DecisionEntropy {
     fn random(&mut self, label: &str) -> Result<f64, DecisionInputError>;
 
     fn gauss(&mut self, label: &str, mu: f64, sigma: f64) -> Result<f64, DecisionInputError>;
+
+    fn gauss_i64(&mut self, label: &str, mu: i64, sigma: i64) -> Result<f64, DecisionInputError> {
+        self.gauss(label, mu as f64, sigma as f64)
+    }
+
+    fn gauss_i64_f64(
+        &mut self,
+        label: &str,
+        mu: i64,
+        sigma: f64,
+    ) -> Result<f64, DecisionInputError> {
+        self.gauss(label, mu as f64, sigma)
+    }
 }
 
 /// CPython-compatible `random.Random` (MT19937 core + `gauss` cache).

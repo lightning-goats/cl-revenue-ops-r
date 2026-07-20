@@ -12,12 +12,12 @@
 
 use super::recompute::{
     earning_region_fee, effective_positive_rate_ref, positive_revenue_mass, py_sum,
-    recompute_posterior, BIAS_DECAY_HOURS, BIAS_MIN_WEIGHT, CTX_PRECISION_DECAY, DECAY_HOURS,
-    MAX_OBSERVATIONS, MEANINGFUL_GAP_EMA_ALPHA, NUDGE_DEDUP_TOLERANCE, POSITIVE_RATE_EMA_ALPHA,
-    SECONDARY_EXPLORE_BOOST, SUPPORTED_CEILING_FLOOR_ESCAPE, SUPPORTED_CEILING_HEADROOM,
-    SUPPORTED_CEILING_MASS_QUANTILE, TRICKLE_RESET_FRAC, UPWARD_PROBE_INTERVAL_HOURS,
-    UPWARD_PROBE_MIN_STD, UPWARD_PROBE_STRETCH, ZERO_PROBE_FLOOR_FRAC, ZERO_PROBE_STEP_FRAC,
-    ZERO_REVENUE_STREAK_THRESHOLD,
+    recompute_posterior_at_times, BIAS_DECAY_HOURS, BIAS_MIN_WEIGHT, CTX_PRECISION_DECAY,
+    DECAY_HOURS, MAX_OBSERVATIONS, MEANINGFUL_GAP_EMA_ALPHA, NUDGE_DEDUP_TOLERANCE,
+    POSITIVE_RATE_EMA_ALPHA, SECONDARY_EXPLORE_BOOST, SUPPORTED_CEILING_FLOOR_ESCAPE,
+    SUPPORTED_CEILING_HEADROOM, SUPPORTED_CEILING_MASS_QUANTILE, TRICKLE_RESET_FRAC,
+    UPWARD_PROBE_INTERVAL_HOURS, UPWARD_PROBE_MIN_STD, UPWARD_PROBE_STRETCH, ZERO_PROBE_FLOOR_FRAC,
+    ZERO_PROBE_STEP_FRAC, ZERO_REVENUE_STREAK_THRESHOLD,
 };
 use super::{
     CtxPosterior, GaussianThompsonState, Observation, CONGESTION_OBS_FLAG, MAX_BIAS_NUDGES,
@@ -68,6 +68,33 @@ pub fn update_posterior(
     time_bucket: &str,
     congested: bool,
     now: i64,
+) {
+    update_posterior_at_times(
+        state,
+        fee,
+        revenue_rate,
+        hours,
+        time_bucket,
+        congested,
+        now,
+        now,
+        now,
+    );
+}
+
+/// Replay-aware form of [`update_posterior`] preserving Python's distinct
+/// update, recompute, and optional bias-application timestamps.
+#[allow(clippy::too_many_arguments)]
+pub fn update_posterior_at_times(
+    state: &mut GaussianThompsonState,
+    fee: f64,
+    revenue_rate: f64,
+    hours: f64,
+    time_bucket: &str,
+    congested: bool,
+    now: i64,
+    recompute_now: i64,
+    bias_now: i64,
 ) {
     // (1) Guards against NaN/Inf inputs that would corrupt the posterior.
     let mut hours = hours;
@@ -182,7 +209,7 @@ pub fn update_posterior(
     }
 
     // (8) Recompute posterior (core rebuild + bias re-apply).
-    recompute_posterior(state, now);
+    recompute_posterior_at_times(state, recompute_now, bias_now);
 }
 
 /// `is_meaningful_rate` (py 835-849): the same trickle classification

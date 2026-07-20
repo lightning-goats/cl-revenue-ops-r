@@ -44,7 +44,7 @@ use crate::pyjson::OValue;
 use crate::thompson::serde::{gts_from_dict, gts_to_dict};
 use crate::thompson::{
     CtxPosterior, GaussianThompsonState, Observation, EXPLORATION_BOOST_MAX, EXPLORATION_BOOST_MIN,
-    MAX_BIAS_NUDGES,
+    MAX_BIAS_NUDGES, WEIGHT_SCHEME,
 };
 
 /// `FeeController.ABS_MAX_FEE_PPM` (py 2918): hard absolute ceiling used to
@@ -975,9 +975,14 @@ const REPLAY_THOMPSON_KEYS: &[&str] = &[
     "observations",
     "posterior_mean",
     "posterior_std",
+    "posterior_variance",
     "posterior_coeffs",
     "posterior_precision",
     "noise_variance",
+    "_prior_coeffs",
+    "_prior_precision",
+    "_last_fee_min",
+    "_last_fee_max",
     "contextual_posteriors",
     "posterior_bias",
     "charged_fee_mean",
@@ -989,6 +994,7 @@ const REPLAY_THOMPSON_KEYS: &[&str] = &[
     "meaningful_gap_ema_hours",
     "last_meaningful_ts",
     "last_upward_probe_ts",
+    "weight_scheme",
     "exploration_boost",
     "last_sampled_fee",
     "last_sample_time",
@@ -1320,6 +1326,29 @@ fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonS
             .ok_or_else(|| format!("{path}.posterior_precision is required"))?,
         &format!("{path}.posterior_precision"),
     )?;
+    let posterior_std = replay_positive_f64(value, path, "posterior_std")?;
+    let posterior_variance = replay_nonnegative_f64(value, path, "posterior_variance")?;
+    if posterior_variance.to_bits() != (posterior_std * posterior_std).to_bits() {
+        return Err(format!(
+            "{path}.posterior_variance must equal posterior_std squared"
+        ));
+    }
+    let prior_coeffs = replay_v3(
+        value
+            .get("_prior_coeffs")
+            .ok_or_else(|| format!("{path}._prior_coeffs is required"))?,
+        &format!("{path}._prior_coeffs"),
+    )?;
+    let prior_precision = replay_m3(
+        value
+            .get("_prior_precision")
+            .ok_or_else(|| format!("{path}._prior_precision is required"))?,
+        &format!("{path}._prior_precision"),
+    )?;
+    let weight_scheme = replay_str(value, path, "weight_scheme")?;
+    if weight_scheme != WEIGHT_SCHEME {
+        return Err(format!("{path}.weight_scheme must be {WEIGHT_SCHEME:?}"));
+    }
     let contextual_posteriors = replay_contextual_posteriors(
         value
             .get("contextual_posteriors")
@@ -1340,17 +1369,14 @@ fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonS
         prior_std_fee_is_int,
         observations,
         posterior_mean: replay_f64(value, path, "posterior_mean")?,
-        posterior_std: replay_positive_f64(value, path, "posterior_std")?,
+        posterior_std,
         posterior_coeffs,
         posterior_precision,
         noise_variance: replay_positive_f64(value, path, "noise_variance")?,
-        // These private Python dataclass fields are intentionally absent from
-        // the replay schema. Their constructor values are fixed, not inferred
-        // from malformed or missing captured input.
-        prior_coeffs: [0.0, 1.0, 0.0],
-        prior_precision: [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]],
-        last_fee_min: 0.0,
-        last_fee_max: 0.0,
+        prior_coeffs,
+        prior_precision,
+        last_fee_min: replay_nonnegative_f64(value, path, "_last_fee_min")?,
+        last_fee_max: replay_nonnegative_f64(value, path, "_last_fee_max")?,
         contextual_posteriors,
         posterior_bias,
         charged_fee_mean: replay_nonnegative_f64(value, path, "charged_fee_mean")?,

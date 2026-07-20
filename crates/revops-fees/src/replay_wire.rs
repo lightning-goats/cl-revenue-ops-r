@@ -33,6 +33,7 @@ pub enum WireValue {
     Null,
     Bool(bool),
     Integer(i64),
+    Unsigned(u64),
     String(String),
     Array(Vec<WireValue>),
     Object(WireObject),
@@ -48,6 +49,7 @@ impl Serialize for WireValue {
             Self::Null => serializer.serialize_none(),
             Self::Bool(value) => serializer.serialize_bool(*value),
             Self::Integer(value) => serializer.serialize_i64(*value),
+            Self::Unsigned(value) => serializer.serialize_u64(*value),
             Self::String(value) => serializer.serialize_str(value),
             Self::Array(items) => items.serialize(serializer),
             Self::Object(entries) => entries.serialize(serializer),
@@ -99,9 +101,7 @@ impl<'de> Visitor<'de> for WireValueVisitor {
     where
         E: de::Error,
     {
-        let value = i64::try_from(value)
-            .map_err(|_| E::custom("replay wire integer exceeds signed 64-bit range"))?;
-        Ok(WireValue::Integer(value))
+        Ok(i64::try_from(value).map_or(WireValue::Unsigned(value), WireValue::Integer))
     }
 
     fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>

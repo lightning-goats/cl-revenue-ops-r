@@ -570,8 +570,18 @@ pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
 /// durable out-of-band nudges (`posterior_bias`) with decay so they are
 /// not lost by the recompute.
 pub fn recompute_posterior(state: &mut GaussianThompsonState, now: i64) {
-    recompute_posterior_core(state, now);
-    apply_posterior_bias(state, now);
+    recompute_posterior_at_times(state, now, now);
+}
+
+/// Replay-aware form of [`recompute_posterior`] preserving Python's
+/// separate `_recompute_posterior` and `_apply_posterior_bias` clock reads.
+pub fn recompute_posterior_at_times(
+    state: &mut GaussianThompsonState,
+    recompute_now: i64,
+    bias_now: i64,
+) {
+    recompute_posterior_core(state, recompute_now);
+    apply_posterior_bias(state, bias_now);
 }
 
 /// `_blend_posterior_toward` (py 1226-1244): mean-only blend toward a
