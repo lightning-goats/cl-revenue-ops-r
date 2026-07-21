@@ -1143,6 +1143,7 @@ fn fee_execution_request(
     FeeExecutionRequest {
         decision,
         wire_request,
+        authorized: true,
         old_fee_ppm,
         expected_base_fee_msat,
     }
@@ -1231,7 +1232,7 @@ fn static_policy_branch(
         });
     }
 
-    let execution_request = fee_execution_request(
+    let mut execution_request = fee_execution_request(
         SetFeeRequest {
             channel_id: channel_id.to_string(),
             fee_ppm: requested_static_fee,
@@ -1267,6 +1268,7 @@ fn static_policy_branch(
             }
         }
     }
+    execution_request.authorized = authorized;
     let decision = deps.executor.execute(&execution_request, cfg, None)?;
     let success = authorized && decision.success;
     if !success {
@@ -2750,7 +2752,7 @@ pub fn adjust_channel_fee(
     // Decision emit — dry-run set_channel_fee (py 7202-7215 → 7203 becomes
     // execution::decide_set_channel_fee; NO RPC side effects).
     // =====================================================================
-    let execution_request = fee_execution_request(
+    let mut execution_request = fee_execution_request(
         SetFeeRequest {
             channel_id: channel_id.to_string(),
             fee_ppm: new_fee_ppm,
@@ -2792,6 +2794,7 @@ pub fn adjust_channel_fee(
             }
         }
     }
+    execution_request.authorized = authorized;
     let decision = deps.executor.execute(&execution_request, cfg, None)?;
     let success = authorized && decision.success;
 
@@ -3204,7 +3207,7 @@ fn create_gossip_refresh_adjustment(
     };
 
     // Execute (dry-run decision; py 5033-5042).
-    let execution_request = fee_execution_request(
+    let mut execution_request = fee_execution_request(
         SetFeeRequest {
             channel_id: channel_id.to_string(),
             fee_ppm: nudge_fee,
@@ -3239,6 +3242,7 @@ fn create_gossip_refresh_adjustment(
             }
         }
     }
+    execution_request.authorized = authorized;
     let decision = executor.execute(&execution_request, cfg, None)?;
     let success = authorized && decision.success;
     if !success {

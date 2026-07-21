@@ -62,6 +62,9 @@ pub struct SetFeeDecision {
 pub struct FeeExecutionRequest {
     pub decision: SetFeeRequest,
     pub wire_request: OValue,
+    /// Final pre-execution governor outcome. This is in-process execution
+    /// context only and is never serialized into the replay wire request.
+    pub authorized: bool,
     /// Pre-execution fee captured in the Python result contract.
     pub old_fee_ppm: i64,
     /// Effective base fee expected in the Python result contract.
@@ -185,7 +188,7 @@ impl FeeExecutor for RecordingFeeExecutor {
         policy: Option<&PeerPolicy>,
     ) -> Result<SetFeeDecision, DecisionInputError> {
         let decision = PureFeeExecutor.execute(request, cfg, policy)?;
-        if decision.success {
+        if request.authorized && decision.success {
             let action = PreparedFeeAction {
                 request: SetChannelRequest::try_from_execution_fee(
                     request,

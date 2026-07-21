@@ -22,6 +22,7 @@ fn execution_request(
             base_fee_msat,
         },
         wire_request: OValue::Null,
+        authorized: true,
         old_fee_ppm: 111,
         expected_base_fee_msat: base_fee_msat,
     }

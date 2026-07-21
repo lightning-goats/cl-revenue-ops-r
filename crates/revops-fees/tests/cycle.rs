@@ -33,7 +33,8 @@ use revops_fees::cycle::{
 use revops_fees::drain::NodeChannel;
 use revops_fees::execution::{
     decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, FeeAuthorizationRequest,
-    FeeAuthorizationResult, FeeAuthorizer, GovernedDeps, PureFeeExecutor, SetFeeRequest,
+    FeeAuthorizationResult, FeeAuthorizer, FeeExecutionRequest, FeeExecutor, GovernedDeps,
+    PureFeeExecutor, RecordingFeeExecutor, SetFeeDecision, SetFeeRequest,
 };
 use revops_fees::floors::{ChainCosts, FlowWindow, PeerLatency, RebalanceCostSample};
 use revops_fees::journal::{FeeDecision, Journal};
@@ -1314,13 +1315,22 @@ fn fixture_cycle_case(name: &str) -> FixtureCycleCase {
 }
 
 fn run_fixture_case(case: &mut FixtureCycleCase, clock: &mut dyn DecisionClock) -> ChannelResult {
+    run_fixture_case_with(case, clock, None, &PURE_EXECUTOR)
+}
+
+fn run_fixture_case_with(
+    case: &mut FixtureCycleCase,
+    clock: &mut dyn DecisionClock,
+    authorizer: Option<&dyn FeeAuthorizer>,
+    executor: &dyn FeeExecutor,
+) -> ChannelResult {
     let mut deps = CycleDeps {
         evidence: &case.evidence,
         cfg: &case.cfg,
         rng: &mut case.rng,
         clock,
-        authorizer: None,
-        executor: &PURE_EXECUTOR,
+        authorizer,
+        executor,
         journal: None,
         state_sink: None,
         min_competitors: case.min_competitors,
@@ -1674,6 +1684,66 @@ impl FeeAuthorizer for RecordingAuthorizer {
             reason_code: String::new(),
             trace: None,
         })
+    }
+}
+
+struct DenyingAuthorizer;
+
+impl FeeAuthorizer for DenyingAuthorizer {
+    fn authorize(
+        &self,
+        _request: &FeeAuthorizationRequest,
+    ) -> Result<FeeAuthorizationResult, DecisionInputError> {
+        Ok(FeeAuthorizationResult {
+            authorized: false,
+            reason_code: "test_denied".to_string(),
+            trace: None,
+        })
+    }
+}
+
+#[derive(Default)]
+struct CountingRecordingExecutor {
+    inner: RecordingFeeExecutor,
+    calls: Cell<usize>,
+}
+
+impl FeeExecutor for CountingRecordingExecutor {
+    fn execute(
+        &self,
+        request: &FeeExecutionRequest,
+        cfg: &FeeCfgSnapshot,
+        policy: Option<&PeerPolicy>,
+    ) -> Result<SetFeeDecision, DecisionInputError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.execute(request, cfg, policy)
+    }
+}
+
+#[test]
+fn governor_denial_consumes_executor_without_recording_shadow_intents() {
+    for scenario in ["policy_static", "dts_pid_undercut", "gossip_refresh_nudge"] {
+        let mut case = fixture_cycle_case(scenario);
+        case.cfg.econ_governor_fees_enabled = true;
+        let executor = CountingRecordingExecutor::default();
+        let mut clock = SemanticClock::new(case.now);
+
+        let result =
+            run_fixture_case_with(&mut case, &mut clock, Some(&DenyingAuthorizer), &executor);
+
+        assert!(
+            matches!(result.outcome, ChannelOutcome::Skipped(_)),
+            "{scenario}: denied action must map to would_broadcast=false"
+        );
+        assert_eq!(
+            executor.calls.get(),
+            1,
+            "{scenario}: denial must not skip the replay execution boundary"
+        );
+        assert!(
+            executor.inner.recorded_actions().is_empty(),
+            "{scenario}: denied action must not be retained"
+        );
     }
 }
 
