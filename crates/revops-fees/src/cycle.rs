@@ -1089,7 +1089,6 @@ fn fee_execution_request(
     reason: &str,
     reason_code: Option<&str>,
     channel_info: Option<OValue>,
-    htlcmin_msat: Option<i64>,
     base_fee_msat_override: Option<i64>,
 ) -> FeeExecutionRequest {
     let expected_base_fee_msat = base_fee_msat_override.unwrap_or(decision.base_fee_msat);
@@ -1115,7 +1114,10 @@ fn fee_execution_request(
         ),
         (
             "htlcmin_msat".to_string(),
-            htlcmin_msat.map(OValue::Int).unwrap_or(OValue::Null),
+            decision
+                .htlcmin_msat
+                .map(OValue::Int)
+                .unwrap_or(OValue::Null),
         ),
         (
             "htlcmax_msat".to_string(),
@@ -1235,13 +1237,13 @@ fn static_policy_branch(
             fee_ppm: requested_static_fee,
             enforce_limits: true,
             effective_min_fee_ppm: None,
+            htlcmin_msat: None,
             htlcmax_msat: None,
             base_fee_msat: cfg.base_fee_msat,
         },
         current_fee,
         "Policy: STATIC",
         Some(FeeReasonCode::PolicyStatic.as_str()),
-        None,
         None,
         None,
     );
@@ -2754,6 +2756,7 @@ pub fn adjust_channel_fee(
             fee_ppm: new_fee_ppm,
             enforce_limits: true,
             effective_min_fee_ppm: Some(effective_min_fee_ppm),
+            htlcmin_msat,
             htlcmax_msat,
             base_fee_msat: target_base_fee_msat,
         },
@@ -2761,7 +2764,6 @@ pub fn adjust_channel_fee(
         &reason,
         Some(fee_reason_code.as_str()),
         Some(channel_info_capture_value(info)),
-        htlcmin_msat,
         Some(target_base_fee_msat),
     );
     let pre_decision = decide_set_channel_fee(&execution_request.decision, cfg, None);
@@ -3208,13 +3210,13 @@ fn create_gossip_refresh_adjustment(
             fee_ppm: nudge_fee,
             enforce_limits: true,
             effective_min_fee_ppm: None,
+            htlcmin_msat: None,
             htlcmax_msat: None,
             base_fee_msat: cfg.base_fee_msat,
         },
         current_fee_ppm,
         "gossip_refresh",
         Some(FeeReasonCode::GossipRefresh.as_str()),
-        None,
         None,
         None,
     );

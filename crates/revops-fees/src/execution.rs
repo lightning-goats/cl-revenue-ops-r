@@ -9,6 +9,7 @@
 //! `GovernorFacade` — no re-implementation (Phase 2 contract).
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use revops_analytics::policy::{FeeStrategy, PeerPolicy};
 use revops_econ::arbiter::ActiveIntentRegistry;
@@ -17,6 +18,7 @@ use revops_econ::intents::{make_intent, Explanation, IntentFields};
 use revops_econ::ledger::EconLedger;
 use revops_econ::pyfloat::py_repr;
 use revops_econ::types::{EconResult, Micro, Msat, SignedMsat, UnixTime};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::cycle::FeeCfgSnapshot;
@@ -38,6 +40,7 @@ pub struct SetFeeRequest {
     /// E-2: class-aware floor from the fee cycle; may only LOWER the
     /// min-fee clamp term (py 7666-7674).
     pub effective_min_fee_ppm: Option<i64>,
+    pub htlcmin_msat: Option<i64>,
     pub htlcmax_msat: Option<i64>,
     pub base_fee_msat: i64,
 }
@@ -65,6 +68,73 @@ pub struct FeeExecutionRequest {
     pub expected_base_fee_msat: i64,
 }
 
+/// Validated, side-effect-free parameters for Core Lightning setchannel.
+/// Optional values are omitted rather than emitted as JSON null.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetChannelRequest {
+    pub id: String,
+    pub feebase: u64,
+    pub feeppm: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub htlcmin: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub htlcmax: Option<u64>,
+}
+
+impl SetChannelRequest {
+    pub fn try_from_execution(request: &FeeExecutionRequest) -> Result<Self, DecisionInputError> {
+        Self::try_from_execution_fee(request, request.decision.fee_ppm)
+    }
+
+    fn try_from_execution_fee(
+        request: &FeeExecutionRequest,
+        fee_ppm: i64,
+    ) -> Result<Self, DecisionInputError> {
+        if request.decision.channel_id.is_empty() {
+            return Err(DecisionInputError::new("setchannel id must not be empty"));
+        }
+
+        Ok(Self {
+            id: request.decision.channel_id.clone(),
+            feebase: wire_u64(request.expected_base_fee_msat, "feebase")?,
+            feeppm: u32::try_from(fee_ppm).map_err(|_| {
+                DecisionInputError::new(format!("setchannel feeppm must fit u32, got {fee_ppm}"))
+            })?,
+            htlcmin: request
+                .decision
+                .htlcmin_msat
+                .map(|value| wire_u64(value, "htlcmin"))
+                .transpose()?,
+            htlcmax: request
+                .decision
+                .htlcmax_msat
+                .map(|value| wire_u64(value, "htlcmax"))
+                .transpose()?,
+        })
+    }
+
+    pub fn to_params(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("SetChannelRequest serialization is infallible")
+    }
+}
+
+fn wire_u64(value: i64, field: &str) -> Result<u64, DecisionInputError> {
+    u64::try_from(value).map_err(|_| {
+        DecisionInputError::new(format!(
+            "setchannel {field} must be a nonnegative integer, got {value}"
+        ))
+    })
+}
+
+/// One successful pure fee decision with validated setchannel parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFeeAction {
+    pub request: SetChannelRequest,
+    pub decision: SetFeeDecision,
+    pub old_fee_ppm: i64,
+    pub expected_base_fee_msat: i64,
+}
+
 /// Strict execution boundary used by production dry-run and offline replay.
 pub trait FeeExecutor {
     fn execute(
@@ -88,6 +158,49 @@ impl FeeExecutor for PureFeeExecutor {
         policy: Option<&PeerPolicy>,
     ) -> Result<SetFeeDecision, DecisionInputError> {
         Ok(decide_set_channel_fee(&request.decision, cfg, policy))
+    }
+}
+
+/// Capability-free collector for stateful shadow mode. It owns no socket,
+/// RPC client, broadcaster, or action-execution capability.
+#[derive(Debug, Default, Clone)]
+pub struct RecordingFeeExecutor {
+    actions: Arc<Mutex<Vec<PreparedFeeAction>>>,
+}
+
+impl RecordingFeeExecutor {
+    pub fn recorded_actions(&self) -> Vec<PreparedFeeAction> {
+        self.actions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+impl FeeExecutor for RecordingFeeExecutor {
+    fn execute(
+        &self,
+        request: &FeeExecutionRequest,
+        cfg: &FeeCfgSnapshot,
+        policy: Option<&PeerPolicy>,
+    ) -> Result<SetFeeDecision, DecisionInputError> {
+        let decision = PureFeeExecutor.execute(request, cfg, policy)?;
+        if decision.success {
+            let action = PreparedFeeAction {
+                request: SetChannelRequest::try_from_execution_fee(
+                    request,
+                    decision.clamped_fee_ppm,
+                )?,
+                decision: decision.clone(),
+                old_fee_ppm: request.old_fee_ppm,
+                expected_base_fee_msat: request.expected_base_fee_msat,
+            };
+            self.actions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(action);
+        }
+        Ok(decision)
     }
 }
 
