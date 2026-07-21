@@ -39,6 +39,7 @@ use revops_fees::cycle::{
     SkipGateEpoch, StateSink,
 };
 use revops_fees::pyjson::{dumps_python, OValue};
+use revops_fees::pyrand::DecisionInputError;
 use revops_fees::state_store::{
     fee_state_to_v2_dict, load_cycle_state, load_fee_state, parse_v2_blob, read_fee_strategy_rows,
 };
@@ -163,13 +164,26 @@ impl JournalStateSink {
 }
 
 impl StateSink for JournalStateSink {
-    /// `_flush_pending_fee_strategy_rows`'s dry-run analogue (py
-    /// 4030-4058): ONE flush per cycle, appended as one JSONL line per row.
-    fn flush_batch(&self, rows: &[(String, ChannelCycleState, ChannelFeeState)]) {
+    /// Persist one complete next journal image through a same-directory
+    /// staging file, then atomically replace the prior complete artifact.
+    fn flush_batch(
+        &self,
+        rows: &[(String, ChannelCycleState, ChannelFeeState)],
+    ) -> Result<(), DecisionInputError> {
         if rows.is_empty() {
-            return;
+            return Ok(());
         }
-        let mut buf = String::new();
+
+        let mut next = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(DecisionInputError::new(format!(
+                    "state journal read failed ({}): {error}",
+                    self.path.display()
+                )));
+            }
+        };
         for (channel_id, cycle, fee) in rows {
             let envelope = state_envelope(cycle, fee);
             let line = OValue::obj(vec![
@@ -179,39 +193,42 @@ impl StateSink for JournalStateSink {
                     OValue::str(dumps_python(&envelope)),
                 ),
             ]);
-            buf.push_str(&dumps_python(&line));
-            buf.push('\n');
+            next.extend_from_slice(dumps_python(&line).as_bytes());
+            next.push(b'\n');
         }
-        // This journal is offline-inspection-only (see the module doc
-        // comment) -- it must never crash the dry-run plugin. A disk-full
-        // or permission hiccup here is logged loudly to stderr (CLN routes
-        // plugin stderr into its own log) and swallowed, mirroring
-        // `revops_fees::journal::Journal::append`/`append_all`'s
-        // `io::Result` return, which exists precisely so callers can log
-        // and continue -- `StateSink::flush_batch`'s pre-existing `()`
-        // signature (`revops-fees/src/cycle.rs`) just means this sink has
-        // to do that logging itself instead of propagating the error.
-        let mut f = match OpenOptions::new()
+
+        let staging_path = self.path.with_extension("jsonl.tmp");
+        let mut staging = OpenOptions::new()
             .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "revops: state journal open failed ({}): {e}; dry-run state flush skipped \
-                     for this cycle",
-                    self.path.display()
-                );
-                return;
-            }
-        };
-        if let Err(e) = f.write_all(buf.as_bytes()) {
-            eprintln!(
-                "revops: state journal write failed ({}): {e}; dry-run state flush incomplete \
-                 for this cycle",
+            .truncate(true)
+            .write(true)
+            .open(&staging_path)
+            .map_err(|error| {
+                DecisionInputError::new(format!(
+                    "state journal staging open failed ({}): {error}",
+                    staging_path.display()
+                ))
+            })?;
+        staging.write_all(&next).map_err(|error| {
+            DecisionInputError::new(format!(
+                "state journal staging write failed ({}): {error}",
+                staging_path.display()
+            ))
+        })?;
+        staging.sync_all().map_err(|error| {
+            DecisionInputError::new(format!(
+                "state journal staging sync failed ({}): {error}",
+                staging_path.display()
+            ))
+        })?;
+        drop(staging);
+
+        std::fs::rename(&staging_path, &self.path).map_err(|error| {
+            DecisionInputError::new(format!(
+                "state journal atomic rename failed ({} -> {}): {error}",
+                staging_path.display(),
                 self.path.display()
-            );
-        }
+            ))
+        })
     }
 }

@@ -414,7 +414,10 @@ pub trait FeeEvidence {
 /// sink's job (T9's `state_store` wires the v2 envelope) — this seam only
 /// guarantees ONE flush per cycle with last-write-wins rows.
 pub trait StateSink {
-    fn flush_batch(&self, rows: &[(String, ChannelCycleState, ChannelFeeState)]);
+    fn flush_batch(
+        &self,
+        rows: &[(String, ChannelCycleState, ChannelFeeState)],
+    ) -> Result<(), DecisionInputError>;
 }
 
 /// Replayable clock consumed at semantically labeled decision boundaries.
@@ -3573,7 +3576,7 @@ pub fn run_fee_cycle(
                 )
             })
             .collect();
-        sink.flush_batch(&rows);
+        sink.flush_batch(&rows)?;
     }
 
     // Decision summary (py 4671-4722).

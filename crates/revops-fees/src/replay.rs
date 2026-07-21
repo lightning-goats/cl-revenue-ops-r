@@ -1484,8 +1484,12 @@ pub struct MemoryStateSink {
 }
 
 impl StateSink for MemoryStateSink {
-    fn flush_batch(&self, rows: &[(String, ChannelCycleState, ChannelFeeState)]) {
+    fn flush_batch(
+        &self,
+        rows: &[(String, ChannelCycleState, ChannelFeeState)],
+    ) -> Result<(), DecisionInputError> {
         self.flushes.borrow_mut().push(rows.to_vec());
+        Ok(())
     }
 }
 

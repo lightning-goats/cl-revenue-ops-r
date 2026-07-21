@@ -330,7 +330,8 @@ fn journal_state_sink_writes_one_line_per_row_and_never_opens_production_db() {
     sink.flush_batch(&[
         ("chan_a".to_string(), cycle_a, fee_a),
         ("chan_b".to_string(), cycle_b, fee_b),
-    ]);
+    ])
+    .expect("state journal flush");
 
     // JournalStateSink's only state is a Rust-owned file path — it never
     // holds or opens a `rusqlite::Connection` at all, structurally
@@ -359,25 +360,24 @@ fn journal_state_sink_writes_one_line_per_row_and_never_opens_production_db() {
     assert!(lines[1].contains("chan_b"));
 }
 
-/// Reviewer finding (Important, Phase 4b Task 4 review): `flush_batch` must
-/// never panic on an open/write failure — this is an offline-inspection
-/// journal for the dry-run plugin, and a disk-full or permission hiccup
-/// crashing the plugin would take down the Python-parity window the sink
-/// exists to serve. `revops_fees::journal::Journal::append`/`append_all`
-/// return `io::Result` precisely so callers can log loudly and continue;
-/// `JournalStateSink` must do the same internally, since `StateSink::
-/// flush_batch` (pre-existing trait, `revops-fees/src/cycle.rs`) returns
-/// `()` and can't propagate the error itself.
 #[test]
-fn journal_state_sink_flush_batch_does_not_panic_when_dir_unwritable() {
+fn journal_state_sink_rename_failure_preserves_prior_complete_artifact() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tempfile::tempdir().unwrap();
     let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
 
-    // Make the containing directory read-only so opening the journal file
-    // for append (which must create it, since it doesn't exist yet) fails
-    // with a permission error instead of succeeding.
+    let journal_path = tmp.path().join("fee_dryrun_state.jsonl");
+    let prior = "{\"prior\":\"complete\"}\n";
+    std::fs::write(&journal_path, prior).expect("seed prior complete artifact");
+
+    // Pre-create the atomic staging file while the directory is writable.
+    // Once the directory becomes read-only, the sink can still truncate and
+    // write this owned file, but rename(2) must fail, deterministically
+    // exercising the commit boundary rather than an earlier open failure.
+    let staging_path = tmp.path().join("fee_dryrun_state.jsonl.tmp");
+    std::fs::write(&staging_path, "stale staging bytes").expect("seed staging file");
+
     let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
     perms.set_mode(0o500);
     std::fs::set_permissions(tmp.path(), perms).unwrap();
@@ -385,13 +385,20 @@ fn journal_state_sink_flush_batch_does_not_panic_when_dir_unwritable() {
     let cycle = ChannelCycleState::default();
     let fee = ChannelFeeState::default();
 
-    // Must not panic even though the underlying open() will fail.
-    sink.flush_batch(&[("chan_a".to_string(), cycle, fee)]);
+    let result = sink.flush_batch(&[("chan_a".to_string(), cycle, fee)]);
 
     // Restore perms so the tempdir can be cleaned up.
     let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
     perms.set_mode(0o700);
     std::fs::set_permissions(tmp.path(), perms).unwrap();
+
+    let error = result.expect_err("atomic rename failure must be returned");
+    assert!(error.to_string().contains("rename"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&journal_path).expect("prior artifact remains readable"),
+        prior,
+        "failed atomic replacement must leave the prior complete artifact intact"
+    );
 }
 
 /// Reviewer finding (Minor): proves `flush_batch` appends (never
@@ -406,13 +413,15 @@ fn journal_state_sink_flush_batch_appends_across_multiple_cycles() {
     cycle1.last_fee_ppm = 100;
     let mut fee1 = ChannelFeeState::default();
     fee1.last_fee_ppm = 100;
-    sink.flush_batch(&[("chan_a".to_string(), cycle1, fee1)]);
+    sink.flush_batch(&[("chan_a".to_string(), cycle1, fee1)])
+        .expect("first state journal flush");
 
     let mut cycle2 = ChannelCycleState::default();
     cycle2.last_fee_ppm = 200;
     let mut fee2 = ChannelFeeState::default();
     fee2.last_fee_ppm = 200;
-    sink.flush_batch(&[("chan_a".to_string(), cycle2, fee2)]);
+    sink.flush_batch(&[("chan_a".to_string(), cycle2, fee2)])
+        .expect("second state journal flush");
 
     let journal_path = tmp.path().join("fee_dryrun_state.jsonl");
     let contents = std::fs::read_to_string(&journal_path).expect("journal file written");
@@ -433,7 +442,7 @@ fn journal_state_sink_flush_batch_empty_rows_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
     let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
 
-    sink.flush_batch(&[]);
+    sink.flush_batch(&[]).expect("empty state journal flush");
 
     let journal_path = tmp.path().join("fee_dryrun_state.jsonl");
     assert!(

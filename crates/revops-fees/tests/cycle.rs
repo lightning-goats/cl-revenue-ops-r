@@ -1154,9 +1154,24 @@ struct CountingSink {
 }
 
 impl StateSink for CountingSink {
-    fn flush_batch(&self, rows: &[(String, ChannelCycleState, ChannelFeeState)]) {
+    fn flush_batch(
+        &self,
+        rows: &[(String, ChannelCycleState, ChannelFeeState)],
+    ) -> Result<(), DecisionInputError> {
         self.calls.set(self.calls.get() + 1);
         self.rows.set(rows.len());
+        Ok(())
+    }
+}
+
+struct FailingSink;
+
+impl StateSink for FailingSink {
+    fn flush_batch(
+        &self,
+        _: &[(String, ChannelCycleState, ChannelFeeState)],
+    ) -> Result<(), DecisionInputError> {
+        Err(DecisionInputError::new("injected state flush failure"))
     }
 }
 
@@ -1778,6 +1793,56 @@ fn synthetic_row(cid: &str, peer: &str) -> ChannelStateRow {
         kalman_flow_ratio: Some(0.2),
         kalman_velocity: Some(0.01),
     }
+}
+
+#[test]
+fn state_sink_failure_prevents_completed_cycle_result() {
+    let now = 1_752_400_000i64;
+    let cid = "700x1x0";
+    let peer = "03".to_string() + &"07".repeat(32);
+    let evidence = SyntheticEvidence {
+        rows: vec![synthetic_row(cid, &peer)],
+        infos: BTreeMap::from([(cid.to_string(), synthetic_info(cid, &peer, 200))]),
+        volumes: BTreeMap::new(),
+        forwards: BTreeMap::new(),
+        passive_peer: String::new(),
+        node_channels: Vec::new(),
+        since_log: Default::default(),
+    };
+
+    let mut state = ControllerState::new();
+    let mut cycle = ChannelCycleState::default();
+    cycle.last_update = now;
+    cycle.last_fee_ppm = 200;
+    cycle.last_broadcast_fee_ppm = 200;
+    state.cycle_states.insert(cid.to_string(), cycle);
+    let mut fee = ChannelFeeState::default();
+    fee.last_update = now;
+    fee.last_fee_ppm = 200;
+    fee.last_broadcast_fee_ppm = 200;
+    state.fee_states.insert(cid.to_string(), fee);
+
+    let cfg = base_cfg();
+    let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = FixedDecisionClock::new(now);
+    let sink = FailingSink;
+    let result = {
+        let mut deps = CycleDeps {
+            evidence: &evidence,
+            cfg: &cfg,
+            rng: &mut rng,
+            clock: &mut clock,
+            authorizer: None,
+            executor: &PURE_EXECUTOR,
+            journal: None,
+            state_sink: Some(&sink),
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
+        };
+        run_fee_cycle(&mut state, &mut deps)
+    };
+
+    let error = result.expect_err("failed state persistence must fail the cycle");
+    assert_eq!(error.to_string(), "injected state flush failure");
 }
 
 #[test]
