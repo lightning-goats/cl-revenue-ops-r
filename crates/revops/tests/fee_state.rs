@@ -361,7 +361,7 @@ fn journal_state_sink_writes_one_line_per_row_and_never_opens_production_db() {
 }
 
 #[test]
-fn journal_state_sink_rename_failure_preserves_prior_complete_artifact() {
+fn journal_state_sink_staging_failure_preserves_prior_complete_artifact() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -371,33 +371,39 @@ fn journal_state_sink_rename_failure_preserves_prior_complete_artifact() {
     let prior = "{\"prior\":\"complete\"}\n";
     std::fs::write(&journal_path, prior).expect("seed prior complete artifact");
 
-    // Pre-create the atomic staging file while the directory is writable.
-    // Once the directory becomes read-only, the sink can still truncate and
-    // write this owned file, but rename(2) must fail, deterministically
-    // exercising the commit boundary rather than an earlier open failure.
-    let staging_path = tmp.path().join("fee_dryrun_state.jsonl.tmp");
-    std::fs::write(&staging_path, "stale staging bytes").expect("seed staging file");
-
     let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
     perms.set_mode(0o500);
     std::fs::set_permissions(tmp.path(), perms).unwrap();
 
-    let cycle = ChannelCycleState::default();
-    let fee = ChannelFeeState::default();
+    let result = sink.flush_batch(&[(
+        "chan_a".to_string(),
+        ChannelCycleState::default(),
+        ChannelFeeState::default(),
+    )]);
 
-    let result = sink.flush_batch(&[("chan_a".to_string(), cycle, fee)]);
-
-    // Restore perms so the tempdir can be cleaned up.
     let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
     perms.set_mode(0o700);
     std::fs::set_permissions(tmp.path(), perms).unwrap();
 
-    let error = result.expect_err("atomic rename failure must be returned");
-    assert!(error.to_string().contains("rename"), "{error}");
+    let error = result.expect_err("staging failure must be returned");
+    assert!(error.to_string().contains("staging open"), "{error}");
     assert_eq!(
         std::fs::read_to_string(&journal_path).expect("prior artifact remains readable"),
         prior,
         "failed atomic replacement must leave the prior complete artifact intact"
+    );
+    let staging: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".fee_dryrun_state.jsonl.") && name.ends_with(".tmp")
+        })
+        .collect();
+    assert!(
+        staging.is_empty(),
+        "failed flush left staging files: {staging:?}"
     );
 }
 
@@ -448,5 +454,110 @@ fn journal_state_sink_flush_batch_empty_rows_is_noop() {
     assert!(
         !journal_path.exists(),
         "empty rows must not create/touch the journal file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_state_sink_does_not_follow_preexisting_legacy_staging_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
+
+    let victim_path = tmp.path().join("unrelated-operator-file");
+    let victim_contents = "must remain intact\n";
+    std::fs::write(&victim_path, victim_contents).expect("seed unrelated target");
+
+    let legacy_staging_path = tmp.path().join("fee_dryrun_state.jsonl.tmp");
+    symlink(&victim_path, &legacy_staging_path).expect("seed legacy staging symlink");
+
+    sink.flush_batch(&[(
+        "chan_a".to_string(),
+        ChannelCycleState::default(),
+        ChannelFeeState::default(),
+    )])
+    .expect("journal flush must ignore unrelated legacy staging entry");
+
+    assert_eq!(
+        std::fs::read_to_string(&victim_path).expect("unrelated target remains readable"),
+        victim_contents,
+        "flush must never follow or truncate a pre-existing staging symlink"
+    );
+}
+
+#[test]
+fn journal_state_sink_separate_instances_serialize_concurrent_appends() {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Barrier};
+
+    const WRITERS: usize = 16;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = Arc::new(tmp.path().to_path_buf());
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut threads = Vec::new();
+
+    for index in 0..WRITERS {
+        let dir = Arc::clone(&dir);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            let sink = JournalStateSink::open_dir(&dir).expect("open separate sink instance");
+            let mut cycle = ChannelCycleState::default();
+            cycle.last_fee_ppm = index as i64;
+            let mut fee = ChannelFeeState::default();
+            fee.last_fee_ppm = index as i64;
+            barrier.wait();
+            sink.flush_batch(&[(format!("chan_{index}"), cycle, fee)])
+                .expect("serialized concurrent flush");
+        }));
+    }
+    for thread in threads {
+        thread.join().expect("writer thread");
+    }
+
+    let journal =
+        std::fs::read_to_string(dir.join("fee_dryrun_state.jsonl")).expect("concurrent journal");
+    let ids: BTreeSet<String> = journal
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<JsonValue>(line).expect("valid JSON")["channel_id"]
+                .as_str()
+                .expect("channel id")
+                .to_string()
+        })
+        .collect();
+    let expected: BTreeSet<String> = (0..WRITERS).map(|i| format!("chan_{i}")).collect();
+    assert_eq!(ids, expected);
+    assert_eq!(journal.lines().count(), WRITERS);
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_state_sink_preserves_restrictive_permissions() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sink = JournalStateSink::open_dir(tmp.path()).expect("open journal state sink dir");
+    sink.flush_batch(&[(
+        "first".to_string(),
+        ChannelCycleState::default(),
+        ChannelFeeState::default(),
+    )])
+    .expect("initial flush");
+
+    let journal = tmp.path().join("fee_dryrun_state.jsonl");
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600))
+        .expect("tighten journal mode");
+    sink.flush_batch(&[(
+        "second".to_string(),
+        ChannelCycleState::default(),
+        ChannelFeeState::default(),
+    )])
+    .expect("replacement flush");
+
+    assert_eq!(
+        std::fs::metadata(&journal).unwrap().mode() & 0o777,
+        0o600,
+        "atomic replacement must preserve an operator-tightened mode"
     );
 }

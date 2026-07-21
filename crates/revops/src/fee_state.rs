@@ -30,9 +30,13 @@
 //! comparison (`tools/diff-harness`), mirroring `revops_fees::journal`'s
 //! `Journal` (decisions) with a state-focused sibling file.
 
-use std::fs::OpenOptions;
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use revops_fees::cycle::{
     serialize_cycle_state_payload, ChannelCycleState, ChannelFeeState, ControllerState,
@@ -147,14 +151,101 @@ fn state_envelope(cycle: &ChannelCycleState, fee: &ChannelFeeState) -> OValue {
 #[derive(Debug)]
 pub struct JournalStateSink {
     path: PathBuf,
+    transaction_lock: Arc<Mutex<()>>,
+}
+
+static JOURNAL_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn transaction_lock(path: &Path) -> Arc<Mutex<()>> {
+    let registry = JOURNAL_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+#[derive(Debug)]
+struct OwnedStaging {
+    path: PathBuf,
+    file: Option<File>,
+    remove_on_drop: bool,
+}
+
+impl OwnedStaging {
+    fn create(destination: &Path) -> std::io::Result<Self> {
+        let parent = destination.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "journal has no parent")
+        })?;
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid journal name")
+            })?;
+        for _ in 0..64 {
+            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+            match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                        remove_on_drop: true,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate unique journal staging file",
+        ))
+    }
+
+    fn file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("staging file is open")
+    }
+
+    fn close(&mut self) {
+        self.file.take();
+    }
+
+    fn preserve(mut self) {
+        self.remove_on_drop = false;
+    }
+}
+
+impl Drop for OwnedStaging {
+    fn drop(&mut self) {
+        self.file.take();
+        if self.remove_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl JournalStateSink {
     /// State journal inside `dir` under the frozen file name.
     pub fn open_dir(dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
+        let canonical_dir = std::fs::canonicalize(dir)?;
+        let path = canonical_dir.join(STATE_JOURNAL_FILE_NAME);
         Ok(JournalStateSink {
-            path: dir.join(STATE_JOURNAL_FILE_NAME),
+            transaction_lock: transaction_lock(&path),
+            path,
         })
     }
 
@@ -164,19 +255,47 @@ impl JournalStateSink {
 }
 
 impl StateSink for JournalStateSink {
-    /// Persist one complete next journal image through a same-directory
-    /// staging file, then atomically replace the prior complete artifact.
     fn flush_batch(
         &self,
         rows: &[(String, ChannelCycleState, ChannelFeeState)],
     ) -> Result<(), DecisionInputError> {
+        self.flush_batch_with_rename(rows, |from, to| std::fs::rename(from, to))
+    }
+}
+
+impl JournalStateSink {
+    /// Persist one complete next journal image through an exclusively-owned,
+    /// same-directory staging file, then atomically replace the prior artifact.
+    fn flush_batch_with_rename<F>(
+        &self,
+        rows: &[(String, ChannelCycleState, ChannelFeeState)],
+        rename: F,
+    ) -> Result<(), DecisionInputError>
+    where
+        F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    {
         if rows.is_empty() {
             return Ok(());
         }
 
-        let mut next = match std::fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        let _transaction = self
+            .transaction_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let (mut next, prior_permissions) = match std::fs::read(&self.path) {
+            Ok(bytes) => {
+                let permissions = std::fs::metadata(&self.path)
+                    .map_err(|error| {
+                        DecisionInputError::new(format!(
+                            "state journal metadata failed ({}): {error}",
+                            self.path.display()
+                        ))
+                    })?
+                    .permissions();
+                (bytes, Some(permissions))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
             Err(error) => {
                 return Err(DecisionInputError::new(format!(
                     "state journal read failed ({}): {error}",
@@ -197,38 +316,93 @@ impl StateSink for JournalStateSink {
             next.push(b'\n');
         }
 
-        let staging_path = self.path.with_extension("jsonl.tmp");
-        let mut staging = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&staging_path)
-            .map_err(|error| {
-                DecisionInputError::new(format!(
-                    "state journal staging open failed ({}): {error}",
-                    staging_path.display()
-                ))
-            })?;
-        staging.write_all(&next).map_err(|error| {
+        let mut staging = OwnedStaging::create(&self.path).map_err(|error| {
             DecisionInputError::new(format!(
-                "state journal staging write failed ({}): {error}",
-                staging_path.display()
-            ))
-        })?;
-        staging.sync_all().map_err(|error| {
-            DecisionInputError::new(format!(
-                "state journal staging sync failed ({}): {error}",
-                staging_path.display()
-            ))
-        })?;
-        drop(staging);
-
-        std::fs::rename(&staging_path, &self.path).map_err(|error| {
-            DecisionInputError::new(format!(
-                "state journal atomic rename failed ({} -> {}): {error}",
-                staging_path.display(),
+                "state journal staging open failed ({}): {error}",
                 self.path.display()
             ))
-        })
+        })?;
+        staging.file_mut().write_all(&next).map_err(|error| {
+            DecisionInputError::new(format!(
+                "state journal staging write failed ({}): {error}",
+                staging.path.display()
+            ))
+        })?;
+        if let Some(permissions) = prior_permissions {
+            staging
+                .file_mut()
+                .set_permissions(permissions)
+                .map_err(|error| {
+                    DecisionInputError::new(format!(
+                        "state journal staging permissions failed ({}): {error}",
+                        staging.path.display()
+                    ))
+                })?;
+        }
+        staging.file_mut().sync_all().map_err(|error| {
+            DecisionInputError::new(format!(
+                "state journal staging sync failed ({}): {error}",
+                staging.path.display()
+            ))
+        })?;
+        staging.close();
+
+        rename(&staging.path, &self.path).map_err(|error| {
+            DecisionInputError::new(format!(
+                "state journal atomic rename failed ({} -> {}): {error}",
+                staging.path.display(),
+                self.path.display()
+            ))
+        })?;
+        staging.preserve();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod journal_atomic_tests {
+    use super::*;
+    use revops_fees::cycle::StateSink;
+
+    #[test]
+    fn injected_rename_failure_cleans_owned_staging_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sink = JournalStateSink::open_dir(tmp.path()).expect("sink");
+        let prior = b"{\"prior\":\"complete\"}\n";
+        std::fs::write(sink.path(), prior).expect("seed journal");
+
+        let error = sink
+            .flush_batch_with_rename(
+                &[(
+                    "chan_a".to_string(),
+                    ChannelCycleState::default(),
+                    ChannelFeeState::default(),
+                )],
+                |_, _| Err(std::io::Error::other("injected rename failure")),
+            )
+            .expect_err("rename failure must propagate");
+        assert!(error.to_string().contains("injected rename failure"));
+        assert_eq!(std::fs::read(sink.path()).unwrap(), prior);
+
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".fee_dryrun_state.jsonl.") && name.ends_with(".tmp")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "rename failure left owned staging files: {leftovers:?}"
+        );
+
+        sink.flush_batch(&[(
+            "chan_b".to_string(),
+            ChannelCycleState::default(),
+            ChannelFeeState::default(),
+        )])
+        .expect("later flush is not poisoned");
     }
 }
