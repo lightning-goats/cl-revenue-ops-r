@@ -220,6 +220,10 @@ async fn all_22_fields_are_plumbed() {
         c.drain_fee_discount_max
     })
     .await;
+    assert_float_field("node-drain-bias-max", "0.45", 0.45, |c| {
+        c.node_drain_bias_max
+    })
+    .await;
     assert_float_field("high-liquidity-threshold", "0.9", 0.9, |c| {
         c.high_liquidity_threshold
     })

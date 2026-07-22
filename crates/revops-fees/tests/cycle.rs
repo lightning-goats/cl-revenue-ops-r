@@ -34,6 +34,7 @@ use revops_fees::execution::{
     decide_set_channel_fee, fail_closed, governed_authorize_fee_broadcast, FeeAuthorizationRequest,
     FeeAuthorizationResult, FeeAuthorizer, GovernedDeps, PureFeeExecutor, SetFeeRequest,
 };
+use revops_fees::drain::NodeChannel;
 use revops_fees::floors::{ChainCosts, FlowWindow, PeerLatency, RebalanceCostSample};
 use revops_fees::journal::{FeeDecision, Journal};
 use revops_fees::pid::pid_from_dict;
@@ -236,6 +237,9 @@ impl FixtureEvidence {
     fn temporary_overlay_active(&self, _channel_id: &str) -> bool {
         self.overlay_active.get()
     }
+    fn node_channels(&self) -> Vec<NodeChannel> {
+        Vec::new()
+    }
 }
 
 fn parse_cfg(v: &OValue) -> FeeCfgSnapshot {
@@ -258,6 +262,12 @@ fn parse_cfg(v: &OValue) -> FeeCfgSnapshot {
         htlcmax_balanced_pct: getf(v, "htlcmax_balanced_pct"),
         paused: getb(v, "paused"),
         node_drain_bias_enabled: getb(v, "node_drain_bias_enabled"),
+        // Fixture cfg blobs predate this field; the generating Python
+        // Config always carried its 0.3 default (config.py:537).
+        node_drain_bias_max: v
+            .get("node_drain_bias_max")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.3),
         receivable_ratio_target: 0.30,
         receivable_ratio_floor: 0.20,
         econ_governor_fees_enabled: getb(v, "econ_governor_fees_enabled"),
@@ -987,6 +997,10 @@ fn default_cfg_matches_python_config_defaults() {
         "config.py:535 node_drain_bias_enabled"
     );
     assert_eq!(
+        cfg.node_drain_bias_max, 0.3,
+        "config.py:537 node_drain_bias_max"
+    );
+    assert_eq!(
         cfg.receivable_ratio_target, 0.30,
         "config.py:522 receivable_ratio_target"
     );
@@ -1049,6 +1063,7 @@ struct SyntheticEvidence {
     volumes: BTreeMap<String, i64>,
     forwards: BTreeMap<String, i64>,
     passive_peer: String,
+    node_channels: Vec<NodeChannel>,
 }
 
 impl SyntheticEvidence {
@@ -1109,6 +1124,9 @@ impl SyntheticEvidence {
     }
     fn temporary_overlay_active(&self, _channel_id: &str) -> bool {
         false
+    }
+    fn node_channels(&self) -> Vec<NodeChannel> {
+        self.node_channels.clone()
     }
 }
 
@@ -1706,6 +1724,7 @@ fn three_channel_synthetic_cycle_end_to_end() {
         volumes: BTreeMap::from([("100x1x0".to_string(), 2_000_000)]),
         forwards: BTreeMap::from([("100x1x0".to_string(), 8)]),
         passive_peer: peer_c.clone(),
+        node_channels: Vec::new(),
     };
 
     let mut state = ControllerState::new();
@@ -1893,6 +1912,7 @@ fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String
         volumes: BTreeMap::new(),
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
+        node_channels: Vec::new(),
     };
 
     let mut state = ControllerState::new();
@@ -1988,6 +2008,7 @@ fn skip_gate_bootstrap_marks_channel_non_comparable() {
         volumes: BTreeMap::new(),
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
+        node_channels: Vec::new(),
     };
 
     let mut state = ControllerState::new();
@@ -2126,9 +2147,71 @@ macro_rules! wrap_test_evidence {
             ) -> Result<bool, DecisionInputError> {
                 Ok(Self::temporary_overlay_active(self, channel_id))
             }
+            fn node_channels(&self) -> Result<Vec<NodeChannel>, DecisionInputError> {
+                Ok(Self::node_channels(self))
+            }
         }
     };
 }
 
 wrap_test_evidence!(FixtureEvidence);
 wrap_test_evidence!(SyntheticEvidence);
+
+/// H2 (2026-07-22 audit): the node-drain-bias effective cap must scale by
+/// the SEPARATE `node_drain_bias_max` knob (py 184: `_cfg_float(cfg_like,
+/// "node_drain_bias_max", 0.0)`, Config default 0.3), not by the static
+/// `drain_fee_discount_max`. With the static cap at its 0.0 default and a
+/// fully source-heavy node (receivable ratio 0.0 -> pressure 1.0), Python
+/// computes max(0.0, 0.3 * 1.0) = 0.3; wiring the static knob into the
+/// bias slot yields 0.0 forever — the feature's designed use-case dead.
+#[test]
+fn node_drain_bias_cap_scales_by_bias_knob_not_static_max() {
+    let peer = "03".to_string() + &"01".repeat(32);
+    let evidence = SyntheticEvidence {
+        // One channel row so the cycle survives the empty-states hold
+        // gate and reaches the node-drain aggregate.
+        rows: vec![synthetic_row("100x1x0", &peer)],
+        infos: BTreeMap::from([("100x1x0".to_string(), synthetic_info("100x1x0", &peer, 300))]),
+        volumes: BTreeMap::new(),
+        forwards: BTreeMap::new(),
+        passive_peer: String::new(),
+        // One all-local channel: receivable ratio 0.0, below the 0.2
+        // floor -> node_drain_pressure = 1.0.
+        node_channels: vec![NodeChannel {
+            state: "CHANNELD_NORMAL".to_string(),
+            to_us_msat: 5_000_000_000,
+            total_msat: 5_000_000_000,
+        }],
+    };
+    let mut cfg = base_cfg();
+    cfg.node_drain_bias_enabled = true;
+    assert_eq!(
+        cfg.drain_fee_discount_max, 0.0,
+        "precondition: static cap at its config.py:529 default"
+    );
+
+    let mut state = ControllerState::default();
+    let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = FixedDecisionClock::new(1_752_400_000);
+    {
+        let mut deps = CycleDeps {
+            evidence: &evidence,
+            cfg: &cfg,
+            rng: &mut rng,
+            clock: &mut clock,
+            authorizer: None,
+            executor: &PURE_EXECUTOR,
+            journal: None,
+            state_sink: None,
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
+        };
+        run_fee_cycle(&mut state, &mut deps).expect("fixed decision inputs");
+    }
+
+    assert_eq!(state.last_node_drain_pressure, Some(1.0));
+    assert_eq!(
+        state.last_effective_drain_discount_max,
+        Some(0.3),
+        "effective cap must be node_drain_bias_max (0.3) * pressure (1.0)"
+    );
+}

@@ -334,6 +334,13 @@ pub async fn resolve_fee_cfg(
             default.node_drain_bias_enabled,
         )
         .await,
+        node_drain_bias_max: resolve_float(
+            db,
+            python_option_values,
+            "node-drain-bias-max",
+            default.node_drain_bias_max,
+        )
+        .await,
         receivable_ratio_target: resolve_float(
             db,
             python_option_values,

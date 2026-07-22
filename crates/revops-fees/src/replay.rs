@@ -1558,6 +1558,10 @@ fn decode_cfg(configuration: &WireObject) -> Result<FeeCfgSnapshot, ReplayError>
             field(configuration, "node_drain_bias_enabled", p)?,
             &format!("{p}.node_drain_bias_enabled"),
         )?,
+        node_drain_bias_max: number(
+            field(configuration, "node_drain_bias_max", p)?,
+            &format!("{p}.node_drain_bias_max"),
+        )?,
         receivable_ratio_target: number(
             field(configuration, "receivable_ratio_target", p)?,
             &format!("{p}.receivable_ratio_target"),

@@ -134,6 +134,11 @@ pub struct FeeCfgSnapshot {
     pub htlcmax_balanced_pct: f64,
     pub paused: bool,
     pub node_drain_bias_enabled: bool,
+    /// `node_drain_bias_max` (py config.py:537, default 0.3): the
+    /// node-liquidity bias cap `effective_drain_discount_max` scales by
+    /// pressure — a SEPARATE knob from `drain_fee_discount_max` (2026-07-22
+    /// audit H2: wiring the static knob here made the feature a no-op).
+    pub node_drain_bias_max: f64,
     pub receivable_ratio_target: f64,
     pub receivable_ratio_floor: f64,
     /// `econ_governor_fees_enabled is True` (py 7521-7529).
@@ -205,6 +210,8 @@ impl Default for FeeCfgSnapshot {
             paused: false,
             // py config.py:535: `node_drain_bias_enabled: bool = False`.
             node_drain_bias_enabled: false,
+            // py config.py:537: `node_drain_bias_max: float = 0.3`.
+            node_drain_bias_max: 0.3,
             // py config.py:522: `receivable_ratio_target: float = 0.30`.
             receivable_ratio_target: 0.30,
             // py config.py:523: `receivable_ratio_floor: float = 0.20`.
@@ -3438,7 +3445,10 @@ pub fn run_fee_cycle(
         Some(drain::effective_drain_discount_max(
             cfg.drain_fee_discount_max,
             cfg.node_drain_bias_enabled,
-            cfg.drain_fee_discount_max,
+            // py 184: `_cfg_float(cfg_like, "node_drain_bias_max", 0.0)` —
+            // the SEPARATE bias knob (2026-07-22 audit H2: passing the
+            // static cap here made the bias a no-op for every config).
+            cfg.node_drain_bias_max,
             pressure,
         ))
     };
