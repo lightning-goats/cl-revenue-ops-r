@@ -626,5 +626,27 @@
    "growth",
    "custom"
   ]
+ },
+ "bool_casts": {
+  "hot_channel_protection_enabled": "eq_true",
+  "boltz_auto_cycle_enabled": "eq_true",
+  "node_drain_bias_enabled": "eq_true",
+  "enable_dynamic_htlcmax": "eq_true",
+  "expansion_treasury_enabled": "eq_true",
+  "expansion_treasury_exclude_protected": "eq_true",
+  "fee_market_boundary_enabled": "eq_true",
+  "rebalance_size_tiered_targets": "in_true_1_yes",
+  "growth_budget_enabled": "in_true_1_yes",
+  "allow_zero_cost_auto_rebalance_when_budget_zero": "in_true_1_yes",
+  "dry_run": "eq_true",
+  "enable_reputation": "eq_true",
+  "enable_kelly": "eq_true",
+  "enable_vegas_reflex": "eq_true",
+  "planner_enabled": "in_true_1_yes",
+  "planner_dry_run": "in_true_1_yes",
+  "planner_execute_closes": "in_true_1_yes",
+  "planner_close_feerange_enabled": "in_true_1_yes",
+  "lnplus_swaps_enabled": "in_true_1_yes",
+  "lnplus_execute_applications": "in_true_1_yes"
  }
 }

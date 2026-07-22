@@ -320,3 +320,59 @@ async fn neighbor_min_competitors_listconfigs_layer_resolves_typed() {
     assert_eq!(v, serde_json::json!(3));
     assert_eq!(revops::fee_config::resolve_min_competitors(&v), Ok(3));
 }
+
+// ---------------------------------------------------------------------------
+// M2 (2026-07-22 audit): layer (b) bool parsing must mirror each field's
+// PYTHON STARTUP cast (the `Config(**config_kwargs)` expressions in
+// cl-revenue-ops.py), not `_apply_override`'s tolerant
+// {'true','1','yes','on'} parser — that parser is only correct for layer
+// (a) DB overrides. enable_vegas_reflex is cast `.lower() == 'true'`
+// (cl-revenue-ops.py:2610): a config-file value of `1` is FALSE in Python,
+// and since vegas gates a per-cycle RNG draw, getting this wrong desyncs
+// the whole PyRandom stream from the Python oracle.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resolve_fee_cfg_vegas_listconfigs_value_uses_strict_startup_cast() {
+    let mut py = HashMap::new();
+    py.insert(
+        "revenue-ops-vegas-reflex".to_string(),
+        cln_plugin::options::Value::String("1".to_string()),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &py).await;
+    assert!(
+        !cfg.enable_vegas_reflex,
+        "'1' is truthy for _apply_override but FALSE for the startup cast"
+    );
+}
+
+#[tokio::test]
+async fn resolve_fee_cfg_node_drain_bias_listconfigs_strict_cast() {
+    let mut py = HashMap::new();
+    py.insert(
+        "revenue-ops-node-drain-bias-enabled".to_string(),
+        cln_plugin::options::Value::String("yes".to_string()),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &py).await;
+    assert!(!cfg.node_drain_bias_enabled, "startup cast is .lower() == 'true'");
+}
+
+#[tokio::test]
+async fn resolve_fee_cfg_vegas_listconfigs_true_still_true() {
+    let mut py = HashMap::new();
+    py.insert(
+        "revenue-ops-vegas-reflex".to_string(),
+        cln_plugin::options::Value::String("TRUE".to_string()),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &py).await;
+    assert!(cfg.enable_vegas_reflex);
+}
+
+/// Layer (a) keeps `_apply_override`'s tolerant parser: a DB override row
+/// `enable_vegas_reflex = "1"` is applied as True by Python.
+#[tokio::test]
+async fn resolve_fee_cfg_vegas_db_override_stays_tolerant() {
+    let (handle, _tmp) = fixture_db_with_override("vegas-reflex", "1").await;
+    let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
+    assert!(cfg.enable_vegas_reflex, "DB layer mirrors _apply_override: '1' is truthy");
+}

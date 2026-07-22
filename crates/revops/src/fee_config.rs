@@ -154,11 +154,21 @@ async fn resolve_bool(
     default: bool,
 ) -> bool {
     let field = config_resolve::db_override_key(suffix);
-    match resolve_raw(db, python_option_values, suffix).await {
-        Some(raw) => config_types::typed_value(&field, &raw)
+    // Layer-aware casts (2026-07-22 audit M2): a DB override row goes
+    // through `_apply_override`'s generic tolerant parser
+    // (`config_types::typed_value`), but a listconfigs value goes through
+    // the field's PYTHON STARTUP cast -- the two disagree on '1'/'yes'/
+    // 'on' for strict fields, and e.g. vegas-reflex=1 flipping the wrong
+    // way desyncs the shared per-cycle RNG stream from the oracle.
+    if let Some(raw) = db_layer(db, suffix).await {
+        return config_types::typed_value(&field, &OptValue::String(raw))
             .as_bool()
-            .unwrap_or(default),
-        None => default,
+            .unwrap_or(default);
+    }
+    match python_layer(suffix, python_option_values) {
+        Some(OptValue::String(s)) => config_types::python_startup_bool(&field, &s),
+        Some(OptValue::Boolean(b)) => b,
+        Some(_) | None => default,
     }
 }
 

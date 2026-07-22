@@ -52,6 +52,12 @@ struct RawTable {
     /// field name -> valid value list.
     #[serde(default)]
     enums: HashMap<String, Vec<String>>,
+    /// Per-field bool STARTUP casts AST-extracted from the
+    /// `config_kwargs = dict(...)` construction (cl-revenue-ops.py:2413):
+    /// `"eq_true"` (`.lower() == 'true'`) or `"in_true_1_yes"`
+    /// (`.lower() in ('true', '1', 'yes')`). See [`python_startup_bool`].
+    #[serde(default)]
+    bool_casts: HashMap<String, String>,
 }
 
 /// Typed `Config` field metadata plus the public/deprecated runtime-key
@@ -64,6 +70,8 @@ pub struct ConfigTypes {
     pub ranges: HashMap<String, (f64, f64)>,
     /// `STRING_ENUM_VALID_VALUES` -- see [`field_enum`].
     pub enums: HashMap<String, Vec<String>>,
+    /// Per-field bool startup casts -- see [`python_startup_bool`].
+    pub bool_casts: HashMap<String, String>,
 }
 
 /// Load the embedded `fixtures/config_types.json` table.
@@ -81,6 +89,44 @@ pub fn load() -> ConfigTypes {
         deprecated_keys: raw.deprecated_keys,
         ranges: raw.ranges,
         enums: raw.enums,
+        bool_casts: raw.bool_casts,
+    }
+}
+
+/// Python's per-field STARTUP bool cast for a layer-(b) `listconfigs`
+/// string value (2026-07-22 audit M2).
+///
+/// `Config(**config_kwargs)` converts each bool option with one of two
+/// inconsistent expressions -- `.lower() == 'true'` (strict; e.g.
+/// `enable_vegas_reflex`, cl-revenue-ops.py:2610) or `.lower() in
+/// ('true', '1', 'yes')` (tolerant, note NO `'on'`; e.g.
+/// `growth_budget_enabled`) -- and the generic `('true','1','yes','on')`
+/// parser in `_apply_override` applies ONLY to layer-(a) DB override rows
+/// ([`convert_value`] keeps mirroring that for the DB layer). Getting the
+/// layer-(b) cast wrong is not cosmetic: `revenue-ops-vegas-reflex=1` in
+/// the operator's config file runs Python with Vegas DISABLED, and since
+/// the Vegas update consumes a per-cycle RNG draw, a Rust `true` desyncs
+/// the entire shared PyRandom stream from the oracle.
+///
+/// Fields absent from the extracted table (no CLN option at all, e.g.
+/// `paused`) fall back to the strict cast -- layer (b) can never produce
+/// them in practice, and strict is Python's dominant spelling.
+///
+/// Accepts the field name or hyphenated suffix (same contract as
+/// [`field_type_for`]).
+pub fn python_startup_bool(field: &str, raw: &str) -> bool {
+    let table = load();
+    let underscored = field.replace('-', "_");
+    let cast = table
+        .bool_casts
+        .get(field)
+        .or_else(|| table.bool_casts.get(&underscored))
+        .map(String::as_str)
+        .unwrap_or("eq_true");
+    let lower = raw.to_lowercase();
+    match cast {
+        "in_true_1_yes" => matches!(lower.as_str(), "true" | "1" | "yes"),
+        _ => lower == "true",
     }
 }
 
@@ -306,6 +352,58 @@ mod tests {
 
     /// A real string-backed bool field: `hot_channel_protection_enabled`
     /// (fixture: `"bool"`) is registered as CLN option
+    /// M2 (2026-07-22 audit): the per-field STARTUP casts. Strict fields
+    /// (`.lower() == 'true'`) reject `'1'`/`'yes'`/`'on'`; tolerant fields
+    /// (`.lower() in ('true','1','yes')`) accept `'1'`/`'yes'` but NOT
+    /// `'on'` — only `_apply_override` (layer (a)) accepts `'on'`.
+    #[test]
+    fn python_startup_bool_strict_field_is_eq_true_only() {
+        for (raw, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            ("1", false),
+            ("yes", false),
+            ("on", false),
+            ("junk", false),
+        ] {
+            assert_eq!(
+                python_startup_bool("enable_vegas_reflex", raw),
+                expected,
+                "enable_vegas_reflex {raw:?}"
+            );
+            assert_eq!(
+                python_startup_bool("node_drain_bias_enabled", raw),
+                expected,
+                "node_drain_bias_enabled {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_startup_bool_tolerant_field_accepts_one_and_yes_not_on() {
+        for (raw, expected) in [
+            ("true", true),
+            ("1", true),
+            ("YES", true),
+            ("on", false),
+            ("junk", false),
+        ] {
+            assert_eq!(
+                python_startup_bool("growth_budget_enabled", raw),
+                expected,
+                "growth_budget_enabled {raw:?}"
+            );
+        }
+    }
+
+    /// Fields with no CLN option (absent from the extracted table, e.g.
+    /// `paused`) fall back to the strict cast.
+    #[test]
+    fn python_startup_bool_unknown_field_falls_back_strict() {
+        assert!(python_startup_bool("paused", "true"));
+        assert!(!python_startup_bool("paused", "1"));
+    }
+
     /// `revenue-ops-hot-channel-protection-enabled`, a `string`-typed
     /// option with default `"true"` per `fixtures/options.json`. Runtime
     /// shape is `options::Value::String("true")`; must convert to JSON

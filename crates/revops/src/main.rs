@@ -616,8 +616,32 @@ async fn main() -> Result<()> {
                                             }
                                         }
                                         .map(cln_plugin::options::Value::String);
-                                    let python_value =
-                                        s.python_options.snapshot().get(&python_name).cloned();
+                                    let python_value = s
+                                        .python_options
+                                        .snapshot()
+                                        .get(&python_name)
+                                        .cloned()
+                                        // 2026-07-22 audit M2: a layer-(b)
+                                        // bool STRING goes through the
+                                        // field's Python STARTUP cast, not
+                                        // `_apply_override`'s tolerant
+                                        // parser (that one is layer-(a)
+                                        // only) -- pre-cast here so the
+                                        // downstream generic conversion
+                                        // passes the native bool through.
+                                        .map(|v| match v {
+                                            cln_plugin::options::Value::String(raw)
+                                                if config_types::field_type_for(&db_key)
+                                                    == Some(config_types::FieldType::Bool) =>
+                                            {
+                                                cln_plugin::options::Value::Boolean(
+                                                    config_types::python_startup_bool(
+                                                        &db_key, &raw,
+                                                    ),
+                                                )
+                                            }
+                                            other => other,
+                                        });
                                     (db_override, python_value)
                                 }
                                 None => (None, None),
