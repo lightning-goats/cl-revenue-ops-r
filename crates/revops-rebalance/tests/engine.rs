@@ -403,6 +403,20 @@ impl EvProvider for FixedEv {
     }
 }
 
+/// EV terms that always clear the (default 0.0) hold margin. Since audit
+/// M1 a priced pair with no EV terms fails CLOSED, so tests exercising
+/// OTHER gates wire these to keep their pre-M1 behavior; gate-specific
+/// tests wire their own terms (or `None` to hit the fail-closed path).
+fn passing_ev() -> Option<Arc<dyn EvProvider>> {
+    Some(Arc::new(FixedEv(EvTerms {
+        dest_attempts: 0,
+        dest_success_rate: 0.0,
+        efv_sats: 1_000_000.0,
+        source_opportunity_sats: 0.0,
+        activity_penalty_sats: 0.0,
+    })))
+}
+
 struct SystemTestClock;
 
 impl EngineClock for SystemTestClock {
@@ -635,7 +649,7 @@ fn default_harness(
         ScriptRouterFactory::new(router_script),
         ScriptExecutor::new(executor_script),
         HashMap::new(),
-        None,
+        passing_ev(),
         Some(Arc::new(AllowAllPolicy)),
     )
 }
@@ -688,7 +702,7 @@ fn budget_block_records_skipped_never_futility() {
         ScriptRouterFactory::new(vec![route_ok(10), route_ok(10), route_ok(10)]),
         ScriptExecutor::new(vec![]),
         HashMap::new(),
-        None,
+        passing_ev(),
         Some(Arc::new(AllowAllPolicy)),
     );
 
@@ -1001,7 +1015,7 @@ fn single_flight_engine_busy_and_cycle_already_running() {
         ScriptRouterFactory::new(vec![route_ok(10)]),
         executor,
         HashMap::new(),
-        None,
+        passing_ev(),
         Some(Arc::new(AllowAllPolicy)),
     );
 
@@ -1078,7 +1092,7 @@ fn timeout_abandons_but_reservation_settles_when_worker_finishes() {
         ScriptRouterFactory::new(vec![route_ok(10), route_ok(10)]),
         executor,
         HashMap::new(),
-        None,
+        passing_ev(),
         Some(Arc::new(AllowAllPolicy)),
     );
 
@@ -1300,7 +1314,7 @@ fn zero_budget_blocks_auto_rebalance() {
         ScriptRouterFactory::new(vec![route_ok(10)]),
         ScriptExecutor::new(vec![]),
         HashMap::new(),
-        None,
+        passing_ev(),
         Some(Arc::new(AllowAllPolicy)),
     );
     let result = h.engine.run_cycle();
@@ -1511,7 +1525,7 @@ fn find_candidates_drops_inflight_dest_with_skip() {
         ScriptRouterFactory::new(vec![route_ok(10), route_ok(10)]),
         executor,
         HashMap::new(),
-        None,
+        passing_ev(),
         Some(Arc::new(AllowAllPolicy)),
     );
     // First cycle abandons a worker holding the dest.
@@ -1644,4 +1658,37 @@ fn failed_execution_exports_segment_snapshot() {
         exports,
         vec!["datastore_export:revenue/segment-observations".to_string()]
     );
+}
+
+/// M1 (2026-07-22 audit): a PRICED pair must never bypass the sats-EV
+/// hold-margin gate because no `EvProvider` is wired. Python evaluates
+/// the gate for every priced pair — `_update_pair_score_decomposition`
+/// always writes `final_score_sats` into the engine decomposition
+/// (rebalance_engine_v2.py:659-678, 1464-1472) — so a missing provider
+/// (or missing terms) is a wiring deficiency, not a gate waiver. Fail
+/// closed: reject the pair with an explicit audit record rather than
+/// spending sats on an EV-unevaluated rebalance.
+#[test]
+fn ev_gate_fails_closed_when_no_provider_wired() {
+    let h = build_engine(
+        base_config(),
+        MockStore::new(),
+        ScriptRouterFactory::new(vec![route_ok(10)]),
+        ScriptExecutor::new(vec![]),
+        HashMap::new(),
+        None,
+        Some(Arc::new(AllowAllPolicy)),
+    );
+    let result = h.engine.run_cycle();
+    assert!(
+        result.executions.is_empty(),
+        "priced pair executed without EV evaluation"
+    );
+    let skip = result
+        .audit_records
+        .iter()
+        .find(|s| s.reason == "ev_terms_unavailable")
+        .expect("ev_terms_unavailable skip recorded");
+    assert_eq!(skip.channel_id, "dst-chan");
+    assert!(h.store.calls_with_prefix("reserve_budget:").is_empty());
 }

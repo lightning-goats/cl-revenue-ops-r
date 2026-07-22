@@ -106,7 +106,8 @@ use crate::errors::{
     LOCAL_BUDGET_BLOCK, ROUTE_PRICING_FAILED_PREFIX, ZERO_BUDGET_BLOCKS_AUTO_REBALANCE,
 };
 use crate::ev::{
-    per_attempt_ceiling, sats_ev_gate, EvInputs, BELOW_HOLD_MARGIN, FAILURE_COST_RATE,
+    per_attempt_ceiling, sats_ev_gate, EvInputs, BELOW_HOLD_MARGIN, EV_TERMS_UNAVAILABLE,
+    FAILURE_COST_RATE,
 };
 use crate::executor::{ExecuteRequest, NativeRouteExecutor, PaymentMode, PaymentRpc};
 use crate::modes::EngineKwargs;
@@ -1878,9 +1879,15 @@ impl EngineShared {
 
             // Phase 4.3 / audit F2: sats-denominated do-nothing hard gate.
             // Zero-cost routes bypass it inside sats_ev_gate (they spend no
-            // capital — the zero-budget equalization invariant); a missing
-            // EV provider or missing terms matches py's
-            // `final_score_present` guard.
+            // capital — the zero-budget equalization invariant). A missing
+            // EV provider (or missing terms) does NOT waive the gate: in
+            // Python `final_score_sats` is always present for priced pairs
+            // (`_update_pair_score_decomposition` writes the engine
+            // decomposition unconditionally, rebalance_engine_v2.py:
+            // 659-678; the `final_score_present` guard at 1464-1472 only
+            // filters the planner's bootstrap decomposition), so terms
+            // being unavailable is a wiring deficiency and priced pairs
+            // fail CLOSED below (2026-07-22 audit M1).
             if let Some(terms) = self.ev.as_ref().and_then(|p| p.ev_terms(&pair)) {
                 let failure_count = self
                     .pair_futility
@@ -1918,6 +1925,19 @@ impl EngineShared {
                     });
                     continue;
                 }
+            } else if route_result.route_cost_sats > 0 {
+                skips.push(SkipRecord {
+                    channel_id: pair.dest_channel_id.clone(),
+                    reason: EV_TERMS_UNAVAILABLE.to_string(),
+                    value_class: "valuable".to_string(),
+                    remaining_budget_sats: 0,
+                    detail: Some(format!(
+                        "src={} route_cost={}: priced pair with no sats-EV \
+                         terms (no EvProvider wired?) — failing closed",
+                        pair.source_channel_id, route_result.route_cost_sats
+                    )),
+                });
+                continue;
             }
 
             priced.push(pair);

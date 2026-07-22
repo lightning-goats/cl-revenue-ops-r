@@ -98,6 +98,15 @@ pub const UNVALIDATED_ADVERTISED_FEE_DISCOUNT: f64 = 0.5;
 /// reason, a different contract surface (audit + skip records).
 pub const BELOW_HOLD_MARGIN: &str = "below_hold_margin";
 
+/// Fail-closed rejection for a PRICED pair whose sats-EV terms cannot be
+/// produced (no `EvProvider` wired, or the provider has no terms for the
+/// pair). Python has no equivalent state — the engine decomposition always
+/// carries `final_score_sats` for priced pairs (rebalance_engine_v2.py:
+/// 659-678), so reaching this reason means the Rust wiring is deficient;
+/// spending sats on an EV-unevaluated pair would be fail-open (2026-07-22
+/// audit M1).
+pub const EV_TERMS_UNAVAILABLE: &str = "ev_terms_unavailable";
+
 /// Inputs to the sats-EV do-nothing gate (py `_build_score_decomposition`'s
 /// sats terms + the inline hold-margin check). See the module doc comment
 /// for the scope note on why this is a reduced, already-partially-computed
