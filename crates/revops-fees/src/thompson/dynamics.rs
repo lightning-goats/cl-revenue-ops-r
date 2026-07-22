@@ -353,7 +353,11 @@ pub fn update_contextual(
         if role == "S" {
             init_std = state.posterior_std * SECONDARY_EXPLORE_BOOST;
         }
-        let init_precision = 1.0 / (init_std * init_std).max(MIN_STD * MIN_STD);
+        // `py_pow(_, 2.0)` for every VARIABLE squaring here (py `** 2` is
+        // libm pow, not a multiply — 2026-07-22 audit H1, pinned by the
+        // pow_parity_canary_contextual update sequence). The constant
+        // MIN_STD * MIN_STD square is exact either way.
+        let init_precision = 1.0 / py_pow(init_std, 2.0).max(MIN_STD * MIN_STD);
         state.contextual_posteriors.push((
             context_key.to_string(),
             CtxPosterior {
@@ -406,7 +410,7 @@ pub fn update_contextual(
     let revenue_weight = 1.0f64.min((revenue_rate + 1.0) / 100.0);
     let role_boost = if ctx_role == "S" { 1.3 } else { 1.0 };
 
-    let obs_variance = (MIN_STD * MIN_STD).max(state.posterior_std * state.posterior_std);
+    let obs_variance = (MIN_STD * MIN_STD).max(py_pow(state.posterior_std, 2.0));
     let obs_precision = (revenue_weight * time_weight * role_boost) / obs_variance;
 
     // Normal-Normal conjugate update.
@@ -471,7 +475,7 @@ fn update_related_time_contexts(
                 (adj.mean, adj.precision, adj.count, adj.last_update);
 
             let revenue_weight = 1.0f64.min((revenue_rate + 1.0) / 100.0);
-            let obs_variance = (MIN_STD * MIN_STD).max(state.posterior_std * state.posterior_std);
+            let obs_variance = (MIN_STD * MIN_STD).max(py_pow(state.posterior_std, 2.0));
             let cross_precision = 0.1 * revenue_weight / obs_variance;
 
             let new_precision = adj_precision + cross_precision;

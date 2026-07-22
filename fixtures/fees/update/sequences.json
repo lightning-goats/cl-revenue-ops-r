@@ -10631,6 +10631,160 @@
      }
     }
    ]
+  },
+  {
+   "name": "pow_parity_canary_contextual",
+   "initial": {
+    "posterior_mean": "250.0",
+    "posterior_std": "138.55702359529351"
+   },
+   "steps": [
+    {
+     "op": "update_contextual",
+     "now": 1752400000,
+     "args": {
+      "context_key": "low:normal:P",
+      "fee": "167.41525471658025",
+      "revenue_rate": "159.32235856043812",
+      "time_bucket": "normal"
+     },
+     "expected": {
+      "checks": {
+       "real_observation_count": 0,
+       "ceiling_floor_ppm": null,
+       "supported_fee_ceiling": null
+      },
+      "state": {
+       "observations": [],
+       "zero_revenue_streak": 0,
+       "zero_run_start_fee": "0.0",
+       "zero_run_start_ts": 0,
+       "positive_rate_ref": "0.0",
+       "positive_rate_ref_ts": 0,
+       "meaningful_gap_ema_hours": "0.0",
+       "last_meaningful_ts": 0,
+       "last_upward_probe_ts": 0,
+       "posterior_mean": "250.0",
+       "posterior_std": "138.55702359529351",
+       "posterior_coeffs": [
+        "0.0",
+        "1.0",
+        "0.0"
+       ],
+       "posterior_precision": [
+        [
+         "0.01",
+         "0.0",
+         "0.0"
+        ],
+        [
+         "0.0",
+         "0.01",
+         "0.0"
+        ],
+        [
+         "0.0",
+         "0.0",
+         "0.01"
+        ]
+       ],
+       "noise_variance": "1000.0",
+       "charged_fee_mean": "0.0",
+       "last_fee_min": "0.0",
+       "last_fee_max": "0.0",
+       "posterior_bias": [],
+       "contextual_posteriors": [
+        [
+         "low:normal:P",
+         [
+          "208.29053268514156",
+          "0.0001031354812099576",
+          1,
+          1752400000
+         ]
+        ]
+       ]
+      }
+     }
+    },
+    {
+     "op": "update_contextual",
+     "now": 1752400000,
+     "args": {
+      "context_key": "low:peak:P",
+      "fee": "300.0",
+      "revenue_rate": "120.0",
+      "time_bucket": "peak"
+     },
+     "expected": {
+      "checks": {
+       "real_observation_count": 0,
+       "ceiling_floor_ppm": null,
+       "supported_fee_ceiling": null
+      },
+      "state": {
+       "observations": [],
+       "zero_revenue_streak": 0,
+       "zero_run_start_fee": "0.0",
+       "zero_run_start_ts": 0,
+       "positive_rate_ref": "0.0",
+       "positive_rate_ref_ts": 0,
+       "meaningful_gap_ema_hours": "0.0",
+       "last_meaningful_ts": 0,
+       "last_upward_probe_ts": 0,
+       "posterior_mean": "250.0",
+       "posterior_std": "138.55702359529351",
+       "posterior_coeffs": [
+        "0.0",
+        "1.0",
+        "0.0"
+       ],
+       "posterior_precision": [
+        [
+         "0.01",
+         "0.0",
+         "0.0"
+        ],
+        [
+         "0.0",
+         "0.01",
+         "0.0"
+        ],
+        [
+         "0.0",
+         "0.0",
+         "0.01"
+        ]
+       ],
+       "noise_variance": "1000.0",
+       "charged_fee_mean": "0.0",
+       "last_fee_min": "0.0",
+       "last_fee_max": "0.0",
+       "posterior_bias": [],
+       "contextual_posteriors": [
+        [
+         "low:normal:P",
+         [
+          "212.69964169066358",
+          "0.0001083443438973292",
+          1,
+          1752400000
+         ]
+        ],
+        [
+         "low:peak:P",
+         [
+          "275.2525252525253",
+          "0.0001031354812099576",
+          1,
+          1752400000
+         ]
+        ]
+       ]
+      }
+     }
+    }
+   ]
   }
  ]
 }

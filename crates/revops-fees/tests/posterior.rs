@@ -435,3 +435,61 @@ fn pinned_constants_match_python_source() {
     assert_eq!(MIN_PRECISION, 0.000025);
     assert_eq!(DISCOUNT_WEIGHT_FLOOR, 0.05);
 }
+
+// ---------------------------------------------------------------------------
+// posterior/pow_canary.json: pow-vs-multiply parity canaries (2026-07-22
+// deep-audit H1). CPython `x ** 2` is libm pow(x, 2.0), which differs from
+// `x * x` in the last bit for ~0.086% of doubles; every input here is
+// searched so that delta survives into the expected repr. A port computing
+// any `** 2` site as a multiply or `.powi(2)` fails these.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_recompute_squarings_match_cpython_pow() {
+    let doc = load("posterior/pow_canary.json");
+    let now = doc["now"].as_i64().expect("now");
+    for case in doc["legacy_direct_cases"].as_array().expect("cases") {
+        let name = case["name"].as_str().expect("name");
+        let input = &case["input"];
+        let mut state = GaussianThompsonState {
+            prior_mean_fee: parse_f(&input["prior_mean_fee"]),
+            prior_std_fee: parse_f(&input["prior_std_fee"]),
+            observations: input["observations"]
+                .as_array()
+                .expect("observations")
+                .iter()
+                .map(parse_obs)
+                .collect(),
+            ..GaussianThompsonState::default()
+        };
+        recompute_posterior_legacy(&mut state, None, now);
+        assert_eq!(
+            py_repr(state.posterior_mean),
+            case["expected"]["posterior_mean"].as_str().expect("mean"),
+            "{name}: posterior_mean"
+        );
+        assert_eq!(
+            py_repr(state.posterior_std),
+            case["expected"]["posterior_std"].as_str().expect("std"),
+            "{name}: posterior_std"
+        );
+    }
+}
+
+#[test]
+fn dts_discount_squaring_matches_cpython_pow() {
+    let doc = load("posterior/pow_canary.json");
+    for case in doc["dts_direct_cases"].as_array().expect("cases") {
+        let name = case["name"].as_str().expect("name");
+        let mut state = GaussianThompsonState {
+            posterior_std: parse_f(&case["input"]["posterior_std"]),
+            ..GaussianThompsonState::default()
+        };
+        apply_dts_discount(&mut state, parse_f(&case["input"]["gamma"]));
+        assert_eq!(
+            py_repr(state.posterior_std),
+            case["expected"]["posterior_std"].as_str().expect("std"),
+            "{name}: posterior_std"
+        );
+    }
+}

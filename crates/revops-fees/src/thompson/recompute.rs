@@ -271,12 +271,17 @@ pub fn recompute_posterior_legacy(
         let weighted_sum: f64 = py_sum(wobs.iter().map(|(f, _, w)| f * w));
         let weighted_sq_sum: f64 = py_sum(wobs.iter().map(|(f, _, w)| f * f * w));
         let obs_mean = weighted_sum / total_weight;
-        let mut variance = (weighted_sq_sum / total_weight) - obs_mean * obs_mean;
+        // `py_pow(_, 2.0)` for every VARIABLE squaring in this module:
+        // CPython `x ** 2` calls libm pow(x, 2.0), which differs from a
+        // multiply/`.powi(2)` in the last bit for ~0.086% of doubles
+        // (2026-07-22 audit H1; pinned by posterior/pow_canary.json).
+        // Constant squarings (MIN_STD * MIN_STD) are exact either way.
+        let mut variance = (weighted_sq_sum / total_weight) - py_pow(obs_mean, 2.0);
         variance = variance.max(0.0);
         variance = variance.max(MIN_STD * MIN_STD);
 
         let prior_precision =
-            1.0 / (MIN_STD * MIN_STD).max(state.prior_std_fee * state.prior_std_fee);
+            1.0 / (MIN_STD * MIN_STD).max(py_pow(state.prior_std_fee, 2.0));
         let data_precision = total_weight / variance;
         let posterior_precision = prior_precision + data_precision;
 
@@ -482,7 +487,7 @@ pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
     for &(fee_raw, rev, w) in &weighted_obs {
         let f = (fee_raw - fee_min) * inv_range;
         let pred = mu_n[0] * f * f + mu_n[1] * f + mu_n[2];
-        ss += w * (rev - pred).powi(2);
+        ss += w * py_pow(rev - pred, 2.0);
         sw += w;
     }
     let new_sigma2 = ss / (sw - 3.0).max(1.0);
@@ -543,7 +548,8 @@ pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
                 continue;
             }
             let mean_rev: f64 = py_sum(entries.iter().map(|(_, r, w)| r * w)) / bw;
-            let var: f64 = py_sum(entries.iter().map(|(_, r, w)| w * (r - mean_rev).powi(2))) / bw;
+            let var: f64 =
+                py_sum(entries.iter().map(|(_, r, w)| w * py_pow(r - mean_rev, 2.0))) / bw;
             let sq: f64 = py_sum(entries.iter().map(|(_, _, w)| w * w));
             let n_eff = if sq > 0.0 { bw * bw / sq } else { 1.0 };
             let lcb = mean_rev - var.max(0.0).sqrt() / n_eff.max(1.0).sqrt();
@@ -635,8 +641,9 @@ pub fn apply_dts_discount(state: &mut GaussianThompsonState, gamma: f64) {
         return;
     }
 
-    // (a) Gaussian posterior: widen by reducing precision.
-    let mut precision = 1.0 / (state.posterior_std * state.posterior_std).max(1.0);
+    // (a) Gaussian posterior: widen by reducing precision. `py_pow`, not a
+    // multiply: see the audit-H1 comment in `recompute_posterior_legacy`.
+    let mut precision = 1.0 / py_pow(state.posterior_std, 2.0).max(1.0);
     precision *= gamma;
     precision = precision.max(MIN_PRECISION);
     state.posterior_std = (1.0 / precision).sqrt();
