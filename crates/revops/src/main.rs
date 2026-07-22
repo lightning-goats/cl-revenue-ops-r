@@ -55,13 +55,16 @@ struct State {
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
-    /// Cached `listconfigs` snapshot of every `revenue-ops-*` (Python
-    /// plugin) option's live resolved value, keyed by the FULL Python
-    /// option name (e.g. `revenue-ops-min-fee-ppm`). Fetched ONCE at init
-    /// via `revops::config_resolve::fetch_python_option_values` -- see that
-    /// module's doc comment for the full (a) DB override > (b) this map >
+    /// Refreshable `listconfigs` snapshot of every `revenue-ops-*`
+    /// (Python plugin) option's live resolved value, keyed by the FULL
+    /// Python option name (e.g. `revenue-ops-min-fee-ppm`). Fetched at
+    /// init and re-fetched before every dispatched fee cycle (2026-07-22
+    /// audit M3 — mirroring Python's per-cycle `_refresh_dynamic_config`),
+    /// so `setconfig` on dynamic options takes effect without a restart
+    /// and an init-time listconfigs outage heals. See
+    /// `revops::config_resolve` for the (a) DB override > (b) this cache >
     /// (c) fixture-default precedence `revenue-r-config` resolves through.
-    python_option_values: HashMap<String, cln_plugin::options::Value>,
+    python_options: revops::config_resolve::PythonOptionCache,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
@@ -614,7 +617,7 @@ async fn main() -> Result<()> {
                                         }
                                         .map(cln_plugin::options::Value::String);
                                     let python_value =
-                                        s.python_option_values.get(&python_name).cloned();
+                                        s.python_options.snapshot().get(&python_name).cloned();
                                     (db_override, python_value)
                                 }
                                 None => (None, None),
@@ -893,8 +896,10 @@ async fn main() -> Result<()> {
     // motivated deferring that call instead.
     let init_cfg = configured.configuration();
     let init_socket_path = PathBuf::from(&init_cfg.lightning_dir).join(&init_cfg.rpc_file);
-    let python_option_values =
-        revops::config_resolve::fetch_python_option_values(&init_socket_path).await;
+    let python_options = revops::config_resolve::PythonOptionCache::empty();
+    // Failure logs and leaves the cache empty; the per-cycle refresh in
+    // the fee scheduler (audit M3) retries until lightningd answers.
+    let _ = python_options.refresh(&init_socket_path).await;
 
     // Task 3: resolve `revops-r-journal-dir` once at init (empty default
     // falls back to the parent of the resolved `observer-db-path`; see
@@ -913,7 +918,7 @@ async fn main() -> Result<()> {
         observer_db,
         journal_dir,
         config_names: config_name_map(),
-        python_option_values,
+        python_options,
         scheduler: std::sync::OnceLock::new(),
     });
 
@@ -955,7 +960,7 @@ async fn main() -> Result<()> {
                             trigger: revops::fee_scheduler::TriggerMode::default(),
                         },
                         s.db.clone(),
-                        s.python_option_values.clone(),
+                        s.python_options.clone(),
                     ) {
                         Ok(handle) => {
                             let _ = s.scheduler.set(handle);

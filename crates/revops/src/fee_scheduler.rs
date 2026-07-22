@@ -143,6 +143,7 @@ use revops_fees::journal::Journal;
 use revops_fees::profiles::fee_profile;
 use revops_fees::pyrand::PyRandom;
 
+use crate::config_resolve::PythonOptionCache;
 use crate::fee_config;
 use crate::fee_evidence::{build_evidence_snapshot, prefetch_rpc, RpcPrefetch};
 use crate::fee_governor::GovernorWiring;
@@ -775,9 +776,9 @@ pub struct SchedulerHandle {
 pub fn spawn(
     cfg: SchedulerConfig,
     db_handle: Option<DbHandle>,
-    python_option_values: HashMap<String, OptValue>,
+    python_options: PythonOptionCache,
 ) -> anyhow::Result<SchedulerHandle> {
-    spawn_with_thread_spawner(cfg, db_handle, python_option_values, |name, body| {
+    spawn_with_thread_spawner(cfg, db_handle, python_options, |name, body| {
         std::thread::Builder::new()
             .name(name.to_string())
             .spawn(body)
@@ -791,7 +792,7 @@ pub fn spawn(
 pub fn spawn_with_thread_spawner<S>(
     cfg: SchedulerConfig,
     db_handle: Option<DbHandle>,
-    python_option_values: HashMap<String, OptValue>,
+    python_options: PythonOptionCache,
     thread_spawner: S,
 ) -> anyhow::Result<SchedulerHandle>
 where
@@ -867,7 +868,7 @@ where
         db_path,
         socket_path,
         db_handle,
-        python_option_values,
+        python_options,
         tick_tx,
         wake_rx,
     ));
@@ -890,10 +891,18 @@ enum Dispatch {
 async fn dispatch_cycle(
     socket_path: &Path,
     db_handle: Option<&DbHandle>,
-    python_option_values: &HashMap<String, OptValue>,
+    python_options: &PythonOptionCache,
     tick_tx: &mpsc::Sender<CycleMsg>,
 ) -> Dispatch {
-    match prepare_cycle(socket_path, db_handle, python_option_values).await {
+    // 2026-07-22 audit M3: Python re-reads `listconfigs` every cycle
+    // (`_refresh_dynamic_config`), so refresh layer (b) before resolving —
+    // a `setconfig` on a dynamic option takes effect on the next cycle,
+    // and an init-time listconfigs outage heals instead of pinning the
+    // whole window to fixture defaults. A failed refresh keeps the last
+    // good snapshot (and logs); resolution then proceeds as before.
+    let _ = python_options.refresh(socket_path).await;
+    let snapshot = python_options.snapshot();
+    match prepare_cycle(socket_path, db_handle, &snapshot).await {
         Ok(prepared) => {
             let interval_secs = prepared.cfg.fee_interval.max(1) as u64;
             if tick_tx
@@ -919,16 +928,17 @@ async fn trigger_loop(
     db_path: PathBuf,
     socket_path: PathBuf,
     db_handle: Option<DbHandle>,
-    python_option_values: HashMap<String, OptValue>,
+    python_options: PythonOptionCache,
     tick_tx: mpsc::Sender<CycleMsg>,
     mut wake_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     // Initial cadence resolution -- schedule/staleness seed only; every
     // cycle's authoritative cfg is resolved in prepare_cycle.
-    let mut interval_secs = fee_config::resolve_fee_cfg(db_handle.as_ref(), &python_option_values)
-        .await
-        .fee_interval
-        .max(1) as u64;
+    let mut interval_secs =
+        fee_config::resolve_fee_cfg(db_handle.as_ref(), &python_options.snapshot())
+            .await
+            .fee_interval
+            .max(1) as u64;
 
     match trigger {
         TriggerMode::FixedInterval { phase_offset_secs } => {
@@ -949,7 +959,7 @@ async fn trigger_loop(
                 match dispatch_cycle(
                     &socket_path,
                     db_handle.as_ref(),
-                    &python_option_values,
+                    &python_options,
                     &tick_tx,
                 )
                 .await
@@ -985,7 +995,7 @@ async fn trigger_loop(
                     match dispatch_cycle(
                         &socket_path,
                         db_handle.as_ref(),
-                        &python_option_values,
+                        &python_options,
                         &tick_tx,
                     )
                     .await
@@ -1018,7 +1028,7 @@ async fn trigger_loop(
                         match dispatch_cycle(
                             &socket_path,
                             db_handle.as_ref(),
-                            &python_option_values,
+                            &python_options,
                             &tick_tx,
                         )
                         .await

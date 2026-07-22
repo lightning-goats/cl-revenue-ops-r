@@ -144,3 +144,55 @@ async fn db_override_key_resolves_seeded_override_for_a_renamed_field() {
         Some("true".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------
+// PythonOptionCache (2026-07-22 audit M3): the listconfigs snapshot must be
+// refreshable (Python re-reads listconfigs each boltz/planner cycle via
+// _refresh_dynamic_config, cl-revenue-ops.py:6597-6685, so setconfig on a
+// dynamic option takes effect without a restart) and a failed refresh must
+// keep the last good snapshot rather than blanking it.
+// ---------------------------------------------------------------------------
+
+mod python_option_cache {
+    use cln_plugin::options::Value;
+    use revops::config_resolve::PythonOptionCache;
+    use std::collections::HashMap;
+
+    fn map(pairs: &[(&str, &str)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn starts_empty() {
+        let cache = PythonOptionCache::empty();
+        assert!(cache.snapshot().is_empty());
+    }
+
+    #[test]
+    fn ok_fetch_replaces_snapshot() {
+        let cache = PythonOptionCache::empty();
+        assert!(cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "50")]))));
+        assert!(cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "60")]))));
+        let snap = cache.snapshot();
+        assert!(
+            matches!(snap.get("revenue-ops-min-fee-ppm"), Some(Value::String(s)) if s == "60"),
+            "snapshot must hold the latest fetched value"
+        );
+        assert_eq!(snap.len(), 1);
+    }
+
+    #[test]
+    fn failed_fetch_keeps_previous_snapshot() {
+        let cache = PythonOptionCache::empty();
+        assert!(cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "50")]))));
+        assert!(!cache.apply_fetch(Err("socket gone".to_string())));
+        let snap = cache.snapshot();
+        assert!(
+            matches!(snap.get("revenue-ops-min-fee-ppm"), Some(Value::String(s)) if s == "50"),
+            "a failed refresh must keep the last good snapshot"
+        );
+    }
+}

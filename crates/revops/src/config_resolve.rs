@@ -231,8 +231,8 @@ pub fn resolve_option_value(
 /// the exact pre-existing Phase 1a/1b behavior. A `listconfigs` outage at
 /// init must never block plugin startup or take `revenue-r-config` down.
 pub async fn fetch_python_option_values(socket_path: &Path) -> HashMap<String, options::Value> {
-    match call_listconfigs(socket_path, LISTCONFIGS_TIMEOUT_SECONDS).await {
-        Ok(body) => parse_listconfigs_response(&body),
+    match try_fetch_python_option_values(socket_path).await {
+        Ok(map) => map,
         Err(e) => {
             eprintln!(
                 "revops: listconfigs unavailable ({e}); revenue-r-config falls back to \
@@ -240,6 +240,81 @@ pub async fn fetch_python_option_values(socket_path: &Path) -> HashMap<String, o
             );
             HashMap::new()
         }
+    }
+}
+
+/// Error-surfacing variant of [`fetch_python_option_values`], for callers
+/// that must distinguish "fetched an empty/updated map" from "fetch
+/// failed" (the [`PythonOptionCache`] refresh path keeps its previous
+/// snapshot on failure rather than blanking it).
+async fn try_fetch_python_option_values(
+    socket_path: &Path,
+) -> anyhow::Result<HashMap<String, options::Value>> {
+    let body = call_listconfigs(socket_path, LISTCONFIGS_TIMEOUT_SECONDS).await?;
+    Ok(parse_listconfigs_response(&body))
+}
+
+/// Shared, refreshable `listconfigs` snapshot (2026-07-22 audit M3).
+///
+/// Python re-reads `listconfigs` at the top of every boltz/planner cycle
+/// (`_refresh_dynamic_config`, cl-revenue-ops.py:6597-6685) and updates
+/// the live `config` object, so a `setconfig` on a `dynamic:true` option
+/// takes effect without a plugin restart — and an init-time outage heals
+/// on the next cycle. The one-shot init fetch this plugin previously
+/// cached gave neither: the fee controller would run a whole window on
+/// fixture defaults after a cold-start socket race, and dynamic options
+/// silently stopped being dynamic. This cache is shared by every
+/// consumer (`revenue-r-config` resolution and the fee scheduler's
+/// per-cycle cfg resolution) and refreshed before each dispatched fee
+/// cycle; a failed refresh KEEPS the last good snapshot.
+#[derive(Clone, Default)]
+pub struct PythonOptionCache {
+    inner: std::sync::Arc<std::sync::RwLock<HashMap<String, options::Value>>>,
+}
+
+impl PythonOptionCache {
+    /// An empty cache (no fetch attempted yet): resolution degrades to
+    /// (a) DB override > (c) fixture default until the first successful
+    /// refresh.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Clone of the current snapshot (short lock, no await inside).
+    pub fn snapshot(&self) -> HashMap<String, options::Value> {
+        self.inner.read().expect("option cache lock poisoned").clone()
+    }
+
+    /// Apply a fetch outcome: success replaces the snapshot wholesale
+    /// (lightningd's resolved values are authoritative for layer (b));
+    /// failure keeps the previous snapshot untouched. Returns whether the
+    /// fetch succeeded. Split from [`Self::refresh`] so the keep-on-
+    /// failure contract is unit-testable without a socket.
+    pub fn apply_fetch(
+        &self,
+        fetched: Result<HashMap<String, options::Value>, String>,
+    ) -> bool {
+        match fetched {
+            Ok(map) => {
+                *self.inner.write().expect("option cache lock poisoned") = map;
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "revops: listconfigs refresh failed ({e}); keeping the previous \
+                     Python option snapshot"
+                );
+                false
+            }
+        }
+    }
+
+    /// Re-fetch `listconfigs` and apply per [`Self::apply_fetch`].
+    pub async fn refresh(&self, socket_path: &Path) -> bool {
+        let fetched = try_fetch_python_option_values(socket_path)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        self.apply_fetch(fetched)
     }
 }
 

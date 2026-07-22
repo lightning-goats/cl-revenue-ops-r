@@ -696,7 +696,7 @@ fn spawn_surfaces_owner_thread_spawn_failure() {
             trigger: TriggerMode::default(),
         },
         None,
-        std::collections::HashMap::new(),
+        revops::config_resolve::PythonOptionCache::empty(),
         |_name, _body| Err(std::io::Error::other("no threads left")),
     );
     let err = match result {
@@ -957,7 +957,7 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
             },
         },
         None,
-        std::collections::HashMap::new(),
+        revops::config_resolve::PythonOptionCache::empty(),
         |name, body| {
             std::thread::Builder::new()
                 .name(name.to_string())
