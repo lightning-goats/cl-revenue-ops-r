@@ -3467,7 +3467,16 @@ pub fn run_fee_cycle(
         }
         let info = match channels.get(&row.channel_id) {
             Some(i) => i.clone(),
-            None => continue,
+            None => {
+                // py main:5106-5112 (2026-07-22 audit M4): the live tree
+                // drops the row FIRST — before the overlay/policy gates —
+                // with a dedicated tally and NO per-channel decision (the
+                // capture recorder invalidates any capture containing one,
+                // so replay never sees this path; only the tally and the
+                // decision summary are observable).
+                *skip_reasons.entry("missing_channel_info").or_insert(0) += 1;
+                continue;
+            }
         };
         let result = process_channel(
             state,
@@ -3551,11 +3560,7 @@ pub fn run_fee_cycle(
             .map(|(k, v)| (*k, *v))
             .collect();
         if !active_skips.is_empty() {
-            let dominant_reason = active_skips
-                .iter()
-                .max_by_key(|(_, v)| *v)
-                .map(|(k, _)| *k)
-                .unwrap_or("fee_unchanged");
+            let dominant_reason = dominant_skip_reason(&skip_reasons);
             let suppressed = matches!(
                 dominant_reason,
                 "policy_passive"
@@ -3566,6 +3571,7 @@ pub fn run_fee_cycle(
                     | "waiting_forwards"
                     | "gossip_hysteresis"
                     | "idempotent"
+                    | "missing_channel_info"
                     | "error"
             );
             state.set_summary(
@@ -3597,6 +3603,47 @@ pub fn run_fee_cycle(
     }
 
     Ok(decisions)
+}
+
+/// The `skip_reasons` dict's DECLARATION order (py main:4842-4855). The
+/// dominant reason is Python's `max(active_skips.items(), key=count)`,
+/// which returns the FIRST maximal key in dict insertion order — this
+/// order, since the dict is pre-seeded with every key at zero (2026-07-22
+/// audit F3: a BTreeMap + `max_by_key`, which keeps the LAST maximum,
+/// picked the wrong reason on ties — e.g. sleeping=3/waiting_time=3
+/// reported `waiting_time` where Python reports `sleeping`).
+const SKIP_REASON_ORDER: [&str; 12] = [
+    "policy_passive",
+    "policy_static",
+    "temporary_overlay",
+    "sleeping",
+    "waiting_time",
+    "waiting_forwards",
+    "alpha_guard",
+    "fee_unchanged",
+    "gossip_hysteresis",
+    "idempotent",
+    "missing_channel_info",
+    "error",
+];
+
+/// First-maximal skip reason in Python's dict insertion order (see
+/// [`SKIP_REASON_ORDER`]). Callers guarantee at least one nonzero tally.
+fn dominant_skip_reason(skip_reasons: &BTreeMap<&'static str, i64>) -> &'static str {
+    debug_assert!(
+        skip_reasons.keys().all(|k| SKIP_REASON_ORDER.contains(k)),
+        "tallied skip reason missing from SKIP_REASON_ORDER: {skip_reasons:?}"
+    );
+    let mut dominant = "fee_unchanged";
+    let mut best = 0i64;
+    for key in SKIP_REASON_ORDER {
+        let count = skip_reasons.get(key).copied().unwrap_or(0);
+        if count > best {
+            best = count;
+            dominant = key;
+        }
+    }
+    dominant
 }
 
 /// Journal reason_code for scheduler skips (`skip_*` wire values from
@@ -3803,5 +3850,23 @@ mod tests {
         // cost_ppm would be 100_000_000 uncapped; min(5000, ..) applies.
         let history = vec![sample(0, 100, 1)];
         assert_eq!(channel_rebalance_cost_ppm("balanced", &history, 0), 5000);
+    }
+
+    /// F3 (2026-07-22 audit): Python's `max()` keeps the FIRST maximal
+    /// key in `skip_reasons` dict insertion order — a count tie between
+    /// `sleeping` and `waiting_time` reports `sleeping`.
+    #[test]
+    fn dominant_skip_reason_first_max_in_python_dict_order() {
+        let tied: std::collections::BTreeMap<&'static str, i64> =
+            [("sleeping", 3), ("waiting_time", 3)].into_iter().collect();
+        assert_eq!(dominant_skip_reason(&tied), "sleeping");
+
+        let clear: std::collections::BTreeMap<&'static str, i64> =
+            [("sleeping", 3), ("waiting_time", 5)].into_iter().collect();
+        assert_eq!(dominant_skip_reason(&clear), "waiting_time");
+
+        let late_key: std::collections::BTreeMap<&'static str, i64> =
+            [("missing_channel_info", 2), ("error", 2)].into_iter().collect();
+        assert_eq!(dominant_skip_reason(&late_key), "missing_channel_info");
     }
 }

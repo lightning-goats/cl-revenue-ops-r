@@ -2215,3 +2215,49 @@ fn node_drain_bias_cap_scales_by_bias_knob_not_static_max() {
         "effective cap must be node_drain_bias_max (0.3) * pressure (1.0)"
     );
 }
+
+/// M4 (2026-07-22 audit, reground against the LIVE main tree): a channel
+/// present in flow-analysis `channel_states` but absent from
+/// `listpeerchannels` is dropped FIRST — before the overlay/policy gates —
+/// with a dedicated `missing_channel_info` skip tally and NO per-channel
+/// decision entry (Python's capture recorder marks the whole capture
+/// invalid for such a cycle, so replay never sees one; only the
+/// `skip_reasons` tally and the decision summary are observable —
+/// fee_controller.py main:5106-5112, 4853, 5017-5033). Rust previously
+/// dropped the row silently, so the summary read `hold`/`fee_unchanged`
+/// where Python reports `suppressed`/`missing_channel_info`.
+#[test]
+fn missing_channel_info_tallies_and_dominates_summary() {
+    let peer = "03".to_string() + &"02".repeat(32);
+    let evidence = SyntheticEvidence {
+        rows: vec![synthetic_row("900x1x0", &peer)],
+        infos: BTreeMap::new(), // channel absent from listpeerchannels
+        volumes: BTreeMap::new(),
+        forwards: BTreeMap::new(),
+        passive_peer: String::new(),
+        node_channels: Vec::new(),
+    };
+    let cfg = base_cfg();
+    let mut state = ControllerState::default();
+    let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = FixedDecisionClock::new(1_752_400_000);
+    let decisions = {
+        let mut deps = CycleDeps {
+            evidence: &evidence,
+            cfg: &cfg,
+            rng: &mut rng,
+            clock: &mut clock,
+            authorizer: None,
+            executor: &PURE_EXECUTOR,
+            journal: None,
+            state_sink: None,
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
+        };
+        run_fee_cycle(&mut state, &mut deps).expect("fixed decision inputs")
+    };
+    assert!(decisions.is_empty(), "no per-channel decision for the drop");
+    let summary = &state.last_decision_summary;
+    assert_eq!(summary.reason, "missing_channel_info");
+    assert_eq!(summary.action, "suppressed");
+    assert!(summary.safety_block);
+}
