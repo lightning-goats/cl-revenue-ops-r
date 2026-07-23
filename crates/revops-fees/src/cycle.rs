@@ -1019,7 +1019,7 @@ pub fn process_channel(
             chain_costs,
             policy: policy.as_ref(),
             forward_count_hint,
-            forward_count_hint_since: pre_last_update,
+            pre_last_update,
             node_drain_bias_effective_cap,
             node_receivable_ratio,
             node_drain_pressure,
@@ -1379,7 +1379,21 @@ pub struct AdjustCtx<'a> {
     pub chain_costs: Option<&'a ChainCosts>,
     pub policy: Option<&'a PeerPolicy>,
     pub forward_count_hint: Option<i64>,
-    pub forward_count_hint_since: i64,
+    /// The T8b PRE-DECISION epoch (`skip_gate_prev` when cached, else the
+    /// hydrated `cycle.last_update` — `process_channel` resolves this).
+    /// The observation-window gate, observation cursor, and hours-elapsed
+    /// all consume THIS epoch, not the freshly rehydrated
+    /// `cycle.last_update`: in shadow RehydratePerCycle mode the hydrated
+    /// value is Python's POST-decision flush (stamped for every evaluated
+    /// channel every cycle, so always ~seconds old when the
+    /// flush-triggered cycle runs), while Python's own gate (py
+    /// 5713-5804) reads its in-memory PRE-decision value. Consuming the
+    /// fresh value starved the whole live decision surface — 75% of
+    /// shadow rows held at `waiting_window` (2026-07-23 runway gate). In
+    /// replay this equals the hydrated value by construction
+    /// (`replay.rs` seeds `skip_gate_prev` from the captured pre-state),
+    /// and under SeedOnce lifecycle the two coincide as well.
+    pub pre_last_update: i64,
     pub node_drain_bias_effective_cap: Option<f64>,
     pub node_receivable_ratio: Option<f64>,
     pub node_drain_pressure: Option<f64>,
@@ -1592,7 +1606,11 @@ pub fn adjust_channel_fee(
     // =====================================================================
     // Observation window (py 5713-5804).
     // =====================================================================
-    let mut observation_cursor = cycle.last_update;
+    // Every epoch-derived read below consumes the PRE-DECISION epoch
+    // (see `AdjustCtx::pre_last_update`), matching Python's in-memory
+    // pre-decision `cycle.last_update` at py 5713-5804.
+    let epoch_last_update = ctx.pre_last_update;
+    let mut observation_cursor = epoch_last_update;
     if observation_cursor <= 0 {
         let interval = if cfg.fee_interval != 0 {
             cfg.fee_interval
@@ -1603,23 +1621,23 @@ pub fn adjust_channel_fee(
     }
     let volume_since_sats = evidence.volume_since(channel_id, observation_cursor)?;
 
-    let mut hours_elapsed = if cycle.last_update > 0 {
-        (now - cycle.last_update) as f64 / 3600.0
+    let mut hours_elapsed = if epoch_last_update > 0 {
+        (now - epoch_last_update) as f64 / 3600.0
     } else {
         0.0
     };
 
-    let forward_count = if ctx.forward_count_hint.is_some()
-        && ctx.forward_count_hint_since == cycle.last_update
-        && cycle.last_update > 0
-    {
+    // The hint was computed by `process_channel` since this same
+    // pre-decision epoch, so it is valid whenever present and the epoch
+    // is a real timestamp.
+    let forward_count = if ctx.forward_count_hint.is_some() && epoch_last_update > 0 {
         ctx.forward_count_hint.unwrap_or(0)
     } else {
         evidence.forward_count_since(channel_id, observation_cursor)?
     };
     cycle.forward_count_since_update = forward_count;
 
-    if cycle.last_update > 0 {
+    if epoch_last_update > 0 {
         let time_ok = hours_elapsed >= profile.min_observation_hours;
         let forwards_ok = forward_count >= profile.min_forwards_for_signal;
         if ctx.force_reprice_reason.is_some() || time_ok || forwards_ok {

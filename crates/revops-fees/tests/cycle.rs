@@ -1064,6 +1064,11 @@ struct SyntheticEvidence {
     forwards: BTreeMap<String, i64>,
     passive_peer: String,
     node_channels: Vec<NodeChannel>,
+    /// Recorded `since` cursors for volume/forward evidence reads, so
+    /// tests can pin WHICH epoch the decision path consulted (the
+    /// 2026-07-23 gate-starvation fix: must be the T8b pre-decision
+    /// epoch, not the freshly rehydrated flush value).
+    since_log: std::cell::RefCell<Vec<(String, i64)>>,
 }
 
 impl SyntheticEvidence {
@@ -1079,10 +1084,16 @@ impl SyntheticEvidence {
     fn chain_costs(&self) -> Option<ChainCosts> {
         None
     }
-    fn volume_since(&self, channel_id: &str, _since: i64) -> i64 {
+    fn volume_since(&self, channel_id: &str, since: i64) -> i64 {
+        self.since_log
+            .borrow_mut()
+            .push(("volume".to_string(), since));
         self.volumes.get(channel_id).copied().unwrap_or(0)
     }
-    fn forward_count_since(&self, channel_id: &str, _since: i64) -> i64 {
+    fn forward_count_since(&self, channel_id: &str, since: i64) -> i64 {
+        self.since_log
+            .borrow_mut()
+            .push(("forwards".to_string(), since));
         self.forwards.get(channel_id).copied().unwrap_or(0)
     }
     fn exploration_flag(&self, _channel_id: &str) -> bool {
@@ -1725,6 +1736,7 @@ fn three_channel_synthetic_cycle_end_to_end() {
         forwards: BTreeMap::from([("100x1x0".to_string(), 8)]),
         passive_peer: peer_c.clone(),
         node_channels: Vec::new(),
+        since_log: Default::default(),
     };
 
     let mut state = ControllerState::new();
@@ -1899,13 +1911,11 @@ fn dts_summary_and_wake_helpers() {
 /// `last_update` in `cycle_states` -- i.e. exactly what `rehydrate` loads
 /// after Python's current-cycle flush -- and the given `skip_gate_prev`
 /// cache seeded. Returns the channel's `reason_code`.
-fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String {
-    let cid = "700x1x0";
-    let peer = "03".to_string() + &"07".repeat(32);
+fn skip_gate_evidence(cid: &str, peer: &str) -> SyntheticEvidence {
     let mut infos = BTreeMap::new();
-    infos.insert(cid.to_string(), synthetic_info(cid, &peer, 200));
-    let evidence = SyntheticEvidence {
-        rows: vec![synthetic_row(cid, &peer)],
+    infos.insert(cid.to_string(), synthetic_info(cid, peer, 200));
+    SyntheticEvidence {
+        rows: vec![synthetic_row(cid, peer)],
         infos,
         // No forwards: isolate the TIME gate (forwards_ok stays false, so
         // the outcome turns purely on pre_hours_elapsed).
@@ -1913,19 +1923,30 @@ fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
-    };
+        since_log: Default::default(),
+    }
+}
+
+/// Run one skip-gate cycle: `hydrated_last_update` is what `rehydrate`
+/// loaded (Python's just-written flush in shadow mode); `cached_prev` is
+/// Rust's own T8b pre-decision epoch. Returns the single journal decision.
+fn run_skip_gate_cycle(
+    evidence: &SyntheticEvidence,
+    now: i64,
+    hydrated_last_update: i64,
+    cached_prev: Option<SkipGateEpoch>,
+) -> FeeDecision {
+    let cid = &evidence.rows[0].channel_id;
 
     let mut state = ControllerState::new();
-    // Python's just-flushed row: last_update == now (the WRONG epoch for the
-    // gate). This is what `rehydrate` loads into `cycle_states`.
     let mut cyc = ChannelCycleState::default();
-    cyc.last_update = now;
+    cyc.last_update = hydrated_last_update;
     cyc.last_fee_ppm = 200;
     cyc.last_broadcast_fee_ppm = 200;
     cyc.last_revenue_rate = 5.0;
     state.cycle_states.insert(cid.to_string(), cyc);
     let mut fee = ChannelFeeState::default();
-    fee.last_update = now;
+    fee.last_update = hydrated_last_update;
     fee.last_fee_ppm = 200;
     fee.last_broadcast_fee_ppm = 200;
     fee.last_revenue_rate = 5.0;
@@ -1940,7 +1961,7 @@ fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String
     let mut clock = FixedDecisionClock::new(now);
     let decisions = {
         let mut deps = CycleDeps {
-            evidence: &evidence,
+            evidence,
             cfg: &cfg,
             rng: &mut rng,
             clock: &mut clock,
@@ -1953,7 +1974,15 @@ fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String
         run_fee_cycle(&mut state, &mut deps).expect("fixed decision inputs")
     };
     assert_eq!(decisions.len(), 1, "one decision for the one channel");
-    decisions[0].reason_code.clone()
+    decisions[0].clone()
+}
+
+fn run_skip_gate_channel(now: i64, cached_prev: Option<SkipGateEpoch>) -> String {
+    let peer = "03".to_string() + &"07".repeat(32);
+    let evidence = skip_gate_evidence("700x1x0", &peer);
+    // Python's just-flushed row: last_update == now (the WRONG epoch for
+    // the gate).
+    run_skip_gate_cycle(&evidence, now, now, cached_prev).reason_code
 }
 
 /// REPRODUCE: with the pre-decision epoch as fresh as the flush (what the
@@ -2009,6 +2038,7 @@ fn skip_gate_bootstrap_marks_channel_non_comparable() {
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
+        since_log: Default::default(),
     };
 
     let mut state = ControllerState::new();
@@ -2182,6 +2212,7 @@ fn node_drain_bias_cap_scales_by_bias_knob_not_static_max() {
             to_us_msat: 5_000_000_000,
             total_msat: 5_000_000_000,
         }],
+        since_log: Default::default(),
     };
     let mut cfg = base_cfg();
     cfg.node_drain_bias_enabled = true;
@@ -2236,6 +2267,7 @@ fn missing_channel_info_tallies_and_dominates_summary() {
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
+        since_log: Default::default(),
     };
     let cfg = base_cfg();
     let mut state = ControllerState::default();
@@ -2260,4 +2292,78 @@ fn missing_channel_info_tallies_and_dominates_summary() {
     assert_eq!(summary.reason, "missing_channel_info");
     assert_eq!(summary.action, "suppressed");
     assert!(summary.safety_block);
+}
+
+/// 2026-07-23 gate-starvation fix (runway "live decision-surface
+/// engagement gate"): the DECISION path's observation-window check must
+/// consume the T8b pre-decision epoch, not the freshly rehydrated
+/// `cycle.last_update`. Live-shadow scenario: Python flushed 2 min ago
+/// (hydrated last_update fresh — Python stamps it for every evaluated
+/// channel every cycle), while Rust's own cached pre-decision epoch is a
+/// full fee interval old. Python's gate (reading ITS pre-decision value,
+/// ~30 min old) proceeds to evaluate; before this fix Rust's gate read
+/// the fresh flush value and held the channel forever (disposition
+/// `waiting_window`, 75% of live rows), while the T8b classifier —
+/// correctly using the old epoch — mislabeled the hold `fee_unchanged`.
+#[test]
+fn decision_gate_uses_pre_decision_epoch_not_fresh_flush() {
+    let now = 1_752_400_000i64;
+    let peer = "03".to_string() + &"07".repeat(32);
+    let evidence = skip_gate_evidence("700x1x0", &peer);
+    let decision = run_skip_gate_cycle(
+        &evidence,
+        now,
+        now - 120, // Python flushed 2 min ago
+        Some(SkipGateEpoch {
+            last_update: now - 1800, // true pre-decision epoch: 30 min
+            is_sleeping: false,
+        }),
+    );
+    let disposition = decision
+        .trace
+        .get("disposition")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    assert_ne!(
+        disposition.as_deref(),
+        Some("waiting_window"),
+        "decision gate consumed the fresh post-flush epoch: fee engine starved \
+         (reason_code was {:?})",
+        decision.reason_code
+    );
+}
+
+/// Same scenario: the observation cursor for volume evidence must also be
+/// the pre-decision epoch — Python computes its revenue window since ITS
+/// pre-decision `cycle.last_update`, so a cursor at the fresh flush value
+/// shrinks every observation window to the flush→cycle latency.
+#[test]
+fn observation_cursor_uses_pre_decision_epoch() {
+    let now = 1_752_400_000i64;
+    let peer = "03".to_string() + &"07".repeat(32);
+    let evidence = skip_gate_evidence("700x1x0", &peer);
+    let _ = run_skip_gate_cycle(
+        &evidence,
+        now,
+        now - 120,
+        Some(SkipGateEpoch {
+            last_update: now - 1800,
+            is_sleeping: false,
+        }),
+    );
+    let log = evidence.since_log.borrow();
+    let volume_sinces: Vec<i64> = log
+        .iter()
+        .filter(|(kind, _)| kind == "volume")
+        .map(|(_, s)| *s)
+        .collect();
+    assert!(
+        !volume_sinces.is_empty(),
+        "expected the adjust path to read volume evidence"
+    );
+    assert!(
+        volume_sinces.iter().all(|s| *s == now - 1800),
+        "volume observation cursor must be the pre-decision epoch \
+         (now-1800), got {volume_sinces:?}"
+    );
 }
