@@ -404,7 +404,54 @@ Any of the following resets promotion and prevents cutover:
 - report tampering, non-atomic publication, or exhausted retention headroom;
 - a capture reaching its retention limit before it is safely frozen;
 - the `lightningd` user manager not being persistent while timers are expected
-  to enforce the runway.
+  to enforce the runway;
+- a gate-starved stateful-shadow window: the dry-run decision surface must be
+  live (see "Live decision-surface engagement gate" below) — a soak day whose
+  non-sleeping rows are majority `waiting_window`, or whose would-broadcast
+  count does not track Python's applied fee-change count, is red.
+
+### Live decision-surface engagement gate (added 2026-07-23)
+
+Shadow-data analysis of the 2026-07-22/23 window found the live dry-run
+journal had **never exercised the fee engine**: 1442 of ~1925 non-sleeping
+post-deploy rows (75%) carried trace `disposition: waiting_window`, the
+dry-run proposed 1 adjustment while Python applied 247, and every one of
+the sampling channel `958668x1046x0`'s 47 rows was gate-held. Strict replay
+being byte-exact is NOT evidence against this — replay runs on Python's
+captured pre-state; the live gate starvation is a shadow-mode input skew.
+
+Root cause (hydration-epoch skew, the same class T8b fixed for skip-reason
+classification but not for the decision path): `adjust_channel_fee`'s
+observation-window check (`crates/revops-fees/src/cycle.rs:1622`) and its
+`observation_cursor` for volume/forward reads consume the freshly
+rehydrated `cycle.last_update` — Python's POST-decision flush value,
+~50 s old when the flush-triggered Rust cycle runs, because Python's flush
+advances `last_update` for every evaluated channel each cycle. Python's own
+gate (py 5768-5782) reads its in-memory PRE-decision value (~one fee
+interval old). Result: shadow Rust perpetually waits on channels Python is
+actively evaluating, and the T8b classifier (correctly using the
+pre-decision epoch) then mislabels the hold as `fee_unchanged`. Under
+SeedOnce/authoritative lifecycle the two epochs coincide by construction,
+so cutover would not inherit the starvation — but it WOULD inherit an
+unmeasured fee engine: the soak would have validated the gate, not the
+decisions.
+
+Required fix before the stateful-shadow soak counts: extend the T8b
+pre-decision epoch to the decision gate and observation cursor (a
+decision-path fix — per "Candidate changes and bug fixes" this requires a
+fresh 72-hour clean soak).
+
+Gate measurement, per soak day, from the dry-run journal vs Python's
+`fee_changes`:
+
+- `waiting_window` share of non-sleeping rows below 20% (red above 50%,
+  yellow between);
+- Rust would-broadcast count within 0.5x–2.0x of Python's applied
+  fee-change count over the same window (RNG divergence keeps individual
+  decisions non-identical; the RATE must track);
+- the flapper-class check: any channel Python adjusted in ≥ 5 consecutive
+  cycles must show at least one non-`waiting_window` Rust evaluation in
+  the same span.
 
 ### Yellow gates
 
