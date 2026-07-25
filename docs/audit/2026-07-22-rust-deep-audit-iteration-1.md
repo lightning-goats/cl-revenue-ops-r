@@ -12,6 +12,21 @@
 > real gap was the missing tally/summary accounting, now fixed. Lesson:
 > verify oracle claims against the tree production actually runs.
 > Remaining lows are unfixed except F3 (tie-break, folded into `526300f`).
+>
+> **Low-batch 1 (2026-07-25, `44b536c`, read-side/observer only — no
+> soak impact, ships with the next candidate):** fixed #8
+> (boltz-structural-budget-sats classification), #11 (closure txid-as-scid
+> skip), #12-db (lifetime_aggregates atomic pruned read), #10b
+> (whitespace-padded numeric overrides). Still open, batched for the
+> stateful-shadow candidate (decision/state path): thompson NaN-fee panic,
+> resync_broadcast_fee overflow, econ ledger unchecked subtraction,
+> thompson serde asymmetries, Explanation::render float panic (pre-Phase-2b
+> blocker), fee_profile/market_fee_mode layer-(b) lowercasing, crossed
+> min/max override repair. Rebalance-crate lows (max_fee_sats clamp,
+> no_route classification decision) unwired/anytime. Analytics
+> TemporalProfile NaN guard is a Phase-3b wiring precondition. Risk-profile
+> bundle derivation for revenue-r-config reporting remains a substantive
+> open feature.
 
 First deep audit of the Rust codebase itself (all prior verification was
 parity-replay + shadow deployment). Six parallel audit passes, one per
