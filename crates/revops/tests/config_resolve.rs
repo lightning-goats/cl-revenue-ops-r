@@ -196,3 +196,39 @@ mod python_option_cache {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Audit low #10b (2026-07-22): Python's `int()`/`float()` accept
+// leading/trailing whitespace, so a whitespace-padded `config_overrides`
+// row is APPLIED by Python (`_apply_override`'s typed_value = int(raw))
+// but was silently discarded by the Rust validator (strict str::parse),
+// falling through to layer (b)/(c) — a divergent effective config.
+// ---------------------------------------------------------------------------
+
+mod whitespace_padded_overrides {
+    use revops::config_resolve::validate_override;
+
+    #[test]
+    fn padded_int_override_accepted_like_python_int() {
+        assert_eq!(
+            validate_override("daily_budget_sats", " 5000 "),
+            Some("5000".to_string()),
+            "Python int(' 5000 ') == 5000: the override applies"
+        );
+    }
+
+    #[test]
+    fn padded_float_override_accepted_like_python_float() {
+        assert_eq!(
+            validate_override("htlc_congestion_threshold", "\t0.5\n"),
+            Some("0.5".to_string()),
+            "Python float('\\t0.5\\n') == 0.5: the override applies"
+        );
+    }
+
+    #[test]
+    fn genuinely_unparseable_still_rejected() {
+        assert_eq!(validate_override("daily_budget_sats", " 5 000 "), None);
+        assert_eq!(validate_override("daily_budget_sats", ""), None);
+    }
+}

@@ -38,12 +38,14 @@ pub async fn config_override(handle: &DbHandle, key: &str) -> Result<Option<Stri
 
 /// Port of `Database.get_lifetime_stats` (modules/database.py:6018-6087).
 ///
-/// Deliberately EIGHT separate single-column queries, mirroring Python's
-/// own non-atomic composition (the Python method itself never wraps these
-/// in one transaction either) -- not a combined statement. See
-/// [`DbHandle::query_row`] for the contrasting case
-/// (`closed_channels_summary`) where Python's source genuinely is one
-/// atomic `SELECT`.
+/// Deliberately SEVEN separate statements, mirroring Python's own
+/// non-atomic composition (the Python method itself never wraps these in
+/// one transaction either) -- EXCEPT the two `lifetime_aggregates` pruned
+/// columns, which Python reads in one fetchone (database.py:6043-6048)
+/// and are therefore one combined statement here too (audit low #12: the
+/// split read could tear against the prune job's transaction). See
+/// [`DbHandle::query_row`] for the contrasting fully-atomic case
+/// (`closed_channels_summary`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifetimeStats {
     pub total_revenue_msat: i64,
@@ -60,16 +62,18 @@ pub struct LifetimeStats {
 pub async fn lifetime_stats(handle: &DbHandle, now: i64) -> Result<LifetimeStats> {
     let today_start = (now / 86400) * 86400;
 
-    let pruned_revenue_msat = handle
-        .query_i64(
-            "SELECT COALESCE((SELECT pruned_revenue_msat FROM lifetime_aggregates WHERE id = 1), 0)",
+    // ONE statement for both pruned columns, matching Python's single
+    // fetchone (database.py:6043-6048) — audit low #12: two separate
+    // round-trips could tear against the Python prune job's transaction
+    // (a pre-prune revenue paired with a post-prune count, a combination
+    // Python can never report). The other seven reads below legitimately
+    // stay separate: Python's own composition is non-atomic across THEM.
+    let (pruned_revenue_msat, pruned_forward_count) = handle
+        .query_row(
+            "SELECT COALESCE((SELECT pruned_revenue_msat FROM lifetime_aggregates WHERE id = 1), 0), \
+             COALESCE((SELECT pruned_forward_count FROM lifetime_aggregates WHERE id = 1), 0)",
             vec![],
-        )
-        .await?;
-    let pruned_forward_count = handle
-        .query_i64(
-            "SELECT COALESCE((SELECT pruned_forward_count FROM lifetime_aggregates WHERE id = 1), 0)",
-            vec![],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .await?;
     // Current revenue from forwards table (msat) -- unconditional sum, no

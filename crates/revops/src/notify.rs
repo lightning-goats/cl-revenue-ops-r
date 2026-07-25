@@ -40,6 +40,20 @@ pub(crate) fn normalize_scid(scid: &str) -> String {
     scid.replace(':', "x")
 }
 
+/// True iff a normalized value has CLN short-channel-id shape
+/// (`block x tx x output`, three non-empty decimal segments) — used to
+/// reject funding-txid values arriving where an SCID belongs.
+fn is_scid_shaped(normalized: &str) -> bool {
+    let mut segments = 0;
+    for segment in normalized.split('x') {
+        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        segments += 1;
+    }
+    segments == 3
+}
+
 pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -239,6 +253,20 @@ async fn try_on_channel_state_changed(
     let Some(raw_scid) = raw_scid else {
         return Ok(());
     };
+    // Audit low #11: only record SCID-shaped values. A closure event
+    // without `short_channel_id` carries the hex funding txid in
+    // `channel_id`; Python resolves that to a real SCID or skips
+    // accounting (`_resolve_event_channel_scid`,
+    // cl-revenue-ops.py:6988-7016). This observer has no resolution
+    // machinery, and a txid keyed as `scid` is permanently unjoinable —
+    // skip (loudly) instead.
+    if !is_scid_shaped(&normalize_scid(raw_scid)) {
+        eprintln!(
+            "revops: channel_state_changed ({new_state}) without a resolvable \
+             short_channel_id (got {raw_scid:?}); closure event not recorded"
+        );
+        return Ok(());
+    }
     let cause = inner
         .get("cause")
         .and_then(|v| v.as_str())
@@ -470,14 +498,45 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    /// Audit low #11 (2026-07-22): a closure notification carrying only the
+    /// hex funding `channel_id` (no `short_channel_id`) must be SKIPPED,
+    /// not stored — Python resolves the txid to a real SCID or skips
+    /// accounting (`_resolve_event_channel_scid`,
+    /// cl-revenue-ops.py:6988-7016); this narrower observer has no
+    /// resolution machinery, so a txid keyed as `scid` would be a
+    /// permanently unjoinable row.
     #[tokio::test]
-    async fn on_channel_state_changed_falls_back_to_channel_id() {
+    async fn on_channel_state_changed_skips_unresolvable_channel_id() {
         let dir = tempfile::tempdir().unwrap();
         let handle = revops_db::owner::spawn_read_write(&dir.path().join("obs.db"))
             .await
             .unwrap();
         let event = json!({
-            "channel_id": "deadbeef",
+            "channel_id": "ab".repeat(32),
+            "new_state": "CLOSED",
+            "cause": "local",
+        });
+        on_channel_state_changed(&handle, &event).await;
+        let conn = rusqlite::Connection::open(dir.path().join("obs.db")).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channel_closure_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "funding-txid fallback must not be stored as scid");
+    }
+
+    /// The `channel_id` fallback still records when the value IS
+    /// SCID-shaped (colon or x separated) — only unresolvable hex ids are
+    /// dropped.
+    #[tokio::test]
+    async fn on_channel_state_changed_accepts_scid_shaped_channel_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = revops_db::owner::spawn_read_write(&dir.path().join("obs.db"))
+            .await
+            .unwrap();
+        let event = json!({
+            "channel_id": "931308:1256:1",
             "new_state": "CLOSED",
             "cause": "local",
         });
@@ -486,6 +545,6 @@ mod tests {
         let scid: String = conn
             .query_row("SELECT scid FROM channel_closure_events", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(scid, "deadbeef");
+        assert_eq!(scid, "931308x1256x1");
     }
 }

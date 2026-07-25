@@ -102,3 +102,27 @@ fn option_value_to_json_converts_scalars() {
     );
     assert!(option_value_to_json(None).is_null());
 }
+
+/// Audit low #8 (2026-07-22): the four FIELD_NAME_OVERRIDES suffixes must
+/// classify via their REAL Python field name, not the naive underscored
+/// suffix. `boltz-structural-budget-sats` maps to
+/// `boltz_structural_budget_sats_per_day`, which IS in PUBLIC_RUNTIME_KEYS
+/// (modules/config.py:66) — the naive `boltz_structural_budget_sats`
+/// lookup missed and reported a public operator control as "internal".
+/// (The other three overridden fields are internal either way, so only
+/// this one could misreport — but pin all four through the same path.)
+#[test]
+fn overridden_suffixes_classify_via_real_field_name() {
+    let v = build_config_response(
+        "boltz-structural-budget-sats",
+        true,
+        Some(&options::Value::Integer(1000)),
+        Some(FieldType::Int),
+        0,
+    );
+    assert_eq!(v["classification"], "public");
+    for suffix in ["vegas-reflex", "vegas-decay", "planner-max-fee-rate"] {
+        let v = build_config_response(suffix, true, None, None, 0);
+        assert_eq!(v["classification"], "internal", "suffix={suffix}");
+    }
+}

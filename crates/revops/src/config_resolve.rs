@@ -165,22 +165,30 @@ pub fn validate_override(field: &str, raw: &str) -> Option<String> {
     let field_type = config_types::field_type_for(field).unwrap_or(FieldType::String);
     match field_type {
         FieldType::Bool => Some(raw.to_string()),
+        // Numeric rows: trim before parsing AND return the trimmed text —
+        // Python's `int()`/`float()` accept surrounding whitespace
+        // (audit low #10b: a padded row is applied by `_apply_override`,
+        // so discarding it here silently diverged the effective config),
+        // and the downstream `convert_value` parse is strict, so the
+        // padding must not survive into the resolved value either.
         FieldType::Int => {
-            let parsed: i64 = raw.parse().ok()?;
+            let trimmed = raw.trim();
+            let parsed: i64 = trimmed.parse().ok()?;
             if !in_range(field, parsed as f64) {
                 return None;
             }
-            Some(raw.to_string())
+            Some(trimmed.to_string())
         }
         FieldType::Float => {
-            let parsed: f64 = raw.parse().ok()?;
+            let trimmed = raw.trim();
+            let parsed: f64 = trimmed.parse().ok()?;
             if !parsed.is_finite() {
                 return None;
             }
             if !in_range(field, parsed) {
                 return None;
             }
-            Some(raw.to_string())
+            Some(trimmed.to_string())
         }
         FieldType::String => match config_types::field_enum(field) {
             Some(valid) => {
