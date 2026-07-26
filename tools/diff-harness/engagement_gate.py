@@ -548,6 +548,51 @@ def self_test():
         assert results["excluded_non_comparable"] == 1
         assert results["starvation"]["share"] == 0.0
 
+        # NULL disposition (rust_fee_shadow_outcomes.disposition IS
+        # nullable) must map identically to the JSONL missing-disposition
+        # shape (ambiguity ruling: no sentinel invented -- disposition()
+        # returns None for both a trace that omits the key entirely and a
+        # sqlite row whose disposition column is NULL). First, exercise it
+        # through a full scenario on both sources via the shared
+        # _outcome_row/_build_observer_db helpers, mixed with a
+        # sleeping_hold row and a real broadcast so the None-disposition
+        # row's categorization (non_sleeping, non-waiting) is asserted,
+        # not just "doesn't crash".
+        null_dispo_specs = [
+            dict(cycle=cycle_stamps[0], channel="100x1x0", dispo=None),
+            dict(cycle=cycle_stamps[0], channel="200x1x0", dispo="sleeping_hold"),
+            dict(cycle=cycle_stamps[0], channel="300x1x0", dispo="broadcast",
+                would_broadcast=True, algorithm_values={"k": 1}),
+        ]
+        results = _assert_sources_agree(
+            null_dispo_specs, _py_changes("300x1x0", [cycle_stamps[0]]),
+            cycle_stamps[0], None, tmp_dir, "null_disposition")
+        # None is neither "sleeping_hold" nor "waiting_window": it counts
+        # toward non_sleeping but not toward waiting (same rule a JSONL
+        # trace with an absent/None disposition follows).
+        assert results["starvation"]["non_sleeping"] == 2, results
+        assert results["starvation"]["waiting"] == 0, results
+
+        # Second, lock the "identical to the JSONL missing-disposition
+        # shape" wording literally: disposition() must return None for
+        # BOTH a hand-built trace that omits the "disposition" key
+        # entirely (what a real journal line with no disposition field at
+        # all looks like -- _row() always sets the key, even to None, so
+        # this shape can only be constructed by hand) and a sqlite row
+        # mapped through fetch_sqlite_rows() whose disposition column is
+        # NULL.
+        missing_key_decision = {"channel_id": "100x1x0",
+                                "cycle_id": "fee-dryrun-0",
+                                "would_broadcast": False,
+                                "algorithm_values": None, "trace": {}}
+        null_db_path = _build_observer_db(
+            os.path.join(tmp_dir, "null_dispo_single.db"),
+            [_outcome_row(0, "100x1x0", dispo=None)])
+        sqlite_decision = fetch_sqlite_rows(null_db_path, 0, None)[0]
+        assert disposition(missing_key_decision) is None
+        assert disposition(sqlite_decision) is None
+        assert disposition(missing_key_decision) == disposition(sqlite_decision)
+
         # `--source` must reject an unknown value rather than silently
         # falling back to the journal (or any other source).
         try:
@@ -585,6 +630,24 @@ def self_test():
             raised = exc
         assert raised is not None and isinstance(raised, MAIN_CAUGHT_EXCEPTIONS), \
             f"missing table must raise a caught exception, got {raised!r}"
+
+        # A file that EXISTS at the path but is not a sqlite database at
+        # all (corrupt/truncated/garbage bytes -- e.g. a partial rsync, a
+        # disk-full write, or a non-db file handed to --observer-db by
+        # mistake) must raise the same way: the transport/error exit path,
+        # never a silent empty-decisions green verdict.
+        corrupt_path = os.path.join(tmp_dir, "corrupt.db")
+        with open(corrupt_path, "wb") as fh:
+            fh.write(b"not a sqlite file at all, just garbage bytes 1234567890")
+        try:
+            fetch_sqlite_rows(corrupt_path, base, None)
+            raised = None
+        except Exception as exc:  # noqa: BLE001
+            raised = exc
+        assert raised is not None and isinstance(raised, MAIN_CAUGHT_EXCEPTIONS), \
+            f"corrupt observer-db must raise a caught exception, got {raised!r}"
+        assert isinstance(raised, sqlite3.Error), \
+            f"corrupt observer-db should raise a sqlite3.Error specifically, got {raised!r}"
 
         # --since excludes earlier cycles entirely.
         journal = [_row(**s) for s in nc_specs]
