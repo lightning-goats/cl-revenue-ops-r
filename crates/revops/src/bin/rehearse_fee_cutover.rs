@@ -111,6 +111,46 @@ const SCENARIOS: &[&str] = &[
 /// separate list on purpose: it is the honesty gate, not a formality.
 const IMPLEMENTED: &[&str] = SCENARIOS;
 
+/// The scenarios that actually send a batch, and so are the only ones whose
+/// outcome is decided by [`classify_transport_outcome`].
+const TRANSPORT_SCENARIOS: &[&str] = &["explicit_rejection", "ambiguous_result"];
+
+/// Decide the headline for a transport scenario from the EXACT
+/// [`BroadcastError`] variant the run produced, or refuse.
+///
+/// Split out of the transport arm so it can be driven directly with every
+/// variant, including the ones no scenario can produce on purpose.
+///
+/// Review round 1 (rust verifier) replaced a `(_, "ambiguous_result")` arm
+/// here: wildcarding the RESULT meant a socket that could not be reached at
+/// all — `CleanFailure`, zero bytes sent — was still headlined `ambiguous`. A
+/// harness that reports an outcome the run never reached is worse than no
+/// harness, and this is the artefact meant to be trustworthy cutover evidence.
+///
+/// The verifier's follow-up was that the replacement had no tripwire: the
+/// reproduction test pins the `SUN_LEN` input guard, which refuses before this
+/// is ever reached. Two things defend it now — the unit tests at the bottom of
+/// this file drive every variant through it directly, and the caller consumes
+/// its RETURN VALUE, so unlike a `Result<(), _>` check it cannot be deleted
+/// without the call site failing to compile.
+fn classify_transport_outcome(
+    result: &Result<revops::fee_execution::BatchReceipt, BroadcastError>,
+    transport: &str,
+) -> Result<(&'static str, &'static str), String> {
+    match (result, transport) {
+        (Err(BroadcastError::Rejected { .. }), "explicit_rejection") => {
+            Ok(("rejected", "Rejected"))
+        }
+        (Err(BroadcastError::Ambiguous { .. }), "ambiguous_result") => {
+            Ok(("ambiguous", "Ambiguous"))
+        }
+        (other, _) => Err(format!(
+            "{transport} did not produce its contracted BroadcastError variant; got {other:?}. \
+             Refusing rather than headlining an outcome this run never reached."
+        )),
+    }
+}
+
 const HELP: &str = "\
 rehearse_fee_cutover -- copied-state, fake-RPC fee-cutover rehearsal harness
 
@@ -130,6 +170,17 @@ OPTIONAL (each still refused if it looks live):
     --python-db <PATH>       Override the synthetic Python source database.
     --rust-db <PATH>         Override the synthetic Rust source database.
 
+FAULT INJECTION (transport scenarios only; refused elsewhere):
+    --inject-fault unbind-socket-before-broadcast
+                             Bind the fake socket, construct the broadcaster and
+                             authorize as usual, then REMOVE the socket file just
+                             before the batch is sent. Produces a real
+                             CleanFailure (zero bytes sent) from otherwise valid
+                             input, which is the only way to drive the transport
+                             arm's variant check with a result the scenario did
+                             not contract for. A correct harness must REFUSE such
+                             a run, never headline it as the scenario's outcome.
+
 OTHER:
     --list-scenarios         Print every contracted scenario, one per line.
     --help                   Print this text.
@@ -144,6 +195,49 @@ struct Run {
     socket_override: Option<PathBuf>,
     python_db_override: Option<PathBuf>,
     rust_db_override: Option<PathBuf>,
+    inject_fault: Option<TransportFault>,
+}
+
+/// A deliberately-induced transport failure, used to drive the transport arm's
+/// variant check with a result the scenario did not contract for.
+///
+/// This exists because of the task-29 verifier's non-blocking follow-up: the
+/// exact-variant match added in review round 1 had NO test that reddens when it
+/// is reverted to the original `(_, "ambiguous_result")` wildcard. The
+/// reproduction test pins the `SUN_LEN` input guard, which refuses BEFORE the
+/// match is ever reached, so nothing exercised the match itself.
+///
+/// The scenarios' own sockets always answer the way their scenario contracts
+/// for, so there is no combination of the existing flags that reaches the arm
+/// with a non-contracted result. Hence an explicit lever rather than a clever
+/// one: it is named, documented, refused outside the transport scenarios, and
+/// recorded in the evidence, so a run that used it can never be mistaken for a
+/// clean rehearsal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportFault {
+    /// Remove the bound socket file immediately before `broadcast_batch`, so
+    /// the connect itself fails and zero bytes reach the fake node.
+    UnbindSocketBeforeBroadcast,
+}
+
+impl TransportFault {
+    const UNBIND: &'static str = "unbind-socket-before-broadcast";
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            Self::UNBIND => Ok(Self::UnbindSocketBeforeBroadcast),
+            other => Err(format!(
+                "unknown --inject-fault {other:?}; the only supported kind is {:?}",
+                Self::UNBIND
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UnbindSocketBeforeBroadcast => Self::UNBIND,
+        }
+    }
 }
 
 enum Mode {
@@ -202,13 +296,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Mode, String> {
     let mut socket_override: Option<PathBuf> = None;
     let mut python_db_override: Option<PathBuf> = None;
     let mut rust_db_override: Option<PathBuf> = None;
+    let mut inject_fault: Option<TransportFault> = None;
     let mut args = args.peekable();
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--help" | "-h" => return Ok(Mode::Help),
             "--list-scenarios" => return Ok(Mode::ListScenarios),
-            "--rehearsal-root" | "--scenario" | "--socket-path" | "--python-db" | "--rust-db" => {
+            "--rehearsal-root" | "--scenario" | "--socket-path" | "--python-db" | "--rust-db"
+            | "--inject-fault" => {
                 let value = args
                     .next()
                     .ok_or_else(|| format!("{flag} requires a value"))?;
@@ -218,6 +314,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Mode, String> {
                     "--socket-path" => socket_override = Some(PathBuf::from(value)),
                     "--python-db" => python_db_override = Some(PathBuf::from(value)),
                     "--rust-db" => rust_db_override = Some(PathBuf::from(value)),
+                    "--inject-fault" => inject_fault = Some(TransportFault::parse(&value)?),
                     _ => unreachable!("flag matched above"),
                 }
             }
@@ -226,6 +323,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Mode, String> {
     }
 
     Ok(Mode::Run(Run {
+        inject_fault,
         root: root.ok_or_else(|| {
             "--rehearsal-root is required: this harness has no default root, so it can never \
              silently resolve to a production location"
@@ -723,6 +821,20 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
     if !IMPLEMENTED.contains(&run.scenario.as_str()) {
         return Err(Refusal::Unimplemented(run.scenario.clone()));
     }
+    // Fault injection is meaningful only where a batch is actually sent.
+    // Refused (not ignored) elsewhere: silently accepting a flag that did
+    // nothing would let a run claim it exercised a failure it never reached.
+    if let Some(fault) = run.inject_fault {
+        if !TRANSPORT_SCENARIOS.contains(&run.scenario.as_str()) {
+            return Err(Refusal::Input(format!(
+                "--inject-fault {} applies only to the transport scenarios {:?}, not {:?}; \
+                 refusing rather than running a scenario the fault could not affect",
+                fault.as_str(),
+                TRANSPORT_SCENARIOS,
+                run.scenario
+            )));
+        }
+    }
 
     let iso = prepare_isolation(&run)?;
     let mut evidence = Map::new();
@@ -730,6 +842,10 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
     evidence.insert("scenario".into(), json!(run.scenario));
     evidence.insert("rehearsal_root".into(), json!(run.root.to_string_lossy()));
     evidence.insert("isolation".into(), isolation_json(&iso));
+    evidence.insert(
+        "injected_fault".into(),
+        json!(run.inject_fault.map(TransportFault::as_str)),
+    );
 
     match run.scenario.as_str() {
         "valid_activation" => {
@@ -942,35 +1058,25 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
             )
             .await
             .map_err(|r| Refusal::Input(format!("authorization unexpectedly denied: {r:?}")))?;
+            // Everything above is a normal, valid run. The fault lands here, at
+            // the last possible moment, so the batch fails in transport rather
+            // than being rejected as bad input somewhere earlier.
+            if run.inject_fault == Some(TransportFault::UnbindSocketBeforeBroadcast) {
+                fs::remove_file(&iso.socket_path).map_err(|e| {
+                    Refusal::Input(format!(
+                        "inject-fault could not unbind {}: {e}",
+                        iso.socket_path.display()
+                    ))
+                })?;
+            }
             let result = broadcaster.broadcast_batch(auth, &[one_request()]).await;
             let quarantined = store
                 .active_execution_quarantine()
                 .await
                 .map_err(|e| Refusal::Input(format!("read quarantine: {e}")))?
                 .is_some();
-            // Each headline is tied to an EXACT BroadcastError variant and the
-            // variant is recorded, so the claim is falsifiable.
-            //
-            // Review round 1 (rust verifier): this previously matched
-            // `(_, "ambiguous_result")`, wildcarding the RESULT — so a socket
-            // that could not be reached at all (CleanFailure, zero bytes sent)
-            // was still headlined `ambiguous`. A harness that reports an
-            // outcome the run never reached is worse than no harness.
-            let (outcome, matched_variant) = match (&result, transport) {
-                (Err(BroadcastError::Rejected { .. }), "explicit_rejection") => {
-                    ("rejected", "Rejected")
-                }
-                (Err(BroadcastError::Ambiguous { .. }), "ambiguous_result") => {
-                    ("ambiguous", "Ambiguous")
-                }
-                (other, _) => {
-                    return Err(Refusal::Input(format!(
-                        "{transport} did not produce its contracted BroadcastError variant; got \
-                         {other:?}. Refusing rather than headlining an outcome this run never \
-                         reached."
-                    )))
-                }
-            };
+            let (outcome, matched_variant) =
+                classify_transport_outcome(&result, transport).map_err(Refusal::Input)?;
             evidence.insert("outcome".into(), json!(outcome));
             evidence.insert("matched_variant".into(), json!(matched_variant));
             evidence.insert("quarantined".into(), json!(quarantined));
@@ -1137,5 +1243,127 @@ mod tests {
                 "{s} is implemented but not contracted"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Transport-arm variant match. The task-29 verifier reverted the exact
+    // match to `(_, "ambiguous_result")` and all 25 integration tests still
+    // passed, because the reproduction test pins the SUN_LEN input guard,
+    // which refuses before the match is reached. These drive the match
+    // itself; every one of them reddens on that revert.
+    // -----------------------------------------------------------------
+
+    fn err(v: BroadcastError) -> Result<revops::fee_execution::BatchReceipt, BroadcastError> {
+        Err(v)
+    }
+
+    fn parts(kind: &str) -> (String, String) {
+        ("req-1".to_string(), format!("rehearsal {kind}"))
+    }
+
+    #[test]
+    fn the_contracted_variant_is_the_only_one_that_earns_its_headline() {
+        let (request_id, detail) = parts("ambiguous");
+        assert_eq!(
+            classify_transport_outcome(
+                &err(BroadcastError::Ambiguous { request_id, detail }),
+                "ambiguous_result"
+            ),
+            Ok(("ambiguous", "Ambiguous"))
+        );
+        let (request_id, detail) = parts("rejected");
+        assert_eq!(
+            classify_transport_outcome(
+                &err(BroadcastError::Rejected { request_id, detail }),
+                "explicit_rejection"
+            ),
+            Ok(("rejected", "Rejected"))
+        );
+    }
+
+    /// THE tripwire. `CleanFailure` means the socket was never reached and
+    /// zero bytes were sent. Under the original wildcard this was headlined
+    /// `ambiguous` — a rehearsed outcome the run never reached. Reverting
+    /// `(Err(BroadcastError::Ambiguous { .. }), "ambiguous_result")` to
+    /// `(_, "ambiguous_result")` makes this assertion fail.
+    #[test]
+    fn a_clean_failure_is_never_headlined_as_an_ambiguous_outcome() {
+        let (request_id, detail) = parts("connect failed");
+        let refusal = classify_transport_outcome(
+            &err(BroadcastError::CleanFailure { request_id, detail }),
+            "ambiguous_result",
+        )
+        .expect_err("a CleanFailure must be refused, not headlined as ambiguous");
+        assert!(refusal.contains("CleanFailure"), "{refusal}");
+        assert!(
+            refusal.contains("never reached"),
+            "the refusal must say why: {refusal}"
+        );
+    }
+
+    /// Every other variant, including the ones that mean "nothing was sent"
+    /// and the ones that belong to the SIBLING scenario. A wildcard on
+    /// either arm reddens here.
+    #[test]
+    fn no_other_variant_can_earn_either_headline() {
+        let (request_id, dt) = parts("x");
+        let variants = [
+            BroadcastError::Quarantined,
+            BroadcastError::Poisoned,
+            BroadcastError::Persistence("store down".into()),
+            BroadcastError::CleanFailure {
+                request_id: request_id.clone(),
+                detail: dt.clone(),
+            },
+            BroadcastError::Rejected {
+                request_id: request_id.clone(),
+                detail: dt.clone(),
+            },
+            BroadcastError::Ambiguous {
+                request_id,
+                detail: dt,
+            },
+        ];
+        for variant in variants {
+            for transport in TRANSPORT_SCENARIOS {
+                let contracted = matches!(
+                    (&variant, *transport),
+                    (BroadcastError::Rejected { .. }, "explicit_rejection")
+                        | (BroadcastError::Ambiguous { .. }, "ambiguous_result")
+                );
+                let got = classify_transport_outcome(&err(variant.clone()), transport);
+                assert_eq!(
+                    got.is_ok(),
+                    contracted,
+                    "{transport} vs {variant:?}: only the contracted variant may be accepted"
+                );
+            }
+        }
+    }
+
+    /// A batch that SUCCEEDED is not an outcome either scenario contracts
+    /// for, and must not be reported as one.
+    #[test]
+    fn a_successful_batch_is_refused_by_both_transport_scenarios() {
+        let ok: Result<revops::fee_execution::BatchReceipt, BroadcastError> =
+            Ok(revops::fee_execution::BatchReceipt {
+                outcomes: Vec::new(),
+            });
+        for transport in TRANSPORT_SCENARIOS {
+            assert!(
+                classify_transport_outcome(&ok, transport).is_err(),
+                "{transport} must refuse a successful batch"
+            );
+        }
+    }
+
+    #[test]
+    fn fault_injection_is_parsed_by_name_only() {
+        assert_eq!(
+            TransportFault::parse("unbind-socket-before-broadcast"),
+            Ok(TransportFault::UnbindSocketBeforeBroadcast)
+        );
+        assert!(TransportFault::parse("unbind").is_err());
+        assert!(TransportFault::parse("").is_err());
     }
 }

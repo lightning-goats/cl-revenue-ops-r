@@ -996,6 +996,34 @@ async fn broadcast_attempt_row_records_exactly_the_params_sent_on_the_wire() {
     );
 }
 
+/// I7a, second half — the honest limit of the test above, pinned rather
+/// than left implicit.
+///
+/// The task-40 verifier's audit recorded that 947b2b3's `params_json`
+/// fail-closed branch is "unreachable by type, so the fix is untestable as
+/// written", and that is correct: `to_params` returns a `serde_json::Value`,
+/// and serializing a `Value` cannot fail. So `serde_json::to_string(..)?` and
+/// the `unwrap_or_default()` it replaced are behaviourally IDENTICAL today.
+/// No runtime test can tell them apart, and the test above passes under both.
+///
+/// What can be defended is the premise. These pin the two signatures that
+/// make the branch unreachable. If either ever becomes fallible — a custom
+/// `Serialize`, a map with non-string keys, an arbitrary-precision number —
+/// this stops compiling, and that is the signal that the fail-closed branch
+/// has become live code needing a real test. The alternative was to record
+/// the branch as covered when nothing covers it, which is the exact failure
+/// class this branch has now produced six times.
+///
+/// Note also that `SetChannelRequest::to_params` reacts to a serialization
+/// failure by PANICKING (`.expect`), not by failing closed. That is a
+/// pre-existing choice, unchanged here, and it is the reason the pin is worth
+/// more than a runtime test would be: the first thing to break is the build,
+/// not a live cycle.
+const _PARAMS_SERIALIZATION_IS_INFALLIBLE_BY_TYPE: () = {
+    const _: fn(&PersistedFeeRequest) -> Value = PersistedFeeRequest::to_params;
+    const _: fn(&SetChannelRequest) -> Value = SetChannelRequest::to_params;
+};
+
 /// I7b: `authorize` read the CURRENT state generation via
 /// `load_latest_fee_state()`, which materialises every channel's state row
 /// through the same single-owner actor the cycle loop writes through, then

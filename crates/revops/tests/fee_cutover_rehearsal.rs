@@ -446,6 +446,133 @@ fn an_unreachable_socket_is_never_reported_as_a_rehearsed_ambiguous_outcome() {
     );
 }
 
+/// THE END-TO-END TRIPWIRE for the exact-variant transport match.
+///
+/// The task-29 verifier's non-blocking follow-up: reverting the arm to the
+/// original `(_, "ambiguous_result")` wildcard left all 25 tests green. The
+/// test above pins the `SUN_LEN` INPUT guard, which refuses before the match is
+/// ever reached — so nothing exercised the match itself.
+///
+/// This drives it directly, exactly as the verifier suggested: a legal short
+/// root, a really-bound fake socket, a real broadcaster and a real
+/// authorization — everything valid — and then the socket file is removed the
+/// instant before the batch is sent. The connect fails, zero bytes reach the
+/// fake node, and the real `BroadcastError::CleanFailure` arrives at the match
+/// with the input the scenario contracted for.
+///
+/// Under the wildcard this run headlines `outcome=ambiguous` with
+/// `mutation_calls=0` — a rehearsed ambiguous outcome for a batch that was
+/// never transmitted. Under the exact match it must refuse.
+#[test]
+fn a_transport_failure_is_refused_rather_than_headlined_as_the_scenario_outcome() {
+    let root = rehearsal_root("fault-unbind");
+    let out = run(&[
+        "--rehearsal-root",
+        root.to_str().expect("utf-8"),
+        "--scenario",
+        "ambiguous_result",
+        "--inject-fault",
+        "unbind-socket-before-broadcast",
+    ]);
+
+    if out.status.success() {
+        let value = one_json(&out);
+        panic!(
+            "a batch that never reached the socket must be REFUSED, not headlined as the \
+             scenario's rehearsed outcome; got outcome={:?} matched_variant={:?} \
+             mutation_calls={:?} quarantined={:?}",
+            value["outcome"],
+            value["matched_variant"],
+            value["mutation_calls"],
+            value["quarantined"]
+        );
+    }
+
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        text.to_lowercase().contains("refus"),
+        "the refusal must say so explicitly, got: {text}"
+    );
+    assert!(
+        text.contains("CleanFailure"),
+        "the refusal must name the variant that actually occurred so the operator can tell a \
+         transport fault from a rehearsed ambiguity, got: {text}"
+    );
+    assert!(
+        text.contains("never reached"),
+        "the refusal must say the outcome was never reached, got: {text}"
+    );
+}
+
+/// The lever itself is fail-closed: it may not be pointed at a scenario whose
+/// outcome it could not possibly affect, because a run that silently ignored it
+/// would look like a passing rehearsal of a fault that never fired.
+#[test]
+fn fault_injection_is_refused_outside_the_transport_scenarios() {
+    for scenario in ["valid_activation", "governor_denial", "ordered_rollback"] {
+        let root = rehearsal_root(&format!("fault-refused-{scenario}"));
+        let out = run(&[
+            "--rehearsal-root",
+            root.to_str().expect("utf-8"),
+            "--scenario",
+            scenario,
+            "--inject-fault",
+            "unbind-socket-before-broadcast",
+        ]);
+        assert!(
+            !out.status.success(),
+            "{scenario} must refuse a fault it cannot exercise"
+        );
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            text.contains("transport scenarios"),
+            "the refusal must explain the restriction, got: {text}"
+        );
+    }
+}
+
+/// An unknown fault kind is a bad input, never a silently-skipped one.
+#[test]
+fn an_unknown_fault_kind_is_refused() {
+    let root = rehearsal_root("fault-unknown");
+    let out = run(&[
+        "--rehearsal-root",
+        root.to_str().expect("utf-8"),
+        "--scenario",
+        "ambiguous_result",
+        "--inject-fault",
+        "make-it-work",
+    ]);
+    assert!(!out.status.success(), "an unknown fault kind must refuse");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown --inject-fault"),
+        "the refusal must name the flag"
+    );
+}
+
+/// The normal path is unchanged by the lever's existence: with no
+/// `--inject-fault`, the transport scenarios still rehearse their real outcome
+/// and record that no fault was injected.
+#[test]
+fn an_uninjected_transport_run_records_that_no_fault_was_used() {
+    for (case, scenario, outcome) in [
+        ("no-fault-amb", "ambiguous_result", "ambiguous"),
+        ("no-fault-rej", "explicit_rejection", "rejected"),
+    ] {
+        let value = rehearse(case, scenario);
+        assert_eq!(value["outcome"], outcome);
+        assert_eq!(
+            value["injected_fault"],
+            Value::Null,
+            "a clean rehearsal must record that no fault was injected"
+        );
+        assert_eq!(
+            value["mutation_calls"], 1,
+            "the real run must still reach the fake node"
+        );
+    }
+}
+
 /// The fail-fast guard must fire for EVERY scenario, not just the ones that
 /// happen to bind a socket — an oversized root is a bad input, not a per-
 /// scenario accident.

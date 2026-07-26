@@ -191,3 +191,45 @@ pub fn compute_forward_hydration_start(
     let overlap_start = last - 86400;
     Some(overlap_start.max(floor))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task-40 verifier finding (2026-07-26), remediated under task 30: the
+    /// `ensure!` in [`set_journal_mode_wal`] was DELETABLE with the whole
+    /// suite green. Every existing caller reaches it over a connection that
+    /// is already WAL or in-memory, so nothing exercised the refusal.
+    ///
+    /// An anonymous temporary database (`Connection::open("")`) is the case
+    /// that discriminates: SQLite answers `delete` and does NOT error, so the
+    /// mode silently degrades to a rollback journal unless the answer is
+    /// checked. That is the exact regime where the engagement gate's reader
+    /// blocks the fee-cycle writer.
+    #[test]
+    fn init_schema_refuses_a_connection_that_never_entered_wal() {
+        let conn = Connection::open("").expect("anonymous temp database");
+        let err = init_schema(&conn)
+            .expect_err("a connection stuck in rollback-journal mode must fail schema init");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("delete"),
+            "the failure must name the mode actually reached, got: {msg}"
+        );
+        assert!(
+            msg.contains("block the fee-cycle writer"),
+            "the failure must say why it matters, got: {msg}"
+        );
+    }
+
+    /// The `memory` exemption is deliberate, not an oversight: in-memory and
+    /// temp databases have no other mode, and the direct-connection test
+    /// doubles use them. Pinned so a later tightening is a decision rather
+    /// than an accident — the FILE-backed production open is stricter and
+    /// still requires exactly WAL (`owner::require_wal_mode`).
+    #[test]
+    fn an_in_memory_connection_is_accepted_because_memory_is_not_a_fallback() {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        init_schema(&conn).expect("an in-memory double must remain usable");
+    }
+}

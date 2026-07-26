@@ -735,6 +735,47 @@ fn observer_db_open_verifies_wal_actually_took_effect() {
     );
 }
 
+/// Task-40 verifier finding (2026-07-26), remediated under task 30: the
+/// `require_wal_mode(&mode, path)?` line in `open_observer_db` was DELETABLE
+/// with the entire 1442-test suite still green. Neither test above can catch
+/// that — `observer_db_open_verifies_wal_actually_took_effect` opens a normal
+/// tempdir file, which is WAL whether or not the answer is checked, and
+/// `observer_db_open_fails_loudly_when_wal_was_not_applied` calls the pure
+/// verifier directly and never reaches the call site. A guard no test defends
+/// is one a later commit removes silently, which is exactly how this branch
+/// acquired its other five false-clean defects.
+///
+/// This drives the CALL SITE. Note that the remediation as originally
+/// specified — a database file pre-set to `journal_mode=DELETE` — does NOT
+/// work: `PRAGMA journal_mode=WAL` simply converts such a file (verified
+/// against sqlite 3.45.1). The targets that genuinely answer something other
+/// than `wal` WITHOUT erroring are the two the `require_wal_mode` doc comment
+/// already names, and both are reachable by mis-setting `observer-db-path`:
+///
+/// * `:memory:` answers `memory`. This is the discriminating case for THIS
+///   guard: `notifications::init_schema` deliberately accepts `memory` (its
+///   test doubles are in-memory), so nothing downstream would catch it.
+/// * `""` — an anonymous temporary database — answers `delete`. Caught here
+///   first, and by `init_schema` as a second layer.
+#[test]
+fn open_observer_db_refuses_a_target_that_cannot_enter_wal() {
+    for (target, expected_mode) in [(":memory:", "memory"), ("", "delete")] {
+        let err = revops_db::owner::open_observer_db(std::path::Path::new(target)).expect_err(
+            "a target that cannot enter WAL must fail the open, never degrade to a rollback \
+             journal in silence",
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(expected_mode),
+            "the failure must name the mode actually reached ({expected_mode}), got: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("wal"),
+            "the failure must name WAL as the requirement, got: {msg}"
+        );
+    }
+}
+
 #[test]
 fn observer_db_open_fails_loudly_when_wal_was_not_applied() {
     // The pure verifier behind the open: any mode other than WAL is a hard

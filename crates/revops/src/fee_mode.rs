@@ -124,6 +124,32 @@ impl LiveMode {
     /// one-session-per-arm contract asserted in `fee_execution`'s module
     /// doc. Not reachable from any caller that existed when this was
     /// tightened; keep it crate-private.
+    ///
+    /// The seal itself is pinned below. The task-40 verifier found that
+    /// changing `pub(crate)` back to `pub` left the whole 1442-test suite
+    /// green — a visibility narrowing that no test defends is one a later
+    /// commit widens silently, and widening this one re-opens the
+    /// one-session-per-arm hole:
+    ///
+    /// ```compile_fail,E0624
+    /// // An external consumer must not be able to take the arm back OUT of a
+    /// // `LiveMode` -- that is what would let one cutover arm mint a second
+    /// // `LiveMode`, and so a second broadcaster.
+    /// fn re_mint(live: revops::fee_mode::LiveMode) -> revops::cutover_arm::LiveSessionArm {
+    ///     live.into_arm()
+    /// }
+    /// ```
+    ///
+    /// Reading `&LiveSessionArm` stays public and must keep compiling --
+    /// `arm()` is how the live path records WHICH arm authorized the session.
+    /// Pinned as the positive control, so the test above is known to fail for
+    /// the visibility reason rather than a typo:
+    ///
+    /// ```
+    /// fn inspect(live: &revops::fee_mode::LiveMode) -> &revops::cutover_arm::LiveSessionArm {
+    ///     live.arm()
+    /// }
+    /// ```
     pub(crate) fn into_arm(self) -> LiveSessionArm {
         self.arm
     }
