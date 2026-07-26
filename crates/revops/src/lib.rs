@@ -6,6 +6,7 @@
 
 pub mod config_resolve;
 pub mod config_types;
+pub mod cutover_arm;
 pub mod fee_config;
 pub mod fee_evidence;
 pub mod fee_governor;

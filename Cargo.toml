@@ -21,6 +21,11 @@ anyhow = "1"
 cln-rpc = "0.7"
 hex = "0.4"
 rusqlite = { version = "0.32", features = [] }
+# cutover-arm validation (Task 7): O_NOFOLLOW opens and RENAME_NOREPLACE
+# atomic consumption need real syscalls std::fs cannot express portably.
+# "std" pulls in std::os::fd::OwnedFd interop so the opened fd converts
+# straight into a std::fs::File; no unsafe code is written on our side.
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: serde_json's default f64 parser does not always round-trip
 # repr(float)-precision literals to exact bits (P5-T2 finding; e.g.

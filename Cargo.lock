@@ -598,6 +598,7 @@ dependencies = [
  "revops-fees",
  "revops-rpc",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
