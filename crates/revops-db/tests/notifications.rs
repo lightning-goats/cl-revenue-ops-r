@@ -5,9 +5,9 @@
 use revops_db::fee_runway::{
     active_quarantine, commit_fee_cycle, insert_quarantine, latest_runway_snapshot,
     load_latest_state, mutation_count, query_mempool_samples_since, record_mempool_sample,
-    record_runway_snapshot, record_trigger_event, FeeCycleCommit, FeeStateRow, FeeTriggerEventRow,
-    GovernorAuditRow, LedgerAuditRow, PreparedFeeActionRow, QuarantineEntry, RunwaySnapshotRow,
-    ShadowCycleOutcomeRow,
+    record_mempool_sample_pruned, record_runway_snapshot, record_trigger_event, FeeCycleCommit,
+    FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow, PreparedFeeActionRow,
+    QuarantineEntry, RunwaySnapshotRow, ShadowCycleOutcomeRow,
 };
 use revops_db::notifications::{
     compute_forward_hydration_start, init_schema, insert_channel_closure_event,
@@ -441,6 +441,28 @@ fn rust_fee_schema_mempool_samples_record_and_query() {
     assert_eq!(samples[0].sampled_at, 1_800_000_000);
     assert_eq!(samples[0].sat_per_vbyte, 12.5);
     assert_eq!(samples[1].sampled_at, 1_800_003_600);
+}
+
+#[test]
+fn rust_fee_schema_mempool_sample_pruned_is_transactional() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    record_mempool_sample(&conn, 1_799_990_000, 9.0).unwrap(); // stale, will be pruned
+    record_mempool_sample(&conn, 1_800_000_000, 12.5).unwrap(); // fresh, retained
+
+    // Insert one new sample AND prune everything before the 24h window,
+    // atomically -- Task 6 step 1's "old rows are pruned transactionally".
+    record_mempool_sample_pruned(&conn, 1_800_003_600, 15.0, 1_800_000_000).unwrap();
+
+    let samples = query_mempool_samples_since(&conn, 0).unwrap();
+    assert_eq!(
+        samples.len(),
+        2,
+        "the stale pre-window row must be gone, the retained + new rows must remain"
+    );
+    assert_eq!(samples[0].sampled_at, 1_800_000_000);
+    assert_eq!(samples[1].sampled_at, 1_800_003_600);
+    assert_eq!(samples[1].sat_per_vbyte, 15.0);
 }
 
 #[test]

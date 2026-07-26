@@ -17,11 +17,11 @@
 //!   `tests/fee_evidence.rs`.
 //! - **journal dir**: a tempdir subdirectory.
 
-use revops::fee_evidence::RpcPrefetch;
+use revops::fee_evidence::{RpcPrefetch, MEMPOOL_MA_WINDOW_SECONDS};
 use revops::fee_scheduler::{
     read_flush_marker, CycleMsg, CycleOutcome, CycleOwner, FeeDebugQuery, FlushWatcher,
     PollOutcome, PreparedCycle, SchedulerConfig, StateLifecycle, TriggerMode, WatchParams,
-    DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS,
+    DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS, TRIGGER_QUEUE_CAPACITY,
 };
 use revops::fee_state::STATE_JOURNAL_FILE_NAME;
 use revops_fees::cycle::{ChannelCycleState, ChannelFeeState, ChannelStateRow, FeeCfgSnapshot};
@@ -169,6 +169,17 @@ fn prepared(min_competitors: Value, with_peer_channel: bool) -> PreparedCycle {
             feerates: Some(json!({"perkb": {"opening": 3000}})),
         },
     }
+}
+
+/// [`prepared`] with Vegas Reflex disabled -- Task 6: `SeedOnce` cycles now
+/// fail-closed on `mempool_ma_24h` without a fresh Rust-owned sample (see
+/// `mod mempool_evidence` below), so tests whose PURPOSE is unrelated to
+/// mempool evidence (hydration/lifecycle plumbing) opt out of that gate
+/// the same way `seedonce_restart`'s own harness already does.
+fn prepared_no_vegas(min_competitors: Value, with_peer_channel: bool) -> PreparedCycle {
+    let mut p = prepared(min_competitors, with_peer_channel);
+    p.cfg.enable_vegas_reflex = false;
+    p
 }
 
 fn line_count(path: &Path) -> usize {
@@ -404,7 +415,7 @@ fn seed_once_hydrates_first_cycle_then_evolves_in_memory() {
     let mut owner = seedonce_restart::owner_with_test_store(&fx);
     let mut clock = || NOW;
 
-    let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+    let outcome = owner.run_cycle(prepared_no_vegas(json!(3), false), &mut clock);
     assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
     assert!(
         owner.state().fee_states.contains_key("chan_kept"),
@@ -412,7 +423,7 @@ fn seed_once_hydrates_first_cycle_then_evolves_in_memory() {
     );
 
     delete_fee_strategy_row(&fx.db_path, "chan_kept");
-    let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+    let outcome = owner.run_cycle(prepared_no_vegas(json!(3), false), &mut clock);
     assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
     assert!(
         owner.state().fee_states.contains_key("chan_kept"),
@@ -1087,6 +1098,34 @@ mod seedonce_restart {
         ) -> anyhow::Result<i64> {
             fee_runway::record_restart_marker(&self.conn(), &marker)
         }
+
+        fn record_mempool_sample_pruned(
+            &self,
+            sampled_at: i64,
+            sat_per_vbyte: f64,
+            retain_since: i64,
+        ) -> anyhow::Result<()> {
+            fee_runway::record_mempool_sample_pruned(
+                &self.conn(),
+                sampled_at,
+                sat_per_vbyte,
+                retain_since,
+            )
+        }
+
+        fn query_mempool_samples_since(
+            &self,
+            since: i64,
+        ) -> anyhow::Result<Vec<fee_runway::MempoolSampleRow>> {
+            fee_runway::query_mempool_samples_since(&self.conn(), since)
+        }
+
+        fn record_trigger_event(
+            &self,
+            event: fee_runway::FeeTriggerEventRow,
+        ) -> anyhow::Result<()> {
+            fee_runway::record_trigger_event(&self.conn(), &event)
+        }
     }
 
     const CHANNEL: &str = "700x1x0";
@@ -1496,5 +1535,329 @@ mod seedonce_restart {
         assert_eq!(fee_runway::load_latest_state(&conn).unwrap().generation, 0);
         assert!(fee_runway::latest_seed_event(&conn).unwrap().is_none());
         assert!(fee_runway::latest_restart_marker(&conn).unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Task 6 step 1/2: Rust-owned mempool recorder + evidence switch
+    // -----------------------------------------------------------------
+
+    fn mempool_sample_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM rust_mempool_fee_history", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn mempool_rehydrate_per_cycle_records_a_rust_sample_every_vegas_cycle() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        seed_fee_strategy_row(&fx.db_path, "chan_kept");
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        );
+        let mut clock = || NOW;
+        // `prepared()` uses `FeeCfgSnapshot::default()` (Vegas Reflex ON
+        // by default, py config.py:765) with `feerates` present -> a
+        // truthy `chain_costs` -- the exact gate `record_mempool_fee`'s
+        // Python call site uses.
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            mempool_sample_count(&conn),
+            1,
+            "Rust's own recorder must write ONE sample this cycle, same cadence as Python"
+        );
+    }
+
+    #[test]
+    fn mempool_no_sample_recorded_when_vegas_reflex_disabled() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        seed_fee_strategy_row(&fx.db_path, "chan_kept");
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        );
+        let mut clock = || NOW;
+        let outcome = owner.run_cycle(prepared_no_vegas(json!(3), false), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            mempool_sample_count(&conn),
+            0,
+            "no recorder write when Vegas Reflex is off, mirroring Python's own gate"
+        );
+    }
+
+    #[test]
+    fn mempool_old_samples_are_pruned_transactionally_across_cycles() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        seed_fee_strategy_row(&fx.db_path, "chan_kept");
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        let mut clock1 = || NOW;
+        owner.run_cycle(prepared(json!(3), false), &mut clock1);
+        // Second cycle, > 24h later: the first cycle's sample must be
+        // pruned away, leaving exactly the new one.
+        let far_later = NOW + MEMPOOL_MA_WINDOW_SECONDS * 2;
+        let mut clock2 = || far_later;
+        owner.run_cycle(prepared(json!(3), false), &mut clock2);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            mempool_sample_count(&conn),
+            1,
+            "the stale first-cycle sample must be pruned once it falls outside the 24h window"
+        );
+    }
+
+    #[test]
+    fn mempool_seedonce_denies_a_vegas_decision_without_fresh_rust_evidence() {
+        let fx = fixture();
+        let conn = Connection::open(&fx.db_path).expect("open for seeding");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, \
+             sats_out, capacity, updated_at, kalman_flow_ratio, kalman_velocity) \
+             VALUES ('100x1x0', ?1, 'balanced', 0.1, 0, 0, 2000000, ?2, 0.05, 0.01)",
+            rusqlite::params![peer_a(), NOW - 60],
+        )
+        .unwrap();
+        drop(conn);
+        let mut owner = owner_with_test_store(&fx);
+        let mut clock = || NOW;
+
+        // `prepared()`'s default cfg has Vegas Reflex ON and a truthy
+        // `chain_costs` -- SeedOnce has NO Rust-owned mempool sample yet,
+        // so the cycle must fail closed (Task 6: "missing/stale samples
+        // deny a decision that needs Vegas evidence"), never silently
+        // fabricate a `1.0` MA the way strict-replay's Python fallback
+        // would.
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert_eq!(outcome, CycleOutcome::SkippedDecisionInput, "{outcome:?}");
+    }
+
+    #[test]
+    fn mempool_seedonce_uses_fresh_rust_evidence_once_recorded() {
+        let fx = fixture();
+        let conn = Connection::open(&fx.db_path).expect("open for seeding");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, \
+             sats_out, capacity, updated_at, kalman_flow_ratio, kalman_velocity) \
+             VALUES ('100x1x0', ?1, 'balanced', 0.1, 0, 0, 2000000, ?2, 0.05, 0.01)",
+            rusqlite::params![peer_a(), NOW - 60],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store_path = fx.journal_dir.join("rust-owned.db");
+        std::fs::create_dir_all(&fx.journal_dir).unwrap();
+        let fail_commits = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open(&store_path, Arc::clone(&fail_commits));
+        // Seed ONE fresh Rust-owned sample directly (as if a prior cycle,
+        // or Rust's own recorder, had already written it).
+        {
+            let conn = store.conn();
+            fee_runway::record_mempool_sample_pruned(&conn, NOW - 10, 42.0, NOW - 90_000).unwrap();
+        }
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let mut clock = || NOW;
+
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert!(
+            matches!(outcome, CycleOutcome::Ran { .. }),
+            "a fresh Rust-owned sample must satisfy the Vegas evidence gate: {outcome:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 6 steps 3-4: trigger receipts through the full CycleOwner
+    // -----------------------------------------------------------------
+
+    fn trigger_events(conn: &Connection) -> Vec<(String, Option<String>, bool, Option<String>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT trigger_type, channel_id, coalesced, detail FROM rust_fee_trigger_events \
+                 ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    fn owner_with_any_store(fx: &Fixture, lifecycle: StateLifecycle) -> (CycleOwner, PathBuf) {
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        );
+        (owner, store_path)
+    }
+
+    #[test]
+    fn wake_all_trigger_receipt_is_persisted() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        owner.handle_wake_all(NOW);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "wake_all");
+        assert_eq!(events[0].1, None);
+        assert!(!events[0].2, "the FIRST occurrence must not be coalesced");
+    }
+
+    #[test]
+    fn repeated_wake_all_before_a_cycle_coalesces_the_receipt() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        owner.handle_wake_all(NOW);
+        owner.handle_wake_all(NOW + 1);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        assert_eq!(events.len(), 2);
+        assert!(!events[0].2);
+        assert!(
+            events[1].2,
+            "the SECOND occurrence must be recorded as coalesced"
+        );
+    }
+
+    #[test]
+    fn policy_changed_trigger_receipt_carries_the_peer_id_as_scope() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        let peer = peer_a();
+        owner.handle_policy_changed(&[], &peer, NOW);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "policy_changed");
+        assert_eq!(events[0].1.as_deref(), Some(peer.as_str()));
+    }
+
+    #[test]
+    fn vegas_spike_trigger_receipt_is_persisted() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        owner.handle_vegas_spike_check(NOW);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "vegas_spike");
+    }
+
+    #[test]
+    fn a_dropped_trigger_is_a_persisted_red_event() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+
+        // Saturate the bounded queue with DISTINCT failed-forward channel
+        // keys (never coalescing, never drained by a cycle) past its
+        // capacity.
+        for i in 0..(TRIGGER_QUEUE_CAPACITY + 1) {
+            owner.handle_failed_forward(&format!("chan-{i}"), NOW);
+        }
+        assert_eq!(owner.trigger_queue_dropped_total(), 1);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        let dropped: Vec<_> = events
+            .iter()
+            .filter(|(_, _, _, detail)| detail.as_deref().is_some_and(|d| d.contains("DROPPED")))
+            .collect();
+        assert_eq!(
+            dropped.len(),
+            1,
+            "exactly one occurrence must be recorded as a dropped/red event"
+        );
+    }
+
+    /// R8 amendment item 3: the `FixedInterval` trigger receipt's
+    /// `cycle_ts` matches the SAME cycle's `rust_fee_shadow_outcomes.
+    /// cycle_ts` -- the two tables join on that column.
+    #[test]
+    fn fixed_interval_receipt_shares_cycle_ts_with_shadow_outcomes() {
+        let mut harness = seedonce_harness_with_one_channel();
+        let outcome = harness.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = harness.store_conn();
+        let (trigger_type, cycle_id, cycle_ts): (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT trigger_type, cycle_id, cycle_ts FROM rust_fee_trigger_events \
+                 WHERE trigger_type = 'fixed_interval' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(trigger_type, "fixed_interval");
+        let cycle_id = cycle_id.expect("a Ran SeedOnce cycle must carry a cycle_id");
+        let cycle_ts = cycle_ts.expect("a Ran SeedOnce cycle must carry a cycle_ts");
+
+        let outcome_cycle_ts: i64 = conn
+            .query_row(
+                "SELECT cycle_ts FROM rust_fee_shadow_outcomes WHERE cycle_id = ?1 LIMIT 1",
+                [&cycle_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cycle_ts, outcome_cycle_ts,
+            "trigger receipt and shadow outcome must share the same cycle_ts key"
+        );
     }
 }

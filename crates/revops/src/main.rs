@@ -7,6 +7,7 @@ use cln_plugin::options::{
 };
 use cln_plugin::{Builder, Plugin};
 use revops::config_types;
+use revops::fee_evidence::MEMPOOL_MA_WINDOW_SECONDS;
 use revops::options_table::{self, OptDef};
 use revops::rpc_dashboard::{build_dashboard, parse_window_days};
 use revops::rpc_history::build_history;
@@ -549,8 +550,25 @@ async fn main() -> Result<()> {
                             .map(|snap| snap.generation);
                         let seed = handle.latest_fee_seed_event().await.ok().flatten();
                         let restart = handle.latest_fee_restart_marker().await.ok().flatten();
+                        // Task 6: Rust-owned mempool recorder freshness --
+                        // resolved live from the observer db, same as
+                        // every other `fee_runway` field on this path
+                        // (never Python state). Gives operators visibility
+                        // into whether the recorder is actually running
+                        // ahead of cutover (checklist item 9).
+                        let mempool_samples_24h = handle
+                            .query_mempool_samples_since(now_unix() - MEMPOOL_MA_WINDOW_SECONDS)
+                            .await
+                            .ok();
+                        let mempool = mempool_samples_24h.map(|rows| {
+                            serde_json::json!({
+                                "sample_count_24h": rows.len(),
+                                "latest_sampled_at": rows.last().map(|r| r.sampled_at),
+                            })
+                        });
                         Some(serde_json::json!({
                             "generation": generation,
+                            "mempool": mempool,
                             "seed": seed.map(|e| serde_json::json!({
                                 "outcome": e.outcome,
                                 "seeded_at": e.seeded_at,

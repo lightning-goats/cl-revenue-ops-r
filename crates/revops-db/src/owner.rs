@@ -46,6 +46,13 @@ enum Command {
         sat_per_vbyte: f64,
         reply: oneshot::Sender<Result<()>>,
     },
+    // -- Task 6: transactional insert+prune for Rust's own recorder --
+    RecordMempoolSamplePruned {
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
     QueryMempoolSamplesSince {
         since: i64,
         reply: oneshot::Sender<Result<Vec<MempoolSampleRow>>>,
@@ -229,6 +236,50 @@ impl ObserverHandle {
             .blocking_send(Command::RecordMempoolSample {
                 sampled_at,
                 sat_per_vbyte,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Record one mempool fee-rate sample AND prune everything strictly
+    /// before `retain_since`, atomically. See
+    /// [`fee_runway::record_mempool_sample_pruned`] for the transactional
+    /// contract (Task 6 step 1).
+    pub async fn record_mempool_sample_pruned(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordMempoolSamplePruned {
+                sampled_at,
+                sat_per_vbyte,
+                retain_since,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of
+    /// [`ObserverHandle::record_mempool_sample_pruned`].
+    pub fn blocking_record_mempool_sample_pruned(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RecordMempoolSamplePruned {
+                sampled_at,
+                sat_per_vbyte,
+                retain_since,
                 reply,
             })
             .context("observer actor gone (blocking)")?;
@@ -537,6 +588,20 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 } => {
                     let result =
                         fee_runway::record_mempool_sample(&conn, sampled_at, sat_per_vbyte);
+                    let _ = reply.send(result);
+                }
+                Command::RecordMempoolSamplePruned {
+                    sampled_at,
+                    sat_per_vbyte,
+                    retain_since,
+                    reply,
+                } => {
+                    let result = fee_runway::record_mempool_sample_pruned(
+                        &conn,
+                        sampled_at,
+                        sat_per_vbyte,
+                        retain_since,
+                    );
                     let _ = reply.send(result);
                 }
                 Command::QueryMempoolSamplesSince { since, reply } => {

@@ -223,6 +223,20 @@ async fn fee_cycle_transaction_mempool_trigger_and_quarantine_through_actor() {
         .unwrap();
     assert_eq!(samples.len(), 2);
 
+    // Task 6: the transactional insert+prune sibling, through the actor.
+    handle
+        .record_mempool_sample_pruned(1_800_010_000, 20.0, 1_800_003_600)
+        .await
+        .unwrap();
+    let pruned = handle.query_mempool_samples_since(0).await.unwrap();
+    assert_eq!(
+        pruned.len(),
+        2,
+        "the 1_800_000_000 sample must be pruned; the retained + new samples remain"
+    );
+    assert_eq!(pruned[0].sampled_at, 1_800_003_600);
+    assert_eq!(pruned[1].sampled_at, 1_800_010_000);
+
     handle
         .record_fee_trigger_event(FeeTriggerEventRow {
             trigger_type: "wake_all".to_string(),

@@ -152,12 +152,16 @@ use revops_fees::pyrand::PyRandom;
 
 use crate::config_resolve::PythonOptionCache;
 use crate::fee_config;
-use crate::fee_evidence::{build_evidence_snapshot, prefetch_rpc, RpcPrefetch};
+use crate::fee_evidence::{
+    build_evidence_snapshot, prefetch_rpc, EvidenceSnapshot, MempoolEvidenceSource, RpcPrefetch,
+    MEMPOOL_MA_WINDOW_SECONDS,
+};
 use crate::fee_governor::GovernorWiring;
 use crate::fee_state::{
     rehydrate, rehydrate_from_rows, seed_once_from_python, serialize_state_envelope,
     set_skip_gates_to_owned, HydrationSource, JournalStateSink, RunwayStateStore, SeedOutcome,
 };
+use crate::fee_triggers::{build_receipt, FeeTrigger, TriggerOutcome, TriggerQueue};
 
 /// T6's fixed tick phase offset from plugin start, kept as the
 /// [`TriggerMode::FixedInterval`] default for cutover. During the dry-run
@@ -174,6 +178,15 @@ pub const DEFAULT_FLUSH_POLL_SECS: u64 = 30;
 /// the flush transaction and Python's immediate cycle-tail writes
 /// (`_prune_stale_states`, decision-summary bookkeeping) go quiescent.
 pub const DEFAULT_FLUSH_SETTLE_SECS: u64 = 30;
+
+/// Bounded trigger-queue capacity (Task 6 step 4): sized generously above
+/// the five trigger KINDS coalesced by key -- in practice only a handful
+/// of distinct pending (kind, scope) entries exist at once (one
+/// `FixedInterval`/`WakeAll`/`VegasSpike` slot each, plus one per
+/// distinct channel/peer with a pending `FailedForward`/`PolicyChanged`).
+/// Saturating this many DISTINCT keys between cycles is itself loud
+/// evidence of a real backlog, not routine operation.
+pub const TRIGGER_QUEUE_CAPACITY: usize = 64;
 
 /// The binary's source-commit identity for provenance rows (seed events,
 /// cycle commits, restart markers). Release builds inject the real commit
@@ -462,6 +475,16 @@ pub enum CycleMsg {
     /// channel. Fire-and-forget (see module doc) -- the manual
     /// `revenue-r-fee-wake` RPC's trigger.
     WakeAll,
+    /// `record_failed_forward`'s scheduler-facing hook (py
+    /// fee_controller.py:8527-8608): a fee-relevant failed forward on
+    /// `channel_id`. Task 6: recording-only (see
+    /// `CycleOwner::handle_failed_forward`) -- constructed by nothing yet
+    /// (no `forward_event` hook subscription exists in this window),
+    /// same "handler is real, caller is future work" posture
+    /// `PolicyChanged` already carries.
+    FailedForward {
+        channel_id: String,
+    },
     /// A `revenue-r-fee-debug` query; the owner thread answers over the
     /// included reply channel without ever blocking on IO.
     Query(FeeDebugQuery, mpsc::Sender<serde_json::Value>),
@@ -534,6 +557,28 @@ pub enum CycleOutcome {
     PersistenceFailed,
 }
 
+/// Human-readable WHY for the `FixedInterval` trigger receipt (Task 6
+/// step 4: "shadow records WHY each trigger did or did not produce a
+/// cycle").
+fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
+    match outcome {
+        CycleOutcome::Ran { decisions } => format!("ran: {decisions} decision(s)"),
+        CycleOutcome::SkippedMinCompetitors => {
+            "skipped: neighbor_median_min_competitors unresolvable".to_string()
+        }
+        CycleOutcome::SkippedEvidence => "skipped: evidence snapshot failed".to_string(),
+        CycleOutcome::SkippedDecisionInput => {
+            "skipped: replayable decision input failed".to_string()
+        }
+        CycleOutcome::SkippedStateUnavailable => {
+            "skipped: SeedOnce state unavailable (fail-closed)".to_string()
+        }
+        CycleOutcome::PersistenceFailed => {
+            "ran but PersistenceFailed: atomic commit failed, generation not advanced".to_string()
+        }
+    }
+}
+
 /// The single owner of `ControllerState` + the ONE long-lived `PyRandom`.
 /// Lives on the dedicated cycle thread for the plugin's whole lifetime;
 /// tests drive it synchronously.
@@ -568,6 +613,11 @@ pub struct CycleOwner {
     journal: Option<Journal>,
     state_sink: Option<JournalStateSink>,
     governor: GovernorWiring,
+    /// Task 6: the bounded, coalescing trigger queue every out-of-cycle
+    /// wake (and the fixed-interval cycle-dispatch trigger itself) is
+    /// offered to before the owner thread acts -- see `fee_triggers.rs`'s
+    /// module doc.
+    trigger_queue: TriggerQueue,
     /// T7: the last cycle's resolved `fee_profile` name, consulted by the
     /// out-of-cycle wake handlers (`wake_all`/`vegas_spike_check`/
     /// `policy_changed`), none of which have a fresh `PreparedCycle` to
@@ -628,6 +678,7 @@ impl CycleOwner {
             journal,
             state_sink,
             governor: GovernorWiring::open(Some(&cfg.journal_dir)),
+            trigger_queue: TriggerQueue::new(TRIGGER_QUEUE_CAPACITY),
             last_profile: "active".to_string(),
         }
     }
@@ -674,12 +725,54 @@ impl CycleOwner {
         self.run_cycle_at(prepared, now, &mut decision_clock)
     }
 
+    /// `run_cycle`'s wrapper: offers the `FixedInterval` trigger (Task 6
+    /// step 4 -- this IS the drain point every pending wake-only trigger
+    /// waits for) BEFORE the cycle body, then persists the trigger's own
+    /// receipt afterward, carrying the cycle identity (R8 amendment item
+    /// 3's shared `cycle_ts`) when the cycle actually committed.
     fn run_cycle_at(
         &mut self,
         prepared: PreparedCycle,
         now: i64,
         decision_clock: &mut dyn DecisionClock,
     ) -> CycleOutcome {
+        let fixed_interval_outcome = self.trigger_queue.offer(FeeTrigger::FixedInterval, now);
+        let coalesced = matches!(fixed_interval_outcome, TriggerOutcome::Coalesced);
+        // Every wake-only trigger pending since the last cycle is now
+        // covered by this cycle's own evaluation -- free the queue
+        // regardless of what this cycle's outcome turns out to be (a
+        // skipped/failed cycle still means the NEXT cycle re-evaluates
+        // from current state, so there is nothing left to keep pending).
+        self.trigger_queue.drain_all();
+
+        let (outcome, cycle_id) = self.run_cycle_body(prepared, now, decision_clock);
+
+        let cycle = match (&outcome, &cycle_id) {
+            (CycleOutcome::Ran { .. }, Some(id)) => Some((id.as_str(), now)),
+            _ => None,
+        };
+        self.record_trigger_receipt(
+            &FeeTrigger::FixedInterval,
+            now,
+            coalesced,
+            cycle,
+            describe_cycle_outcome(&outcome),
+        );
+        outcome
+    }
+
+    /// The per-cycle sequence proper (see [`Self::run_cycle`]'s doc
+    /// comment for the numbered steps). Returns the outcome plus, ONLY on
+    /// a `SeedOnce` cycle whose commit succeeded, that commit's
+    /// `cycle_id` -- [`Self::run_cycle_at`] uses it to key the
+    /// `FixedInterval` trigger receipt to the SAME cycle identity/`cycle_ts`
+    /// the commit's `rust_fee_shadow_outcomes` rows carry.
+    fn run_cycle_body(
+        &mut self,
+        prepared: PreparedCycle,
+        now: i64,
+        decision_clock: &mut dyn DecisionClock,
+    ) -> (CycleOutcome, Option<String>) {
         // T7: capture this cycle's resolved profile name for the
         // out-of-cycle wake handlers (see `last_profile`'s doc comment).
         // Captured even on a skip path below -- config still resolved
@@ -697,18 +790,50 @@ impl CycleOwner {
                      (value={}): {reason} (skipping cycle)",
                     prepared.min_competitors
                 );
-                return CycleOutcome::SkippedMinCompetitors;
+                return (CycleOutcome::SkippedMinCompetitors, None);
             }
         };
 
         // (3) Per-cycle-frozen evidence (read-only DB + prefetched RPC).
-        let snapshot = match build_evidence_snapshot(&self.db_path, prepared.rpc, now) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("revops: fee cycle skipped: evidence snapshot failed: {e:#}");
-                return CycleOutcome::SkippedEvidence;
+        //
+        // Task 6 / R8 amendment: `FeeEvidence::mempool_ma_24h` reads
+        // Python's rows in strict replay (`RehydratePerCycle`) and ONLY
+        // fresh Rust-owned rows in autonomous (`SeedOnce`) mode -- the
+        // Rust-owned query happens HERE, before the snapshot freezes,
+        // mirroring `RpcPrefetch`'s prefetch-then-freeze shape.
+        let mempool_source = match self.lifecycle {
+            StateLifecycle::RehydratePerCycle => MempoolEvidenceSource::Python,
+            StateLifecycle::SeedOnce => {
+                let rows = match self.store.as_ref() {
+                    Some(store) => store
+                        .query_mempool_samples_since(now - MEMPOOL_MA_WINDOW_SECONDS)
+                        .unwrap_or_else(|e| {
+                            eprintln!(
+                                "revops: SeedOnce mempool sample query failed ({e:#}); \
+                                 treating as no fresh autonomous evidence this cycle"
+                            );
+                            Vec::new()
+                        }),
+                    None => Vec::new(),
+                };
+                MempoolEvidenceSource::Rust(rows)
             }
         };
+        let snapshot =
+            match build_evidence_snapshot(&self.db_path, prepared.rpc, now, mempool_source) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("revops: fee cycle skipped: evidence snapshot failed: {e:#}");
+                    return (CycleOutcome::SkippedEvidence, None);
+                }
+            };
+
+        // Task 6 step 2: Rust's own mempool recorder + the shadow-window
+        // comparison against Python's rows -- see
+        // `Self::record_mempool_evidence`'s doc comment. Runs in BOTH
+        // lifecycles (building continuity ahead of cutover); never fails
+        // the cycle.
+        self.record_mempool_evidence(now, &snapshot, &prepared.cfg);
 
         // (4) State lifecycle (Design Note 1), over the snapshot's pinned
         // read-only connection -- hydration sees the exact same frozen DB
@@ -727,7 +852,7 @@ impl CycleOwner {
                         eprintln!(
                             "revops: FEE CYCLE FAIL-CLOSED (SeedOnce state unavailable): {reason}"
                         );
-                        return CycleOutcome::SkippedStateUnavailable;
+                        return (CycleOutcome::SkippedStateUnavailable, None);
                     }
                     self.hydrated_once = true;
                 } else {
@@ -786,7 +911,7 @@ impl CycleOwner {
             Ok(decisions) => decisions,
             Err(error) => {
                 eprintln!("revops: fee cycle stopped: replayable decision input failed: {error}");
-                return CycleOutcome::SkippedDecisionInput;
+                return (CycleOutcome::SkippedDecisionInput, None);
             }
         };
 
@@ -819,12 +944,14 @@ impl CycleOwner {
         // state (a restart would resume from the last COMMITTED
         // generation, discarding this cycle -- recorded divergence, never
         // silent).
+        let mut committed_cycle_id = None;
         if matches!(self.lifecycle, StateLifecycle::SeedOnce) {
             let intents = recording_executor
                 .as_ref()
                 .map(|r| r.recorded_actions())
                 .unwrap_or_default();
             let commit = self.build_cycle_commit(now, &decisions, &intents);
+            let cycle_id = commit.cycle_id.clone();
             let store = self
                 .store
                 .as_ref()
@@ -837,18 +964,93 @@ impl CycleOwner {
                      from the last committed generation)",
                     self.persistence_failures
                 );
-                return CycleOutcome::PersistenceFailed;
+                return (CycleOutcome::PersistenceFailed, None);
             }
+            committed_cycle_id = Some(cycle_id);
         }
 
-        CycleOutcome::Ran {
-            decisions: decisions.len(),
-        }
+        (
+            CycleOutcome::Ran {
+                decisions: decisions.len(),
+            },
+            committed_cycle_id,
+        )
     }
 
     /// Red error counter: SeedOnce cycles whose atomic commit failed.
     pub fn persistence_failures(&self) -> u64 {
         self.persistence_failures
+    }
+
+    /// Task 6 step 2: Rust's own mempool recorder, plus (during the
+    /// `RehydratePerCycle` shadow window) a comparison against Python's
+    /// evidence value.
+    ///
+    /// Records ONE sample this cycle -- `chain_costs.sat_per_vbyte` --
+    /// gated the EXACT same way Python's `record_mempool_fee` call site
+    /// is (`cfg.enable_vegas_reflex && chain_costs`, fee_controller.py:
+    /// 4583-4587), so Rust's own history stays sample-for-sample
+    /// comparable to Python's, transactionally pruned to
+    /// [`MEMPOOL_MA_WINDOW_SECONDS`] (`fee_runway::
+    /// record_mempool_sample_pruned`'s contract). Runs in BOTH lifecycles
+    /// (`RehydratePerCycle` AND `SeedOnce`) so continuity exists BEFORE
+    /// cutover ever needs it; a missing store or a write failure is
+    /// logged loudly and never fails the cycle (this is bookkeeping, not
+    /// decision-relevant evidence in `RehydratePerCycle` mode -- in
+    /// `SeedOnce` mode the decision-relevant read already happened
+    /// earlier, in `run_cycle_body`'s evidence-source selection).
+    ///
+    /// The shadow-window comparison (R8 binding constraint: "during
+    /// shadow, compare the Rust 24h MA against Python's and record the
+    /// comparison") is recorded as a loud log line -- there is no
+    /// dedicated comparison table in this task's schema, and the
+    /// underlying `rust_mempool_fee_history` vs. production
+    /// `mempool_fee_history` rows remain independently queryable for a
+    /// later reporting task if a persisted row ever proves necessary.
+    fn record_mempool_evidence(&self, now: i64, snapshot: &EvidenceSnapshot, cfg: &FeeCfgSnapshot) {
+        if !cfg.enable_vegas_reflex {
+            return;
+        }
+        let Some(costs) = snapshot.chain_costs() else {
+            return;
+        };
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let retain_since = now - MEMPOOL_MA_WINDOW_SECONDS;
+        if let Err(e) = store.record_mempool_sample_pruned(now, costs.sat_per_vbyte, retain_since) {
+            eprintln!(
+                "revops: Rust-owned mempool sample record failed ({e:#}); comparison history \
+                 has a gap this cycle"
+            );
+            return;
+        }
+
+        if !matches!(self.lifecycle, StateLifecycle::RehydratePerCycle) {
+            // SeedOnce already reads Rust rows as the decision-relevant
+            // evidence itself -- nothing to compare against.
+            return;
+        }
+        match store.query_mempool_samples_since(retain_since) {
+            Ok(rows) if !rows.is_empty() => {
+                let rust_ma = rows.iter().map(|r| r.sat_per_vbyte).sum::<f64>() / rows.len() as f64;
+                match snapshot.mempool_ma_24h() {
+                    Ok(python_ma) => eprintln!(
+                        "revops: mempool 24h MA comparison (shadow): rust={rust_ma:.4} \
+                         python={python_ma:.4} delta={:.4} rust_samples={}",
+                        rust_ma - python_ma,
+                        rows.len()
+                    ),
+                    Err(e) => eprintln!(
+                        "revops: mempool 24h MA comparison (shadow): rust={rust_ma:.4} \
+                         python=<unavailable: {e}> rust_samples={}",
+                        rows.len()
+                    ),
+                }
+            }
+            Ok(_) => {} // no Rust samples in the window yet -- nothing to compare
+            Err(e) => eprintln!("revops: Rust mempool comparison query failed ({e:#})"),
+        }
     }
 
     /// The one-time `SeedOnce` hydration decision (Task 5 step 2):
@@ -1098,6 +1300,185 @@ impl CycleOwner {
         handle_policy_change(&mut self.state, channel_states, peer_id)
     }
 
+    // -----------------------------------------------------------------
+    // Task 6 step 4: bounded/coalescing trigger-queue wrappers. Every
+    // out-of-cycle trigger source in `spawn_with_thread_spawner`'s owner
+    // message loop calls ONE of these (never the raw `wake_all`/
+    // `vegas_spike_check`/`policy_changed` methods above directly) so
+    // every occurrence is offered to `self.trigger_queue` and gets a
+    // persisted receipt recording WHY it did or did not produce a cycle.
+    // These wrappers enqueue and record ONLY -- they never run a cycle
+    // inline (module doc, `fee_scheduler.rs` top + `fee_triggers.rs`).
+    // -----------------------------------------------------------------
+
+    /// Persist one trigger receipt via `self.store`, if any is configured.
+    /// Never fatal: a store-write failure here only means this ONE
+    /// receipt is lost (loudly logged), matching every other
+    /// log-and-continue posture in this module.
+    fn record_trigger_receipt(
+        &self,
+        trigger: &FeeTrigger,
+        received_at: i64,
+        coalesced: bool,
+        cycle: Option<(&str, i64)>,
+        detail: impl Into<String>,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let row = build_receipt(trigger, received_at, coalesced, cycle, detail);
+        if let Err(e) = store.record_trigger_event(row) {
+            eprintln!(
+                "revops: trigger receipt record failed ({e:#}): {} at {received_at}",
+                trigger.trigger_type()
+            );
+        }
+    }
+
+    /// [`CycleMsg::WakeAll`]'s full handling (see [`Self::wake_all`] for
+    /// the underlying effect). Backpressure-dropped occurrences skip the
+    /// wake entirely -- a red, always-recorded event, never silent.
+    pub fn handle_wake_all(&mut self, now: i64) -> i64 {
+        let outcome = self.trigger_queue.offer(FeeTrigger::WakeAll, now);
+        if matches!(outcome, TriggerOutcome::Dropped) {
+            eprintln!("revops: TRIGGER DROPPED (bounded queue at capacity): wake_all at {now}");
+            self.record_trigger_receipt(
+                &FeeTrigger::WakeAll,
+                now,
+                false,
+                None,
+                "DROPPED: bounded trigger queue at capacity (backpressure)",
+            );
+            return 0;
+        }
+        let woken = self.wake_all(now);
+        self.record_trigger_receipt(
+            &FeeTrigger::WakeAll,
+            now,
+            matches!(outcome, TriggerOutcome::Coalesced),
+            None,
+            format!(
+                "applied in-memory wake ({woken} channel(s)); did not itself run a cycle -- \
+                 the next scheduled cycle observes it"
+            ),
+        );
+        woken
+    }
+
+    /// [`CycleMsg::VegasSpikeCheck`]'s full handling (see
+    /// [`Self::vegas_spike_check`] for the underlying effect).
+    pub fn handle_vegas_spike_check(&mut self, now: i64) -> bool {
+        let outcome = self.trigger_queue.offer(FeeTrigger::VegasSpike, now);
+        if matches!(outcome, TriggerOutcome::Dropped) {
+            eprintln!(
+                "revops: TRIGGER DROPPED (bounded queue at capacity): vegas_spike_check at {now}"
+            );
+            self.record_trigger_receipt(
+                &FeeTrigger::VegasSpike,
+                now,
+                false,
+                None,
+                "DROPPED: bounded trigger queue at capacity (backpressure)",
+            );
+            return false;
+        }
+        let fired = self.vegas_spike_check(now);
+        self.record_trigger_receipt(
+            &FeeTrigger::VegasSpike,
+            now,
+            matches!(outcome, TriggerOutcome::Coalesced),
+            None,
+            format!(
+                "edge-triggered check (fired={fired}); did not itself run a cycle -- the next \
+                 scheduled cycle observes it"
+            ),
+        );
+        fired
+    }
+
+    /// [`CycleMsg::PolicyChanged`]'s full handling (see
+    /// [`Self::policy_changed`] for the underlying effect). `channel_states`
+    /// is the fresh, unpinned read the caller already fetched (see
+    /// `read_channel_states_readonly`).
+    pub fn handle_policy_changed(
+        &mut self,
+        channel_states: &[ChannelStateRow],
+        peer_id: &str,
+        now: i64,
+    ) -> i64 {
+        let trigger = FeeTrigger::PolicyChanged {
+            channel_id: peer_id.to_string(),
+        };
+        let outcome = self.trigger_queue.offer(trigger.clone(), now);
+        if matches!(outcome, TriggerOutcome::Dropped) {
+            eprintln!(
+                "revops: TRIGGER DROPPED (bounded queue at capacity): policy_changed peer \
+                 {peer_id} at {now}"
+            );
+            self.record_trigger_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "DROPPED: bounded trigger queue at capacity (backpressure)",
+            );
+            return 0;
+        }
+        let woken = self.policy_changed(channel_states, peer_id);
+        self.record_trigger_receipt(
+            &trigger,
+            now,
+            matches!(outcome, TriggerOutcome::Coalesced),
+            None,
+            format!(
+                "applied in-memory wake ({woken} channel(s)); did not itself run a cycle -- \
+                 the next scheduled cycle observes it"
+            ),
+        );
+        woken
+    }
+
+    /// [`CycleMsg::FailedForward`]'s handler -- `record_failed_forward`'s
+    /// scheduler-facing hook (py fee_controller.py:8527-8608). Recording-
+    /// only in this task: the per-channel Thompson posterior nudge itself
+    /// is unported scheduler-side work (same "handler is real, caller is
+    /// future work" posture `PolicyChanged` already carried before Task 6
+    /// -- no hook subscription constructs this message yet).
+    pub fn handle_failed_forward(&mut self, channel_id: &str, now: i64) {
+        let trigger = FeeTrigger::FailedForward {
+            channel_id: channel_id.to_string(),
+        };
+        let outcome = self.trigger_queue.offer(trigger.clone(), now);
+        if matches!(outcome, TriggerOutcome::Dropped) {
+            eprintln!(
+                "revops: TRIGGER DROPPED (bounded queue at capacity): failed_forward channel \
+                 {channel_id} at {now}"
+            );
+            self.record_trigger_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "DROPPED: bounded trigger queue at capacity (backpressure)",
+            );
+            return;
+        }
+        self.record_trigger_receipt(
+            &trigger,
+            now,
+            matches!(outcome, TriggerOutcome::Coalesced),
+            None,
+            "failed-forward nudge received; posterior-nudge application is not yet wired to \
+             the scheduler (recording only) -- did not itself run a cycle",
+        );
+    }
+
+    /// Total triggers ever dropped for backpressure (Task 6's red
+    /// counter, alongside [`Self::persistence_failures`]).
+    pub fn trigger_queue_dropped_total(&self) -> u64 {
+        self.trigger_queue.dropped_total()
+    }
+
     /// [`CycleMsg::Query`]'s handler -- the `revenue-r-fee-debug` RPC's
     /// response body (see [`FeeDebugQuery`]'s doc comment for the exact
     /// shape of each variant). Read-only, no IO: answers straight out of
@@ -1130,6 +1511,11 @@ impl CycleOwner {
                         "safety_block": d.safety_block,
                     },
                     "channels": channels,
+                    // Task 6: bounded trigger-queue observability.
+                    "trigger_queue": {
+                        "pending": self.trigger_queue.pending_len(),
+                        "dropped_total": self.trigger_queue.dropped_total(),
+                    },
                 })
             }
         }
@@ -1215,7 +1601,7 @@ where
                     // still re-hydrates state normally.
                     match read_channel_states_readonly(&owner.db_path) {
                         Ok(rows) => {
-                            let _ = owner.policy_changed(&rows, &peer_id);
+                            let _ = owner.handle_policy_changed(&rows, &peer_id, crate::now_unix());
                         }
                         Err(e) => eprintln!(
                             "revops: policy-change wake for peer {peer_id} skipped: \
@@ -1224,10 +1610,13 @@ where
                     }
                 }
                 CycleMsg::VegasSpikeCheck => {
-                    let _ = owner.vegas_spike_check(crate::now_unix());
+                    let _ = owner.handle_vegas_spike_check(crate::now_unix());
                 }
                 CycleMsg::WakeAll => {
-                    let _ = owner.wake_all(crate::now_unix());
+                    let _ = owner.handle_wake_all(crate::now_unix());
+                }
+                CycleMsg::FailedForward { channel_id } => {
+                    owner.handle_failed_forward(&channel_id, crate::now_unix());
                 }
                 CycleMsg::Query(query, reply) => {
                     // Never block the owner thread on a slow/uncooperative

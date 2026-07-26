@@ -11,6 +11,7 @@ pub mod fee_evidence;
 pub mod fee_governor;
 pub mod fee_scheduler;
 pub mod fee_state;
+pub mod fee_triggers;
 pub mod hydration;
 pub mod notify;
 pub mod options_table;

@@ -12,8 +12,11 @@
 //! same SQL/arithmetic `database.py`/`fee_controller.py` implement,
 //! documented inline at each assertion.
 
-use revops::fee_evidence::{build_evidence_snapshot, prefetch_rpc, EvidenceSnapshot, RpcPrefetch};
+use revops::fee_evidence::{
+    build_evidence_snapshot, prefetch_rpc, EvidenceSnapshot, MempoolEvidenceSource, RpcPrefetch,
+};
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
+use revops_db::fee_runway::MempoolSampleRow;
 use revops_fees::floors::{FlowWindow, PeerLatency};
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -180,7 +183,22 @@ fn canned_prefetch(feerates: Option<Value>) -> RpcPrefetch {
 }
 
 fn build(path: &Path, feerates: Option<Value>) -> EvidenceSnapshot {
-    build_evidence_snapshot(path, canned_prefetch(feerates), NOW).expect("build snapshot")
+    build_evidence_snapshot(
+        path,
+        canned_prefetch(feerates),
+        NOW,
+        MempoolEvidenceSource::Python,
+    )
+    .expect("build snapshot")
+}
+
+fn build_with_mempool_source(
+    path: &Path,
+    feerates: Option<Value>,
+    mempool_source: MempoolEvidenceSource,
+) -> EvidenceSnapshot {
+    build_evidence_snapshot(path, canned_prefetch(feerates), NOW, mempool_source)
+        .expect("build snapshot")
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +392,7 @@ fn mempool_ma_24h_matches_python_sql() {
     drop(conn);
     let snap = build(&path, None);
     // AVG(10, 20, 30) = 20.0 (the 99.0 sample is outside the window).
-    assert_eq!(snap.mempool_ma_24h(), 20.0);
+    assert_eq!(snap.mempool_ma_24h(), Ok(20.0));
 }
 
 #[test]
@@ -385,7 +403,67 @@ fn mempool_ma_24h_empty_table_falls_back_to_one() {
     let snap = build(&path, None);
     // py get_mempool_ma: `row['avg_fee'] if row and row['avg_fee'] else 1.0`
     // -- NULL AVG (no rows) is falsy -> 1.0.
-    assert_eq!(snap.mempool_ma_24h(), 1.0);
+    assert_eq!(snap.mempool_ma_24h(), Ok(1.0));
+}
+
+// ---------------------------------------------------------------------------
+// Task 6 / R8 amendment: MempoolEvidenceSource::Rust (autonomous mode)
+// ---------------------------------------------------------------------------
+
+/// Autonomous mode reads ONLY the caller-supplied Rust-owned rows -- even
+/// with Python's `mempool_fee_history` table populated, its rows are
+/// completely ignored.
+#[test]
+fn mempool_ma_24h_rust_source_ignores_pythons_table() {
+    let (_dir, path, conn) = seeded_db();
+    seed_channel_states(&conn);
+    conn.execute(
+        "INSERT INTO mempool_fee_history (sat_per_vbyte, timestamp) VALUES (?1, ?2)",
+        rusqlite::params![999.0, NOW - 100],
+    )
+    .unwrap();
+    drop(conn);
+
+    let rows = vec![
+        MempoolSampleRow {
+            sampled_at: NOW - 1000,
+            sat_per_vbyte: 10.0,
+        },
+        MempoolSampleRow {
+            sampled_at: NOW - 2000,
+            sat_per_vbyte: 30.0,
+        },
+    ];
+    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(rows));
+    assert_eq!(
+        snap.mempool_ma_24h(),
+        Ok(20.0),
+        "must average ONLY the Rust rows (10, 30), never Python's 999.0 row"
+    );
+}
+
+/// Missing/stale Rust-owned evidence (no sample in the last 24h) is
+/// fail-closed: `Err`, never a silent `1.0` Python-style default.
+#[test]
+fn mempool_ma_24h_rust_source_empty_is_fail_closed_error() {
+    let (_dir, path, _conn) = seeded_db();
+    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(Vec::new()));
+    assert!(
+        snap.mempool_ma_24h().is_err(),
+        "empty Rust-owned evidence must deny the decision, not synthesize 1.0"
+    );
+}
+
+/// A single fresh Rust row is enough -- no synthetic minimum sample count.
+#[test]
+fn mempool_ma_24h_rust_source_single_sample() {
+    let (_dir, path, _conn) = seeded_db();
+    let rows = vec![MempoolSampleRow {
+        sampled_at: NOW - 10,
+        sat_per_vbyte: 42.5,
+    }];
+    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(rows));
+    assert_eq!(snap.mempool_ma_24h(), Ok(42.5));
 }
 
 // ---------------------------------------------------------------------------

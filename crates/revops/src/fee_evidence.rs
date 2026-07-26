@@ -53,6 +53,7 @@ use anyhow::{Context, Result};
 use cln_rpc::ClnRpc;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_core::msat::{base_to_sats_ceil, base_to_sats_floor, parse_msat};
+use revops_db::fee_runway::MempoolSampleRow;
 use revops_fees::cycle::{ChannelInfo, ChannelStateRow, FeeEvidence, GossipRow, PeerFeeHistory};
 use revops_fees::drain::NodeChannel;
 use revops_fees::floors::{
@@ -76,6 +77,12 @@ const FLOW_BALANCED_WINDOW_SECONDS: i64 = 7 * 86_400;
 /// `Database.get_channel_probe`'s `max_age_seconds` default
 /// (database.py:2144): exploration flags auto-expire after 24h.
 const PROBE_MAX_AGE_SECONDS: i64 = 86_400;
+
+/// `Database.get_mempool_ma`'s window (database.py:7696-7712, called with
+/// `86400`): the 24-hour moving-average window, shared by BOTH mempool
+/// evidence sources ([`MempoolEvidenceSource`]) so the strict-replay and
+/// autonomous readings stay comparable window-for-window.
+pub const MEMPOOL_MA_WINDOW_SECONDS: i64 = 86_400;
 
 // ---------------------------------------------------------------------------
 // Async half: RPC prefetch
@@ -508,7 +515,39 @@ pub struct EvidenceSnapshot {
     gossip_memo: RefCell<FrozenObservations>,
     flow_windows: HashMap<String, FlowWindow>,
     policies: HashMap<String, PeerPolicy>,
-    mempool_ma_24h: f64,
+    mempool_ma_24h: MempoolMaValue,
+}
+
+/// Which mempool sample history [`build_evidence_snapshot`] computes
+/// `FeeEvidence::mempool_ma_24h` from (stateful-shadow plan Task 6 / R8
+/// amendment: "cutover reads only Rust-owned mempool samples; during
+/// shadow, compare the Rust 24h MA against Python's and record the
+/// comparison").
+pub enum MempoolEvidenceSource {
+    /// Strict replay/compatibility mode (`StateLifecycle::
+    /// RehydratePerCycle`): read Python's `mempool_fee_history` table over
+    /// the SAME frozen connection every other evidence read this cycle
+    /// uses -- exact `get_mempool_ma` parity (falsy average -> `1.0`
+    /// fallback), never an error. This is the ONLY source production uses
+    /// today.
+    Python,
+    /// Autonomous shadow/live mode (`StateLifecycle::SeedOnce`): ONLY
+    /// fresh Rust-owned rows, queried by the CALLER before the snapshot is
+    /// built (same prefetch-then-freeze shape as [`RpcPrefetch`] -- the
+    /// scheduler owns the blocking store query, this module never opens a
+    /// second connection). An EMPTY slice (no sample in the last 24h) is
+    /// fail-closed: `FeeEvidence::mempool_ma_24h` returns `Err` rather
+    /// than a silent Python-style `1.0` default -- "missing/stale samples
+    /// deny a decision that needs Vegas evidence."
+    Rust(Vec<MempoolSampleRow>),
+}
+
+/// The computed mempool evidence value, or the reason it is unavailable
+/// (autonomous mode only -- [`MempoolEvidenceSource::Python`] always
+/// produces a [`MempoolMaValue::Value`]).
+enum MempoolMaValue {
+    Value(f64),
+    MissingRustEvidence,
 }
 
 /// Sync half, called ON the cycle thread: opens the read-only
@@ -520,6 +559,7 @@ pub fn build_evidence_snapshot(
     db_path: &std::path::Path,
     rpc: RpcPrefetch,
     now: i64,
+    mempool_source: MempoolEvidenceSource,
 ) -> Result<EvidenceSnapshot> {
     let conn = revops_db::open_read_only(db_path)?;
     // Pin the frozen view: a deferred read transaction; the immediately
@@ -532,7 +572,19 @@ pub fn build_evidence_snapshot(
     let channel_states = read_channel_states(&conn)?;
     let flow_windows = read_flow_windows(&conn, now - FLOW_BALANCED_WINDOW_SECONDS)?;
     let policies = read_policies(&conn, now)?;
-    let mempool_ma_24h = read_mempool_ma(&conn, now - 86_400)?;
+    let mempool_ma_24h = match mempool_source {
+        MempoolEvidenceSource::Python => {
+            MempoolMaValue::Value(read_mempool_ma(&conn, now - MEMPOOL_MA_WINDOW_SECONDS)?)
+        }
+        MempoolEvidenceSource::Rust(rows) => {
+            if rows.is_empty() {
+                MempoolMaValue::MissingRustEvidence
+            } else {
+                let avg = rows.iter().map(|r| r.sat_per_vbyte).sum::<f64>() / rows.len() as f64;
+                MempoolMaValue::Value(avg)
+            }
+        }
+    };
 
     Ok(EvidenceSnapshot {
         now,
@@ -1242,20 +1294,32 @@ impl EvidenceSnapshot {
         false
     }
 
-    /// Port of `Database.get_mempool_ma(86400)` (database.py:7696-7712)
-    /// over Python's `mempool_fee_history` table -- see
-    /// [`read_mempool_ma`] for the SQL.
+    /// [`MempoolEvidenceSource::Python`]: port of
+    /// `Database.get_mempool_ma(86400)` (database.py:7696-7712) over
+    /// Python's `mempool_fee_history` table -- see [`read_mempool_ma`] for
+    /// the SQL; never fails (falsy average -> `1.0` fallback).
     ///
-    /// CUTOVER RIDER: this value is only live because *Python's* fee cycle
-    /// keeps recording mempool samples during the dry-run window
-    /// (`database.record_mempool_fee`, fee_controller.py:4586-4587 --
-    /// Python writes one sample per cycle while Vegas is enabled). After
-    /// Python unloads at cutover, nothing writes `mempool_fee_history`
-    /// and this average degrades toward the stale window (ultimately the
-    /// `1.0` fallback) until the Rust recorder exists (checklist item 9's
-    /// cutover work). Do NOT ship cutover without that recorder.
-    pub fn mempool_ma_24h(&self) -> f64 {
-        self.mempool_ma_24h
+    /// [`MempoolEvidenceSource::Rust`]: the average of the caller-supplied
+    /// Rust-owned samples, or `Err` if none were fresh (Task 6: "missing/
+    /// stale samples deny a decision that needs Vegas evidence" -- no
+    /// silent `1.0` synthesis in autonomous mode).
+    ///
+    /// Rust's own recorder (`CycleOwner::record_mempool_evidence`,
+    /// `fee_scheduler.rs`) writes `rust_mempool_fee_history` every cycle
+    /// Vegas Reflex is enabled and chain costs resolved -- the SAME
+    /// cadence gate `record_mempool_fee`'s Python call site uses
+    /// (fee_controller.py:4583-4587) -- so the two histories stay
+    /// sample-for-sample comparable during the shadow window, and cutover
+    /// (`MempoolEvidenceSource::Rust`) never depends on Python's table.
+    pub fn mempool_ma_24h(&self) -> Result<f64, DecisionInputError> {
+        match &self.mempool_ma_24h {
+            MempoolMaValue::Value(v) => Ok(*v),
+            MempoolMaValue::MissingRustEvidence => Err(DecisionInputError::new(
+                "autonomous mempool evidence unavailable: no fresh Rust-owned sample in the \
+                 last 24h (rust_mempool_fee_history) -- refusing to synthesize a value for a \
+                 decision that needs Vegas evidence",
+            )),
+        }
     }
 
     /// py `listpeerchannels` rows for the node-drain-bias aggregate
@@ -1327,7 +1391,7 @@ impl FeeEvidence for EvidenceSnapshot {
         Ok(Self::temporary_overlay_active(self, channel_id))
     }
     fn mempool_ma_24h(&self) -> Result<f64, DecisionInputError> {
-        Ok(Self::mempool_ma_24h(self))
+        Self::mempool_ma_24h(self)
     }
     fn node_channels(&self) -> Result<Vec<NodeChannel>, DecisionInputError> {
         Ok(Self::node_channels(self))

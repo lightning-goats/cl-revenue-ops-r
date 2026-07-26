@@ -327,6 +327,29 @@ pub trait RunwayStateStore: Send {
         &self,
         marker: revops_db::fee_runway::FeeRestartMarkerRow,
     ) -> anyhow::Result<i64>;
+    // -- Task 6: mempool recorder + trigger receipts --
+    /// Insert one Rust-owned mempool sample and prune everything strictly
+    /// before `retain_since`, atomically (`fee_runway::
+    /// record_mempool_sample_pruned`'s transactional contract).
+    fn record_mempool_sample_pruned(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> anyhow::Result<()>;
+    /// Every Rust-owned mempool sample at or after `since`, oldest first
+    /// -- the input `FeeEvidence::mempool_ma_24h` computes from in
+    /// autonomous (`SeedOnce`) mode.
+    fn query_mempool_samples_since(
+        &self,
+        since: i64,
+    ) -> anyhow::Result<Vec<revops_db::fee_runway::MempoolSampleRow>>;
+    /// Persist one trigger receipt (why a trigger did or did not produce a
+    /// cycle).
+    fn record_trigger_event(
+        &self,
+        event: revops_db::fee_runway::FeeTriggerEventRow,
+    ) -> anyhow::Result<()>;
 }
 
 impl RunwayStateStore for revops_db::owner::ObserverHandle {
@@ -353,6 +376,29 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         marker: revops_db::fee_runway::FeeRestartMarkerRow,
     ) -> anyhow::Result<i64> {
         self.blocking_record_fee_restart_marker(marker)
+    }
+
+    fn record_mempool_sample_pruned(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> anyhow::Result<()> {
+        self.blocking_record_mempool_sample_pruned(sampled_at, sat_per_vbyte, retain_since)
+    }
+
+    fn query_mempool_samples_since(
+        &self,
+        since: i64,
+    ) -> anyhow::Result<Vec<revops_db::fee_runway::MempoolSampleRow>> {
+        self.blocking_query_mempool_samples_since(since)
+    }
+
+    fn record_trigger_event(
+        &self,
+        event: revops_db::fee_runway::FeeTriggerEventRow,
+    ) -> anyhow::Result<()> {
+        self.blocking_record_fee_trigger_event(event)
     }
 }
 

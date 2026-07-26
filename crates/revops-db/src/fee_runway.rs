@@ -646,6 +646,51 @@ pub fn record_mempool_sample(conn: &Connection, sampled_at: i64, sat_per_vbyte: 
     Ok(())
 }
 
+/// Delete every sample strictly BEFORE `cutoff`. Returns the row count
+/// removed. Used standalone by tests; production always goes through
+/// [`record_mempool_sample_pruned`]'s single transaction (stateful-shadow
+/// plan Task 6 step 1: "old rows are pruned transactionally").
+pub fn prune_mempool_samples_before(conn: &Connection, cutoff: i64) -> Result<usize> {
+    let n = conn
+        .execute(
+            "DELETE FROM rust_mempool_fee_history WHERE sampled_at < ?1",
+            params![cutoff],
+        )
+        .context("prune mempool samples")?;
+    Ok(n)
+}
+
+/// Insert one sample and prune everything strictly before `retain_since`,
+/// atomically: both the `INSERT` and the `DELETE` run inside ONE `BEGIN
+/// IMMEDIATE`/`COMMIT` (mirroring [`commit_fee_cycle`]'s rollback-on-error
+/// shape), so a failure in either step leaves the table exactly as it was
+/// before the call -- Task 6 step 1's "old rows are pruned transactionally"
+/// contract. This is Rust's OWN recorder cadence (never Python's table);
+/// callers gate the call the same way Python gates `record_mempool_fee`
+/// (only when Vegas Reflex is enabled and chain costs resolved this
+/// cycle), so the two histories stay sample-for-sample comparable.
+pub fn record_mempool_sample_pruned(
+    conn: &Connection,
+    sampled_at: i64,
+    sat_per_vbyte: f64,
+    retain_since: i64,
+) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("begin mempool sample transaction")?;
+    let result = (|| -> Result<()> {
+        record_mempool_sample(conn, sampled_at, sat_per_vbyte)?;
+        prune_mempool_samples_before(conn, retain_since)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    } else {
+        conn.execute_batch("COMMIT")
+            .context("commit mempool sample transaction")?;
+    }
+    result
+}
+
 /// Every sample at or after `since`, oldest first -- the input a 24-hour
 /// moving average is computed from.
 pub fn query_mempool_samples_since(conn: &Connection, since: i64) -> Result<Vec<MempoolSampleRow>> {
