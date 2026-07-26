@@ -1398,8 +1398,23 @@ pub struct AdjustCtx<'a> {
     /// fresh value starved the whole live decision surface — 75% of
     /// shadow rows held at `waiting_window` (2026-07-23 runway gate). In
     /// replay this equals the hydrated value by construction
-    /// (`replay.rs` seeds `skip_gate_prev` from the captured pre-state),
-    /// and under SeedOnce lifecycle the two coincide as well.
+    /// (`replay.rs` seeds `skip_gate_prev` from the captured pre-state).
+    ///
+    /// Under SeedOnce the two coincide only AS HYDRATED at the top of the
+    /// cycle — NOT for the whole cycle, and this field is therefore never
+    /// redundant there. `run_fee_cycle` calls `maybe_wake_for_vegas_spike`
+    /// mid-cycle (line 3452, after the scheduler's top-of-cycle
+    /// `set_skip_gates_to_owned` and before any call to this function),
+    /// which BACKDATES `cycle.last_update` via
+    /// `wake_all_sleeping_channels` (line 3322). Every epoch-derived read
+    /// below must keep consuming THIS field: substituting
+    /// `cycle.last_update` changes the decision on any cycle where a vegas
+    /// spike woke the channels, and `enable_vegas_reflex` defaults to TRUE
+    /// in production (line 200). The invariant is pinned by
+    /// `tests/cycle.rs::decision_gate_uses_pre_decision_epoch_not_fresh_flush`
+    /// and `::observation_cursor_uses_pre_decision_epoch` — the only tests
+    /// that cover it, since every evidence double here returns
+    /// `chain_costs() = None` and so never reaches the vegas block.
     pub pre_last_update: i64,
     pub node_drain_bias_effective_cap: Option<f64>,
     pub node_receivable_ratio: Option<f64>,

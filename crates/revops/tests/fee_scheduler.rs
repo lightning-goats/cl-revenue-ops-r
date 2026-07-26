@@ -1528,22 +1528,44 @@ mod seedonce_restart {
     ///    disposition is NOT `waiting_window` -- the starvation signature
     ///    a fresh/zero epoch produces.
     ///
-    /// NOTE on mutation coverage: mutating `cycle.rs`'s
-    /// `let epoch_last_update = ctx.pre_last_update;` to `cycle
-    /// .last_update` cannot be detected from HERE, and provably so: under
-    /// SeedOnce the scheduler calls `set_skip_gates_to_owned` both at the
-    /// top of every cycle and at the end of every cycle, and nothing
-    /// between that refresh and `adjust_channel_fee`'s read mutates
-    /// `cycle.last_update`, so the two expressions are the SAME VALUE by
-    /// construction -- which is precisely the invariant this test exists
-    /// to pin. The mutation is caught by the kernel tests that can inject
-    /// the divergence directly
-    /// (`revops-fees/tests/cycle.rs::decision_gate_uses_pre_decision_epoch_not_fresh_flush`
-    /// and `::observation_cursor_uses_pre_decision_epoch`); do not weaken
-    /// them. What THIS test catches is the SeedOnce-layer regression class:
-    /// an epoch cache that is not refreshed from the owned state, a seed
-    /// or commit that persists the wrong `last_update`, or a decision that
-    /// stops consuming the cached epoch at all.
+    /// NOTE on mutation coverage. Mutating `cycle.rs`'s
+    /// `let epoch_last_update = ctx.pre_last_update;` (`cycle.rs:1619`) to
+    /// `cycle.last_update` is NOT detected from here. That is a gap in
+    /// THIS layer's coverage, not a proof that the two are equivalent --
+    /// do not read it as one:
+    ///
+    /// * Under SeedOnce the two epochs coincide only AS HYDRATED at the
+    ///   top of the cycle (`fee_scheduler.rs:917`/`:978` refresh
+    ///   `skip_gate_prev` from the owned `cycle_states`).
+    /// * That identity is BROKEN mid-cycle: `run_fee_cycle` calls
+    ///   `maybe_wake_for_vegas_spike` at `cycle.rs:3452` -- after the
+    ///   top-of-cycle refresh and before any `adjust_channel_fee` read --
+    ///   which calls `wake_all_sleeping_channels` (`cycle.rs:3305`) and
+    ///   BACKDATES `cycle.last_update` at `cycle.rs:3322`. From that point
+    ///   on `cycle.last_update` is older than the cached pre-decision
+    ///   epoch, and the mutation changes the decision.
+    /// * No scheduler-layer test exercises that path, for two independent
+    ///   reasons: this harness sets `enable_vegas_reflex = false`
+    ///   (`fee_scheduler.rs:181`, `:1330`), and the vegas block is gated on
+    ///   `chain_costs` being `Some` while every kernel evidence double
+    ///   returns `None` (`revops-fees/tests/cycle.rs:186`, `:1090`). In
+    ///   PRODUCTION `enable_vegas_reflex` defaults to TRUE (`cycle.rs:200`,
+    ///   mirroring py `config.py:765`) and `chain_costs` comes from real
+    ///   `feerates` (`fee_evidence.rs:466`/`:855`), so the path is live.
+    ///
+    /// The `pre_last_update` mutation is therefore left to the two kernel
+    /// tests that inject the divergence directly --
+    /// `revops-fees/tests/cycle.rs::decision_gate_uses_pre_decision_epoch_not_fresh_flush`
+    /// and `::observation_cursor_uses_pre_decision_epoch`. They are the
+    /// ONLY guard against re-introducing the 2026-07-23 gate-starvation
+    /// bug: do not weaken, merge, or "simplify" them on the theory that
+    /// SeedOnce makes the epoch contract redundant. It does not.
+    ///
+    /// What THIS test catches is the complementary SeedOnce-layer
+    /// regression class: an epoch cache that is not refreshed from the
+    /// owned state, a seed or commit that persists the wrong
+    /// `last_update`, or a decision that stops consuming the cached epoch
+    /// at all.
     #[test]
     fn seedonce_second_cycle_consumes_the_committed_first_cycle_epoch() {
         const INTERVAL: i64 = 1800;
