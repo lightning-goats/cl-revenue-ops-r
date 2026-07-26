@@ -822,6 +822,44 @@ fn fee_debug_query_summary_includes_last_decision_and_channel_map() {
     );
 }
 
+/// Task 10: `FeeDebugQuery::RunwayCounters` -- the read-only in-memory
+/// counters `revenue-r-fee-runway-status` surfaces. Before any cycle runs:
+/// `lifecycle` reflects the constructor argument, `hydrated_once`/
+/// `seed_refused`/`persistence_failures` are all at their zero defaults,
+/// the trigger queue is empty, `last_cycle` is `null`, and the ledger
+/// reflects whatever `GovernorWiring::open` resolved for this fixture's
+/// journal dir (opened successfully, since `fixture()` gives a real
+/// tempdir).
+#[test]
+fn fee_debug_query_runway_counters_reports_lifecycle_and_zeroed_counters() {
+    let fx = fixture();
+    let owner = owner(&fx, StateLifecycle::SeedOnce);
+
+    let value = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+    assert_eq!(value["lifecycle"], json!("seed_once"));
+    assert_eq!(value["hydrated_once"], json!(false));
+    assert_eq!(value["seed_refused"], json!(false));
+    assert_eq!(value["persistence_failures"], json!(0));
+    assert_eq!(
+        value["trigger_queue"],
+        json!({"pending": 0, "dropped_total": 0})
+    );
+    assert_eq!(value["last_cycle"], json!({"at": null, "outcome": null}));
+    assert_eq!(value["last_profile"], json!("active"));
+    assert_eq!(value["governor_ledger_open"], json!(true));
+}
+
+/// Companion: `RehydratePerCycle` reports its own lifecycle label, proving
+/// the label is read live off the owner's actual configured lifecycle
+/// rather than a hardcoded constant.
+#[test]
+fn fee_debug_query_runway_counters_reports_rehydrate_per_cycle_lifecycle() {
+    let fx = fixture();
+    let owner = owner(&fx, StateLifecycle::RehydratePerCycle);
+    let value = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+    assert_eq!(value["lifecycle"], json!("rehydrate_per_cycle"));
+}
+
 /// [`CycleOwner::wake_all`] -- `wake_all_sleeping_channels`'s handler for
 /// [`CycleMsg::WakeAll`] (the manual `revenue-r-fee-wake` RPC's trigger).
 #[test]

@@ -69,6 +69,10 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     FeeMutationCount(oneshot::Sender<Result<i64>>),
+    // -- Task 10: distinct live-broadcast-attempt counter (see
+    // `fee_runway::broadcast_attempt_count`'s doc comment for why this is
+    // NOT the same number as `FeeMutationCount`) --
+    FeeBroadcastAttemptCount(oneshot::Sender<Result<i64>>),
     InsertExecutionQuarantine {
         entry: QuarantineEntry,
         reply: oneshot::Sender<Result<i64>>,
@@ -401,6 +405,29 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Total number of live broadcast attempts ever recorded (see
+    /// [`fee_runway::broadcast_attempt_count`]) -- Task 10's runway status
+    /// RPC's "mutation-call count", distinct from
+    /// [`ObserverHandle::fee_mutation_count`]'s "prepared-request count".
+    pub async fn fee_broadcast_attempt_count(&self) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::FeeBroadcastAttemptCount(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::fee_broadcast_attempt_count`].
+    pub fn blocking_fee_broadcast_attempt_count(&self) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::FeeBroadcastAttemptCount(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Record a new execution quarantine entry. Returns the new row id.
     pub async fn insert_execution_quarantine(&self, entry: QuarantineEntry) -> Result<i64> {
         let (reply, rx) = oneshot::channel();
@@ -564,9 +591,9 @@ impl ObserverHandle {
 
     // -----------------------------------------------------------------
     // Task 9: the guarded live broadcaster's intent/result ledger +
-    // restart quarantine reconciliation. Async only -- `ClnFeeBroadcaster`
-    // (the only caller) is already async (it awaits the CLN RPC call),
-    // unlike the fee scheduler's plain `std::thread` owner.
+    // restart quarantine reconciliation. Async only -- the guarded
+    // broadcaster (the only caller) is already async (it awaits the CLN
+    // RPC call), unlike the fee scheduler's plain `std::thread` owner.
     // -----------------------------------------------------------------
 
     /// Persist one broadcast attempt's intent BEFORE any socket write.
@@ -724,6 +751,10 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::FeeMutationCount(reply) => {
                     let result = fee_runway::mutation_count(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::FeeBroadcastAttemptCount(reply) => {
+                    let result = fee_runway::broadcast_attempt_count(&conn);
                     let _ = reply.send(result);
                 }
                 Command::InsertExecutionQuarantine { entry, reply } => {

@@ -18,7 +18,10 @@ revops-econ = { path = "../revops-econ" }
 revops-fees = { path = "../revops-fees" }
 revops-rpc = { path = "../revops-rpc" }
 rusqlite.workspace = true
-rustix.workspace = true
+# "process" (beyond the workspace default fs+std): Task 10's cutover-arm
+# identity needs the running process's real uid (`rustix::process::getuid`)
+# to build `cutover_arm::RunningIdentity` at plugin startup.
+rustix = { workspace = true, features = ["process"] }
 sha2.workspace = true
 
 [dev-dependencies]

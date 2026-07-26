@@ -77,6 +77,16 @@ impl GovernorWiring {
             authority_level: cfg.authority_level.clone(),
         }
     }
+
+    /// Task 10: whether the dry-run governor/ledger successfully opened at
+    /// [`open`](Self::open) -- the "governor/ledger health" field the
+    /// `revops-fee-runway-status` RPC surfaces. `false` means every
+    /// governed authorization this process lifetime ran WITHOUT a ledger
+    /// trail (still authorized/denied correctly -- [`governed_deps`]
+    /// tolerates `ledger: None` -- but with no audit record of it).
+    pub fn ledger_open(&self) -> bool {
+        self.ledger.is_some()
+    }
 }
 
 #[cfg(test)]

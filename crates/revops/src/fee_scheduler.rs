@@ -78,12 +78,14 @@
 //! this against a REAL live listener, not just the type-level guarantee.
 //!
 //! Prior to the stateful-shadow revision plan's Task 9, a source-scan
-//! guard (`tests/fee_scheduler.rs::no_setchannel_symbol_in_crate`)
-//! additionally asserted the broadcast RPC's literal name was absent from
-//! this whole CRATE. That guard is gone: `crate::fee_execution` now holds
-//! the one guarded action call site (`ClnFeeBroadcaster::attempt_send`),
+//! guard in `tests/fee_scheduler.rs` additionally asserted the broadcast
+//! RPC's literal method name was absent from this whole CRATE. That guard
+//! is gone (superseded by Task 10's workspace-wide
+//! `tests/action_surface.rs` allowlist): `crate::fee_execution` now holds
+//! the one guarded action call site, behind the guarded live broadcaster
+//! type this module never constructs, holds, or even names -- itself
 //! behind the [`crate::fee_mode::LiveMode`] capability this module never
-//! constructs or holds. The production DB is opened read-only (via
+//! constructs or holds either. The production DB is opened read-only (via
 //! `fee_evidence`), and every write target this module itself produces
 //! (decision journal, state JSONL, dry-run econ ledger, and -- for
 //! `SeedOnce` -- the Rust-owned state/audit commit) is a Rust-owned file
@@ -220,7 +222,7 @@ pub fn source_commit() -> &'static str {
 /// `rust_fee_cycles.binary_sha256` identity column). `"unavailable"` when
 /// the executable cannot be read -- identity degrades loudly-typed, never
 /// panics.
-fn binary_sha256() -> &'static str {
+pub fn binary_sha256() -> &'static str {
     use std::sync::OnceLock;
     static HASH: OnceLock<String> = OnceLock::new();
     HASH.get_or_init(|| {
@@ -462,6 +464,13 @@ pub enum FeeDebugQuery {
     /// 3031-3048) plus a `channels` map of every tracked channel's SAME
     /// per-channel shape as `Channel` above, keyed by channel_id.
     Summary,
+    /// Task 10: the in-memory counters `revenue-r-fee-runway-status`
+    /// (the read-only runway status RPC) surfaces -- lifecycle,
+    /// hydration/seed bookkeeping, persistence failures, trigger-queue
+    /// pending/dropped counts, the last cycle's timestamp/outcome, and
+    /// whether the dry-run governor/ledger is open. Answered synchronously
+    /// off this owner's own fields, no IO -- never blocks the cycle loop.
+    RunwayCounters,
 }
 
 /// Messages on the owner thread's channel.
@@ -654,6 +663,15 @@ pub struct CycleOwner {
     /// documented default (`"active"`, `_resolve_fee_profile`'s fallback)
     /// so a wake BEFORE the first cycle still resolves a real profile.
     last_profile: String,
+    /// Task 10: wall-clock time of the last `run_cycle_at` invocation
+    /// (whatever it did -- ran, skipped, or persistence-failed), for the
+    /// runway status RPC's "last cycle" field. `None` until the first
+    /// cycle attempt.
+    last_cycle_at: Option<i64>,
+    /// Task 10: a short, stable label for the last cycle's
+    /// [`CycleOutcome`] (via [`describe_cycle_outcome`]), paired with
+    /// `last_cycle_at`.
+    last_cycle_outcome: Option<String>,
 }
 
 impl CycleOwner {
@@ -707,6 +725,8 @@ impl CycleOwner {
             governor: GovernorWiring::open(Some(&cfg.journal_dir)),
             trigger_queue: TriggerQueue::new(TRIGGER_QUEUE_CAPACITY),
             last_profile: "active".to_string(),
+            last_cycle_at: None,
+            last_cycle_outcome: None,
         }
     }
 
@@ -773,6 +793,12 @@ impl CycleOwner {
         self.trigger_queue.drain_all();
 
         let (outcome, cycle_id) = self.run_cycle_body(prepared, now, decision_clock);
+
+        // Task 10: record this attempt for the runway status RPC,
+        // regardless of outcome -- "last cycle" means the last time this
+        // owner thread attempted one, not only the last successful one.
+        self.last_cycle_at = Some(now);
+        self.last_cycle_outcome = Some(describe_cycle_outcome(&outcome));
 
         let cycle = match (&outcome, &cycle_id) {
             (CycleOutcome::Ran { .. }, Some(id)) => Some((id.as_str(), now)),
@@ -1607,6 +1633,25 @@ impl CycleOwner {
                     },
                 })
             }
+            FeeDebugQuery::RunwayCounters => serde_json::json!({
+                "lifecycle": match self.lifecycle {
+                    StateLifecycle::RehydratePerCycle => "rehydrate_per_cycle",
+                    StateLifecycle::SeedOnce => "seed_once",
+                },
+                "hydrated_once": self.hydrated_once,
+                "seed_refused": self.seed_refused,
+                "persistence_failures": self.persistence_failures,
+                "trigger_queue": {
+                    "pending": self.trigger_queue.pending_len(),
+                    "dropped_total": self.trigger_queue.dropped_total(),
+                },
+                "last_cycle": {
+                    "at": self.last_cycle_at,
+                    "outcome": self.last_cycle_outcome,
+                },
+                "last_profile": self.last_profile,
+                "governor_ledger_open": self.governor.ledger_open(),
+            }),
         }
     }
 }

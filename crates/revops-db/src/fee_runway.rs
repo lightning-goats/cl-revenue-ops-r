@@ -860,6 +860,23 @@ pub fn mutation_count(conn: &Connection) -> Result<i64> {
         .context("read fee mutation count")
 }
 
+/// Total number of live broadcast attempts ever recorded (Task 9's
+/// `rust_broadcast_attempts` ledger -- one row per would-broadcast request
+/// that actually reached
+/// [`crate::owner::ObserverHandle::insert_broadcast_attempt`], i.e. a
+/// genuine live dispatch attempt by the `revops` crate's guarded
+/// broadcaster, success/rejected/clean-failure/ambiguous alike). Distinct
+/// from [`mutation_count`], which counts SHADOW-mode would-broadcast
+/// preparations that were never actually sent -- Task 10's runway status
+/// RPC reports both as separate counters (prepared-request count vs.
+/// mutation-call count).
+pub fn broadcast_attempt_count(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM rust_broadcast_attempts", [], |r| {
+        r.get(0)
+    })
+    .context("read broadcast attempt count")
+}
+
 // ---------------------------------------------------------------------------
 // quarantine
 // ---------------------------------------------------------------------------
@@ -1050,8 +1067,9 @@ pub struct BroadcastAttemptIntent {
     /// request cannot silently insert a second intent row.
     pub request_id: String,
     /// Always [`crate::owner`]'s caller-supplied RPC method name (in
-    /// practice always `"setchannel"` -- kept as a column, not a constant,
-    /// so this ledger stays a generic attempt log).
+    /// practice always the one guarded broadcast RPC method name -- kept
+    /// as a column, not a constant, so this ledger stays a generic attempt
+    /// log).
     pub method: String,
     /// The exact wire params sent, already serialized by the caller.
     pub params_json: String,
@@ -1205,8 +1223,8 @@ pub fn unresolved_broadcast_attempts(conn: &Connection) -> Result<Vec<BroadcastA
 /// quarantine is left exactly as it was (this module offers no clear
 /// function at all -- see the module doc's `rust_execution_quarantine`
 /// bullet); a genuinely orphaned intent always produces (or confirms) an
-/// active quarantine. The caller (`revops::fee_execution::
-/// ClnFeeBroadcaster::new`) MUST run this before the broadcaster it
+/// active quarantine. The caller (the `revops` crate's guarded live
+/// broadcaster constructor) MUST run this before the broadcaster it
 /// constructs becomes usable, so a restart can never accept a fresh
 /// cutover arm without first restoring whatever quarantine state the
 /// prior process left behind.

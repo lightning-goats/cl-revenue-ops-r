@@ -2,7 +2,7 @@
 //! (cl_revenue_ops v2.18.1, branch `port`): discounted Gaussian Thompson
 //! sampling, the PI inventory controller, evidence-backed floors, market
 //! intelligence, the htlcmax admission valve, and the frozen ADR-001 rail
-//! order — dry-run decision journal only (no `setchannel` until cutover).
+//! order — dry-run decision journal only (no live broadcast until cutover).
 //!
 //! Parity discipline (Phase 4 Global Constraints): every float-producing
 //! function is pinned by fixtures generated from the REAL Python

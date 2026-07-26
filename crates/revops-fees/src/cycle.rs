@@ -1,6 +1,6 @@
 //! Dry-run fee cycle orchestrator: the decision core that strings every
 //! merged fee module into one cycle, journaling decisions WITHOUT ever
-//! broadcasting a `setchannel`.
+//! broadcasting a live fee-set RPC.
 //!
 //! Ports (all line anchors into `modules/fee_controller.py`, branch
 //! `port` == `main`):

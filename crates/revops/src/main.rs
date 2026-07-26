@@ -7,7 +7,10 @@ use cln_plugin::options::{
 };
 use cln_plugin::{Builder, Plugin};
 use revops::config_types;
+use revops::cutover_arm::{self, RunningIdentity};
 use revops::fee_evidence::MEMPOOL_MA_WINDOW_SECONDS;
+use revops::fee_execution::ClnFeeBroadcaster;
+use revops::fee_mode::{self, ModeFlags, ValidatedFeeMode};
 use revops::options_table::{self, OptDef};
 use revops::rpc_dashboard::{build_dashboard, parse_window_days};
 use revops::rpc_history::build_history;
@@ -15,14 +18,21 @@ use revops::rpc_report::build_report;
 use revops::rpc_status::{build_config_response, build_status, StatusInputs};
 use revops::{as_bool_default, as_int_default, as_string_default, now_unix};
 use revops::{hydration, notify};
+use revops_db::fee_runway::{FeeSeedEventRow, FeeStateSnapshot};
 use revops_db::queries;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Timeout budget for the guarded live broadcaster's own RPC calls (its
+/// restart quarantine reconciliation touches only the Rust-owned observer
+/// db, not a socket; this timeout is for the broadcaster's own future live
+/// dispatch, per-call).
+const LIVE_BROADCASTER_TIMEOUT_SECONDS: u64 = 30;
 
 /// Shared plugin state, resolved once at init (option values, and — if
 /// `revops-r-db-path` is set — a persistent read-only DB actor). See
@@ -66,6 +76,22 @@ struct State {
     /// `revops::config_resolve` for the (a) DB override > (b) this cache >
     /// (c) fixture-default precedence `revenue-r-config` resolves through.
     python_options: revops::config_resolve::PythonOptionCache,
+    /// Task 10: the stable label for the [`ValidatedFeeMode`] this process
+    /// resolved at startup (`resolve_startup_mode`) -- one of
+    /// `"passive_observer"`, `"autonomous_shadow"`, `"live_authority"`.
+    /// Surfaced by the runway status RPC; never changes for the process's
+    /// whole lifetime (the mode-matrix options are not `.dynamic()`).
+    mode_label: &'static str,
+    /// Task 10: the guarded CLN fee broadcaster, constructed ONLY when
+    /// `mode_label == "live_authority"` -- see `ClnFeeBroadcaster::new`'s
+    /// doc comment for why construction alone (restart quarantine
+    /// reconciliation) is itself a hard startup gate. Resolved pre-start,
+    /// so (unlike `scheduler`) this is a plain field, not a `OnceLock`.
+    /// Unused by the cycle loop in this build (wiring live broadcast
+    /// dispatch into the scheduler is out of this task's scope) -- its
+    /// presence here proves every construction gate passed.
+    #[allow(dead_code)]
+    live_broadcaster: Option<ClnFeeBroadcaster>,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
@@ -92,6 +118,15 @@ fn config_name_map() -> HashMap<String, String> {
     map.insert("observer-db-path".to_string(), opt_name("observer-db-path"));
     map.insert("journal-dir".to_string(), opt_name("journal-dir"));
     map.insert("fee-dryrun".to_string(), opt_name("fee-dryrun"));
+    // Task 10: the stateful-shadow mode-matrix options -- no Python
+    // analogs, same registration pattern as every other Rust-only option
+    // above.
+    map.insert(
+        "fee-stateful-shadow".to_string(),
+        opt_name("fee-stateful-shadow"),
+    );
+    map.insert("fee-broadcast".to_string(), opt_name("fee-broadcast"));
+    map.insert("cutover-arm-path".to_string(), opt_name("cutover-arm-path"));
     for opt in options_table::load() {
         let suffix = opt
             .name
@@ -389,6 +424,159 @@ where
     builder
 }
 
+// ---------------------------------------------------------------------------
+// Task 10: capability-separated startup mode resolution.
+// ---------------------------------------------------------------------------
+
+/// Everything [`resolve_startup_mode`] needs to decide (and, for the live
+/// row, atomically consume) which of the three accepted operating modes
+/// this process may run in. Every field is caller-resolved -- this
+/// function performs no RPC and opens no DB connection itself -- so it is
+/// unit-testable without a live plugin process; `main` is the only
+/// production caller and is responsible for actually gathering these
+/// inputs (a live `getinfo` for the node id, the Rust-owned observer db's
+/// read paths for `state`/`seed_event`, `cutover_arm::hash_running_binary`
+/// for the running binary's own hash).
+pub struct StartupModeInputs<'a> {
+    pub flags: ModeFlags,
+    /// `Some((arm_path, identity))` iff `revops-r-cutover-arm-path` is a
+    /// non-empty, `~`-expanded path -- the arm path and the running
+    /// process's identity are resolved TOGETHER (never one without the
+    /// other) so this function can never be called in a state where an arm
+    /// path exists but there is no identity to validate it against.
+    pub cutover_arm: Option<(&'a Path, RunningIdentity)>,
+    /// Where a successfully-validated arm is atomically consumed
+    /// (`cutover_arm::validate_and_consume`'s `consumed_dir`).
+    pub consumed_arm_dir: &'a Path,
+    /// The Rust-owned state store's latest snapshot -- read ONLY by
+    /// [`fee_mode::validate_fee_mode`]'s autonomous-shadow row (see that
+    /// function's own doc comment). The caller passes
+    /// [`FeeStateSnapshot::default`] when no Rust-owned store is
+    /// configured; combined with `rust_state_store_configured: false` that
+    /// case is refused by the mandatory-writable-state gate below before
+    /// this default value is ever consulted.
+    pub state: &'a FeeStateSnapshot,
+    pub seed_event: Option<&'a FeeSeedEventRow>,
+    /// Whether the Rust-owned observer db (`revops-r-observer-db-path`) is
+    /// configured and successfully opened THIS process lifetime.
+    pub rust_state_store_configured: bool,
+}
+
+/// Every fail-closed reason [`resolve_startup_mode`] can return, each
+/// naming which gate refused (per the stateful-shadow revision's ruling:
+/// "a stable error message states which gate refused").
+#[derive(Debug)]
+pub enum StartupModeDenyReason {
+    /// Autonomous-shadow or live-authority rows require the Rust-owned
+    /// observer db to be configured and open -- checked BEFORE any
+    /// cutover arm is even read, so a misconfigured deploy never burns a
+    /// one-time arm on an environment that could never have supported the
+    /// requested mode.
+    MissingRustState { mode: &'static str },
+    /// The cutover arm itself failed validation (wrong node/commit/hash,
+    /// expired, reused nonce, bad file mode, ...).
+    ArmInvalid(cutover_arm::CutoverArmDenyReason),
+    /// The resolved flags (plus arm presence/absence) matched no accepted
+    /// mode-matrix row, or `fee-stateful-shadow=true` with committed state
+    /// but no seed-provenance event (see [`fee_mode::FeeModeDenyReason`]).
+    Mode(fee_mode::FeeModeDenyReason),
+}
+
+impl std::fmt::Display for StartupModeDenyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRustState { mode } => write!(
+                f,
+                "missing_rust_state: {mode} requires revops-r-observer-db-path to be configured \
+                 and successfully opened (a writable Rust-owned state store)"
+            ),
+            Self::ArmInvalid(reason) => write!(f, "cutover_arm_invalid: {reason}"),
+            Self::Mode(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+impl std::error::Error for StartupModeDenyReason {}
+
+/// Resolve which operating mode this process may run in (Task 10 Step 1/2
+/// wiring around Task 8's [`fee_mode::validate_fee_mode`] and Task 7's
+/// [`cutover_arm::validate_and_consume`]).
+///
+/// Check order (each gate runs to completion before the next; see this
+/// module's tests for the ordering guarantee):
+///
+/// 1. **Mandatory writable Rust state**: `fee-stateful-shadow=true` or
+///    `fee-broadcast=true` without a configured, open Rust-owned observer
+///    db is refused HERE, before the cutover arm file (if any) is ever
+///    touched -- a broken deploy must never burn a one-time arm.
+/// 2. **Cutover arm validation + one-time consumption**: only when
+///    `inputs.cutover_arm` is `Some`. This is the only step with a
+///    filesystem side effect (the arm is renamed into `consumed_arm_dir`
+///    on success) -- run UNCONDITIONALLY on the resolved flags, exactly
+///    mirroring `fee_mode`'s own `ArmPresentInNonLiveMode` gate (an arm
+///    present alongside a non-live flag combination is itself a
+///    misconfiguration the arm is consumed to prove, per that module's
+///    doc comment).
+/// 3. **The Task 8 mode matrix**: [`fee_mode::validate_fee_mode`] over the
+///    resolved flags, the (now possibly `Some`) consumed arm, and the
+///    state/seed-event evidence.
+pub fn resolve_startup_mode(
+    inputs: StartupModeInputs<'_>,
+) -> Result<ValidatedFeeMode, StartupModeDenyReason> {
+    if (inputs.flags.fee_stateful_shadow || inputs.flags.fee_broadcast)
+        && !inputs.rust_state_store_configured
+    {
+        let mode = if inputs.flags.fee_broadcast {
+            "live fee authority mode"
+        } else {
+            "autonomous fee shadow mode"
+        };
+        return Err(StartupModeDenyReason::MissingRustState { mode });
+    }
+
+    let arm = match inputs.cutover_arm {
+        Some((arm_path, identity)) => Some(
+            cutover_arm::validate_and_consume(arm_path, inputs.consumed_arm_dir, &identity)
+                .map_err(StartupModeDenyReason::ArmInvalid)?,
+        ),
+        None => None,
+    };
+
+    fee_mode::validate_fee_mode(inputs.flags, arm, inputs.state, inputs.seed_event)
+        .map_err(StartupModeDenyReason::Mode)
+}
+
+/// A short, stable label for a [`ValidatedFeeMode`] -- surfaced in
+/// `State::mode_label` for the status/runway RPCs and startup logging.
+pub fn mode_label(mode: &ValidatedFeeMode) -> &'static str {
+    match mode {
+        ValidatedFeeMode::PassiveObserver => "passive_observer",
+        ValidatedFeeMode::AutonomousShadow(_) => "autonomous_shadow",
+        ValidatedFeeMode::LiveAuthority(_) => "live_authority",
+    }
+}
+
+/// One `getinfo` RPC call over a fresh connection -- ONLY made when
+/// `revops-r-cutover-arm-path` is non-empty (the common passive-observer/
+/// autonomous-shadow startup path never dials this). Mirrors the
+/// fresh-connection-per-call rationale every other read-only RPC helper in
+/// this crate uses (`fee_evidence::call_rpc`, `hydration::call_listforwards`,
+/// `python_authority::call_status_rpc`).
+async fn resolve_running_node_id(socket_path: &Path) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let mut rpc = cln_rpc::ClnRpc::new(socket_path)
+        .await
+        .with_context(|| format!("connect lightning-rpc socket {}", socket_path.display()))?;
+    let info: serde_json::Value = rpc
+        .call_raw("getinfo", &serde_json::json!({}))
+        .await
+        .map_err(|e| anyhow::anyhow!("getinfo RPC error: {e}"))?;
+    info.get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .context("getinfo response missing 'id'")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let observer_name = opt_name("observer");
@@ -455,6 +643,37 @@ async fn main() -> Result<()> {
     )
     .dynamic();
 
+    // Task 10 (stateful-shadow revision plan): the mode-matrix options.
+    // NOT `.dynamic()` -- the operating mode is validated exactly ONCE, at
+    // init, before the plugin starts; a runtime `setconfig` flip would be
+    // silently ineffective (worse than merely undocumented), so these are
+    // deliberately fixed for the process's whole lifetime.
+    let fee_stateful_shadow_name = opt_name("fee-stateful-shadow");
+    let fee_stateful_shadow_opt = DefaultBooleanConfigOption::new_bool_with_default(
+        &fee_stateful_shadow_name,
+        false,
+        "Run the fee controller as an autonomous Rust-owned shadow: SeedOnce state lifecycle, \
+         fixed-interval cycles, Rust mempool evidence, a capability-free recording executor, \
+         and governor/ledger auditing -- never a live broadcaster. Requires observer=true, \
+         revops-r-fee-dryrun=true, revops-r-fee-broadcast=false, and revops-r-observer-db-path \
+         configured.",
+    );
+    let fee_broadcast_name = opt_name("fee-broadcast");
+    let fee_broadcast_opt = DefaultBooleanConfigOption::new_bool_with_default(
+        &fee_broadcast_name,
+        false,
+        "Enable live fee authority. Requires observer=false, revops-r-fee-dryrun=false, \
+         revops-r-fee-stateful-shadow=false, revops-r-observer-db-path configured, and a valid, \
+         one-time cutover arm at revops-r-cutover-arm-path.",
+    );
+    let cutover_arm_path_name = opt_name("cutover-arm-path");
+    let cutover_arm_path_opt = DefaultStringConfigOption::new_str_with_default(
+        &cutover_arm_path_name,
+        "",
+        "Path to a one-time, mode-0600 cutover-arm JSON file authorizing live fee authority \
+         (empty = no arm supplied). Consumed exactly once at startup; never reusable.",
+    );
+
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
@@ -466,6 +685,11 @@ async fn main() -> Result<()> {
     // `s.scheduler.get()` checks in each handler below).
     let fee_debug_name = rpc_name("fee-debug");
     let fee_wake_name = rpc_name("fee-wake");
+    // Task 10: the read-only runway status RPC. Deliberately NOT run
+    // through `rpc_name()` -- this is a new capability with no Python
+    // analog to shadow/canonicalize, so it keeps one fixed name in every
+    // mode (per the plan's own literal naming).
+    let fee_runway_status_name = "revops-fee-runway-status";
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
@@ -478,6 +702,9 @@ async fn main() -> Result<()> {
         .option(observer_db_opt.clone())
         .option(journal_dir_opt.clone())
         .option(fee_dryrun_opt.clone())
+        .option(fee_stateful_shadow_opt.clone())
+        .option(fee_broadcast_opt.clone())
+        .option(cutover_arm_path_opt.clone())
         .subscribe(
             "forward_event",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
@@ -851,6 +1078,114 @@ async fn main() -> Result<()> {
                     }
                 }
             },
+        )
+        .rpcmethod(
+            fee_runway_status_name,
+            "read-only runway status for the stateful-shadow candidate: schema/version, mode, \
+             candidate source commit/binary hash, Rust-owned state generation, hydration \
+             source, last cycle, trigger queue/drop counters, mempool freshness, \
+             governor/ledger health, quarantine, prepared-request count, and mutation-call \
+             count. Performs no mutations and never blocks the cycle loop.",
+            |p: Plugin<SharedState>, _v| async move {
+                let s = p.state();
+
+                // In-memory counters, from the owner thread itself (never
+                // blocks the cycle loop -- the owner answers synchronously
+                // off its own fields, see `CycleOwner::fee_debug`'s
+                // `RunwayCounters` arm). `null` when the scheduler isn't
+                // running (passive-observer mode, or it failed to start).
+                let mut counters = serde_json::Value::Null;
+                if let Some(handle) = s.scheduler.get() {
+                    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                    if handle
+                        .tx
+                        .send(revops::fee_scheduler::CycleMsg::Query(
+                            revops::fee_scheduler::FeeDebugQuery::RunwayCounters,
+                            reply_tx,
+                        ))
+                        .is_ok()
+                    {
+                        if let Ok(Ok(value)) =
+                            tokio::task::spawn_blocking(move || reply_rx.recv()).await
+                        {
+                            counters = value;
+                        }
+                    }
+                }
+
+                // Rust-owned store reads: all read-only, resolved live at
+                // request time via the actor's async request/reply
+                // methods (never a blocking call, never a lock shared
+                // with the cycle loop). `null` fields when no observer db
+                // is configured, matching every other optional field on
+                // this path.
+                let (
+                    state_generation,
+                    quarantine,
+                    prepared_request_count,
+                    mutation_call_count,
+                    mempool,
+                ) = match &s.observer_db {
+                    Some(handle) => {
+                        let generation = handle
+                            .load_latest_fee_state()
+                            .await
+                            .ok()
+                            .map(|snap| snap.generation);
+                        let quarantine = handle
+                            .active_execution_quarantine()
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|q| {
+                                serde_json::json!({
+                                    "id": q.id,
+                                    "reason": q.reason,
+                                    "cycle_id": q.cycle_id,
+                                    "channel_id": q.channel_id,
+                                    "request_id": q.request_id,
+                                    "entered_at": q.entered_at,
+                                })
+                            });
+                        let prepared_request_count = handle.fee_mutation_count().await.ok();
+                        let mutation_call_count = handle.fee_broadcast_attempt_count().await.ok();
+                        let mempool_rows = handle
+                            .query_mempool_samples_since(now_unix() - MEMPOOL_MA_WINDOW_SECONDS)
+                            .await
+                            .ok();
+                        let mempool = mempool_rows.map(|rows| {
+                            serde_json::json!({
+                                "sample_count_24h": rows.len(),
+                                "latest_sampled_at": rows.last().map(|r| r.sampled_at),
+                            })
+                        });
+                        (
+                            generation,
+                            quarantine,
+                            prepared_request_count,
+                            mutation_call_count,
+                            mempool,
+                        )
+                    }
+                    None => (None, None, None, None, None),
+                };
+
+                Ok(serde_json::json!({
+                    "schema_version": "revops_fee_runway_status/v1",
+                    "plugin_version": s.version,
+                    "mode": s.mode_label,
+                    "candidate": {
+                        "source_commit": revops::fee_scheduler::source_commit(),
+                        "binary_sha256": revops::fee_scheduler::binary_sha256(),
+                    },
+                    "state_generation": state_generation,
+                    "counters": counters,
+                    "mempool": mempool,
+                    "quarantine": quarantine,
+                    "prepared_request_count": prepared_request_count,
+                    "mutation_call_count": mutation_call_count,
+                }))
+            },
         );
     let builder = register_python_options(builder, canonical_names());
 
@@ -1003,6 +1338,179 @@ async fn main() -> Result<()> {
 
     let fee_dryrun = configured.option(&fee_dryrun_opt)?;
 
+    // ------------------------------------------------------------------
+    // Task 10: resolve the operating mode BEFORE the plugin ever starts.
+    // Every gate here either disables the plugin (loudly, naming which
+    // gate refused) or falls through with a validated `ValidatedFeeMode`.
+    // ------------------------------------------------------------------
+    let fee_stateful_shadow = configured.option(&fee_stateful_shadow_opt)?;
+    let fee_broadcast = configured.option(&fee_broadcast_opt)?;
+    let cutover_arm_path_raw = configured.option(&cutover_arm_path_opt)?;
+    let cutover_arm_path_expanded: Option<PathBuf> =
+        (!cutover_arm_path_raw.is_empty()).then(|| expand_tilde(&cutover_arm_path_raw));
+
+    let flags = ModeFlags {
+        observer,
+        fee_dryrun,
+        fee_broadcast,
+        fee_stateful_shadow,
+    };
+    let rust_state_store_configured = observer_db.is_some();
+
+    // Rust-owned state/seed-provenance evidence, read ONLY here at init,
+    // straight off the observer db actor (never Python state). A read
+    // FAILURE must fail closed -- it must never be treated as "virgin
+    // store" (that would let a broken store slip through as
+    // `PendingFirstCycle`).
+    let (fee_state_snapshot, fee_seed_event) = match &observer_db {
+        Some(handle) => {
+            let snap = match handle.load_latest_fee_state().await {
+                Ok(snap) => snap,
+                Err(e) => {
+                    configured
+                        .disable(&format!(
+                            "stateful-shadow mode gate: failed to read Rust-owned state \
+                             generation: {e:#}"
+                        ))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let seed = match handle.latest_fee_seed_event().await {
+                Ok(seed) => seed,
+                Err(e) => {
+                    configured
+                        .disable(&format!(
+                            "stateful-shadow mode gate: failed to read Rust-owned seed \
+                             provenance: {e:#}"
+                        ))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            (snap, seed)
+        }
+        None => (FeeStateSnapshot::default(), None),
+    };
+
+    // Mirrors `resolve_startup_mode`'s OWN check order (mandatory writable
+    // Rust state before any arm handling): if that gate is going to refuse
+    // anyway, skip resolving the cutover identity entirely here too --
+    // otherwise a broken deploy (no Rust-owned store) that also happens to
+    // have no live `lightning-rpc` socket would report the WRONG gate
+    // (a `getinfo` failure) instead of the more fundamental
+    // `missing_rust_state` refusal.
+    let mandatory_state_gate_would_fail =
+        (fee_stateful_shadow || fee_broadcast) && !rust_state_store_configured;
+
+    // The cutover arm and the running process's identity are resolved
+    // TOGETHER (see `StartupModeInputs::cutover_arm`'s doc comment): a
+    // `getinfo` call and a fresh self-hash, made ONLY when an arm path was
+    // actually supplied AND the mandatory-state gate won't refuse first --
+    // the common passive-observer/autonomous-shadow startup path never
+    // dials either.
+    let cutover_identity: Option<RunningIdentity> = match &cutover_arm_path_expanded {
+        Some(_) if !mandatory_state_gate_would_fail => {
+            let node_id = match resolve_running_node_id(&init_socket_path).await {
+                Ok(id) => id,
+                Err(e) => {
+                    configured
+                        .disable(&format!(
+                            "cutover arm gate: failed to resolve running node identity via \
+                             getinfo: {e:#}"
+                        ))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let binary_sha256 = match cutover_arm::hash_running_binary() {
+                Ok(hash) => hash,
+                Err(e) => {
+                    configured
+                        .disable(&format!(
+                            "cutover arm gate: failed to hash the running binary: {e}"
+                        ))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            Some(RunningIdentity {
+                node_id,
+                subsystem: cutover_arm::CUTOVER_SUBSYSTEM_FEES.to_string(),
+                source_commit: revops::fee_scheduler::source_commit().to_string(),
+                binary_sha256,
+                owner_uid: rustix::process::getuid().as_raw(),
+                now: now_unix(),
+            })
+        }
+        _ => None,
+    };
+
+    // Where a successfully-validated arm is atomically consumed -- a
+    // Rust-owned subdirectory alongside every other write target this
+    // plugin produces.
+    let consumed_arm_dir: PathBuf = journal_dir
+        .clone()
+        .or_else(|| {
+            cutover_arm_path_expanded
+                .as_ref()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("cutover-consumed");
+
+    let mode = match resolve_startup_mode(StartupModeInputs {
+        flags,
+        cutover_arm: cutover_arm_path_expanded.as_deref().zip(cutover_identity),
+        consumed_arm_dir: &consumed_arm_dir,
+        state: &fee_state_snapshot,
+        seed_event: fee_seed_event.as_ref(),
+        rust_state_store_configured,
+    }) {
+        Ok(mode) => mode,
+        Err(reason) => {
+            configured
+                .disable(&format!("stateful-shadow mode gate refused: {reason}"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let resolved_mode_label = mode_label(&mode);
+    let autonomous_shadow = matches!(mode, ValidatedFeeMode::AutonomousShadow(_));
+
+    // Live authority's ONLY job in this task is constructing the guarded
+    // broadcaster -- proving restart quarantine reconciliation succeeds --
+    // BEFORE the plugin ever announces itself started. Wiring live
+    // broadcast dispatch into the cycle loop is out of this task's scope
+    // (see `State::live_broadcaster`'s doc comment).
+    let live_broadcaster = match mode {
+        ValidatedFeeMode::LiveAuthority(live_mode) => {
+            let store = observer_db
+                .clone()
+                .expect("live authority mode gate guarantees observer_db is Some");
+            match ClnFeeBroadcaster::new(
+                init_socket_path.clone(),
+                store,
+                LIVE_BROADCASTER_TIMEOUT_SECONDS,
+                live_mode,
+            )
+            .await
+            {
+                Ok(broadcaster) => Some(broadcaster),
+                Err(e) => {
+                    configured
+                        .disable(&format!(
+                            "live authority gate: restart quarantine reconciliation failed: {e}"
+                        ))
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
+        _ => None,
+    };
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -1013,29 +1521,38 @@ async fn main() -> Result<()> {
         config_names: config_name_map(),
         python_options,
         scheduler: std::sync::OnceLock::new(),
+        mode_label: resolved_mode_label,
+        live_broadcaster,
     });
 
     let plugin = configured.start(state).await?;
 
-    // T6: spawn the single-owner fee-cycle scheduler -- ONLY IF the
-    // operator opted in AND both required paths resolved; otherwise say
-    // exactly why the fee cycle is off (plan requirement: never silent).
+    // Task 10: spawn the single-owner fee-cycle scheduler -- ONLY when the
+    // resolved mode is autonomous shadow AND both required paths resolved;
+    // otherwise say exactly why the fee cycle is off (plan requirement:
+    // never silent). Autonomous shadow is the ONLY row that runs the
+    // scheduler in this build: passive-observer has no dry-run to run, and
+    // live-authority's cycle-execution wiring is out of this task's scope
+    // (see `State::live_broadcaster`'s doc comment).
     {
         let s = plugin.state();
-        if !fee_dryrun {
+        if !autonomous_shadow {
             eprintln!(
-                "revops: fee-cycle scheduler off: {fee_dryrun_name}=false (dry-run not \
-                 requested; default is off)"
+                "revops: fee-cycle scheduler off: resolved mode is '{}' (autonomous shadow -- \
+                 {fee_stateful_shadow_name}=true alongside {fee_dryrun_name}=true, \
+                 observer=true, {fee_broadcast_name}=false -- is the only mode that runs the \
+                 fee-cycle scheduler in this build)",
+                s.mode_label
             );
         } else {
             match (production_db_path_expanded.as_ref(), s.journal_dir.as_ref()) {
                 (None, _) => eprintln!(
-                    "revops: fee-cycle scheduler off: {fee_dryrun_name}=true but \
+                    "revops: fee-cycle scheduler off: autonomous shadow mode resolved but \
                      {db_path_name} is unset/unusable (no production DB to read evidence from)"
                 ),
                 (_, None) => eprintln!(
-                    "revops: fee-cycle scheduler off: {fee_dryrun_name}=true but no journal \
-                     dir resolved (set {journal_dir_name} or {observer_db_name})"
+                    "revops: fee-cycle scheduler off: autonomous shadow mode resolved but no \
+                     journal dir resolved (set {journal_dir_name} or {observer_db_name})"
                 ),
                 (Some(prod_db_path), Some(journal_dir)) => {
                     match revops::fee_scheduler::spawn(
@@ -1043,21 +1560,24 @@ async fn main() -> Result<()> {
                             db_path: prod_db_path.clone(),
                             socket_path: init_socket_path.clone(),
                             journal_dir: journal_dir.clone(),
-                            // Design Note 1: re-hydrate-per-cycle for the
-                            // whole dry-run window; SeedOnce is the
-                            // cutover flip.
-                            lifecycle: revops::fee_scheduler::StateLifecycle::RehydratePerCycle,
-                            // T6b: cycles keyed off Python's observed
-                            // end-of-cycle state flush (FixedInterval is
-                            // the cutover flip, alongside SeedOnce).
-                            trigger: revops::fee_scheduler::TriggerMode::default(),
+                            // Task 10 (Design Note 1's recorded cutover
+                            // flip): autonomous shadow uses SeedOnce +
+                            // fixed-interval cycles. RehydratePerCycle /
+                            // FlushTriggered remain in `fee_scheduler` for
+                            // strict-replay/legacy dry-run tests only --
+                            // never selected by this live wiring.
+                            lifecycle: revops::fee_scheduler::StateLifecycle::SeedOnce,
+                            trigger: revops::fee_scheduler::TriggerMode::FixedInterval {
+                                phase_offset_secs: revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
+                            },
                         },
                         s.db.clone(),
                         s.python_options.clone(),
                         // Task 5: the Rust-owned state store (observer-db
-                        // actor). Unused by RehydratePerCycle; REQUIRED
-                        // once the lifecycle above flips to SeedOnce at
-                        // cutover (cycles fail closed without it).
+                        // actor) -- REQUIRED for SeedOnce; the mode gate
+                        // already guarantees `observer_db.is_some()` for
+                        // this mode (see `resolve_startup_mode`'s
+                        // mandatory-writable-state check).
                         s.observer_db
                             .clone()
                             .map(|h| Box::new(h) as Box<dyn revops::fee_state::RunwayStateStore>),
@@ -1065,17 +1585,15 @@ async fn main() -> Result<()> {
                         Ok(handle) => {
                             let _ = s.scheduler.set(handle);
                             eprintln!(
-                                "revops: fee-cycle scheduler started (dry-run; journal dir {}, \
-                                 flush-triggered: poll {}s / settle {}s off Python's \
-                                 fee_strategy_state flush marker)",
+                                "revops: fee-cycle scheduler started (autonomous shadow, \
+                                 SeedOnce; journal dir {}, fixed interval, phase offset {}s)",
                                 journal_dir.display(),
-                                revops::fee_scheduler::DEFAULT_FLUSH_POLL_SECS,
-                                revops::fee_scheduler::DEFAULT_FLUSH_SETTLE_SECS
+                                revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
                             );
                         }
                         Err(e) => eprintln!(
-                            "revops: fee-cycle scheduler FAILED to start: {e:#}; fee dry-run \
-                             disabled for this plugin lifetime"
+                            "revops: fee-cycle scheduler FAILED to start: {e:#}; autonomous \
+                             shadow disabled for this plugin lifetime"
                         ),
                     }
                 }
@@ -1127,6 +1645,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     /// Serializes every test that mutates process-global environment
     /// (`HOME`): the default test runner executes `#[test]`s on parallel
@@ -1398,5 +1917,385 @@ mod tests {
     fn resolve_journal_dir_both_unset_yields_none() {
         let resolved = resolve_journal_dir("", None);
         assert_eq!(resolved, None);
+    }
+
+    // -----------------------------------------------------------------
+    // Task 10: `resolve_startup_mode` -- the mode matrix, the mandatory-
+    // writable-Rust-state gate, and cutover-arm consumption, all wired
+    // together exactly as `main()` calls them.
+    // -----------------------------------------------------------------
+
+    const TEST_NODE_ID: &str = "lnnode";
+    const TEST_SOURCE_COMMIT: &str = "7d8e79ec307fd10bd1a775a236148a642a0a506f";
+    const TEST_BINARY_SHA256: &str =
+        "ff648376758b9a97de7642adbf1c258494744c54e33c31a712dcc8c742d1428c";
+
+    fn test_identity(owner_uid: u32) -> RunningIdentity {
+        RunningIdentity {
+            node_id: TEST_NODE_ID.to_string(),
+            subsystem: cutover_arm::CUTOVER_SUBSYSTEM_FEES.to_string(),
+            source_commit: TEST_SOURCE_COMMIT.to_string(),
+            binary_sha256: TEST_BINARY_SHA256.to_string(),
+            owner_uid,
+            now: 1_000_000,
+        }
+    }
+
+    fn valid_arm_json(nonce: &str) -> String {
+        format!(
+            r#"{{
+                "schema": "{schema}",
+                "node_id": "{node}",
+                "subsystem": "{subsystem}",
+                "source_commit": "{commit}",
+                "binary_sha256": "{hash}",
+                "not_before": 999900,
+                "expires_at": 1000100,
+                "nonce": "{nonce}"
+            }}"#,
+            schema = cutover_arm::CUTOVER_ARM_SCHEMA,
+            node = TEST_NODE_ID,
+            subsystem = cutover_arm::CUTOVER_SUBSYSTEM_FEES,
+            commit = TEST_SOURCE_COMMIT,
+            hash = TEST_BINARY_SHA256,
+            nonce = nonce,
+        )
+    }
+
+    fn write_arm(dir: &std::path::Path, name: &str, json: &str) -> PathBuf {
+        use std::fs::OpenOptions;
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = dir.join(name);
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("create arm file")
+            .write_all(json.as_bytes())
+            .expect("write arm json");
+        path
+    }
+
+    fn virgin_state() -> revops_db::fee_runway::FeeStateSnapshot {
+        revops_db::fee_runway::FeeStateSnapshot::default()
+    }
+
+    fn non_virgin_state() -> revops_db::fee_runway::FeeStateSnapshot {
+        revops_db::fee_runway::FeeStateSnapshot {
+            generation: 3,
+            rows: vec![],
+        }
+    }
+
+    fn passive_flags() -> ModeFlags {
+        ModeFlags {
+            observer: true,
+            fee_dryrun: false,
+            fee_broadcast: false,
+            fee_stateful_shadow: false,
+        }
+    }
+
+    fn shadow_flags() -> ModeFlags {
+        ModeFlags {
+            observer: true,
+            fee_dryrun: true,
+            fee_broadcast: false,
+            fee_stateful_shadow: true,
+        }
+    }
+
+    fn live_flags() -> ModeFlags {
+        ModeFlags {
+            observer: false,
+            fee_dryrun: false,
+            fee_broadcast: true,
+            fee_stateful_shadow: false,
+        }
+    }
+
+    /// Full mode matrix: passive observer needs no Rust state and no arm.
+    #[test]
+    fn resolve_startup_mode_passive_observer_delegates_to_fee_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let result = resolve_startup_mode(StartupModeInputs {
+            flags: passive_flags(),
+            cutover_arm: None,
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: false,
+        })
+        .expect("passive observer needs no Rust state");
+        assert!(matches!(result, ValidatedFeeMode::PassiveObserver));
+        assert_eq!(mode_label(&result), "passive_observer");
+    }
+
+    /// Mandatory writable Rust state (Step 1): autonomous shadow without a
+    /// configured Rust-owned store is refused BEFORE the mode matrix ever
+    /// runs -- no arm is involved here, so this proves the gate exists
+    /// independent of arm handling.
+    #[test]
+    fn resolve_startup_mode_shadow_requires_rust_state_store() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: shadow_flags(),
+            cutover_arm: None,
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: false,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::MissingRustState {
+                mode: "autonomous fee shadow mode"
+            }
+        ));
+    }
+
+    /// Same gate, live-authority row -- AND proves the ordering guarantee:
+    /// the cutover arm file is left COMPLETELY untouched (not even opened)
+    /// when the mandatory-state gate refuses first. A broken deploy must
+    /// never burn a one-time arm.
+    #[test]
+    fn resolve_startup_mode_live_requires_rust_state_store_before_touching_arm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let arm_path = write_arm(
+            tmp.path(),
+            "arm.json",
+            &valid_arm_json("live-nonce-untouched"),
+        );
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: live_flags(),
+            cutover_arm: Some((&arm_path, test_identity(owner_uid))),
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: false,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::MissingRustState {
+                mode: "live fee authority mode"
+            }
+        ));
+        assert!(
+            arm_path.exists(),
+            "arm must be left untouched when the mandatory-state gate refuses first"
+        );
+        assert!(!consumed_dir.exists(), "nothing should have been consumed");
+    }
+
+    /// Arm absence in shadow (Step 1): a configured store, no arm supplied,
+    /// virgin state -- accepted, deferring seeding to the first cycle.
+    #[test]
+    fn resolve_startup_mode_shadow_without_arm_when_store_configured() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let result = resolve_startup_mode(StartupModeInputs {
+            flags: shadow_flags(),
+            cutover_arm: None,
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: true,
+        })
+        .expect("shadow row with a configured store and no arm is valid");
+        match result {
+            ValidatedFeeMode::AutonomousShadow(shadow) => assert_eq!(
+                shadow.seed_status(),
+                revops::fee_mode::ShadowSeedStatus::PendingFirstCycle
+            ),
+            other => panic!("expected AutonomousShadow, got {other:?}"),
+        }
+    }
+
+    /// Arm consumption in live mode (Step 1): a valid arm, matching
+    /// identity, and a configured store -- accepted, AND the arm file is
+    /// actually gone from its original path (moved into `consumed_dir`).
+    #[test]
+    fn resolve_startup_mode_live_consumes_a_valid_arm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let arm_path = write_arm(
+            tmp.path(),
+            "arm.json",
+            &valid_arm_json("live-nonce-consumed"),
+        );
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        let result = resolve_startup_mode(StartupModeInputs {
+            flags: live_flags(),
+            cutover_arm: Some((&arm_path, test_identity(owner_uid))),
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: true,
+        })
+        .expect("live row with a valid arm and a configured store is valid");
+        match result {
+            ValidatedFeeMode::LiveAuthority(live) => {
+                assert_eq!(live.arm().nonce(), "live-nonce-consumed");
+            }
+            other => panic!("expected LiveAuthority, got {other:?}"),
+        }
+        assert!(
+            !arm_path.exists(),
+            "the arm must be consumed (moved away) on success"
+        );
+        assert!(
+            consumed_dir.join("live-nonce-consumed").exists(),
+            "the consumed arm must land at consumed_dir/<nonce>"
+        );
+    }
+
+    /// An invalid arm (wrong node id) is refused with `ArmInvalid`, never
+    /// silently treated as "no arm supplied".
+    #[test]
+    fn resolve_startup_mode_invalid_arm_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("live-nonce-bad"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+        let mut identity = test_identity(owner_uid);
+        identity.node_id = "some-other-node".to_string();
+
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: live_flags(),
+            cutover_arm: Some((&arm_path, identity)),
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: true,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::ArmInvalid(cutover_arm::CutoverArmDenyReason::WrongNode(_))
+        ));
+        assert!(arm_path.exists(), "a rejected arm is never consumed");
+    }
+
+    /// An arm present alongside the shadow row is consumed (per
+    /// `fee_mode`'s own `ArmPresentInNonLiveMode` contract) and THEN the
+    /// mode matrix denies it -- proving the arm-handling step runs
+    /// unconditionally on the resolved flags, not only for the live row.
+    #[test]
+    fn resolve_startup_mode_arm_present_in_shadow_row_is_denied_after_consumption() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("stray-in-shadow"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: shadow_flags(),
+            cutover_arm: Some((&arm_path, test_identity(owner_uid))),
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: true,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::Mode(
+                revops::fee_mode::FeeModeDenyReason::ArmPresentInNonLiveMode
+            )
+        ));
+        assert!(
+            !arm_path.exists(),
+            "the arm is consumed even though this mode ultimately denies it"
+        );
+    }
+
+    /// Shadow row, a non-virgin store with no seed event, delegates the
+    /// `NeverSeeded` misconfiguration straight through from `fee_mode`.
+    #[test]
+    fn resolve_startup_mode_never_seeded_delegates_from_fee_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: shadow_flags(),
+            cutover_arm: None,
+            consumed_arm_dir: &consumed_dir,
+            state: &non_virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: true,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::Mode(revops::fee_mode::FeeModeDenyReason::NeverSeeded)
+        ));
+    }
+
+    /// Observer-DB collision guard, end to end: the collision guard yields
+    /// `observer_db = None` (existing Task 2 behavior), and feeding that
+    /// straight into `rust_state_store_configured` refuses autonomous
+    /// shadow with the SAME `MissingRustState` gate a never-configured
+    /// store would -- the collision guard's downstream effect on mode
+    /// resolution is exactly "no writable Rust state", not a distinct
+    /// error path.
+    #[test]
+    fn observer_db_collision_guard_feeds_missing_rust_state_gate() {
+        let observer_path = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
+        let production_path = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
+        assert!(observer_db_path_collides_with_production(
+            &observer_path,
+            Some(&production_path),
+        ));
+        // The collision guard's real effect: `observer_db` stays `None`.
+        let rust_state_store_configured = false;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: shadow_flags(),
+            cutover_arm: None,
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::MissingRustState {
+                mode: "autonomous fee shadow mode"
+            }
+        ));
+    }
+
+    #[test]
+    fn mode_label_matches_every_variant() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("label-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+        let consumed_dir = tmp.path().join("consumed");
+        let arm =
+            cutover_arm::validate_and_consume(&arm_path, &consumed_dir, &test_identity(owner_uid))
+                .expect("valid arm consumes");
+
+        assert_eq!(
+            mode_label(&ValidatedFeeMode::PassiveObserver),
+            "passive_observer"
+        );
+        let shadow = fee_mode::validate_fee_mode(shadow_flags(), None, &virgin_state(), None)
+            .expect("shadow row valid");
+        assert_eq!(mode_label(&shadow), "autonomous_shadow");
+        let live = fee_mode::validate_fee_mode(live_flags(), Some(arm), &virgin_state(), None)
+            .expect("live row valid");
+        assert_eq!(mode_label(&live), "live_authority");
     }
 }

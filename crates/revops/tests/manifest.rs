@@ -82,6 +82,19 @@ fn manifest_advertises_shadow_names() {
     assert!(opts.contains(&"revops-r-db-path"), "options: {opts:?}");
     assert!(opts.contains(&"revops-r-journal-dir"), "options: {opts:?}");
     assert!(opts.contains(&"revops-r-fee-dryrun"), "options: {opts:?}");
+    // Task 10: the stateful-shadow mode-matrix options.
+    assert!(
+        opts.contains(&"revops-r-fee-stateful-shadow"),
+        "options: {opts:?}"
+    );
+    assert!(
+        opts.contains(&"revops-r-fee-broadcast"),
+        "options: {opts:?}"
+    );
+    assert!(
+        opts.contains(&"revops-r-cutover-arm-path"),
+        "options: {opts:?}"
+    );
     let methods: Vec<&str> = result["rpcmethods"]
         .as_array()
         .unwrap()
@@ -118,6 +131,13 @@ fn manifest_advertises_shadow_names() {
         methods.contains(&"revenue-r-fee-wake"),
         "methods: {methods:?}"
     );
+    // Task 10: the read-only runway status RPC -- a fixed name in every
+    // mode (see `main.rs`'s `fee_runway_status_name` doc comment), not run
+    // through the shadow/canonical `rpc_name()` mapping.
+    assert!(
+        methods.contains(&"revops-fee-runway-status"),
+        "methods: {methods:?}"
+    );
 }
 
 #[test]
@@ -132,10 +152,11 @@ fn manifest_registers_all_python_options_under_shadow_prefix() {
         .map(|o| o["name"].as_str().unwrap())
         .filter(|n| n.starts_with("revops-r-"))
         .collect();
-    // +4 for our own revops-r-observer, revops-r-observer-db-path (Task 2),
-    // revops-r-journal-dir (Task 3), and revops-r-fee-dryrun (Phase 4b
-    // Task 6) -- no Python analogs.
-    assert_eq!(shadow.len(), expected + 4, "shadow options registered");
+    // +7 for our own revops-r-observer, revops-r-observer-db-path (Task 2),
+    // revops-r-journal-dir (Task 3), revops-r-fee-dryrun (Phase 4b Task 6),
+    // and Task 10's revops-r-fee-stateful-shadow / revops-r-fee-broadcast /
+    // revops-r-cutover-arm-path -- no Python analogs.
+    assert_eq!(shadow.len(), expected + 7, "shadow options registered");
 }
 
 /// Phase 4b Task 6 (non-negotiable plan constraint): `revops-r-fee-dryrun`
@@ -182,19 +203,32 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         opt_names.contains(&"revenue-ops-journal-dir"),
         "options: {opt_names:?}"
     );
+    assert!(
+        opt_names.contains(&"revenue-ops-fee-stateful-shadow"),
+        "options: {opt_names:?}"
+    );
+    assert!(
+        opt_names.contains(&"revenue-ops-fee-broadcast"),
+        "options: {opt_names:?}"
+    );
+    assert!(
+        opt_names.contains(&"revenue-ops-cutover-arm-path"),
+        "options: {opt_names:?}"
+    );
 
     let canonical: Vec<&&str> = opt_names
         .iter()
         .filter(|n| n.starts_with("revenue-ops-"))
         .collect();
-    // +4 for our own revenue-ops-observer, revenue-ops-observer-db-path,
-    // revenue-ops-journal-dir, and revenue-ops-fee-dryrun
-    // (revenue-ops-db-path is registered exactly once, under the fixture's
-    // own canonical name -- see register_python_options' doc comment on
-    // the db-path skip).
+    // +7 for our own revenue-ops-observer, revenue-ops-observer-db-path,
+    // revenue-ops-journal-dir, revenue-ops-fee-dryrun, and Task 10's
+    // revenue-ops-fee-stateful-shadow / revenue-ops-fee-broadcast /
+    // revenue-ops-cutover-arm-path (revenue-ops-db-path is registered
+    // exactly once, under the fixture's own canonical name -- see
+    // register_python_options' doc comment on the db-path skip).
     assert_eq!(
         canonical.len(),
-        expected + 4,
+        expected + 7,
         "canonical options registered"
     );
 
@@ -222,13 +256,19 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-fee-wake"),
         "methods: {methods:?}"
     );
-    // Exactly 8 rpc methods total (no leftover revenue-r-* names bleeding
+    // Task 10's runway status RPC keeps its one fixed name in every mode
+    // (never canonical-mapped to "revenue-fee-runway-status").
+    assert!(
+        methods.contains(&"revops-fee-runway-status"),
+        "methods: {methods:?}"
+    );
+    // Exactly 9 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
-    // Task 5's history/report/dashboard read-RPC subset, plus Phase 4b
-    // Task 7's fee-debug/fee-wake.
+    // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
+    // fee-debug/fee-wake, plus Task 10's runway status RPC.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        8,
+        9,
         "methods: {methods:?}"
     );
 
@@ -300,6 +340,24 @@ fn init_with(
     db_path_override: Option<&str>,
     home: &std::path::Path,
 ) -> serde_json::Value {
+    init_with_extra(canonical, db_path_override, home, &[])
+}
+
+/// [`init_with`] plus arbitrary extra `(option_name, value)` pairs sent
+/// verbatim in the `init` message's options map -- `option_name` must
+/// already be the fully resolved (shadow- or canonical-mapped) name, e.g.
+/// `"revops-r-fee-stateful-shadow"`, and `value` must already be the
+/// correctly-typed JSON value for that option (a JSON bool for a bool
+/// option, matching what lightningd itself sends). Used by Task 10's
+/// mode-matrix init tests, which need to set the new mode-matrix options
+/// without a live `lightning-rpc` socket (every scenario they cover
+/// resolves without dialing one -- see each test's own comment).
+fn init_with_extra(
+    canonical: bool,
+    db_path_override: Option<&str>,
+    home: &std::path::Path,
+    extra: &[(&str, serde_json::Value)],
+) -> serde_json::Value {
     let bin = env!("CARGO_BIN_EXE_revops");
     let mut cmd = Command::new(bin);
     if canonical {
@@ -332,6 +390,9 @@ fn init_with(
     let mut options = serde_json::Map::new();
     if let Some(p) = db_path_override {
         options.insert(db_path_name.to_string(), serde_json::json!(p));
+    }
+    for (name, value) in extra {
+        options.insert((*name).to_string(), value.clone());
     }
     let init_req = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "init",
@@ -403,5 +464,64 @@ fn init_canonical_mode_explicit_db_path_miss_still_disables() {
     assert!(
         result.get("disable").is_some(),
         "canonical-mode init with a bad explicit db-path must disable: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 10: end-to-end (real plugin process) confirmation that `main()`'s
+// mode-matrix wiring reaches the same conclusions as the pure
+// `resolve_startup_mode` unit tests in `src/main.rs`. These two scenarios
+// need no live `lightning-rpc` socket (neither touches a cutover arm, so
+// `resolve_running_node_id` is never called) -- "arm consumption in live
+// mode" is covered by `src/main.rs`'s inline tests instead (a live-socket
+// fake-RPC rehearsal harness is Task 11's job, not this one's).
+// ---------------------------------------------------------------------------
+
+/// Mandatory writable Rust state: `revops-r-fee-stateful-shadow=true` with
+/// `revops-r-observer-db-path` explicitly cleared (no Rust-owned store)
+/// must disable the plugin loudly at init, naming the gate that refused.
+#[test]
+fn init_stateful_shadow_without_observer_db_disables() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = init_with_extra(
+        false,
+        None,
+        home.path(),
+        &[
+            ("revops-r-fee-stateful-shadow", serde_json::json!(true)),
+            ("revops-r-fee-dryrun", serde_json::json!(true)),
+            ("revops-r-observer-db-path", serde_json::json!("")),
+        ],
+    );
+    let disable = result
+        .get("disable")
+        .and_then(|d| d.as_str())
+        .expect("must disable when the Rust-owned store isn't configured: {result:?}");
+    assert!(
+        disable.contains("missing_rust_state"),
+        "disable reason must name the missing-rust-state gate: {disable}"
+    );
+}
+
+/// Arm absence in shadow: `revops-r-fee-stateful-shadow=true` +
+/// `revops-r-fee-dryrun=true` with the DEFAULT (unset) observer-db-path
+/// (which resolves under `$HOME/.lightning/`, writable in this tempdir
+/// `$HOME`) and no cutover arm must come up cleanly -- a virgin store
+/// defers seeding to the first cycle.
+#[test]
+fn init_stateful_shadow_without_arm_and_with_observer_db_does_not_disable() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = init_with_extra(
+        false,
+        None,
+        home.path(),
+        &[
+            ("revops-r-fee-stateful-shadow", serde_json::json!(true)),
+            ("revops-r-fee-dryrun", serde_json::json!(true)),
+        ],
+    );
+    assert!(
+        result.get("disable").is_none(),
+        "autonomous shadow with a configured store and no arm must not disable: {result:?}"
     );
 }
