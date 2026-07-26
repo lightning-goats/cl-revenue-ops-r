@@ -695,6 +695,26 @@ pub fn load_latest_state(conn: &Connection) -> Result<FeeStateSnapshot> {
     })
 }
 
+/// Scalar-only read of the current state generation (fix round 1, I-5):
+/// [`load_latest_state`] materialises every channel's `v2_state_json` row
+/// just to answer "what generation is this store at" -- callers that only
+/// need the number (the runway status RPC) use this instead, so a request
+/// that only wants one integer doesn't force a full-table read on the
+/// single-owner actor the cycle loop writes through (head-of-line
+/// blocking risk on a busy store).
+pub fn current_state_generation(conn: &Connection) -> Result<u64> {
+    let generation: i64 = conn
+        .query_row(
+            "SELECT generation FROM rust_fee_state_generation WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("read fee state generation")?
+        .unwrap_or(0);
+    Ok(generation.max(0) as u64)
+}
+
 // ---------------------------------------------------------------------------
 // mempool samples
 // ---------------------------------------------------------------------------
@@ -774,6 +794,33 @@ pub fn query_mempool_samples_since(conn: &Connection, since: i64) -> Result<Vec<
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("collect mempool samples")?;
     Ok(rows)
+}
+
+/// The count of, and the most recent timestamp among, every sample at or
+/// after `since` -- one aggregate-only query, never the rows themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MempoolSampleStats {
+    pub count: i64,
+    pub latest_sampled_at: Option<i64>,
+}
+
+/// Scalar-only sibling of [`query_mempool_samples_since`] (fix round 1,
+/// I-5): a caller that only needs freshness bookkeeping (sample count,
+/// latest timestamp -- the runway status RPC's use case) must not force
+/// materialising every row in the window on the single-owner actor the
+/// cycle loop writes through.
+pub fn mempool_sample_stats(conn: &Connection, since: i64) -> Result<MempoolSampleStats> {
+    conn.query_row(
+        "SELECT COUNT(*), MAX(sampled_at) FROM rust_mempool_fee_history WHERE sampled_at >= ?1",
+        params![since],
+        |r| {
+            Ok(MempoolSampleStats {
+                count: r.get(0)?,
+                latest_sampled_at: r.get(1)?,
+            })
+        },
+    )
+    .context("read mempool sample stats")
 }
 
 /// Persist one shadow-window mempool 24h-MA comparison (fix round 1,

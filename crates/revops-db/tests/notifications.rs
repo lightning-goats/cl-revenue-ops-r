@@ -3,12 +3,13 @@
 //! `docs/superpowers/plans/2026-07-17-phase1b-observer.md` Task 2.
 
 use revops_db::fee_runway::{
-    active_quarantine, commit_fee_cycle, insert_quarantine, latest_runway_snapshot,
-    load_latest_state, mutation_count, query_mempool_ma_comparisons_since,
-    query_mempool_samples_since, record_mempool_ma_comparison, record_mempool_sample,
-    record_mempool_sample_pruned, record_runway_snapshot, record_trigger_event, FeeCycleCommit,
-    FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow, MempoolMaComparisonRow,
-    PreparedFeeActionRow, QuarantineEntry, RunwaySnapshotRow, ShadowCycleOutcomeRow,
+    active_quarantine, commit_fee_cycle, current_state_generation, insert_quarantine,
+    latest_runway_snapshot, load_latest_state, mempool_sample_stats, mutation_count,
+    query_mempool_ma_comparisons_since, query_mempool_samples_since, record_mempool_ma_comparison,
+    record_mempool_sample, record_mempool_sample_pruned, record_runway_snapshot,
+    record_trigger_event, FeeCycleCommit, FeeStateRow, FeeTriggerEventRow, GovernorAuditRow,
+    LedgerAuditRow, MempoolMaComparisonRow, PreparedFeeActionRow, QuarantineEntry,
+    RunwaySnapshotRow, ShadowCycleOutcomeRow,
 };
 use revops_db::notifications::{
     compute_forward_hydration_start, init_schema, insert_channel_closure_event,
@@ -430,6 +431,26 @@ fn rust_fee_schema_shadow_outcome_columns_match_engagement_gate_contract() {
     );
 }
 
+/// Fix round 1 (I-5): `current_state_generation` must agree with
+/// `load_latest_state(&conn).generation` at every point -- cold start (0),
+/// after one commit (1), and after a second (2) -- without ever reading
+/// the `rust_fee_state` rows table.
+#[test]
+fn current_state_generation_agrees_with_load_latest_state() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    assert_eq!(current_state_generation(&conn).unwrap(), 0);
+    assert_eq!(load_latest_state(&conn).unwrap().generation, 0);
+
+    commit_fee_cycle(&conn, &sample_commit("cycle-1", 1_800_000_000)).unwrap();
+    assert_eq!(current_state_generation(&conn).unwrap(), 1);
+    assert_eq!(load_latest_state(&conn).unwrap().generation, 1);
+
+    commit_fee_cycle(&conn, &sample_commit("cycle-2", 1_800_000_100)).unwrap();
+    assert_eq!(current_state_generation(&conn).unwrap(), 2);
+    assert_eq!(load_latest_state(&conn).unwrap().generation, 2);
+}
+
 #[test]
 fn rust_fee_schema_mempool_samples_record_and_query() {
     let conn = Connection::open_in_memory().unwrap();
@@ -443,6 +464,36 @@ fn rust_fee_schema_mempool_samples_record_and_query() {
     assert_eq!(samples[0].sampled_at, 1_800_000_000);
     assert_eq!(samples[0].sat_per_vbyte, 12.5);
     assert_eq!(samples[1].sampled_at, 1_800_003_600);
+}
+
+/// Fix round 1 (I-5): `mempool_sample_stats` must agree with
+/// `query_mempool_samples_since(..).len()`/`.last()` without ever fetching
+/// the rows themselves.
+#[test]
+fn mempool_sample_stats_agrees_with_query_mempool_samples_since() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    record_mempool_sample(&conn, 1_800_000_000, 12.5).unwrap();
+    record_mempool_sample(&conn, 1_800_003_600, 15.0).unwrap();
+    record_mempool_sample(&conn, 1_799_990_000, 9.0).unwrap(); // before the window
+
+    let stats = mempool_sample_stats(&conn, 1_800_000_000).unwrap();
+    let rows = query_mempool_samples_since(&conn, 1_800_000_000).unwrap();
+    assert_eq!(stats.count, rows.len() as i64);
+    assert_eq!(stats.latest_sampled_at, rows.last().map(|r| r.sampled_at));
+    assert_eq!(stats.count, 2);
+    assert_eq!(stats.latest_sampled_at, Some(1_800_003_600));
+}
+
+/// Companion: an empty window reports `count: 0` and `latest_sampled_at:
+/// None`, matching an empty `Vec` from `query_mempool_samples_since`.
+#[test]
+fn mempool_sample_stats_reports_zero_for_an_empty_window() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    let stats = mempool_sample_stats(&conn, 0).unwrap();
+    assert_eq!(stats.count, 0);
+    assert_eq!(stats.latest_sampled_at, None);
 }
 
 #[test]

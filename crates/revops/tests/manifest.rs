@@ -1,6 +1,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use revops_db::fee_runway::{record_seed_event, FeeSeedEventRow};
+
 /// Speak the first half of the CLN plugin handshake to the compiled binary
 /// and return the parsed `getmanifest` response's `"result"` object.
 ///
@@ -176,6 +178,58 @@ fn manifest_fee_dryrun_is_bool_default_false_dynamic() {
     assert_eq!(opt["type"], serde_json::json!("bool"), "opt: {opt}");
     assert_eq!(opt["default"], serde_json::json!(false), "opt: {opt}");
     assert_eq!(opt["dynamic"], serde_json::json!(true), "opt: {opt}");
+}
+
+/// Fix round 1 (I-2): pin `revops-r-fee-stateful-shadow`'s type, default,
+/// and NOT-dynamic (the operating mode is validated once at init; a
+/// runtime `setconfig` flip would be silently ineffective) -- flipping any
+/// of the three would otherwise fail no test.
+#[test]
+fn manifest_fee_stateful_shadow_is_bool_default_false_not_dynamic() {
+    let result = manifest();
+    let opt = result["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "revops-r-fee-stateful-shadow")
+        .expect("revops-r-fee-stateful-shadow registered")
+        .clone();
+    assert_eq!(opt["type"], serde_json::json!("bool"), "opt: {opt}");
+    assert_eq!(opt["default"], serde_json::json!(false), "opt: {opt}");
+    assert_eq!(opt["dynamic"], serde_json::json!(false), "opt: {opt}");
+}
+
+/// Same pin, `revops-r-fee-broadcast`.
+#[test]
+fn manifest_fee_broadcast_is_bool_default_false_not_dynamic() {
+    let result = manifest();
+    let opt = result["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "revops-r-fee-broadcast")
+        .expect("revops-r-fee-broadcast registered")
+        .clone();
+    assert_eq!(opt["type"], serde_json::json!("bool"), "opt: {opt}");
+    assert_eq!(opt["default"], serde_json::json!(false), "opt: {opt}");
+    assert_eq!(opt["dynamic"], serde_json::json!(false), "opt: {opt}");
+}
+
+/// Same pin, `revops-r-cutover-arm-path` (string, empty default, not
+/// dynamic).
+#[test]
+fn manifest_cutover_arm_path_is_string_default_empty_not_dynamic() {
+    let result = manifest();
+    let opt = result["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "revops-r-cutover-arm-path")
+        .expect("revops-r-cutover-arm-path registered")
+        .clone();
+    assert_eq!(opt["type"], serde_json::json!("string"), "opt: {opt}");
+    assert_eq!(opt["default"], serde_json::json!(""), "opt: {opt}");
+    assert_eq!(opt["dynamic"], serde_json::json!(false), "opt: {opt}");
 }
 
 #[test]
@@ -419,6 +473,91 @@ fn init_with_extra(
     resp["result"].clone()
 }
 
+/// Fix round 1 (coordinator rulings I-1/I-3): [`init_with_extra`] plus ONE
+/// additional RPC call, keeping the child process alive across all three
+/// exchanges (`getmanifest` -> `init` -> `method`) instead of killing it
+/// right after `init`. Panics if `init` disabled the plugin -- every
+/// caller of this helper expects a live, running plugin to call `method`
+/// against. Returns `method`'s own `"result"` object.
+fn call_after_init(
+    canonical: bool,
+    db_path_override: Option<&str>,
+    home: &std::path::Path,
+    init_extra: &[(&str, serde_json::Value)],
+    method: &str,
+) -> serde_json::Value {
+    let bin = env!("CARGO_BIN_EXE_revops");
+    let mut cmd = Command::new(bin);
+    if canonical {
+        cmd.env("REVOPS_CANONICAL_NAMES", "1");
+    } else {
+        cmd.env_remove("REVOPS_CANONICAL_NAMES");
+    }
+    cmd.env("HOME", home);
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn revops");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+
+    let manifest_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getmanifest", "params": {}
+    });
+    write!(stdin, "{}\n\n", manifest_req).unwrap();
+    drain_one_frame(&mut reader);
+
+    let db_path_name = if canonical {
+        "revenue-ops-db-path"
+    } else {
+        "revops-r-db-path"
+    };
+    let mut options = serde_json::Map::new();
+    if let Some(p) = db_path_override {
+        options.insert(db_path_name.to_string(), serde_json::json!(p));
+    }
+    for (name, value) in init_extra {
+        options.insert((*name).to_string(), value.clone());
+    }
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "init",
+        "params": {
+            "options": options,
+            "configuration": {
+                "lightning-dir": home.join(".lightning").to_string_lossy(),
+                "rpc-file": "lightning-rpc",
+                "startup": true,
+                "network": "regtest",
+                "feature_set": {
+                    "init": "", "node": "", "channel": "", "invoice": ""
+                }
+            }
+        }
+    });
+    write!(stdin, "{}\n\n", init_req).unwrap();
+    let init_body = drain_one_frame(&mut reader);
+    let init_resp: serde_json::Value = serde_json::from_str(&init_body).expect("init json");
+    assert!(
+        init_resp["result"].get("disable").is_none(),
+        "call_after_init: init must not disable for this scenario: {init_resp:?}"
+    );
+
+    let call_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": method, "params": {}
+    });
+    write!(stdin, "{}\n\n", call_req).unwrap();
+    let call_body = drain_one_frame(&mut reader);
+
+    child.kill().ok();
+    child.wait().ok();
+
+    let resp: serde_json::Value = serde_json::from_str(&call_body).expect("call json");
+    resp["result"].clone()
+}
+
 /// Read one newline-terminated JSON-RPC frame (a run of non-blank lines up
 /// to the blank-line frame terminator cln-plugin uses), returning the
 /// accumulated body.
@@ -523,5 +662,181 @@ fn init_stateful_shadow_without_arm_and_with_observer_db_does_not_disable() {
     assert!(
         result.get("disable").is_none(),
         "autonomous shadow with a configured store and no arm must not disable: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (coordinator review): I-1 (seed provenance on the runway
+// status RPC), I-3 (pin the autonomous-shadow spawn config).
+// ---------------------------------------------------------------------------
+
+const RUNWAY_STATUS_METHOD: &str = "revops-fee-runway-status";
+
+/// I-1: no seed event has ever been recorded (a fresh observer db) -- the
+/// runway status RPC's `seed_provenance` field must be `null`, not an
+/// error and not a missing key.
+#[test]
+fn runway_status_seed_provenance_is_null_when_absent() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init(false, None, home.path(), &[], RUNWAY_STATUS_METHOD);
+    assert!(
+        result.get("seed_provenance").is_some(),
+        "seed_provenance key must be present (null, not absent): {result:?}"
+    );
+    assert!(
+        result["seed_provenance"].is_null(),
+        "seed_provenance must be null with no recorded seed event: {result:?}"
+    );
+}
+
+/// I-1: a previously-recorded seed event must be surfaced verbatim --
+/// source db path, MAX(last_update), row count, payload sha256, and
+/// source commit (the fields the runway controller consumes), pre-seeded
+/// directly into the observer db file (via `revops_db::fee_runway`, the
+/// same schema the plugin's own actor opens) BEFORE the plugin process
+/// ever starts.
+#[test]
+fn runway_status_seed_provenance_reports_a_recorded_seed_event() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let observer_db_path = home.path().join("observer.db");
+
+    {
+        let conn = rusqlite::Connection::open(&observer_db_path).expect("open observer db");
+        revops_db::notifications::init_schema(&conn).expect("init observer db schema");
+        record_seed_event(
+            &conn,
+            &FeeSeedEventRow {
+                seeded_at: 1_700_000_000,
+                outcome: "seeded".to_string(),
+                source_db_path: "/var/lib/lightning/revenue_ops.db".to_string(),
+                source_max_last_update: 1_699_999_000,
+                row_count: 7,
+                payload_sha256: "ab".repeat(32),
+                source_commit: "deadbeefcafef00d".to_string(),
+                refused_channel: None,
+                refused_field: None,
+                detail: None,
+            },
+        )
+        .expect("seed the observer db with a seed-provenance event");
+    }
+
+    let result = call_after_init(
+        false,
+        None,
+        home.path(),
+        &[(
+            "revops-r-observer-db-path",
+            serde_json::json!(observer_db_path.to_str().unwrap()),
+        )],
+        RUNWAY_STATUS_METHOD,
+    );
+
+    let seed = &result["seed_provenance"];
+    assert!(
+        !seed.is_null(),
+        "seed_provenance must be populated: {result:?}"
+    );
+    assert_eq!(seed["outcome"], serde_json::json!("seeded"));
+    assert_eq!(
+        seed["source_db_path"],
+        serde_json::json!("/var/lib/lightning/revenue_ops.db")
+    );
+    assert_eq!(
+        seed["source_max_last_update"],
+        serde_json::json!(1_699_999_000)
+    );
+    assert_eq!(seed["row_count"], serde_json::json!(7));
+    assert_eq!(seed["payload_sha256"], serde_json::json!("ab".repeat(32)));
+    assert_eq!(seed["source_commit"], serde_json::json!("deadbeefcafef00d"));
+}
+
+/// I-3: nothing pinned the autonomous-shadow spawn config to
+/// `StateLifecycle::SeedOnce` + `TriggerMode::FixedInterval` -- reverting
+/// either to the legacy `RehydratePerCycle`/`FlushTriggered` default would
+/// fail no test. Drive a REAL plugin process into autonomous-shadow mode
+/// (a production-schema fixture db as the production db-path, so the
+/// scheduler's required-paths gate is satisfied and it actually spawns)
+/// and assert the runway status RPC's own `counters.lifecycle` field
+/// reads back `"seed_once"`.
+#[test]
+fn runway_status_autonomous_shadow_reports_seed_once_lifecycle() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_db =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+    let prod_db_path = home.path().join("prod.db");
+    std::fs::copy(&fixture_db, &prod_db_path).expect("copy fixture.db");
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[
+            ("revops-r-fee-stateful-shadow", serde_json::json!(true)),
+            ("revops-r-fee-dryrun", serde_json::json!(true)),
+        ],
+        RUNWAY_STATUS_METHOD,
+    );
+
+    assert_eq!(
+        result["mode"],
+        serde_json::json!("autonomous_shadow"),
+        "{result:?}"
+    );
+    assert_eq!(
+        result["counters"]["lifecycle"],
+        serde_json::json!("seed_once"),
+        "autonomous shadow must spawn with StateLifecycle::SeedOnce: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (coordinator ruling I-7): `consumed_arm_dir` is the
+// nonce-replay ledger -- it must be pinned to `journal_dir` unconditionally
+// and refuse outright (never fall back to the arm file's own parent
+// directory) when `journal_dir` cannot be resolved at all.
+// ---------------------------------------------------------------------------
+
+/// A cutover-arm-path with NEITHER journal-dir NOR observer-db-path
+/// resolved (both explicitly cleared) must refuse at init, naming the
+/// missing ledger location -- and, critically, the (deliberately
+/// nonexistent) arm path must never even be opened: the old
+/// `arm_path.parent()`/`PathBuf::from(".")` fallback would instead have
+/// attempted (and failed differently -- `ArmInvalid: not_found`) to
+/// validate a real file at that fallback location.
+#[test]
+fn init_cutover_arm_path_without_journal_dir_refuses_before_touching_arm() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let arm_path = home.path().join("would-be-arm.json");
+    let result = init_with_extra(
+        false,
+        None,
+        home.path(),
+        &[
+            ("revops-r-journal-dir", serde_json::json!("")),
+            ("revops-r-observer-db-path", serde_json::json!("")),
+            (
+                "revops-r-cutover-arm-path",
+                serde_json::json!(arm_path.to_str().unwrap()),
+            ),
+        ],
+    );
+    let disable = result
+        .get("disable")
+        .and_then(|d| d.as_str())
+        .unwrap_or_else(|| panic!("must disable when journal-dir cannot be resolved: {result:?}"));
+    assert!(
+        disable.contains("no journal-dir"),
+        "disable reason must name the missing consumed-arm ledger location, not an unrelated \
+         arm-file error: {disable}"
+    );
+    assert!(
+        !disable.contains("not_found"),
+        "must refuse BEFORE ever attempting to open the (nonexistent) arm file, not fail on a \
+         file-not-found from a parent-directory fallback: {disable}"
+    );
+    assert!(
+        !arm_path.exists(),
+        "the arm path must never be created or touched by this refusal"
     );
 }

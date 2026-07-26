@@ -204,6 +204,61 @@ async fn fee_cycle_transaction_rollback_leaves_generation_and_count_unchanged() 
     );
 }
 
+/// Fix round 1 (I-5): the scalar-only `ObserverHandle` siblings agree with
+/// their full-row counterparts through the actor, both async and blocking.
+#[tokio::test]
+async fn scalar_generation_and_mempool_stats_agree_with_full_row_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    assert_eq!(handle.current_state_generation().await.unwrap(), 0);
+    handle
+        .commit_fee_cycle(sample_commit("cycle-1", 1_800_000_000))
+        .await
+        .unwrap();
+    let generation = handle.current_state_generation().await.unwrap();
+    assert_eq!(
+        generation,
+        handle.load_latest_fee_state().await.unwrap().generation
+    );
+    assert_eq!(generation, 1);
+
+    handle
+        .record_mempool_sample(1_800_000_000, 12.5)
+        .await
+        .unwrap();
+    handle
+        .record_mempool_sample(1_800_003_600, 15.0)
+        .await
+        .unwrap();
+    let stats = handle.mempool_sample_stats(1_800_000_000).await.unwrap();
+    let rows = handle
+        .query_mempool_samples_since(1_800_000_000)
+        .await
+        .unwrap();
+    assert_eq!(stats.count, rows.len() as i64);
+    assert_eq!(stats.latest_sampled_at, rows.last().map(|r| r.sampled_at));
+
+    // The blocking siblings must be driven from a plain OS thread (never
+    // from inside the tokio runtime itself) -- the exact same bridge
+    // `fee_cycle_transaction_blocking_bridge_from_scheduler_thread` above
+    // exercises.
+    let blocking_handle = handle.clone();
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            blocking_handle.blocking_current_state_generation().unwrap(),
+            generation
+        );
+        let blocking_stats = blocking_handle
+            .blocking_mempool_sample_stats(1_800_000_000)
+            .unwrap();
+        assert_eq!(blocking_stats, stats);
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn fee_cycle_transaction_mempool_trigger_and_quarantine_through_actor() {
     let dir = tempfile::tempdir().unwrap();

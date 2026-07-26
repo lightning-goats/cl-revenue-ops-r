@@ -151,6 +151,15 @@ pub enum FeeModeDenyReason {
     /// Rust-owned store already holds committed state (not virgin), and no
     /// seed-provenance event is on record.
     NeverSeeded,
+    /// Fix round 1 (coordinator ruling I-6): the flags matched the
+    /// live-fee-authority row and a valid arm was supplied, but the
+    /// Rust-owned store is either virgin (generation 0) or carries no
+    /// seed-provenance event. The cutover sequence guarantees the
+    /// autonomous shadow seeds and accumulates state BEFORE an arm is ever
+    /// minted -- "healthy persisted state" means seeded, never virgin. A
+    /// live process must never be the first thing to ever touch the
+    /// Rust-owned store.
+    LiveModeRequiresSeededState,
 }
 
 impl FeeModeDenyReason {
@@ -161,6 +170,7 @@ impl FeeModeDenyReason {
             Self::ArmPresentInNonLiveMode => "arm_present_in_non_live_mode",
             Self::LiveModeRequiresArm => "live_mode_requires_arm",
             Self::NeverSeeded => "stateful_shadow_never_seeded",
+            Self::LiveModeRequiresSeededState => "live_mode_requires_seeded_state",
         }
     }
 }
@@ -171,7 +181,14 @@ impl std::fmt::Display for FeeModeDenyReason {
             Self::InvalidCombination(flags) => write!(
                 f,
                 "{}: observer={} fee-dryrun={} fee-broadcast={} fee-stateful-shadow={} \
-                 matches no accepted operating mode",
+                 matches no accepted operating mode; accepted combinations (option names as \
+                 registered by the plugin): passive observer (revops-r-observer=true \
+                 revops-r-fee-dryrun=false revops-r-fee-broadcast=false \
+                 revops-r-fee-stateful-shadow=false, arm absent) | autonomous fee shadow \
+                 (revops-r-observer=true revops-r-fee-dryrun=true revops-r-fee-broadcast=false \
+                 revops-r-fee-stateful-shadow=true, arm absent) | live fee authority \
+                 (revops-r-observer=false revops-r-fee-dryrun=false revops-r-fee-broadcast=true \
+                 revops-r-fee-stateful-shadow=false, arm valid and consumed)",
                 self.code(),
                 flags.observer,
                 flags.fee_dryrun,
@@ -196,6 +213,13 @@ impl std::fmt::Display for FeeModeDenyReason {
                  that never seeded is a misconfiguration",
                 self.code(),
             ),
+            Self::LiveModeRequiresSeededState => write!(
+                f,
+                "{}: live fee authority mode requires the Rust-owned store to already hold \
+                 seeded state (generation > 0 and a recorded seed-provenance event) -- a live \
+                 process must never be the first thing to ever touch the Rust-owned store",
+                self.code(),
+            ),
         }
     }
 }
@@ -215,10 +239,12 @@ fn store_is_virgin(state: &FeeStateSnapshot) -> bool {
 /// returning exactly one of the three accepted [`ValidatedFeeMode`]
 /// variants or a stable [`FeeModeDenyReason`].
 ///
-/// `state` and `seed_event` are read ONLY for `fee-stateful-shadow=true`
-/// (the autonomous-shadow row); they are ignored for the other two rows,
-/// matching the table (neither passive observer nor live authority has a
-/// seed-provenance requirement of its own).
+/// `state` and `seed_event` are read for `fee-stateful-shadow=true` (the
+/// autonomous-shadow row) AND for the live-fee-authority row (fix round 1,
+/// coordinator ruling I-6: live authority requires the store to already be
+/// seeded -- see [`FeeModeDenyReason::LiveModeRequiresSeededState`]); they
+/// are ignored only for passive observer, which has no seed-provenance
+/// requirement of its own.
 pub fn validate_fee_mode(
     flags: ModeFlags,
     arm: Option<LiveSessionArm>,
@@ -252,10 +278,24 @@ pub fn validate_fee_mode(
                 seed_status,
             }))
         }
-        (false, false, true, false) => match arm {
-            Some(arm) => Ok(ValidatedFeeMode::LiveAuthority(LiveMode { arm })),
-            None => Err(FeeModeDenyReason::LiveModeRequiresArm),
-        },
+        (false, false, true, false) => {
+            let Some(arm) = arm else {
+                return Err(FeeModeDenyReason::LiveModeRequiresArm);
+            };
+            // Fix round 1 (coordinator ruling I-6): "healthy persisted
+            // state" for live authority means SEEDED, never virgin. The
+            // cutover sequence guarantees the autonomous shadow seeds and
+            // accumulates state before an arm is ever minted, so a virgin
+            // store (or committed state with no seed-provenance event --
+            // the same corruption/misconfiguration `NeverSeeded` catches
+            // for the shadow row) means this would be the FIRST thing to
+            // ever touch the Rust-owned store, which must never happen for
+            // a live process.
+            if state.generation == 0 || seed_event.is_none() {
+                return Err(FeeModeDenyReason::LiveModeRequiresSeededState);
+            }
+            Ok(ValidatedFeeMode::LiveAuthority(LiveMode { arm }))
+        }
         _ => Err(FeeModeDenyReason::InvalidCombination(flags)),
     }
 }

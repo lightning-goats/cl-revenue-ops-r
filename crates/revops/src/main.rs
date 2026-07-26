@@ -671,7 +671,11 @@ async fn main() -> Result<()> {
         &cutover_arm_path_name,
         "",
         "Path to a one-time, mode-0600 cutover-arm JSON file authorizing live fee authority \
-         (empty = no arm supplied). Consumed exactly once at startup; never reusable.",
+         (empty = no arm supplied). Consumed exactly once at startup into <journal-dir>/ \
+         cutover-consumed -- the arm file MUST be on the same filesystem as journal-dir (a \
+         rename never crosses mounts; a cross-filesystem arm fails consumption with EXDEV) -- \
+         and requires journal-dir (or observer-db-path, which journal-dir defaults from) to be \
+         resolved at all, or the plugin refuses to start rather than guess a fallback location.",
     );
 
     let ping_name = rpc_name("ping");
@@ -1116,22 +1120,52 @@ async fn main() -> Result<()> {
                 // Rust-owned store reads: all read-only, resolved live at
                 // request time via the actor's async request/reply
                 // methods (never a blocking call, never a lock shared
-                // with the cycle loop). `null` fields when no observer db
-                // is configured, matching every other optional field on
-                // this path.
+                // with the cycle loop). Fix round 1 (I-5): scalar-only
+                // queries (`current_state_generation`/
+                // `mempool_sample_stats`) replace the prior
+                // `load_latest_fee_state`/`query_mempool_samples_since`
+                // calls here -- this RPC only ever needed a number, not
+                // every channel's `v2_state_json` row or the 24h mempool
+                // row set, and the single-owner actor is the SAME one the
+                // cycle loop writes through (head-of-line blocking risk
+                // on a busy store). `null` fields when no observer db is
+                // configured, matching every other optional field on this
+                // path.
                 let (
                     state_generation,
+                    seed_provenance,
                     quarantine,
                     prepared_request_count,
                     mutation_call_count,
                     mempool,
                 ) = match &s.observer_db {
                     Some(handle) => {
-                        let generation = handle
-                            .load_latest_fee_state()
+                        let generation = handle.current_state_generation().await.ok();
+                        // Fix round 1 (I-1): the runway controller consumes
+                        // this exact shape (source db path, MAX(last_update),
+                        // row count, payload sha256, source commit), mirroring
+                        // the full `FeeSeedEventRow` shape `revenue-r-status`
+                        // already reports (see that RPC's `fee_runway.seed`
+                        // field) for consistency across both.
+                        let seed_provenance = handle
+                            .latest_fee_seed_event()
                             .await
                             .ok()
-                            .map(|snap| snap.generation);
+                            .flatten()
+                            .map(|e| {
+                                serde_json::json!({
+                                    "outcome": e.outcome,
+                                    "seeded_at": e.seeded_at,
+                                    "source_db_path": e.source_db_path,
+                                    "source_max_last_update": e.source_max_last_update,
+                                    "row_count": e.row_count,
+                                    "payload_sha256": e.payload_sha256,
+                                    "source_commit": e.source_commit,
+                                    "refused_channel": e.refused_channel,
+                                    "refused_field": e.refused_field,
+                                    "detail": e.detail,
+                                })
+                            });
                         let quarantine = handle
                             .active_execution_quarantine()
                             .await
@@ -1149,25 +1183,26 @@ async fn main() -> Result<()> {
                             });
                         let prepared_request_count = handle.fee_mutation_count().await.ok();
                         let mutation_call_count = handle.fee_broadcast_attempt_count().await.ok();
-                        let mempool_rows = handle
-                            .query_mempool_samples_since(now_unix() - MEMPOOL_MA_WINDOW_SECONDS)
+                        let mempool_stats = handle
+                            .mempool_sample_stats(now_unix() - MEMPOOL_MA_WINDOW_SECONDS)
                             .await
                             .ok();
-                        let mempool = mempool_rows.map(|rows| {
+                        let mempool = mempool_stats.map(|stats| {
                             serde_json::json!({
-                                "sample_count_24h": rows.len(),
-                                "latest_sampled_at": rows.last().map(|r| r.sampled_at),
+                                "sample_count_24h": stats.count,
+                                "latest_sampled_at": stats.latest_sampled_at,
                             })
                         });
                         (
                             generation,
+                            seed_provenance,
                             quarantine,
                             prepared_request_count,
                             mutation_call_count,
                             mempool,
                         )
                     }
-                    None => (None, None, None, None, None),
+                    None => (None, None, None, None, None, None),
                 };
 
                 Ok(serde_json::json!({
@@ -1179,6 +1214,7 @@ async fn main() -> Result<()> {
                         "binary_sha256": revops::fee_scheduler::binary_sha256(),
                     },
                     "state_generation": state_generation,
+                    "seed_provenance": seed_provenance,
                     "counters": counters,
                     "mempool": mempool,
                     "quarantine": quarantine,
@@ -1403,6 +1439,29 @@ async fn main() -> Result<()> {
     let mandatory_state_gate_would_fail =
         (fee_stateful_shadow || fee_broadcast) && !rust_state_store_configured;
 
+    // Fix round 1 (coordinator ruling I-7): `consumed_arm_dir` (below) IS
+    // the nonce-replay ledger -- the only defence against an operator
+    // re-consuming a copy of an already-consumed arm. It is pinned to
+    // `journal_dir` UNCONDITIONALLY, with NO fallback: a cutover arm
+    // supplied with no journal_dir resolved has nowhere safe to be
+    // consumed into (falling back to the arm file's own parent directory
+    // would silently create a SECOND, different consumption ledger,
+    // letting the very same nonce be consumed twice across the two
+    // different fallback locations). Refuse outright, before ever
+    // touching the arm file -- and before the `getinfo` call just below,
+    // which would otherwise run first and report a less fundamental
+    // failure.
+    if cutover_arm_path_expanded.is_some() && journal_dir.is_none() {
+        configured
+            .disable(&format!(
+                "cutover arm gate: {cutover_arm_path_name} is set but no journal-dir resolved \
+                 to derive the one-time-consumption ledger location from (set \
+                 {journal_dir_name} or {observer_db_name}); refusing to touch the arm file"
+            ))
+            .await?;
+        return Ok(());
+    }
+
     // The cutover arm and the running process's identity are resolved
     // TOGETHER (see `StartupModeInputs::cutover_arm`'s doc comment): a
     // `getinfo` call and a fresh self-hash, made ONLY when an arm path was
@@ -1446,17 +1505,16 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    // Where a successfully-validated arm is atomically consumed -- a
-    // Rust-owned subdirectory alongside every other write target this
-    // plugin produces.
+    // Where a successfully-validated arm is atomically consumed -- pinned
+    // to `journal_dir` UNCONDITIONALLY (fix round 1, I-7): the gate above
+    // already guarantees `journal_dir.is_some()` whenever an arm was
+    // supplied, so `unwrap_or_default()` here only ever produces a
+    // placeholder value when NO arm was supplied (never consulted in that
+    // case). No fallback to the arm file's own parent directory -- see the
+    // gate's own doc comment for why that would be unsafe.
     let consumed_arm_dir: PathBuf = journal_dir
         .clone()
-        .or_else(|| {
-            cutover_arm_path_expanded
-                .as_ref()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-        })
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_default()
         .join("cutover-consumed");
 
     let mode = match resolve_startup_mode(StartupModeInputs {
@@ -1990,6 +2048,24 @@ mod tests {
         }
     }
 
+    /// Coordinator ruling I-6: live authority requires a SEEDED store
+    /// (generation > 0 AND a recorded seed event) -- this pairs with
+    /// [`some_seed_event`] wherever a test needs a valid live row.
+    fn some_seed_event() -> revops_db::fee_runway::FeeSeedEventRow {
+        revops_db::fee_runway::FeeSeedEventRow {
+            seeded_at: 1_000,
+            outcome: "seeded".to_string(),
+            source_db_path: "/var/lib/lightning/revops.db".to_string(),
+            source_max_last_update: 999,
+            row_count: 3,
+            payload_sha256: "0".repeat(64),
+            source_commit: TEST_SOURCE_COMMIT.to_string(),
+            refused_channel: None,
+            refused_field: None,
+            detail: None,
+        }
+    }
+
     fn passive_flags() -> ModeFlags {
         ModeFlags {
             observer: true,
@@ -2134,16 +2210,17 @@ mod tests {
             &valid_arm_json("live-nonce-consumed"),
         );
         let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+        let seed_event = some_seed_event();
 
         let result = resolve_startup_mode(StartupModeInputs {
             flags: live_flags(),
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
-            state: &virgin_state(),
-            seed_event: None,
+            state: &non_virgin_state(),
+            seed_event: Some(&seed_event),
             rust_state_store_configured: true,
         })
-        .expect("live row with a valid arm and a configured store is valid");
+        .expect("live row with a valid arm, a configured store, and seeded state is valid");
         match result {
             ValidatedFeeMode::LiveAuthority(live) => {
                 assert_eq!(live.arm().nonce(), "live-nonce-consumed");
@@ -2277,6 +2354,40 @@ mod tests {
         ));
     }
 
+    /// Coordinator ruling I-6: `resolve_startup_mode` itself (not just
+    /// `fee_mode::validate_fee_mode` directly) must refuse a live row over
+    /// a virgin store, even with an otherwise-perfectly-valid arm and a
+    /// configured Rust-owned store (`rust_state_store_configured: true` is
+    /// NOT sufficient on its own -- the store must also already be
+    /// seeded). The arm is still consumed (this is the arm-handling step
+    /// running unconditionally, same posture as
+    /// `resolve_startup_mode_arm_present_in_shadow_row_is_denied_after_consumption`).
+    #[test]
+    fn resolve_startup_mode_live_denies_virgin_store_even_with_valid_arm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("live-virgin-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        let err = resolve_startup_mode(StartupModeInputs {
+            flags: live_flags(),
+            cutover_arm: Some((&arm_path, test_identity(owner_uid))),
+            consumed_arm_dir: &consumed_dir,
+            state: &virgin_state(),
+            seed_event: None,
+            rust_state_store_configured: true,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StartupModeDenyReason::Mode(fee_mode::FeeModeDenyReason::LiveModeRequiresSeededState)
+        ));
+        assert!(
+            !arm_path.exists(),
+            "the arm is consumed even though the seeded-state gate ultimately denies it"
+        );
+    }
+
     #[test]
     fn mode_label_matches_every_variant() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2294,8 +2405,14 @@ mod tests {
         let shadow = fee_mode::validate_fee_mode(shadow_flags(), None, &virgin_state(), None)
             .expect("shadow row valid");
         assert_eq!(mode_label(&shadow), "autonomous_shadow");
-        let live = fee_mode::validate_fee_mode(live_flags(), Some(arm), &virgin_state(), None)
-            .expect("live row valid");
+        let seed_event = some_seed_event();
+        let live = fee_mode::validate_fee_mode(
+            live_flags(),
+            Some(arm),
+            &non_virgin_state(),
+            Some(&seed_event),
+        )
+        .expect("live row valid");
         assert_eq!(mode_label(&live), "live_authority");
     }
 }

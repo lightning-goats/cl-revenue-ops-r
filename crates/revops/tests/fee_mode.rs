@@ -137,7 +137,7 @@ fn autonomous_shadow_row_accepted_without_arm_when_store_virgin() {
 }
 
 #[test]
-fn live_authority_row_accepted_with_valid_consumed_arm() {
+fn live_authority_row_accepted_with_valid_consumed_arm_and_seeded_state() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let arm = real_consumed_arm(tmp.path(), "live-nonce-1");
     let flags = ModeFlags {
@@ -146,8 +146,9 @@ fn live_authority_row_accepted_with_valid_consumed_arm() {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let result = validate_fee_mode(flags, Some(arm), &virgin_state(), None)
-        .expect("live row with a real consumed arm is valid");
+    let seed_event = some_seed_event();
+    let result = validate_fee_mode(flags, Some(arm), &non_virgin_state(), Some(&seed_event))
+        .expect("live row with a real consumed arm and seeded state is valid");
     match result {
         ValidatedFeeMode::LiveAuthority(live) => {
             assert_eq!(live.arm().nonce(), "live-nonce-1");
@@ -167,6 +168,64 @@ fn live_authority_row_denied_without_arm() {
     let err = validate_fee_mode(flags, None, &virgin_state(), None).unwrap_err();
     assert_eq!(err, FeeModeDenyReason::LiveModeRequiresArm);
     assert_eq!(err.code(), "live_mode_requires_arm");
+}
+
+// ---------------------------------------------------------------------------
+// Coordinator ruling I-6 (fix round 1): live authority must not start from a
+// virgin/unseeded Rust-owned store. The cutover sequence guarantees shadow
+// seeds and accumulates state before an arm is ever minted, so "healthy
+// persisted state" means seeded -- generation > 0 AND a recorded seed event.
+// ---------------------------------------------------------------------------
+
+/// A valid, consumed arm over a VIRGIN store (generation 0, no seed event)
+/// must be denied -- a live process must never be the first thing to ever
+/// touch the Rust-owned store.
+#[test]
+fn live_authority_row_denied_when_store_is_virgin() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm = real_consumed_arm(tmp.path(), "live-nonce-virgin");
+    let flags = ModeFlags {
+        observer: false,
+        fee_dryrun: false,
+        fee_broadcast: true,
+        fee_stateful_shadow: false,
+    };
+    let err = validate_fee_mode(flags, Some(arm), &virgin_state(), None).unwrap_err();
+    assert_eq!(err, FeeModeDenyReason::LiveModeRequiresSeededState);
+    assert_eq!(err.code(), "live_mode_requires_seeded_state");
+}
+
+/// A valid, consumed arm over a NON-virgin store that nonetheless carries
+/// NO seed-provenance event must also be denied -- committed state with no
+/// seed record is exactly the same misconfiguration `NeverSeeded` catches
+/// for the shadow row, now enforced for the live row too.
+#[test]
+fn live_authority_row_denied_when_non_virgin_store_has_no_seed_event() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm = real_consumed_arm(tmp.path(), "live-nonce-unseeded");
+    let flags = ModeFlags {
+        observer: false,
+        fee_dryrun: false,
+        fee_broadcast: true,
+        fee_stateful_shadow: false,
+    };
+    let err = validate_fee_mode(flags, Some(arm), &non_virgin_state(), None).unwrap_err();
+    assert_eq!(err, FeeModeDenyReason::LiveModeRequiresSeededState);
+}
+
+/// Check order: an ABSENT arm is still reported as `LiveModeRequiresArm`,
+/// never `LiveModeRequiresSeededState` -- arm presence is checked first,
+/// exactly as before this amendment.
+#[test]
+fn live_authority_row_without_arm_reports_arm_reason_even_when_store_is_unseeded() {
+    let flags = ModeFlags {
+        observer: false,
+        fee_dryrun: false,
+        fee_broadcast: true,
+        fee_stateful_shadow: false,
+    };
+    let err = validate_fee_mode(flags, None, &non_virgin_state(), None).unwrap_err();
+    assert_eq!(err, FeeModeDenyReason::LiveModeRequiresArm);
 }
 
 #[test]
@@ -272,4 +331,59 @@ fn shadow_row_non_virgin_store_without_seed_event_is_never_seeded_misconfigurati
     let err = validate_fee_mode(shadow_flags(), None, &non_virgin_state(), None).unwrap_err();
     assert_eq!(err, FeeModeDenyReason::NeverSeeded);
     assert_eq!(err.code(), "stateful_shadow_never_seeded");
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (coordinator ruling I-4): `InvalidCombination`'s `Display`
+// must name the real `revops-r-*` option names AND every accepted row, so
+// an operator hitting this exact string on a real restart (e.g. lnnode
+// today: observer=true + fee-dryrun=true + no stateful-shadow) can see
+// what to change. `code()` (Task 8's stable machine-matchable string) must
+// NOT change.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn invalid_combination_display_names_option_flags_and_every_accepted_row() {
+    // lnnode's actual current combination per the coordinator's note.
+    let flags = ModeFlags {
+        observer: true,
+        fee_dryrun: true,
+        fee_broadcast: false,
+        fee_stateful_shadow: false,
+    };
+    let err = validate_fee_mode(flags, None, &virgin_state(), None).unwrap_err();
+    assert_eq!(err, FeeModeDenyReason::InvalidCombination(flags));
+    // The stable code() must be untouched by this fix.
+    assert_eq!(err.code(), "invalid_mode_combination");
+
+    let message = err.to_string();
+    // The real option names an operator can act on.
+    for option_name in [
+        "revops-r-observer",
+        "revops-r-fee-dryrun",
+        "revops-r-fee-broadcast",
+        "revops-r-fee-stateful-shadow",
+    ] {
+        assert!(
+            message.contains(option_name),
+            "message must name {option_name}: {message}"
+        );
+    }
+    // Every accepted row, by description.
+    for row_description in [
+        "passive observer",
+        "autonomous fee shadow",
+        "live fee authority",
+    ] {
+        assert!(
+            message.contains(row_description),
+            "message must describe the {row_description} row: {message}"
+        );
+    }
+    // Arm posture for each row.
+    assert!(message.contains("arm absent"), "message: {message}");
+    assert!(
+        message.contains("arm valid and consumed") || message.contains("valid and consumed"),
+        "message: {message}"
+    );
 }

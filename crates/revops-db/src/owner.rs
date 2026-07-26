@@ -42,6 +42,13 @@ enum Command {
         reply: oneshot::Sender<Result<u64>>,
     },
     LoadLatestFeeState(oneshot::Sender<Result<FeeStateSnapshot>>),
+    // -- Task 10 fix round 1 (I-5): scalar-only siblings that avoid
+    // materialising full-row results just to answer a single number --
+    CurrentStateGeneration(oneshot::Sender<Result<u64>>),
+    MempoolSampleStats {
+        since: i64,
+        reply: oneshot::Sender<Result<fee_runway::MempoolSampleStats>>,
+    },
     RecordMempoolSample {
         sampled_at: i64,
         sat_per_vbyte: f64,
@@ -239,6 +246,29 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Scalar-only sibling of [`ObserverHandle::load_latest_fee_state`]
+    /// (fix round 1, I-5): the current state generation WITHOUT
+    /// materialising every channel's state row -- see
+    /// [`fee_runway::current_state_generation`]'s doc comment.
+    pub async fn current_state_generation(&self) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::CurrentStateGeneration(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::current_state_generation`].
+    pub fn blocking_current_state_generation(&self) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CurrentStateGeneration(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Record one mempool fee-rate sample.
     pub async fn record_mempool_sample(&self, sampled_at: i64, sat_per_vbyte: f64) -> Result<()> {
         let (reply, rx) = oneshot::channel();
@@ -333,6 +363,32 @@ impl ObserverHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::QueryMempoolSamplesSince { since, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Scalar-only sibling of [`ObserverHandle::query_mempool_samples_since`]
+    /// (fix round 1, I-5): sample count + latest timestamp WITHOUT
+    /// fetching the rows themselves -- see
+    /// [`fee_runway::mempool_sample_stats`]'s doc comment.
+    pub async fn mempool_sample_stats(&self, since: i64) -> Result<fee_runway::MempoolSampleStats> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::MempoolSampleStats { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::mempool_sample_stats`].
+    pub fn blocking_mempool_sample_stats(
+        &self,
+        since: i64,
+    ) -> Result<fee_runway::MempoolSampleStats> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::MempoolSampleStats { since, reply })
             .context("observer actor gone (blocking)")?;
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
@@ -712,6 +768,14 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::LoadLatestFeeState(reply) => {
                     let result = fee_runway::load_latest_state(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::CurrentStateGeneration(reply) => {
+                    let result = fee_runway::current_state_generation(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::MempoolSampleStats { since, reply } => {
+                    let result = fee_runway::mempool_sample_stats(&conn, since);
                     let _ = reply.send(result);
                 }
                 Command::RecordMempoolSample {
