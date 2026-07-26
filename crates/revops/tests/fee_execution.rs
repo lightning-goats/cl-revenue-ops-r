@@ -498,6 +498,88 @@ async fn missing_ledger_reservation_denies_authorization_with_zero_calls() {
     assert_eq!(server.connection_count(), 0);
 }
 
+/// Fix round 2 (re-review): `authorize`'s own quarantine READ can fail
+/// (a store error, not "quarantine present/absent") -- this must deny
+/// closed (`QuarantineCheckFailed`), never silently treat a failed read
+/// as "no active quarantine". Sabotages ONLY the read by DROPPING
+/// `rust_execution_quarantine` via a second raw connection to the same
+/// observer db file: a `BEFORE INSERT` trigger (used elsewhere in this
+/// file to fail an INSERT) would never fire for a `SELECT`, so dropping
+/// the table is the seam that actually breaks this specific read.
+#[tokio::test]
+async fn quarantine_check_failure_denies_authorization_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("observer.db");
+    let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
+
+    {
+        let raw = rusqlite::Connection::open(&db_path).expect("open raw connection to sabotage");
+        raw.execute_batch("DROP TABLE rust_execution_quarantine;")
+            .expect("drop the quarantine table out from under the actor");
+    }
+
+    let (first, second) = stable_readings();
+    let err = LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        0,
+        &first,
+        &second,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect_err("a failed quarantine read must deny authorization, never succeed or panic");
+    assert!(
+        matches!(err, LiveBatchDenyReason::QuarantineCheckFailed(_)),
+        "expected QuarantineCheckFailed, got {err:?}"
+    );
+    assert_eq!(server.connection_count(), 0);
+}
+
+/// Fix round 2 (re-review): the sibling of the test above for the
+/// state-generation READ inside `authorize` -- a failed read must deny
+/// closed (`StateGenerationCheckFailed`), never be treated as "matches
+/// the candidate". Sabotages ONLY `load_latest_fee_state`'s read by
+/// dropping `rust_fee_state_generation` (the first table it queries);
+/// `rust_execution_quarantine` is left untouched, so this test isolates
+/// the state-generation check specifically (the quarantine check ahead
+/// of it in `authorize`'s check order still passes normally).
+#[tokio::test]
+async fn state_generation_check_failure_denies_authorization_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("observer.db");
+    let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
+
+    {
+        let raw = rusqlite::Connection::open(&db_path).expect("open raw connection to sabotage");
+        raw.execute_batch("DROP TABLE rust_fee_state_generation;")
+            .expect("drop the fee state generation table out from under the actor");
+    }
+
+    let (first, second) = stable_readings();
+    let err = LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        0,
+        &first,
+        &second,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect_err("a failed state-generation read must deny authorization, never succeed or panic");
+    assert!(
+        matches!(err, LiveBatchDenyReason::StateGenerationCheckFailed(_)),
+        "expected StateGenerationCheckFailed, got {err:?}"
+    );
+    assert_eq!(server.connection_count(), 0);
+}
+
 /// Fix round 1, review finding 3: the store-backed quarantine re-check
 /// INSIDE `broadcast_batch` is the ONLY store-backed quarantine
 /// enforcement actually on the send path -- `authorization` was minted
