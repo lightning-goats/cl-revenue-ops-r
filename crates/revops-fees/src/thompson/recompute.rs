@@ -241,6 +241,14 @@ pub fn recompute_posterior_legacy(
     weighted_obs: Option<&[(f64, f64, f64)]>,
     now: i64,
 ) {
+    // Every branch below reassigns posterior_mean/posterior_std to a
+    // freshly computed f64 (Python: always `float(...)`-cast or float
+    // arithmetic too) -- reset the blob-compat int/float type tags up
+    // front so a stale `true` from a from_dict-seeded int value can't
+    // survive into a recomputed value (see the struct doc comment on
+    // `GaussianThompsonState::posterior_mean_is_int`).
+    state.posterior_mean_is_int = false;
+    state.posterior_std_is_int = false;
     let owned;
     let wobs: &[(f64, f64, f64)] = match weighted_obs {
         Some(w) => w,
@@ -305,6 +313,11 @@ pub fn recompute_posterior_legacy(
 /// anchor and legacy Normal-Normal fallbacks. See the module doc comment
 /// for the discounting order-of-operations this feeds.
 pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
+    // See `recompute_posterior_legacy`'s matching comment: every branch
+    // here (including the ones that delegate to `recompute_posterior_legacy`)
+    // reassigns posterior_mean/posterior_std to a freshly computed value.
+    state.posterior_mean_is_int = false;
+    state.posterior_std_is_int = false;
     if state.observations.is_empty() {
         state.posterior_mean = state.prior_mean_fee;
         state.posterior_std = state.prior_std_fee;
@@ -606,6 +619,9 @@ pub(crate) fn blend_posterior_toward(
     }
     let frac = weight / (1.0 + weight);
     state.posterior_mean += (target_fee - state.posterior_mean) * frac;
+    // Python: `self.posterior_mean + (...) * frac` is always a float
+    // result. See `recompute_posterior_legacy`'s matching comment.
+    state.posterior_mean_is_int = false;
 }
 
 /// `_apply_posterior_bias` (py 1275-1294): re-apply recorded nudges after a
@@ -649,6 +665,9 @@ pub fn apply_dts_discount(state: &mut GaussianThompsonState, gamma: f64) {
     precision *= gamma;
     precision = precision.max(MIN_PRECISION);
     state.posterior_std = (1.0 / precision).sqrt();
+    // Python: `1.0 / precision` is always a float. See
+    // `recompute_posterior_legacy`'s matching comment.
+    state.posterior_std_is_int = false;
 
     // (b) Polynomial posterior: decay precision matrix.
     for row in state.posterior_precision.iter_mut() {

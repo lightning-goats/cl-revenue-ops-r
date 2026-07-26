@@ -577,6 +577,10 @@ pub fn apply_vegas_adjustment(
     }
     let boost = vegas_multiplier.min(2.0);
     state.posterior_std = MIN_STD.max(state.posterior_std * boost);
+    // Python: `self.posterior_std * boost` is always a float result
+    // (int * float => float), matching the struct doc comment's
+    // "every runtime recompute assigns a freshly computed f64" contract.
+    state.posterior_std_is_int = false;
     if new_floor > state.posterior_mean {
         record_posterior_nudge(state, new_floor, 0.43, now);
     }

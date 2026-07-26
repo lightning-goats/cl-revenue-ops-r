@@ -1377,6 +1377,12 @@ fn replay_thompson_state(value: &OValue, path: &str) -> Result<GaussianThompsonS
         prior_std_fee_is_int,
         observations,
         posterior_mean: replay_f64(value, path, "posterior_mean")?,
+        // Replay only ever accepts a tagged JSON float here (`replay_f64`/
+        // `replay_positive_f64` above reject a bare int) -- this path is
+        // for state Rust itself wrote, which never emits an int-typed
+        // posterior_mean/std, so both flags are always false.
+        posterior_mean_is_int: false,
+        posterior_std_is_int: false,
         posterior_std,
         posterior_coeffs,
         posterior_precision,

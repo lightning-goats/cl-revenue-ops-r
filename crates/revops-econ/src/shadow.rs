@@ -42,35 +42,6 @@
 //! `crate::cycle`'s `run_shadow_cycle` live collector):
 //! `record_fee_intents`, `build_snapshot_preview`, and
 //! `shadow_authorize_rebalance`.
-//!
-//! ## The float-in-explanation hazard (T8 review handoff)
-//!
-//! `crate::intents::Explanation::render()` deliberately PANICS on a
-//! float-typed component (see that function's doc comment) — wire/
-//! idempotency correctness demands it never silently emit a Rust
-//! `f64::to_string()` that could diverge from Python's `repr(float)`.
-//! The T8 review flagged that any "shadow journal path" building an
-//! `Explanation` with a float component (e.g. a rebalance score) must
-//! route around that panic, the way `crate::cycle`'s
-//! `write_value_with_pyfloat` does for `CycleResult::canonical()`.
-//!
-//! This module was audited against that hazard: **none of the six ported
-//! methods above ever constructs an `Explanation` or an `IntentEnvelope`**
-//! — `_journal`/`note_spend_*` write only raw integer `amounts` +
-//! plain-JSON `details` (matching `crate::ledger::EconLedger::append`'s
-//! contract, which itself rejects float-typed JSON numbers fail-closed);
-//! `snapshot_ref`'s `snapshot_created` event details carry only an integer
-//! timestamp; `arbitration_registry`/`maybe_run_reconciliation` don't touch
-//! explanations at all. So the panic-on-float guard is never exercised by
-//! anything in this file, and no py_repr-aware rendering path was needed
-//! here. The one Python method that DOES carry a float in an explanation
-//! component — `shadow_authorize_rebalance`'s `rebalance_reservation`
-//! explanation, whose `"score"` component is `float(pair.score)` — is out
-//! of this task's scope (see above); whoever ports it in Phase 2b MUST
-//! render its explanation string through a py_repr-aware path (mirroring
-//! `crate::cycle::write_value_with_pyfloat`, NOT `Explanation::render()`)
-//! rather than the panicking renderer, or it will panic the first time a
-//! non-zero score reaches it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

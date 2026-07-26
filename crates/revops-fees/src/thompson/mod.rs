@@ -203,6 +203,18 @@ pub struct GaussianThompsonState {
 
     pub posterior_mean: f64,
     pub posterior_std: f64,
+    /// `true` when the persisted value had no JSON decimal point (a Python
+    /// `int`), so `to_dict` re-emits it as a bare integer rather than
+    /// `N.0` -- same non-cast passthrough contract as
+    /// `prior_mean_fee`/`prior_mean_fee_is_int` (`fee_controller.py:
+    /// 1816-1817`, `state.posterior_mean = d.get("posterior_mean", 200.0)`,
+    /// no `float()`). Unlike `prior_mean_fee`, this field is reassigned at
+    /// RUNTIME by every posterior recompute (Tasks 2/7) -- always to a
+    /// freshly computed `f64` (Python: always an explicit `float(...)` cast
+    /// or float arithmetic there too), so every such call site also resets
+    /// this to `false`; only `from_dict`'s int branch ever sets it `true`.
+    pub posterior_mean_is_int: bool,
+    pub posterior_std_is_int: bool,
     pub posterior_coeffs: V3,
     pub posterior_precision: M3,
     pub noise_variance: f64,
@@ -263,6 +275,10 @@ impl Default for GaussianThompsonState {
             observations: Vec::new(),
             posterior_mean: 200.0,
             posterior_std: 100.0,
+            // Default() has no source JSON at all; Python's dataclass
+            // defaults (`posterior_mean: float = 200.0`) are floats.
+            posterior_mean_is_int: false,
+            posterior_std_is_int: false,
             posterior_coeffs: [0.0, 1.0, 0.0],
             posterior_precision: [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]],
             noise_variance: 1000.0,

@@ -99,9 +99,12 @@ pub fn gts_to_dict(s: &GaussianThompsonState) -> OValue {
         ),
         (
             "posterior_mean".to_string(),
-            OValue::Float(s.posterior_mean),
+            num_value(s.posterior_mean, s.posterior_mean_is_int),
         ),
-        ("posterior_std".to_string(), OValue::Float(s.posterior_std)),
+        (
+            "posterior_std".to_string(),
+            num_value(s.posterior_std, s.posterior_std_is_int),
+        ),
         (
             "posterior_variance".to_string(),
             OValue::Float(py_pow(s.posterior_std, 2.0)),
@@ -307,15 +310,39 @@ pub fn gts_from_dict(d: &OValue) -> GaussianThompsonState {
         .map(|arr| convert_observations(arr, legacy_weights))
         .unwrap_or_default();
 
-    // posterior_mean / posterior_std: passthrough, no cast (py 1790-1791).
-    state.posterior_mean = d
-        .get("posterior_mean")
-        .and_then(OValue::as_f64)
-        .unwrap_or(200.0);
-    state.posterior_std = d
-        .get("posterior_std")
-        .and_then(OValue::as_f64)
-        .unwrap_or(100.0);
+    // posterior_mean / posterior_std: passthrough, no cast (py 1790-1791),
+    // same int/float-preserving contract as prior_mean_fee/prior_std_fee
+    // above (Python's fallback default is a FLOAT literal --
+    // `d.get("posterior_mean", 200.0)` -- so an absent key yields
+    // `_is_int = false`, unlike prior_mean_fee's int-literal fallback).
+    match d.get("posterior_mean") {
+        Some(OValue::Int(i)) => {
+            state.posterior_mean = *i as f64;
+            state.posterior_mean_is_int = true;
+        }
+        Some(OValue::Float(f)) => {
+            state.posterior_mean = *f;
+            state.posterior_mean_is_int = false;
+        }
+        _ => {
+            state.posterior_mean = 200.0;
+            state.posterior_mean_is_int = false;
+        }
+    }
+    match d.get("posterior_std") {
+        Some(OValue::Int(i)) => {
+            state.posterior_std = *i as f64;
+            state.posterior_std_is_int = true;
+        }
+        Some(OValue::Float(f)) => {
+            state.posterior_std = *f;
+            state.posterior_std_is_int = false;
+        }
+        _ => {
+            state.posterior_std = 100.0;
+            state.posterior_std_is_int = false;
+        }
+    }
 
     // Contextual posteriors: legacy 3-tuple -> 4-tuple conversion (py
     // 1792-1805). Insertion order preserved (Python dict iteration order).
@@ -475,9 +502,19 @@ fn convert_observations(arr: &[OValue], legacy_weights: bool) -> Vec<Observation
             .and_then(OValue::as_str)
             .unwrap_or("normal")
             .to_string();
+        // Audit lows F4/F5: Python passes the tuple through VERBATIM --
+        // it never validates that element 5 (0-indexed) is a string, it
+        // just happens to always be `CONGESTION_OBS_FLAG`/`ZERO_PROBE_FLAG`
+        // in every real blob. If it's a string, treat it as the flag (as
+        // before) and `extra` starts at index 6. If it is present but NOT
+        // a string, there is no flag to consume -- `extra` must start AT
+        // index 5 (not 6), or that element is silently dropped (a 6-tuple
+        // shrinks to 5 elements on re-emit) and every element past it
+        // shifts left by one (a >=7-tuple loses its 6th element).
         let flag = t.get(5).and_then(OValue::as_str).map(|s| s.to_string());
-        let extra = if t.len() > 6 {
-            t[6..].to_vec()
+        let extra_start = if flag.is_some() { 6 } else { 5 };
+        let extra = if t.len() > extra_start {
+            t[extra_start..].to_vec()
         } else {
             Vec::new()
         };

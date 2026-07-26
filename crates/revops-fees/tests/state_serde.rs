@@ -13,9 +13,9 @@
 //! generator's `_state_dict_case_with_unknown` for the exact rule.
 
 use revops_econ::pyfloat::py_repr;
-use revops_fees::pyjson::{dumps_python, parse};
+use revops_fees::pyjson::{dumps_python, parse, OValue};
 use revops_fees::thompson::serde::{gts_from_dict, gts_to_dict};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 fn fixture() -> Value {
@@ -203,4 +203,48 @@ fn observation_fee_int_float_typing_preserved_independently() {
     assert!(state.observations[1].fee_is_int, "second fee was JSON int");
     assert_eq!(state.observations[0].fee, 250.0);
     assert_eq!(state.observations[1].fee, 250.0);
+}
+
+/// Audit lows F4/F5: a 6-element observation tuple whose 6th element is NOT
+/// a string (the real 6th element is always the `"congestion"`/`"zero_probe"`
+/// flag string in current-format blobs, but `from_dict`/`to_dict` never
+/// validates that -- Python passes the tuple through verbatim) was silently
+/// truncated to 5 elements by the old `t.get(5).and_then(as_str)` ->
+/// `flag: None` + `extra = t[6..]` capture (which starts AFTER, not AT, the
+/// non-string 6th element, dropping it). A >=7-element tuple with a
+/// non-string 6th element shifted every later element left by one for the
+/// same reason. Python's `from_dict`/`to_dict` round-trips the tuple
+/// verbatim regardless of what's in it -- this port must match, since
+/// SeedOnce seeds Rust state directly from Python-written blobs it must not
+/// silently rewrite.
+#[test]
+fn observation_with_non_string_sixth_element_roundtrips_verbatim() {
+    let blob = r#"{"observations": [[300, 12.5, 1.0, 1752400000, "normal", 7, "x"]]}"#;
+    let parsed = parse(blob).unwrap();
+    let state = gts_from_dict(&parsed);
+    let out = gts_to_dict(&state);
+    let observations = out
+        .get("observations")
+        .and_then(OValue::as_arr)
+        .expect("observations array");
+    assert_eq!(
+        observations[0].to_serde_json(),
+        json!([300, 12.5, 1.0, 1_752_400_000i64, "normal", 7, "x"])
+    );
+}
+
+/// Audit low F5 continued: `posterior_mean`/`posterior_std` are passthrough,
+/// no-cast fields in Python (`state.posterior_mean = d.get("posterior_mean",
+/// 200.0)` -- `fee_controller.py:1816-1817`), exactly like
+/// `prior_mean_fee`/`prior_std_fee`. An int-typed source value must re-emit
+/// as an int, not get silently upgraded to a float, mirroring the existing
+/// `prior_mean_fee_is_int`/`fee_is_int` flag mechanism.
+#[test]
+fn int_typed_posterior_mean_and_std_keep_json_typing() {
+    let blob = r#"{"posterior_mean": 200, "posterior_std": 50}"#;
+    let parsed = parse(blob).unwrap();
+    let state = gts_from_dict(&parsed);
+    let out = gts_to_dict(&state);
+    assert_eq!(out.get("posterior_mean"), Some(&OValue::Int(200)));
+    assert_eq!(out.get("posterior_std"), Some(&OValue::Int(50)));
 }

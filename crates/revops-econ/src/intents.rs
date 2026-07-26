@@ -55,11 +55,10 @@ impl Explanation {
     /// - `Value::Bool` -> `"True"`/`"False"` (Python capitalization, not
     ///   Rust's `true`/`false`)
     /// - `Value::Null` -> `"None"`
-    /// - float-typed `Value::Number` -> **not supported** in Phase 2 (see
-    ///   `pyfloat.rs`'s doc comment and the Task 8 "float-in-explanation
-    ///   hazard" note in the phase plan) — panics rather than silently
-    ///   rendering a Rust `f64::to_string()` that would diverge from
-    ///   Python's `repr(float)` and break wire byte-parity.
+    /// - float-typed `Value::Number` -> `crate::pyfloat::py_repr`. `str(x)`
+    ///   on a Python float is `repr(x)` (py3), which is exactly what
+    ///   `py_repr` implements, so this is BYTE PARITY with Python's
+    ///   f-string rendering, not a lossy degrade.
     pub fn render(&self) -> String {
         let parts: Vec<String> = self
             .components
@@ -74,13 +73,14 @@ fn render_component_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Number(n) => {
-            if n.is_f64() {
-                panic!(
-                    "Explanation::render: float component values are not supported in \
-                     Phase 2 (see pyfloat.rs); got {n}"
-                );
+            if let Some(f) = n.as_f64().filter(|_| n.is_f64()) {
+                // Python renders a float component via f-string `str()`,
+                // which is `repr()` in py3 -- `py_repr` is the pinned
+                // byte-exact port of that. See `render`'s doc comment.
+                crate::pyfloat::py_repr(f)
+            } else {
+                n.to_string()
             }
-            n.to_string()
         }
         Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
         Value::Null => "None".to_string(),
@@ -456,14 +456,19 @@ mod tests {
         );
     }
 
+    /// Audit low F8: `render()` used to panic on float components as a
+    /// deliberate Phase-2 tripwire. `py_repr` IS `str(float)`
+    /// (`== repr(float)` in py3, which is exactly what an f-string's
+    /// implicit `str()` conversion uses), so rendering a float component
+    /// through it is BYTE PARITY with Python, not a lossy degrade -- the
+    /// tripwire can retire.
     #[test]
-    #[should_panic(expected = "float component values are not supported")]
-    fn explanation_render_panics_on_float_component() {
+    fn render_formats_float_components_like_python() {
         let e = Explanation {
-            kind: "k".to_string(),
-            components: vec![("x".to_string(), json!(1.5))],
+            kind: "cycle_rebalance".to_string(),
+            components: vec![("score".to_string(), json!(0.30000000000000004))],
         };
-        e.render();
+        assert_eq!(e.render(), "cycle_rebalance: score=0.30000000000000004");
     }
 
     // --- compute_idempotency_key / make_intent golden values ---
