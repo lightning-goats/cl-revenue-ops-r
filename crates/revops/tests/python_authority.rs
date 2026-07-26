@@ -254,6 +254,89 @@ fn transitioned_at_change_between_reads_is_unstable_epoch() {
     ));
 }
 
+/// I1 fix-round finding: `validate_stable_epoch` must not be satisfiable by
+/// re-checking a single reading against itself. The whole point of
+/// bracketing is that the SECOND read is a genuinely later fetch; a
+/// same-read-twice call (the exact shape an authorizer bug would produce if
+/// it forgot to actually re-fetch before dispatch) must be denied even
+/// though generation/transitioned_at trivially agree with themselves.
+#[test]
+fn same_reading_checked_against_itself_is_denied_as_non_advancing() {
+    let reading = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_001,
+    };
+    let err = validate_stable_epoch(&reading, &reading).unwrap_err();
+    assert!(matches!(
+        err,
+        PythonAuthorityDenyReason::NonAdvancingObservation { .. }
+    ));
+}
+
+/// Same as above but with two distinct (non-aliased) `PythonAuthorityOff`
+/// values that merely happen to carry the identical `observed_at` -- proves
+/// the check is on the VALUE, not on object identity.
+#[test]
+fn equal_observed_at_across_distinct_readings_is_denied_as_non_advancing() {
+    let first = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_001,
+    };
+    let second = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_001,
+    };
+    let err = validate_stable_epoch(&first, &second).unwrap_err();
+    assert!(matches!(
+        err,
+        PythonAuthorityDenyReason::NonAdvancingObservation { .. }
+    ));
+}
+
+/// A second reading whose `observed_at` moved BACKWARD (clock skew, or a
+/// stale cached value substituted for a fresh fetch) is denied exactly like
+/// a non-advancing one -- "bracketing" means strictly later, never equal or
+/// earlier.
+#[test]
+fn second_observed_at_before_first_is_denied_as_non_advancing() {
+    let first = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_050,
+    };
+    let second = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_001,
+    };
+    let err = validate_stable_epoch(&first, &second).unwrap_err();
+    assert!(matches!(
+        err,
+        PythonAuthorityDenyReason::NonAdvancingObservation { .. }
+    ));
+}
+
+/// A genuinely later second reading with a stable epoch still passes --
+/// the fix must not reject legitimate bracketing.
+#[test]
+fn strictly_advancing_observed_at_with_stable_epoch_is_still_accepted() {
+    let first = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_001,
+    };
+    let second = PythonAuthorityOff {
+        generation: 5,
+        transitioned_at: 1_000,
+        observed_at: 1_002,
+    };
+    validate_stable_epoch(&first, &second)
+        .expect("a strictly later second read with a stable epoch must be accepted");
+}
+
 // ---------------------------------------------------------------------------
 // RPC method presence / classification (no live socket needed)
 // ---------------------------------------------------------------------------

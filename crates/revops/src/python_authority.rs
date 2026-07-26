@@ -60,7 +60,16 @@ pub const AUTHORITY_STATUS_METHOD: &str = "revenue-fee-authority-status";
 /// caller needs to (a) trust the reading (it already passed every check in
 /// [`validate_status`]) and (b) bracket it against a second reading via
 /// [`validate_stable_epoch`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Deliberately NOT `Copy` (fix-round I1): a batch authorizer that wants to
+/// bracket a batch acquisition must hold two DISTINCT values obtained from
+/// two separate fetches -- `Copy` would let a call site silently duplicate
+/// one reading (`let x = reading; validate_stable_epoch(&x, &x)`) without
+/// the type system so much as raising an eyebrow. `Clone` is kept for
+/// legitimate cases (e.g. logging a reading after it's been consumed);
+/// [`validate_stable_epoch`] itself denies a cloned/duplicated reading via
+/// its `observed_at` bracketing check regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonAuthorityOff {
     pub generation: u64,
     pub transitioned_at: i64,
@@ -115,6 +124,16 @@ pub enum PythonAuthorityDenyReason {
         first: (u64, i64),
         second: (u64, i64),
     },
+    /// The second reading's `observed_at` did not strictly advance past the
+    /// first's (fix-round I1): equal (including the same reading checked
+    /// against itself) or earlier. "Bracketing" means the second read is a
+    /// genuinely later fetch -- a non-advancing `observed_at` means no real
+    /// second fetch happened (or Python's own clock went backward), and
+    /// either way the batch must be denied.
+    NonAdvancingObservation {
+        first_observed_at: i64,
+        second_observed_at: i64,
+    },
 }
 
 impl PythonAuthorityDenyReason {
@@ -131,6 +150,7 @@ impl PythonAuthorityDenyReason {
             Self::StillEnabled => "python_authority_still_enabled",
             Self::StaleObservation { .. } => "python_authority_stale_observation",
             Self::UnstableEpoch { .. } => "python_authority_unstable_epoch",
+            Self::NonAdvancingObservation { .. } => "python_authority_non_advancing_observation",
         }
     }
 }
@@ -176,6 +196,16 @@ impl std::fmt::Display for PythonAuthorityDenyReason {
                 f,
                 "{}: generation/transitioned_at changed across the batch acquisition \
                  ({first:?} -> {second:?})",
+                self.code(),
+            ),
+            Self::NonAdvancingObservation {
+                first_observed_at,
+                second_observed_at,
+            } => write!(
+                f,
+                "{}: second read's observed_at ({second_observed_at}) did not strictly advance \
+                 past the first's ({first_observed_at}) -- bracketing requires a genuinely \
+                 later second fetch",
                 self.code(),
             ),
         }
@@ -279,10 +309,27 @@ pub fn validate_status(
 }
 
 /// Validate that two [`PythonAuthorityOff`] readings bracketing a batch
-/// acquisition report the SAME `generation` and `transitioned_at`
-/// (`observed_at` is expected to differ -- see the module doc's "Two-read
-/// batch bracketing"). A change is a denial: Python's authority epoch
-/// moved during the batch window.
+/// acquisition (a) report the SAME `generation` and `transitioned_at` --
+/// see the module doc's "Two-read batch bracketing" -- and (b) that the
+/// second reading is a genuinely later fetch, i.e. `second.observed_at`
+/// strictly exceeds `first.observed_at`.
+///
+/// Fix-round I1: (b) is what makes "bracketing" real. Without it,
+/// `validate_stable_epoch(&x, &x)` -- checking one reading against itself,
+/// or against a clone/duplicate with an identical `observed_at` -- would
+/// pass vacuously, since a value trivially agrees with itself on
+/// `generation`/`transitioned_at`. A batch authorizer that (by bug or by
+/// omission) never actually re-fetched status before dispatch would be
+/// indistinguishable from one that correctly re-confirmed a stable epoch.
+/// Requiring strict advancement means the second value MUST have come from
+/// an actual later call to [`PythonAuthorityClient::fetch_validated_status`]
+/// (or an equivalent independent [`validate_status`] call against a fresh
+/// response) rather than a reused prior result.
+///
+/// Check order: epoch identity (`generation`/`transitioned_at`) first, then
+/// the advancing-`observed_at` requirement -- so a reading that fails both
+/// always reports [`PythonAuthorityDenyReason::UnstableEpoch`], the more
+/// fundamental disagreement.
 pub fn validate_stable_epoch(
     first: &PythonAuthorityOff,
     second: &PythonAuthorityOff,
@@ -291,6 +338,12 @@ pub fn validate_stable_epoch(
         return Err(PythonAuthorityDenyReason::UnstableEpoch {
             first: (first.generation, first.transitioned_at),
             second: (second.generation, second.transitioned_at),
+        });
+    }
+    if second.observed_at <= first.observed_at {
+        return Err(PythonAuthorityDenyReason::NonAdvancingObservation {
+            first_observed_at: first.observed_at,
+            second_observed_at: second.observed_at,
         });
     }
     Ok(())
