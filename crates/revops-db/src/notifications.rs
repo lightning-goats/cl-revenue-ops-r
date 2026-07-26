@@ -11,7 +11,7 @@
 //! (`tools/port/gen_hydration_fixtures.py` in the `cl_revenue_ops-port`
 //! worktree).
 
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection};
 
 /// One settled forward, as extracted from CLN's `forward_event`
@@ -31,11 +31,34 @@ pub struct ForwardRow {
     pub resolved_time: i64,
 }
 
+/// Request WAL and CHECK the answer (final-review finding I3, 2026-07-26).
+/// `PRAGMA journal_mode=WAL` returns the mode the database actually ended
+/// up in; issuing it through `execute_batch` -- as this did -- discards
+/// that answer, so a silent fallback to a rollback journal (where a
+/// concurrent reader BLOCKS the writer) was undetectable.
+///
+/// `memory` is accepted alongside `wal` because it is the ONLY mode an
+/// in-memory or temp database has -- that is what the direct-connection
+/// test doubles use, and it is not a fallback. Every other value is a hard
+/// error. The file-backed production open additionally requires exactly
+/// WAL: see `owner::open_observer_db` / `owner::require_wal_mode`.
+fn set_journal_mode_wal(conn: &Connection) -> Result<()> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+        .context("request journal_mode=WAL on the observer db")?;
+    ensure!(
+        mode.eq_ignore_ascii_case("wal") || mode.eq_ignore_ascii_case("memory"),
+        "observer db did not enter WAL mode (journal_mode={mode}); a rollback \
+         journal lets a concurrent reader block the fee-cycle writer"
+    );
+    Ok(())
+}
+
 /// Idempotent `CREATE TABLE IF NOT EXISTS` for the observer's own db.
 pub fn init_schema(conn: &Connection) -> Result<()> {
+    set_journal_mode_wal(conn)?;
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS ingested_forwards (
+        "CREATE TABLE IF NOT EXISTS ingested_forwards (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              in_channel TEXT NOT NULL,
              out_channel TEXT NOT NULL,

@@ -693,3 +693,60 @@ async fn reconcile_quarantine_on_restart_does_not_duplicate_an_active_quarantine
         "...but must not insert a SECOND quarantine row on top of the active one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Final-review finding I3 (2026-07-26): the observer db was the only open in
+// the repo with NO busy_timeout (SQLite's default is 0 -> immediate
+// SQLITE_BUSY), and its `PRAGMA journal_mode=WAL` went through
+// `execute_batch`, which DISCARDS the returned mode -- so a silent fallback
+// to rollback-journal was undetectable. In rollback mode the engagement
+// gate's `mode=ro` reader blocks the writer, and with no busy_timeout every
+// `commit_fee_cycle` fails instantly and forever, visible only in logs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn observer_db_open_sets_the_repo_busy_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested").join("observer.db");
+    let conn = revops_db::owner::open_observer_db(&path).unwrap();
+    let timeout_ms: i64 = conn
+        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        timeout_ms,
+        revops_db::BUSY_TIMEOUT_MS as i64,
+        "the observer db must use the same busy_timeout as every other open \
+         in this repo (open_read_only, the econ ledger)"
+    );
+}
+
+#[test]
+fn observer_db_open_verifies_wal_actually_took_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let conn = revops_db::owner::open_observer_db(&path).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        mode.to_lowercase(),
+        "wal",
+        "a silent fallback to rollback-journal must never survive the open"
+    );
+}
+
+#[test]
+fn observer_db_open_fails_loudly_when_wal_was_not_applied() {
+    // The pure verifier behind the open: any mode other than WAL is a hard
+    // error naming the file, never a shrug.
+    let path = std::path::Path::new("/tmp/observer.db");
+    assert!(revops_db::owner::require_wal_mode("wal", path).is_ok());
+    assert!(revops_db::owner::require_wal_mode("WAL", path).is_ok());
+    for fallback in ["delete", "truncate", "persist", "memory", "off"] {
+        let err = revops_db::owner::require_wal_mode(fallback, path)
+            .expect_err("a non-WAL journal mode must fail the open");
+        let msg = format!("{err:#}");
+        assert!(msg.contains(fallback), "{msg}");
+        assert!(msg.contains("observer.db"), "{msg}");
+    }
+}

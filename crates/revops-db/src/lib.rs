@@ -10,6 +10,14 @@ pub mod notifications;
 pub mod owner;
 pub mod queries;
 
+/// The lock-wait budget every sqlite connection this plugin opens must
+/// carry. SQLite's default is 0 -- an immediate `SQLITE_BUSY` the instant
+/// any other process (an operator's `sqlite3` session during the soak, the
+/// engagement gate's `mode=ro` reader, Python) holds the lock. Kept
+/// identical across `open_read_only`, `owner::open_observer_db`, and the
+/// econ ledger so there is one number to reason about.
+pub const BUSY_TIMEOUT_MS: u64 = 5000;
+
 /// Open the production sqlite database read-only. Never creates the file;
 /// errors if it does not already exist.
 pub fn open_read_only(path: &Path) -> Result<Connection> {
@@ -19,7 +27,7 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("open read-only {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
     Ok(conn)
 }
 

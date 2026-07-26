@@ -703,15 +703,26 @@ impl ObserverHandle {
 }
 
 /// Open (creating the file and any missing parent directories if needed)
-/// the plugin's own read-write sqlite file, initialize its schema, and
-/// spawn the single-owner actor task that owns the resulting `Connection`
-/// for the rest of the plugin's lifetime.
+/// the plugin's own read-write sqlite file with the two settings the
+/// single-owner actor's correctness depends on, then initialize its schema.
 ///
-/// Unlike `actor::spawn_read_only` (which never creates the production
-/// db), this is a fresh, Rust-only file with no production analog -- an
-/// operator pointing `observer-db-path` at a path that doesn't exist yet
-/// is the expected first-run case, not a misconfiguration.
-pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
+/// Final-review finding I3 (2026-07-26) -- this was a bare
+/// `Connection::open`, the only db open in the repo without a
+/// `busy_timeout`, and its WAL pragma's result was discarded:
+///
+/// * `busy_timeout` -- SQLite defaults to 0, i.e. an immediate
+///   `SQLITE_BUSY` rather than any lock wait. During a soak an operator
+///   WILL open `sqlite3` on this file, and the engagement gate reads it
+///   concurrently; without a wait budget every `commit_fee_cycle` fails
+///   instantly, forever, visible only in the log. Same
+///   [`crate::BUSY_TIMEOUT_MS`] as every other open here.
+/// * WAL -- `PRAGMA journal_mode=WAL` is a *request*: SQLite answers with
+///   the mode it actually ended up in, and `execute_batch` throws that
+///   answer away. A silent fallback to a rollback journal is exactly the
+///   regime where a concurrent reader BLOCKS the writer, so it is verified
+///   here and fails the open loudly ([`require_wal_mode`]) instead of
+///   degrading invisibly.
+pub fn open_observer_db(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -720,7 +731,42 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
     }
     let conn =
         Connection::open(path).with_context(|| format!("open observer db {}", path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_millis(crate::BUSY_TIMEOUT_MS))
+        .with_context(|| format!("set busy_timeout on observer db {}", path.display()))?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+        .with_context(|| format!("set journal_mode=WAL on observer db {}", path.display()))?;
+    require_wal_mode(&mode, path)?;
     notifications::init_schema(&conn).context("init observer db schema")?;
+    Ok(conn)
+}
+
+/// The verifier behind [`open_observer_db`]: `PRAGMA journal_mode=WAL`
+/// REPORTS the mode the database actually ended up in, which is not
+/// necessarily WAL (a read-only directory, an unsupported filesystem, or a
+/// `:memory:`/temp database all answer something else). Anything but WAL
+/// is a hard error naming the file -- the observer db is written by one
+/// actor while the engagement gate reads it, and only WAL keeps those from
+/// blocking each other.
+pub fn require_wal_mode(mode: &str, path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        mode.eq_ignore_ascii_case("wal"),
+        "observer db {} did not enter WAL mode (journal_mode={mode}); a rollback \
+         journal lets a concurrent reader block the fee-cycle writer",
+        path.display(),
+    );
+    Ok(())
+}
+
+/// [`open_observer_db`] plus the single-owner actor task that owns the
+/// resulting `Connection` for the rest of the plugin's lifetime.
+///
+/// Unlike `actor::spawn_read_only` (which never creates the production
+/// db), this is a fresh, Rust-only file with no production analog -- an
+/// operator pointing `observer-db-path` at a path that doesn't exist yet
+/// is the expected first-run case, not a misconfiguration.
+pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
+    let conn = open_observer_db(path)?;
 
     let (tx, mut rx) = mpsc::channel::<Command>(64);
     tokio::task::spawn_blocking(move || {
