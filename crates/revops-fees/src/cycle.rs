@@ -517,6 +517,12 @@ impl Default for DecisionSummary {
 /// reads `pre_last_update` before writing this cycle's flush; Rust
 /// rehydrates AFTER that flush, so the freshly-hydrated `cycle.last_update`
 /// is the WRONG epoch for the gate -- see the fee-window diagnosis, H1).
+///
+/// ONE mid-cycle writer exists (task 39): an in-cycle wake
+/// ([`wake_all_sleeping_channels`]) backdates a woken channel's cached
+/// epoch in lockstep with its live state, because Python backdates its
+/// single in-memory value and its own gate then reads THAT (py 4589-4593
+/// -> py 5299 / py 6219-6269).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SkipGateEpoch {
     pub last_update: i64,
@@ -1400,21 +1406,50 @@ pub struct AdjustCtx<'a> {
     /// replay this equals the hydrated value by construction
     /// (`replay.rs` seeds `skip_gate_prev` from the captured pre-state).
     ///
-    /// Under SeedOnce the two coincide only AS HYDRATED at the top of the
-    /// cycle — NOT for the whole cycle, and this field is therefore never
-    /// redundant there. `run_fee_cycle` calls `maybe_wake_for_vegas_spike`
-    /// mid-cycle (line 3452, after the scheduler's top-of-cycle
-    /// `set_skip_gates_to_owned` and before any call to this function),
-    /// which BACKDATES `cycle.last_update` via
-    /// `wake_all_sleeping_channels` (line 3322). Every epoch-derived read
-    /// below must keep consuming THIS field: substituting
-    /// `cycle.last_update` changes the decision on any cycle where a vegas
-    /// spike woke the channels, and `enable_vegas_reflex` defaults to TRUE
-    /// in production (line 200). The invariant is pinned by
-    /// `tests/cycle.rs::decision_gate_uses_pre_decision_epoch_not_fresh_flush`
-    /// and `::observation_cursor_uses_pre_decision_epoch` — the only tests
-    /// that cover it, since every evidence double here returns
-    /// `chain_costs() = None` and so never reaches the vegas block.
+    /// IN-CYCLE WAKE (task 39 parity fix). `run_fee_cycle` calls
+    /// `maybe_wake_for_vegas_spike` mid-cycle (line 3547, after the
+    /// scheduler's top-of-cycle `set_skip_gates_to_owned` and before any
+    /// call to this function), which BACKDATES `cycle.last_update` via
+    /// `wake_all_sleeping_channels` (line 3408) so waiting-window channels
+    /// are re-evaluated. Python does the same backdate (py 4589-4593) and
+    /// its gate then reads that SAME backdated value (`pre_last_update =
+    /// cycle.last_update` at py 5299 — captured AFTER the py 4963 wake —
+    /// and `cycle.last_update` at py 6219-6269). So Rust's wake ALSO
+    /// backdates the cached `skip_gate_prev` epoch (line 3417), which is
+    /// what this field is resolved from: for a woken channel THIS field
+    /// already IS the backdated epoch, and the reads below re-evaluate it
+    /// exactly as Python does.
+    ///
+    /// The rule is therefore a DISTINCTION, not a swap, and every
+    /// epoch-derived read below must keep consuming THIS field:
+    ///
+    /// * no in-cycle wake → this is the prior cycle's pre-decision epoch
+    ///   (never the fresh post-flush value: the 2026-07-23 starvation);
+    /// * in-cycle wake → this is the wake's backdated epoch, per channel,
+    ///   for exactly the channels the wake touched.
+    ///
+    /// Substituting `cycle.last_update` here collapses the first case and
+    /// reintroduces the incident; dropping the wake's epoch propagation at
+    /// line 3417 collapses the second and diverges from Python on every
+    /// mempool spike (`enable_vegas_reflex` defaults TRUE in production,
+    /// line 200). Both halves are pinned, by disjoint tests in
+    /// `tests/cycle.rs`:
+    ///
+    /// * `decision_gate_uses_pre_decision_epoch_not_fresh_flush` (:2460)
+    ///   and `observation_cursor_uses_pre_decision_epoch` (:2492) — the
+    ///   ONLY guards against the 2026-07-23 gate starvation; do not weaken
+    ///   or merge them;
+    /// * `in_cycle_vegas_wake_backdates_the_epoch_the_decision_gate_consumes`
+    ///   (:2632), its negative control
+    ///   `without_an_in_cycle_wake_the_gate_still_holds_on_the_pre_decision_epoch`
+    ///   (:2713), and the seam-level
+    ///   `wake_backdates_cached_epochs_without_inventing_them` (:2768).
+    ///
+    /// The wake tests reach the vegas block through a `chain_costs()`
+    /// reading of `Some(..)` (`SyntheticEvidence::chain_costs`,
+    /// `tests/cycle.rs:1095`, now a per-test field); the `FixtureEvidence`
+    /// double still returns `None` (`tests/cycle.rs:186`) and never
+    /// reaches it.
     pub pre_last_update: i64,
     pub node_drain_bias_effective_cap: Option<f64>,
     pub node_receivable_ratio: Option<f64>,
@@ -1630,7 +1665,9 @@ pub fn adjust_channel_fee(
     // =====================================================================
     // Every epoch-derived read below consumes the PRE-DECISION epoch
     // (see `AdjustCtx::pre_last_update`), matching Python's in-memory
-    // pre-decision `cycle.last_update` at py 5713-5804.
+    // pre-decision `cycle.last_update` at py 5713-5804 -- INCLUDING the
+    // case where an in-cycle wake backdated it this same cycle, which the
+    // wake propagates into that epoch (line 3417).
     let epoch_last_update = ctx.pre_last_update;
     let mut observation_cursor = epoch_last_update;
     if observation_cursor <= 0 {
@@ -3317,6 +3354,31 @@ fn create_gossip_refresh_adjustment(
 /// `wake_all_sleeping_channels` (py 4295-4384) over the in-memory maps
 /// (the DB-hydration arm is T9's store; a dry-run cycle holds every live
 /// channel's state in memory after its first cycle).
+///
+/// PARITY (task 39): the backdate is applied to the skip-gate epoch cache
+/// (`skip_gate_prev`) as well as to the live state, for exactly the
+/// channels this wake touches. Python has ONE in-memory value: it
+/// backdates `cycle.last_update` here (py 4589-4593, "clear the
+/// observation window gate so waiting_time channels get re-evaluated") and
+/// its gate then reads that same backdated value — `pre_last_update =
+/// cycle.last_update` is captured per channel at py 5299, i.e. AFTER the
+/// in-cycle wake at py 4963, and the decision-side window gate reads
+/// `cycle.last_update` at py 6219-6269. Rust splits the value in two
+/// ([`SkipGateEpoch`] vs. the live [`ChannelCycleState`]), so an in-cycle
+/// wake must move BOTH or the gate keeps consuming the pre-wake epoch and
+/// holds at `waiting_window` every channel Python re-evaluates.
+///
+/// Only channels ALREADY cached in `skip_gate_prev` are updated: a channel
+/// with no cached prior is a bootstrap/first-appearance channel whose gate
+/// falls back to the live (already backdated) `cycle.last_update` anyway,
+/// and inserting one here would silently promote it to skip-gate
+/// COMPARABLE for the diff harness. The `woken` count stays keyed on the
+/// live-state change, matching Python's own count.
+///
+/// This is deliberately NOT a blanket "read the live state instead":
+/// outside an in-cycle wake the gate must keep consuming the pre-decision
+/// epoch (the 2026-07-23 gate-starvation incident — see
+/// [`AdjustCtx::pre_last_update`]).
 pub fn wake_all_sleeping_channels(
     state: &mut ControllerState,
     profile: &FeeProfileSettings,
@@ -3325,7 +3387,16 @@ pub fn wake_all_sleeping_channels(
     let mut woken = 0i64;
     let backdated = now - (profile.min_observation_hours * 3600.0) as i64 - 1;
 
-    for cycle in state.cycle_states.values_mut() {
+    // Disjoint field borrows: the epoch cache is updated in lockstep with
+    // the live state it mirrors.
+    let ControllerState {
+        cycle_states,
+        fee_states,
+        skip_gate_prev,
+        ..
+    } = state;
+
+    for (channel_id, cycle) in cycle_states.iter_mut() {
         let mut changed = false;
         if cycle.is_sleeping {
             cycle.is_sleeping = false;
@@ -3337,11 +3408,20 @@ pub fn wake_all_sleeping_channels(
             cycle.last_update = backdated;
             changed = true;
         }
+        // The same two mutations against the epoch the skip/decision gate
+        // actually consumes, so Python's single post-wake value is
+        // reproduced on both sides.
+        if let Some(epoch) = skip_gate_prev.get_mut(channel_id) {
+            epoch.is_sleeping = false;
+            if epoch.last_update > backdated {
+                epoch.last_update = backdated;
+            }
+        }
         if changed {
             woken += 1;
         }
     }
-    for ts in state.fee_states.values_mut() {
+    for ts in fee_states.values_mut() {
         let mut changed = false;
         if ts.is_sleeping {
             ts.is_sleeping = false;

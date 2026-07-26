@@ -1070,6 +1070,11 @@ struct SyntheticEvidence {
     forwards: BTreeMap<String, i64>,
     passive_peer: String,
     node_channels: Vec<NodeChannel>,
+    /// `feerates` for the cycle. `None` is the historical default (it
+    /// short-circuits `run_fee_cycle`'s whole Vegas block, py 4583-4597);
+    /// `Some` is what the in-cycle vegas-wake tests need, since the wake
+    /// is unreachable without it.
+    chain_costs: Option<ChainCosts>,
     /// Recorded `since` cursors for volume/forward evidence reads, so
     /// tests can pin WHICH epoch the decision path consulted (the
     /// 2026-07-23 gate-starvation fix: must be the T8b pre-decision
@@ -1088,7 +1093,7 @@ impl SyntheticEvidence {
         self.infos.clone()
     }
     fn chain_costs(&self) -> Option<ChainCosts> {
-        None
+        self.chain_costs
     }
     fn volume_since(&self, channel_id: &str, since: i64) -> i64 {
         self.since_log
@@ -1807,6 +1812,7 @@ fn state_sink_failure_prevents_completed_cycle_result() {
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
+        chain_costs: None,
         since_log: Default::default(),
     };
 
@@ -1876,6 +1882,7 @@ fn three_channel_synthetic_cycle_end_to_end() {
         forwards: BTreeMap::from([("100x1x0".to_string(), 8)]),
         passive_peer: peer_c.clone(),
         node_channels: Vec::new(),
+        chain_costs: None,
         since_log: Default::default(),
     };
 
@@ -2063,6 +2070,7 @@ fn skip_gate_evidence(cid: &str, peer: &str) -> SyntheticEvidence {
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
+        chain_costs: None,
         since_log: Default::default(),
     }
 }
@@ -2178,6 +2186,7 @@ fn skip_gate_bootstrap_marks_channel_non_comparable() {
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
+        chain_costs: None,
         since_log: Default::default(),
     };
 
@@ -2352,6 +2361,7 @@ fn node_drain_bias_cap_scales_by_bias_knob_not_static_max() {
             to_us_msat: 5_000_000_000,
             total_msat: 5_000_000_000,
         }],
+        chain_costs: None,
         since_log: Default::default(),
     };
     let mut cfg = base_cfg();
@@ -2407,6 +2417,7 @@ fn missing_channel_info_tallies_and_dominates_summary() {
         forwards: BTreeMap::new(),
         passive_peer: String::new(),
         node_channels: Vec::new(),
+        chain_costs: None,
         since_log: Default::default(),
     };
     let cfg = base_cfg();
@@ -2505,5 +2516,299 @@ fn observation_cursor_uses_pre_decision_epoch() {
         volume_sinces.iter().all(|s| *s == now - 1800),
         "volume observation cursor must be the pre-decision epoch \
          (now-1800), got {volume_sinces:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// In-cycle vegas wake vs. the pre-decision epoch (task 39).
+//
+// The two guards above pin the NORMAL-cycle rule: the gate consumes the
+// PRE-decision epoch, never the freshly rehydrated post-flush
+// `cycle.last_update` (the 2026-07-23 starvation incident). This block pins
+// the complementary rule for the ONE cycle shape where Python deliberately
+// moves that epoch mid-cycle.
+//
+// Python (`fee_controller.py`):
+//   * `_adjust_all_fees_inner` calls `_maybe_wake_for_vegas_spike` at
+//     py:4963 -- INSIDE the cycle, before the per-channel loop.
+//   * That reaches `_wake_all_sleeping_channels_authorized` (py:4559-4648),
+//     whose docstring says it outright ("last_update backdated so
+//     MIN_OBSERVATION_HOURS gate passes"; py:4589-4593 "Also clear the
+//     observation window gate so waiting_time channels get re-evaluated").
+//   * Python's gate then reads that SAME backdated in-memory value:
+//     `pre_last_update = cycle.last_update` is captured per channel at
+//     py:5299 -- AFTER the wake -- and the decision-side window gate reads
+//     `cycle.last_update` directly at py:6219-6269.
+//
+// So a mempool spike makes Python re-evaluate its waiting-window channels.
+// Rust backdates `cycle.last_update` identically (`wake_all_sleeping_channels`)
+// but the gate consumes `AdjustCtx::pre_last_update`, sourced from
+// `skip_gate_prev` -- captured BEFORE the wake. Without propagating the
+// backdate into that epoch, Rust holds at `waiting_window` every channel
+// Python re-evaluates, on every spike, with `enable_vegas_reflex` TRUE in
+// production.
+// ---------------------------------------------------------------------------
+
+/// `skip_gate_evidence` plus a `feerates` reading that deterministically
+/// takes `vegas_update`'s IMMEDIATE-trigger branch.
+///
+/// `sat_per_vbyte = 40.0` against the 24h moving average
+/// (`mempool_ma_24h`'s `0.0` default, which `vegas_update` normalises to
+/// `1.0`) gives `spike_ratio = 40.0 >= 4.0` -> `intensity = 1.0` with NO
+/// `rng.random()` draw, so the wake fires on the first cycle
+/// (`vegas_wake_armed` starts `true`) with zero RNG sensitivity.
+fn vegas_spike_evidence(cid: &str, peer: &str) -> SyntheticEvidence {
+    let mut evidence = skip_gate_evidence(cid, peer);
+    evidence.chain_costs = Some(ChainCosts {
+        open_cost_sats: 5_000,
+        close_cost_sats: 5_000,
+        sat_per_vbyte: 40.0,
+    });
+    evidence
+}
+
+/// Like [`run_skip_gate_cycle`] but hands back the post-cycle
+/// `ControllerState` too, so a test can prove the wake actually fired
+/// rather than assuming it.
+fn run_vegas_wake_cycle(
+    evidence: &SyntheticEvidence,
+    now: i64,
+    hydrated_last_update: i64,
+    cached_prev: SkipGateEpoch,
+) -> (FeeDecision, ControllerState) {
+    let cid = &evidence.rows[0].channel_id;
+
+    let mut state = ControllerState::new();
+    let mut cyc = ChannelCycleState::default();
+    cyc.last_update = hydrated_last_update;
+    cyc.last_fee_ppm = 200;
+    cyc.last_broadcast_fee_ppm = 200;
+    cyc.last_revenue_rate = 5.0;
+    state.cycle_states.insert(cid.to_string(), cyc);
+    let mut fee = ChannelFeeState::default();
+    fee.last_update = hydrated_last_update;
+    fee.last_fee_ppm = 200;
+    fee.last_broadcast_fee_ppm = 200;
+    fee.last_revenue_rate = 5.0;
+    state.fee_states.insert(cid.to_string(), fee);
+    state.skip_gate_prev.insert(cid.to_string(), cached_prev);
+
+    let cfg = base_cfg();
+    assert!(
+        cfg.enable_vegas_reflex,
+        "precondition: the production default (cycle.rs:200 / py config.py:765)"
+    );
+    let mut rng = PyRandom::seed_from_u64(4242);
+    let mut clock = FixedDecisionClock::new(now);
+    let decisions = {
+        let mut deps = CycleDeps {
+            evidence,
+            cfg: &cfg,
+            rng: &mut rng,
+            clock: &mut clock,
+            authorizer: None,
+            executor: &PURE_EXECUTOR,
+            journal: None,
+            state_sink: None,
+            min_competitors: revops_fees::market::MIN_COMPETITORS,
+        };
+        run_fee_cycle(&mut state, &mut deps).expect("fixed decision inputs")
+    };
+    assert_eq!(decisions.len(), 1, "one decision for the one channel");
+    (decisions[0].clone(), state)
+}
+
+/// PARITY: an in-cycle vegas/mempool-spike wake backdates the channel's
+/// observation epoch, and the decision gate must consume THAT backdated
+/// value -- exactly as Python does (py:4963 wake -> py:5299 / py:6219
+/// read). A channel whose pre-decision epoch is a minute old (deep inside
+/// the observation window, so a normal cycle correctly holds it at
+/// `waiting_window`) must be RE-EVALUATED once the spike wakes it.
+///
+/// Before the task-39 fix this test failed with `disposition ==
+/// "waiting_window"`: the wake moved `cycle.last_update` to `now - 901`
+/// while `AdjustCtx::pre_last_update` kept the pre-wake `now - 60`.
+#[test]
+fn in_cycle_vegas_wake_backdates_the_epoch_the_decision_gate_consumes() {
+    let now = 1_752_400_000i64;
+    let peer = "03".to_string() + &"07".repeat(32);
+    let evidence = vegas_spike_evidence("700x1x0", &peer);
+    // `active` profile: min_observation_hours 0.25 -> the wake backdates to
+    // `now - 900 - 1`, one second past the window.
+    let backdated = now - 901;
+
+    let (decision, state) = run_vegas_wake_cycle(
+        &evidence,
+        now,
+        // Python's just-written flush (what `rehydrate` loads).
+        now,
+        SkipGateEpoch {
+            // 1 min: WELL inside the 15-minute observation window, so a
+            // cycle with no wake holds this channel at `waiting_window`.
+            last_update: now - 60,
+            is_sleeping: false,
+        },
+    );
+
+    // The wake really fired (not a vacuous pass).
+    assert_eq!(
+        state.vegas.intensity, 1.0,
+        "spike_ratio 40 must take the immediate-trigger branch"
+    );
+    assert!(
+        !state.vegas_wake_armed,
+        "the edge-triggered wake must have consumed its arm"
+    );
+    // BEHAVIOUR FIRST: the observable parity claim.
+    let disposition = decision
+        .trace
+        .get("disposition")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    assert_ne!(
+        disposition.as_deref(),
+        Some("waiting_window"),
+        "Python re-evaluates a spike-woken channel (py:4589-4593 -> py:5299); \
+         Rust held it at waiting_window, so every mempool spike diverges \
+         (reason_code was {:?})",
+        decision.reason_code
+    );
+
+    // The seam itself: the wake moved the epoch the gate consumes. (The
+    // LIVE `cycle.last_update` is not assertable here -- the channel is
+    // re-evaluated and re-stamps it to `now` before the cycle ends, which
+    // is precisely why the gate needs its own backdated epoch.)
+    assert_eq!(
+        state.skip_gate_prev["700x1x0"].last_update, backdated,
+        "the in-cycle wake must backdate the skip-gate epoch, not only the \
+         live state"
+    );
+
+    // ...and the epoch the gate consumed is the backdated one, proven
+    // through the evidence cursor (the same signal
+    // `observation_cursor_uses_pre_decision_epoch` reads).
+    let log = evidence.since_log.borrow();
+    let volume_sinces: Vec<i64> = log
+        .iter()
+        .filter(|(kind, _)| kind == "volume")
+        .map(|(_, s)| *s)
+        .collect();
+    assert!(
+        !volume_sinces.is_empty(),
+        "expected the adjust path to read volume evidence"
+    );
+    assert!(
+        volume_sinces.iter().all(|s| *s == backdated),
+        "post-wake observation cursor must be the BACKDATED epoch \
+         ({backdated}), got {volume_sinces:?}"
+    );
+}
+
+/// The other half of the distinction, on the SAME evidence double: with no
+/// wake (the spike already consumed its arm), the identical channel is
+/// still held at `waiting_window` off its pre-decision epoch. This is what
+/// stops the fix from degenerating into "always read the live
+/// `cycle.last_update`" -- the 2026-07-23 starvation bug.
+#[test]
+fn without_an_in_cycle_wake_the_gate_still_holds_on_the_pre_decision_epoch() {
+    let now = 1_752_400_000i64;
+    let peer = "03".to_string() + &"07".repeat(32);
+    let mut evidence = vegas_spike_evidence("700x1x0", &peer);
+    // No spike this cycle: sat/vB at the moving average -> ratio 1.0.
+    evidence.chain_costs = Some(ChainCosts {
+        open_cost_sats: 5_000,
+        close_cost_sats: 5_000,
+        sat_per_vbyte: 1.0,
+    });
+
+    let (decision, state) = run_vegas_wake_cycle(
+        &evidence,
+        now,
+        // Python's post-decision flush, 2 min old (the 2026-07-23 shape).
+        now - 120,
+        SkipGateEpoch {
+            last_update: now - 60,
+            is_sleeping: false,
+        },
+    );
+
+    assert!(
+        state.vegas_wake_armed,
+        "no spike -> the wake must stay armed (no wake happened)"
+    );
+    assert_eq!(
+        state.cycle_states["700x1x0"].last_update,
+        now - 120,
+        "no wake -> the live cycle state is untouched by any backdate"
+    );
+    assert_eq!(
+        state.skip_gate_prev["700x1x0"].last_update,
+        now - 60,
+        "no wake -> the pre-decision epoch is untouched"
+    );
+    let disposition = decision
+        .trace
+        .get("disposition")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    assert_eq!(
+        disposition.as_deref(),
+        Some("waiting_window"),
+        "with no wake the pre-decision epoch (now-60) is inside the window \
+         and the channel must be held, exactly as Python holds it"
+    );
+}
+
+/// The seam in isolation: `wake_all_sleeping_channels` backdates a cached
+/// pre-decision epoch in lockstep with the live state, and does NOT invent
+/// one for a channel that has no cached prior (that channel's gate already
+/// falls back to the live -- backdated -- value, and inserting an entry
+/// would silently flip it to skip-gate COMPARABLE for the diff harness).
+#[test]
+fn wake_backdates_cached_epochs_without_inventing_them() {
+    let now = 1_752_400_000i64;
+    let (_, profile) = revops_fees::profiles::fee_profile("active");
+    let backdated = now - (profile.min_observation_hours * 3600.0) as i64 - 1;
+
+    let mut state = ControllerState::new();
+    for cid in ["cached", "bootstrap", "already_old"] {
+        let mut cyc = ChannelCycleState::default();
+        cyc.last_update = now;
+        state.cycle_states.insert(cid.to_string(), cyc);
+    }
+    state.skip_gate_prev.insert(
+        "cached".to_string(),
+        SkipGateEpoch {
+            last_update: now - 60,
+            is_sleeping: true,
+        },
+    );
+    state.skip_gate_prev.insert(
+        "already_old".to_string(),
+        SkipGateEpoch {
+            // Older than the backdate: Python's `>` guard leaves it alone.
+            last_update: now - 100_000,
+            is_sleeping: false,
+        },
+    );
+
+    cycle::wake_all_sleeping_channels(&mut state, profile, now);
+
+    assert_eq!(
+        state.skip_gate_prev["cached"],
+        SkipGateEpoch {
+            last_update: backdated,
+            is_sleeping: false,
+        },
+        "a cached epoch is backdated and un-slept exactly like the live state"
+    );
+    assert_eq!(
+        state.skip_gate_prev["already_old"].last_update,
+        now - 100_000,
+        "py 4591 `if state.last_update > backdated` never moves an epoch FORWARD"
+    );
+    assert!(
+        !state.skip_gate_prev.contains_key("bootstrap"),
+        "the wake must not create a cached prior where there was none"
     );
 }

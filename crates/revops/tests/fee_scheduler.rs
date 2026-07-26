@@ -1529,7 +1529,7 @@ mod seedonce_restart {
     ///    a fresh/zero epoch produces.
     ///
     /// NOTE on mutation coverage. Mutating `cycle.rs`'s
-    /// `let epoch_last_update = ctx.pre_last_update;` (`cycle.rs:1619`) to
+    /// `let epoch_last_update = ctx.pre_last_update;` (`cycle.rs:1671`) to
     /// `cycle.last_update` is NOT detected from here. That is a gap in
     /// THIS layer's coverage, not a proof that the two are equivalent --
     /// do not read it as one:
@@ -1538,28 +1538,45 @@ mod seedonce_restart {
     ///   top of the cycle (`fee_scheduler.rs:917`/`:978` refresh
     ///   `skip_gate_prev` from the owned `cycle_states`).
     /// * That identity is BROKEN mid-cycle: `run_fee_cycle` calls
-    ///   `maybe_wake_for_vegas_spike` at `cycle.rs:3452` -- after the
+    ///   `maybe_wake_for_vegas_spike` at `cycle.rs:3547` -- after the
     ///   top-of-cycle refresh and before any `adjust_channel_fee` read --
-    ///   which calls `wake_all_sleeping_channels` (`cycle.rs:3305`) and
-    ///   BACKDATES `cycle.last_update` at `cycle.rs:3322`. From that point
-    ///   on `cycle.last_update` is older than the cached pre-decision
-    ///   epoch, and the mutation changes the decision.
-    /// * No scheduler-layer test exercises that path, for two independent
-    ///   reasons: this harness sets `enable_vegas_reflex = false`
-    ///   (`fee_scheduler.rs:181`, `:1330`), and the vegas block is gated on
-    ///   `chain_costs` being `Some` while every kernel evidence double
-    ///   returns `None` (`revops-fees/tests/cycle.rs:186`, `:1090`). In
-    ///   PRODUCTION `enable_vegas_reflex` defaults to TRUE (`cycle.rs:200`,
-    ///   mirroring py `config.py:765`) and `chain_costs` comes from real
-    ///   `feerates` (`fee_evidence.rs:466`/`:855`), so the path is live.
+    ///   which calls `wake_all_sleeping_channels` (`cycle.rs:3382`) and
+    ///   BACKDATES `cycle.last_update` at `cycle.rs:3408`.
+    /// * Since task 39 that same wake ALSO backdates the cached
+    ///   `skip_gate_prev` epoch (`cycle.rs:3417`), matching Python, which
+    ///   backdates its single in-memory `last_update` (py 4589-4593) and
+    ///   then reads it in the gate (py 5299 / py 6219-6269). So for a
+    ///   WOKEN channel the two values agree again -- but only for that
+    ///   channel, only after that wake. On every unwoken channel and every
+    ///   cycle without a wake they still differ, and the mutation still
+    ///   changes the decision.
+    /// * This harness reaches neither case: it sets
+    ///   `enable_vegas_reflex = false` (`fee_scheduler.rs:181`, `:1330`),
+    ///   so no wake ever fires here. In PRODUCTION `enable_vegas_reflex`
+    ///   defaults to TRUE (`cycle.rs:200`, mirroring py `config.py:765`)
+    ///   and `chain_costs` comes from real `feerates`
+    ///   (`fee_evidence.rs:466`/`:855`), so both paths are live.
     ///
-    /// The `pre_last_update` mutation is therefore left to the two kernel
-    /// tests that inject the divergence directly --
-    /// `revops-fees/tests/cycle.rs::decision_gate_uses_pre_decision_epoch_not_fresh_flush`
-    /// and `::observation_cursor_uses_pre_decision_epoch`. They are the
-    /// ONLY guard against re-introducing the 2026-07-23 gate-starvation
-    /// bug: do not weaken, merge, or "simplify" them on the theory that
-    /// SeedOnce makes the epoch contract redundant. It does not.
+    /// The `pre_last_update` contract is therefore left to the kernel
+    /// tests in `revops-fees/tests/cycle.rs`, which inject each divergence
+    /// directly and are pinned by disjoint mutants:
+    ///
+    /// * `::decision_gate_uses_pre_decision_epoch_not_fresh_flush` (:2460)
+    ///   and `::observation_cursor_uses_pre_decision_epoch` (:2492) go red
+    ///   on the blanket `ctx.pre_last_update -> cycle.last_update` swap.
+    ///   They are the ONLY guard against re-introducing the 2026-07-23
+    ///   gate-starvation bug: do not weaken, merge, or "simplify" them on
+    ///   the theory that SeedOnce makes the epoch contract redundant. It
+    ///   does not.
+    /// * `::in_cycle_vegas_wake_backdates_the_epoch_the_decision_gate_consumes`
+    ///   (:2632), `::without_an_in_cycle_wake_the_gate_still_holds_on_the_pre_decision_epoch`
+    ///   (:2713) and `::wake_backdates_cached_epochs_without_inventing_them`
+    ///   (:2768) go red on the opposite mutant -- dropping the wake's
+    ///   epoch propagation at `cycle.rs:3417`, which silently re-opens the
+    ///   spike-parity divergence. They drive the vegas block with a
+    ///   `chain_costs() = Some(..)` evidence double
+    ///   (`revops-fees/tests/cycle.rs:1095`); the `FixtureEvidence` double
+    ///   still returns `None` (`:186`).
     ///
     /// What THIS test catches is the complementary SeedOnce-layer
     /// regression class: an epoch cache that is not refreshed from the
