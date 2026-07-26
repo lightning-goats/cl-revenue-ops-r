@@ -172,17 +172,32 @@ async fn resolve_bool(
     }
 }
 
-async fn resolve_string(
+/// `fee_profile`/`market_fee_mode` only: Python lowercases both at startup
+/// (`cl-revenue-ops.py:2514,2517` `str(...).lower()`). Layer-aware cast
+/// (mirrors `resolve_bool`'s DB-layer split, post-M2): a layer-(a) DB
+/// override is already lowercased by `validate_override`'s enum gate, so it
+/// is returned as-is -- but a layer-(b) `listconfigs` value goes through
+/// `.to_lowercase()` to match the Python startup cast (the layer-(c) struct
+/// default is already lowercase, so `unwrap_or(default)` needs no extra
+/// lowering).
+async fn resolve_lowercase_string(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
     suffix: &str,
     default: String,
 ) -> String {
     let field = config_resolve::db_override_key(suffix);
-    match resolve_raw(db, python_option_values, suffix).await {
+    if let Some(raw) = db_layer(db, suffix).await {
+        return config_types::typed_value(&field, &OptValue::String(raw))
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or(default);
+    }
+    match python_layer(suffix, python_option_values) {
         Some(raw) => config_types::typed_value(&field, &raw)
             .as_str()
             .map(str::to_string)
+            .map(|s| s.to_lowercase())
             .unwrap_or(default),
         None => default,
     }
@@ -233,7 +248,7 @@ pub async fn resolve_fee_cfg(
     python_option_values: &HashMap<String, OptValue>,
 ) -> FeeCfgSnapshot {
     let default = FeeCfgSnapshot::default();
-    FeeCfgSnapshot {
+    let mut cfg = FeeCfgSnapshot {
         min_fee_ppm: resolve_int(db, python_option_values, "min-fee-ppm", default.min_fee_ppm)
             .await,
         max_fee_ppm: resolve_int(db, python_option_values, "max-fee-ppm", default.max_fee_ppm)
@@ -266,7 +281,7 @@ pub async fn resolve_fee_cfg(
             default.htlc_congestion_threshold,
         )
         .await,
-        market_fee_mode: resolve_string(
+        market_fee_mode: resolve_lowercase_string(
             db,
             python_option_values,
             "market-fee-mode",
@@ -287,7 +302,7 @@ pub async fn resolve_fee_cfg(
             default.high_liquidity_threshold,
         )
         .await,
-        fee_profile: resolve_string(
+        fee_profile: resolve_lowercase_string(
             db,
             python_option_values,
             "fee-profile",
@@ -379,7 +394,27 @@ pub async fn resolve_fee_cfg(
             default.authority_level.clone(),
         )
         .await,
+    };
+
+    // Python load_overrides post-load repairs (config.py:946-951, 975-980)
+    // for the two crossed pairs that are fee-cycle inputs. Warn-log like
+    // Python; repair identically.
+    if cfg.min_fee_ppm > cfg.max_fee_ppm {
+        eprintln!(
+            "revops: contradictory min_fee_ppm ({}) > max_fee_ppm ({}); repaired min to max",
+            cfg.min_fee_ppm, cfg.max_fee_ppm
+        );
+        cfg.min_fee_ppm = cfg.max_fee_ppm;
     }
+    if cfg.receivable_ratio_floor > cfg.receivable_ratio_target {
+        eprintln!(
+            "revops: contradictory receivable_ratio_floor ({}) > target ({}); repaired floor to target",
+            cfg.receivable_ratio_floor, cfg.receivable_ratio_target
+        );
+        cfg.receivable_ratio_floor = cfg.receivable_ratio_target;
+    }
+
+    cfg
 }
 
 /// Per-cycle resolution of the `neighbor_median_min_competitors` key
