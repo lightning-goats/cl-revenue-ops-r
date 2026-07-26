@@ -1007,33 +1007,56 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
 }
 
 // ---------------------------------------------------------------------------
-// Global Constraint: no broadcast code in this phase at all
+// Task 9 (stateful-shadow revision plan): the cutover task that introduces
+// the guarded broadcast path. Per this test's OWN prior doc comment
+// ("Deferred to Cutover"), the `no_setchannel_symbol_in_crate` source-scan
+// guard is removed in this same commit -- `revops::fee_execution` now
+// legitimately contains the `setchannel` literal (the one guarded action
+// call site). What replaces it: proof that the SHADOW/autonomous cycle
+// path is still structurally connection-free -- it has no broadcaster
+// field or executor capable of dialing CLN at all (see
+// `revops_fees::execution::RecordingFeeExecutor`), which this test
+// confirms against a REAL live listener rather than trusting the type
+// alone.
 // ---------------------------------------------------------------------------
 
-/// Source-scan guard: the literal broadcast RPC name must not appear
-/// anywhere in `crates/revops/src`. The cutover task that introduces the
-/// broadcast path removes this test in the same commit (plan, "Deferred to
-/// Cutover").
-#[test]
-fn no_setchannel_symbol_in_crate() {
-    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let needle: String = ["set", "channel"].concat(); // keep this file clean of the literal
-    let mut scanned = 0usize;
-    for entry in std::fs::read_dir(&src_dir).expect("read src dir") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
+/// A SeedOnce cycle (the autonomous-shadow lifecycle) must make ZERO
+/// connections to a live, listening CLN socket -- it has no broadcaster to
+/// call. Points `socket_path` at a real `UnixListener` (unlike every other
+/// SeedOnce test in this file, which points at `/nonexistent/lightning-rpc`
+/// to prove the OWNER thread never dials RPC prefetch) so a regression that
+/// somehow wired a broadcaster into the cycle path would be caught even
+/// though a live listener is available and ready to accept.
+#[tokio::test]
+async fn seedonce_cycle_makes_zero_connections_to_a_live_cln_socket() {
+    let fx = fixture();
+    seed_channel_state(&fx.db_path);
+
+    let socket_path = fx._dir.path().join("lightning-rpc");
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind fake cln socket");
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connections_task = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((_stream, _)) = listener.accept().await else {
+                return;
+            };
+            connections_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        scanned += 1;
-        let body = std::fs::read_to_string(&path).expect("read source file");
-        assert!(
-            !body.to_lowercase().contains(&needle),
-            "broadcast symbol `{needle}` found in {} -- no broadcast code \
-             is allowed in this phase (Global Constraint)",
-            path.display()
-        );
-    }
-    assert!(scanned >= 10, "scanned only {scanned} files -- wrong dir?");
+    });
+
+    let mut owner = seedonce_restart::owner_with_test_store_and_socket(&fx, socket_path);
+    let mut clock = || NOW;
+    owner.run_cycle(prepared(json!(3), true), &mut clock);
+    let mut clock2 = || NOW + 1800;
+    owner.run_cycle(prepared(json!(3), true), &mut clock2);
+
+    assert_eq!(
+        connections.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the shadow/SeedOnce cycle path must never dial a live CLN socket -- it has no \
+         broadcaster to call"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,6 +1166,26 @@ mod seedonce_restart {
         let store_path = fx._dir.path().join("rust-owned.db");
         let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
         owner_with_store(fx, Some(Box::new(store)))
+    }
+
+    /// [`owner_with_test_store`] with a caller-supplied `socket_path` --
+    /// Task 9's zero-connections test uses this to point a SeedOnce owner
+    /// at a REAL live listener (rather than the dead path every other
+    /// SeedOnce test in this file uses) and still observe no connections.
+    pub fn owner_with_test_store_and_socket(fx: &Fixture, socket_path: PathBuf) -> CycleOwner {
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path,
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::SeedOnce,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        )
     }
 
     pub struct SeedOnceHarness {

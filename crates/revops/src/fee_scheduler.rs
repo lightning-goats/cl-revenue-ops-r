@@ -66,12 +66,29 @@
 //!
 //! ## What this module never does
 //!
-//! No broadcast: there is no fee-broadcast RPC call anywhere in this crate
-//! (structural dry-run safety -- `tests/fee_scheduler.rs`' source-scan
-//! guard enforces the literal's absence). The production DB is opened
-//! read-only (via `fee_evidence`), and every write target (decision
-//! journal, state JSONL, dry-run econ ledger) is a Rust-owned file under
-//! the journal directory. Python stays authoritative for the whole window.
+//! No broadcast: there is no fee-broadcast RPC call anywhere in THIS
+//! module (or anywhere else `CycleOwner`/`spawn`/`spawn_with_thread_spawner`
+//! reach). [`StateLifecycle::SeedOnce`]'s executor swap
+//! (`RecordingFeeExecutor`) is capability-free by construction -- it owns
+//! no socket, RPC client, or broadcaster of any kind (see
+//! `revops_fees::execution::RecordingFeeExecutor`'s own doc comment) --
+//! so the autonomous-shadow cycle path is structurally connection-free,
+//! never merely policy-gated. `tests/fee_scheduler.rs`'s
+//! `seedonce_cycle_makes_zero_connections_to_a_live_cln_socket` proves
+//! this against a REAL live listener, not just the type-level guarantee.
+//!
+//! Prior to the stateful-shadow revision plan's Task 9, a source-scan
+//! guard (`tests/fee_scheduler.rs::no_setchannel_symbol_in_crate`)
+//! additionally asserted the broadcast RPC's literal name was absent from
+//! this whole CRATE. That guard is gone: `crate::fee_execution` now holds
+//! the one guarded action call site (`ClnFeeBroadcaster::attempt_send`),
+//! behind the [`crate::fee_mode::LiveMode`] capability this module never
+//! constructs or holds. The production DB is opened read-only (via
+//! `fee_evidence`), and every write target this module itself produces
+//! (decision journal, state JSONL, dry-run econ ledger, and -- for
+//! `SeedOnce` -- the Rust-owned state/audit commit) is a Rust-owned file
+//! or store, never a live broadcast. Python stays authoritative for the
+//! whole dry-run window regardless of which lifecycle is active.
 //!
 //! ## Wake/policy triggers + the fee-debug query (Phase 4b Task 7)
 //!

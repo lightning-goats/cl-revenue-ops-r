@@ -4,8 +4,9 @@
 //! for a writable connection created fresh if the file doesn't exist yet.
 
 use revops_db::fee_runway::{
-    FeeCycleCommit, FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow,
-    MempoolMaComparisonRow, PreparedFeeActionRow, QuarantineEntry, ShadowCycleOutcomeRow,
+    BroadcastAttemptIntent, BroadcastAttemptOutcome, FeeCycleCommit, FeeStateRow,
+    FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow, MempoolMaComparisonRow,
+    PreparedFeeActionRow, QuarantineEntry, ShadowCycleOutcomeRow,
 };
 use revops_db::notifications::ForwardRow;
 use revops_db::owner::spawn_read_write;
@@ -449,4 +450,191 @@ async fn fee_cycle_transaction_seed_event_and_restart_marker_through_actor() {
         .expect("restart marker visible to async side");
     assert_eq!(marker.hydration_source, "python_seed");
     assert_eq!(marker.process_id, std::process::id() as i64);
+}
+
+// ---------------------------------------------------------------------------
+// Task 9 (stateful-shadow revision plan): the guarded broadcaster's
+// intent/result ledger + restart quarantine reconciliation, through the
+// single-owner actor.
+// ---------------------------------------------------------------------------
+
+fn sample_intent(request_id: &str, at: i64) -> BroadcastAttemptIntent {
+    BroadcastAttemptIntent {
+        cycle_id: Some("live-cycle-1".to_string()),
+        channel_id: "1x1x0".to_string(),
+        request_id: request_id.to_string(),
+        method: "setchannel".to_string(),
+        params_json: r#"{"id":"1x1x0","feebase":0,"feeppm":150}"#.to_string(),
+        submitted_at: at,
+    }
+}
+
+/// Intent-then-result round trip: the intent is written with no outcome
+/// (readable as unresolved), and recording a result clears that.
+#[tokio::test]
+async fn broadcast_attempt_intent_then_result_round_trips_through_actor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let id = handle
+        .insert_broadcast_attempt(sample_intent("req-1", 1_800_000_000))
+        .await
+        .unwrap();
+    assert!(id > 0);
+
+    // Before any result is recorded, restart reconciliation must treat
+    // this exact row as unresolved -- quarantine every subsequent batch.
+    assert!(handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .is_none());
+    let reconciled = handle
+        .reconcile_quarantine_on_restart(1_800_000_100)
+        .await
+        .unwrap();
+    assert_eq!(reconciled, 1, "the unresolved intent must be reconciled");
+    let active = handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .expect("reconciliation must quarantine an unresolved intent");
+    assert_eq!(active.request_id.as_deref(), Some("req-1"));
+
+    // A SECOND reconciliation pass over the SAME (now-resolved) row must
+    // be a no-op -- it was marked ambiguous by the first pass and must
+    // never be re-scanned as unresolved again.
+    let reconciled_again = handle
+        .reconcile_quarantine_on_restart(1_800_000_200)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconciled_again, 0,
+        "a row already resolved (even to Ambiguous) must not be reconciled twice"
+    );
+
+    // A fresh attempt that DOES record a definite result before any
+    // restart happens must never be reconciled at all.
+    let id2 = handle
+        .insert_broadcast_attempt(sample_intent("req-2", 1_800_000_300))
+        .await
+        .unwrap();
+    handle
+        .record_broadcast_attempt_result(id2, BroadcastAttemptOutcome::Success, None, 1_800_000_301)
+        .await
+        .unwrap();
+    let reconciled_third = handle
+        .reconcile_quarantine_on_restart(1_800_000_400)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconciled_third, 0,
+        "a resolved (Success) attempt must never be treated as unresolved"
+    );
+}
+
+/// No unresolved attempts and no active quarantine -> reconciliation is a
+/// true no-op (does not fabricate a quarantine entry out of nothing).
+#[tokio::test]
+async fn reconcile_quarantine_on_restart_is_noop_with_nothing_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let reconciled = handle
+        .reconcile_quarantine_on_restart(1_800_000_000)
+        .await
+        .unwrap();
+    assert_eq!(reconciled, 0);
+    assert!(handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// An explicit rejection (or any other definite result) is never
+/// reconciled into a quarantine -- only a MISSING result is ambiguous.
+#[tokio::test]
+async fn reconcile_quarantine_on_restart_ignores_definite_outcomes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let id = handle
+        .insert_broadcast_attempt(sample_intent("req-rejected", 1_800_000_000))
+        .await
+        .unwrap();
+    handle
+        .record_broadcast_attempt_result(
+            id,
+            BroadcastAttemptOutcome::Rejected,
+            Some("explicit CLN rejection".to_string()),
+            1_800_000_001,
+        )
+        .await
+        .unwrap();
+
+    let reconciled = handle
+        .reconcile_quarantine_on_restart(1_800_000_100)
+        .await
+        .unwrap();
+    assert_eq!(reconciled, 0);
+    assert!(handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// If a quarantine is ALREADY active (e.g. the live broadcaster inserted
+/// one directly after observing an ambiguous transport outcome, before
+/// any restart happened), reconciliation must never insert a SECOND
+/// entry -- restoration only, never a duplicate.
+#[tokio::test]
+async fn reconcile_quarantine_on_restart_does_not_duplicate_an_active_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    handle
+        .insert_execution_quarantine(QuarantineEntry {
+            reason: "ambiguous post-submission transport outcome".to_string(),
+            cycle_id: None,
+            channel_id: Some("1x1x0".to_string()),
+            request_id: Some("req-live".to_string()),
+            entered_at: 1_800_000_000,
+        })
+        .await
+        .unwrap();
+    let before = handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .expect("quarantine set directly");
+
+    // An unrelated unresolved intent from the SAME crash.
+    handle
+        .insert_broadcast_attempt(sample_intent("req-live", 1_800_000_000))
+        .await
+        .unwrap();
+
+    let reconciled = handle
+        .reconcile_quarantine_on_restart(1_800_000_100)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconciled, 1,
+        "the unresolved intent is still reconciled..."
+    );
+    let after = handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .expect("quarantine still active");
+    assert_eq!(
+        after.id, before.id,
+        "...but must not insert a SECOND quarantine row on top of the active one"
+    );
 }

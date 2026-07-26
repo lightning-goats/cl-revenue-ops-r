@@ -237,6 +237,32 @@ CREATE TABLE IF NOT EXISTS rust_fee_restart_markers (
     hydration_source TEXT NOT NULL,
     source_commit TEXT NOT NULL
 );
+
+-- Task 9 (stateful-shadow revision): the guarded live broadcaster's own
+-- intent/result ledger. `outcome IS NULL` means an intent was persisted
+-- BEFORE any socket write but no result was ever recorded -- either the
+-- process is still mid-flight, or (far more commonly, since a single
+-- broadcast attempt is not long-running) it crashed between the intent
+-- write and the result write. Either way that row is read back as
+-- AMBIGUOUS by `reconcile_quarantine_on_restart`, never silently dropped.
+-- No foreign key to rust_fee_cycles: a live broadcast attempt is not part
+-- of the SeedOnce/RehydratePerCycle shadow-commit pipeline that table
+-- family serves, so `cycle_id` here is a plain nullable identity column.
+CREATE TABLE IF NOT EXISTS rust_broadcast_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT,
+    channel_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    submitted_at INTEGER NOT NULL,
+    outcome TEXT CHECK (outcome IN ('success', 'rejected', 'clean_failure', 'ambiguous')),
+    outcome_detail TEXT,
+    completed_at INTEGER,
+    UNIQUE (request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rust_broadcast_attempts_outcome
+    ON rust_broadcast_attempts(outcome);
 ";
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1026,256 @@ pub fn record_runway_snapshot(conn: &Connection, snap: &RunwaySnapshotRow) -> Re
     )
     .context("insert runway snapshot row")?;
     Ok(conn.last_insert_rowid())
+}
+
+// ---------------------------------------------------------------------------
+// broadcast attempts + restart-quarantine reconciliation (Task 9)
+// ---------------------------------------------------------------------------
+
+/// One broadcast attempt's PRE-submission intent (stateful-shadow revision
+/// plan, Task 9): written through the store BEFORE any socket write, so a
+/// process crash between the intent write and the (never-written) result
+/// leaves a row with `outcome IS NULL` -- readable as ambiguous by
+/// [`unresolved_broadcast_attempts`], and restored into an active
+/// quarantine by [`reconcile_quarantine_on_restart`] rather than silently
+/// dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadcastAttemptIntent {
+    /// The shadow/live cycle this request belongs to, if any. No FK to
+    /// `rust_fee_cycles` -- see this module's DDL comment.
+    pub cycle_id: Option<String>,
+    pub channel_id: String,
+    /// Unique request identity (e.g. the governor's idempotency key) --
+    /// `UNIQUE(request_id)` so a retried submission of the exact same
+    /// request cannot silently insert a second intent row.
+    pub request_id: String,
+    /// Always [`crate::owner`]'s caller-supplied RPC method name (in
+    /// practice always `"setchannel"` -- kept as a column, not a constant,
+    /// so this ledger stays a generic attempt log).
+    pub method: String,
+    /// The exact wire params sent, already serialized by the caller.
+    pub params_json: String,
+    pub submitted_at: i64,
+}
+
+/// The terminal classification of one broadcast attempt's transport
+/// outcome. `Success`/`Rejected` are definite -- CLN told us plainly, one
+/// way or the other. `CleanFailure` means no bytes could possibly have
+/// reached lightningd (the attempt was refused before any write was even
+/// attempted). `Ambiguous` means bytes may have been accepted by
+/// lightningd and the true outcome is genuinely unknown -- this is the
+/// ONLY terminal outcome that also quarantines execution (see
+/// [`reconcile_quarantine_on_restart`] and `revops::fee_execution`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastAttemptOutcome {
+    Success,
+    Rejected,
+    CleanFailure,
+    Ambiguous,
+}
+
+impl BroadcastAttemptOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Rejected => "rejected",
+            Self::CleanFailure => "clean_failure",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "success" => Some(Self::Success),
+            "rejected" => Some(Self::Rejected),
+            "clean_failure" => Some(Self::CleanFailure),
+            "ambiguous" => Some(Self::Ambiguous),
+            _ => None,
+        }
+    }
+}
+
+/// A persisted broadcast-attempt row, as read back. `outcome.is_none()`
+/// means no result was ever recorded for this intent (see
+/// [`BroadcastAttemptIntent`]'s doc comment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadcastAttemptRow {
+    pub id: i64,
+    pub cycle_id: Option<String>,
+    pub channel_id: String,
+    pub request_id: String,
+    pub method: String,
+    pub params_json: String,
+    pub submitted_at: i64,
+    pub outcome: Option<BroadcastAttemptOutcome>,
+    pub outcome_detail: Option<String>,
+    pub completed_at: Option<i64>,
+}
+
+/// Persist one broadcast attempt's intent BEFORE any socket write. Returns
+/// the new row's id, which the caller must pass to
+/// [`record_broadcast_attempt_result`] once the transport outcome is
+/// known.
+pub fn insert_broadcast_attempt(conn: &Connection, intent: &BroadcastAttemptIntent) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO rust_broadcast_attempts
+             (cycle_id, channel_id, request_id, method, params_json, submitted_at,
+              outcome, outcome_detail, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
+        params![
+            intent.cycle_id,
+            intent.channel_id,
+            intent.request_id,
+            intent.method,
+            intent.params_json,
+            intent.submitted_at,
+        ],
+    )
+    .context("insert broadcast attempt intent")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Record one broadcast attempt's terminal transport outcome, AFTER the
+/// socket call returned (or was conclusively refused before any write).
+/// Errors if `id` names no row (the intent must have been persisted
+/// first).
+pub fn record_broadcast_attempt_result(
+    conn: &Connection,
+    id: i64,
+    outcome: BroadcastAttemptOutcome,
+    outcome_detail: Option<&str>,
+    completed_at: i64,
+) -> Result<()> {
+    let updated = conn
+        .execute(
+            "UPDATE rust_broadcast_attempts
+             SET outcome = ?1, outcome_detail = ?2, completed_at = ?3
+             WHERE id = ?4",
+            params![outcome.as_str(), outcome_detail, completed_at, id],
+        )
+        .context("record broadcast attempt result")?;
+    if updated == 0 {
+        anyhow::bail!("no rust_broadcast_attempts row with id {id} (intent was never persisted?)");
+    }
+    Ok(())
+}
+
+/// Every broadcast attempt with no recorded result, oldest first -- the
+/// exact set [`reconcile_quarantine_on_restart`] resolves at startup.
+pub fn unresolved_broadcast_attempts(conn: &Connection) -> Result<Vec<BroadcastAttemptRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, cycle_id, channel_id, request_id, method, params_json, submitted_at,
+                    outcome, outcome_detail, completed_at
+             FROM rust_broadcast_attempts
+             WHERE outcome IS NULL
+             ORDER BY id",
+        )
+        .context("prepare unresolved broadcast attempts query")?;
+    let rows = stmt
+        .query_map([], |r| {
+            let outcome: Option<String> = r.get(7)?;
+            Ok(BroadcastAttemptRow {
+                id: r.get(0)?,
+                cycle_id: r.get(1)?,
+                channel_id: r.get(2)?,
+                request_id: r.get(3)?,
+                method: r.get(4)?,
+                params_json: r.get(5)?,
+                submitted_at: r.get(6)?,
+                outcome: outcome.and_then(|s| BroadcastAttemptOutcome::from_str(&s)),
+                outcome_detail: r.get(8)?,
+                completed_at: r.get(9)?,
+            })
+        })
+        .context("run unresolved broadcast attempts query")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect unresolved broadcast attempts")?;
+    Ok(rows)
+}
+
+/// Restart reconciliation (stateful-shadow revision plan, Task 9 brief
+/// Step 2): find every broadcast-attempt intent with no recorded result
+/// (a process crash between the intent write and the result write -- see
+/// [`BroadcastAttemptIntent`]'s doc comment), mark each one `Ambiguous` so
+/// it is never re-scanned as unresolved again, and ensure an active
+/// quarantine entry exists blocking the NEXT batch.
+///
+/// This is RESTORATION, never an automatic clear: an already-active
+/// quarantine is left exactly as it was (this module offers no clear
+/// function at all -- see the module doc's `rust_execution_quarantine`
+/// bullet); a genuinely orphaned intent always produces (or confirms) an
+/// active quarantine. The caller (`revops::fee_execution::
+/// ClnFeeBroadcaster::new`) MUST run this before the broadcaster it
+/// constructs becomes usable, so a restart can never accept a fresh
+/// cutover arm without first restoring whatever quarantine state the
+/// prior process left behind.
+///
+/// Runs inside one `BEGIN IMMEDIATE` transaction (mirroring
+/// [`commit_fee_cycle`]'s rollback-on-error shape): either every orphaned
+/// row is marked ambiguous AND the quarantine entry (if needed) is
+/// inserted, or neither happens -- a crash mid-reconciliation can never
+/// leave some rows resolved without the corresponding quarantine in
+/// place. Returns the number of attempts reconciled (`0` = nothing to
+/// do).
+pub fn reconcile_quarantine_on_restart(conn: &Connection, now: i64) -> Result<usize> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("begin quarantine reconciliation transaction")?;
+    let result = reconcile_quarantine_on_restart_locked(conn, now);
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    } else {
+        conn.execute_batch("COMMIT")
+            .context("commit quarantine reconciliation transaction")?;
+    }
+    result
+}
+
+fn reconcile_quarantine_on_restart_locked(conn: &Connection, now: i64) -> Result<usize> {
+    let orphaned = unresolved_broadcast_attempts(conn)?;
+    if orphaned.is_empty() {
+        return Ok(0);
+    }
+    for row in &orphaned {
+        record_broadcast_attempt_result(
+            conn,
+            row.id,
+            BroadcastAttemptOutcome::Ambiguous,
+            Some(
+                "resolved via restart reconciliation: no result was recorded before the prior \
+                 process exited",
+            ),
+            now,
+        )?;
+    }
+    if active_quarantine(conn)?.is_none() {
+        let last = orphaned
+            .last()
+            .expect("orphaned is non-empty (checked above)");
+        insert_quarantine(
+            conn,
+            &QuarantineEntry {
+                reason: format!(
+                    "restart reconciliation: {} broadcast attempt(s) had no recorded result at \
+                     startup",
+                    orphaned.len()
+                ),
+                // Deliberately `None`, never `last.cycle_id` -- a live
+                // broadcast attempt's `cycle_id` is NOT guaranteed to name
+                // a row in `rust_fee_cycles` (that table belongs to the
+                // shadow-commit pipeline; see this table's DDL comment),
+                // and `rust_execution_quarantine.cycle_id` carries an FK
+                // to it. Copying an attempt's own cycle_id straight
+                // through would make reconciliation fail with a foreign
+                // key violation for the common live-mode case.
+                cycle_id: None,
+                channel_id: Some(last.channel_id.clone()),
+                request_id: Some(last.request_id.clone()),
+                entered_at: now,
+            },
+        )?;
+    }
+    Ok(orphaned.len())
 }
 
 /// The most recently recorded runway snapshot, if any.

@@ -9,6 +9,7 @@ pub mod config_types;
 pub mod cutover_arm;
 pub mod fee_config;
 pub mod fee_evidence;
+pub mod fee_execution;
 pub mod fee_governor;
 pub mod fee_mode;
 pub mod fee_scheduler;

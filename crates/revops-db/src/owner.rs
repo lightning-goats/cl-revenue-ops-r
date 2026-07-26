@@ -8,9 +8,9 @@
 //! contract over the production db.
 
 use crate::fee_runway::{
-    self, FeeCycleCommit, FeeRestartMarkerRow, FeeSeedEventRow, FeeStateSnapshot,
-    FeeTriggerEventRow, MempoolMaComparisonRow, MempoolSampleRow, QuarantineEntry, QuarantineRow,
-    RunwaySnapshotRow,
+    self, BroadcastAttemptIntent, BroadcastAttemptOutcome, FeeCycleCommit, FeeRestartMarkerRow,
+    FeeSeedEventRow, FeeStateSnapshot, FeeTriggerEventRow, MempoolMaComparisonRow,
+    MempoolSampleRow, QuarantineEntry, QuarantineRow, RunwaySnapshotRow,
 };
 use crate::notifications::{self, ForwardRow};
 use anyhow::{Context, Result};
@@ -90,6 +90,23 @@ enum Command {
         reply: oneshot::Sender<Result<i64>>,
     },
     LatestFeeRestartMarker(oneshot::Sender<Result<Option<FeeRestartMarkerRow>>>),
+    // -- Task 9: guarded live broadcaster intent/result ledger + restart
+    // quarantine reconciliation --
+    InsertBroadcastAttempt {
+        intent: BroadcastAttemptIntent,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    RecordBroadcastAttemptResult {
+        id: i64,
+        outcome: BroadcastAttemptOutcome,
+        outcome_detail: Option<String>,
+        completed_at: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ReconcileQuarantineOnRestart {
+        now: i64,
+        reply: oneshot::Sender<Result<usize>>,
+    },
 }
 
 /// Cheap, `Clone`-able handle to the observer-db owner task.
@@ -544,6 +561,62 @@ impl ObserverHandle {
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
     }
+
+    // -----------------------------------------------------------------
+    // Task 9: the guarded live broadcaster's intent/result ledger +
+    // restart quarantine reconciliation. Async only -- `ClnFeeBroadcaster`
+    // (the only caller) is already async (it awaits the CLN RPC call),
+    // unlike the fee scheduler's plain `std::thread` owner.
+    // -----------------------------------------------------------------
+
+    /// Persist one broadcast attempt's intent BEFORE any socket write.
+    /// Returns the new row's id.
+    pub async fn insert_broadcast_attempt(&self, intent: BroadcastAttemptIntent) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertBroadcastAttempt { intent, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Record one broadcast attempt's terminal transport outcome, AFTER
+    /// the socket call returned (or was conclusively refused before any
+    /// write).
+    pub async fn record_broadcast_attempt_result(
+        &self,
+        id: i64,
+        outcome: BroadcastAttemptOutcome,
+        outcome_detail: Option<String>,
+        completed_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordBroadcastAttemptResult {
+                id,
+                outcome,
+                outcome_detail,
+                completed_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Restart reconciliation (Task 9 brief Step 2): restore quarantine
+    /// for any broadcast attempt that never recorded a result, BEFORE any
+    /// cutover arm is accepted. See
+    /// [`fee_runway::reconcile_quarantine_on_restart`] for the full
+    /// contract. Returns the number of attempts reconciled.
+    pub async fn reconcile_quarantine_on_restart(&self, now: i64) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReconcileQuarantineOnRestart { now, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
 }
 
 /// Open (creating the file and any missing parent directories if needed)
@@ -683,6 +756,30 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::LatestFeeRestartMarker(reply) => {
                     let result = fee_runway::latest_restart_marker(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::InsertBroadcastAttempt { intent, reply } => {
+                    let result = fee_runway::insert_broadcast_attempt(&conn, &intent);
+                    let _ = reply.send(result);
+                }
+                Command::RecordBroadcastAttemptResult {
+                    id,
+                    outcome,
+                    outcome_detail,
+                    completed_at,
+                    reply,
+                } => {
+                    let result = fee_runway::record_broadcast_attempt_result(
+                        &conn,
+                        id,
+                        outcome,
+                        outcome_detail.as_deref(),
+                        completed_at,
+                    );
+                    let _ = reply.send(result);
+                }
+                Command::ReconcileQuarantineOnRestart { now, reply } => {
+                    let result = fee_runway::reconcile_quarantine_on_restart(&conn, now);
                     let _ = reply.send(result);
                 }
             }
