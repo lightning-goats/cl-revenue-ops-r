@@ -4,7 +4,8 @@
 //! either (a) exactly one such call happens on a fully-authorized batch,
 //! or (b) some denial/failure path sends ZERO calls, or (c) an ambiguous
 //! transport outcome persistently quarantines execution across a
-//! restart.
+//! restart, or (d) a failure to persist that quarantine still fails
+//! closed (fix round 1, review finding 1).
 //!
 //! A fake CLN Unix-socket JSON-RPC server (below) stands in for
 //! `lightning-rpc` -- it never resolves to a real lightningd socket path
@@ -19,7 +20,7 @@ use revops::fee_execution::{
 };
 use revops::fee_mode::{validate_fee_mode, ModeFlags, ValidatedFeeMode};
 use revops::python_authority::PythonAuthorityOff;
-use revops_db::fee_runway::{BroadcastAttemptIntent, FeeStateSnapshot};
+use revops_db::fee_runway::{BroadcastAttemptIntent, FeeStateSnapshot, QuarantineEntry};
 use revops_db::owner::{spawn_read_write, ObserverHandle};
 use revops_fees::execution::SetChannelRequest;
 use serde_json::{json, Value};
@@ -113,6 +114,24 @@ async fn observer(dir: &Path) -> ObserverHandle {
     spawn_read_write(&dir.join("observer.db"))
         .await
         .expect("spawn observer db")
+}
+
+/// Build a broadcaster over a fresh arm, asserting reconciliation
+/// succeeded (no orphaned intents in a freshly-created store).
+async fn broadcaster(socket_path: PathBuf, store: ObserverHandle, tmp: &Path) -> ClnFeeBroadcaster {
+    let live_mode = real_live_mode(tmp, &format!("nonce-{}", uuid_ish()));
+    ClnFeeBroadcaster::new(socket_path, store, 5, live_mode)
+        .await
+        .expect("no orphaned intents to reconcile in a fresh store")
+}
+
+/// A cheap, collision-avoiding-enough nonce generator for tests that need
+/// more than one consumed arm per process (the cutover arm's nonce must
+/// be filesystem-unique within `consumed_dir`).
+fn uuid_ish() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering as AtoOrdering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, AtoOrdering::SeqCst)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,21 +309,24 @@ fn stable_readings() -> (PythonAuthorityOff, PythonAuthorityOff) {
     (first, second)
 }
 
-fn authorize_ok(
-    active_quarantine: Option<revops_db::fee_runway::QuarantineRow>,
-) -> LiveBatchAuthorization {
+/// Fix round 1 (review finding 4): `authorize` now reads the
+/// quarantine-empty observation and the current state generation
+/// directly from `store` -- a fresh (never-committed) store's generation
+/// is always `0`, so every fixture below authorizes against `0` unless a
+/// test deliberately wants a mismatch.
+async fn authorize_ok(store: &ObserverHandle) -> LiveBatchAuthorization {
     let (first, second) = stable_readings();
     LiveBatchAuthorization::authorize(
+        store,
         "candidate-sha-abc",
-        7,
-        7,
+        0,
         &first,
         &second,
         true,
         "authorized",
         "idem-1",
-        active_quarantine,
     )
+    .await
     .expect("fully authorized batch")
 }
 
@@ -317,12 +339,10 @@ async fn valid_live_mode_sends_exactly_one_setchannel_call_with_typed_payload() 
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
     let store = observer(tmp.path()).await;
-    let live_mode = real_live_mode(tmp.path(), "nonce-success");
-    let broadcaster =
-        ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 5, live_mode).await;
+    let broadcaster = broadcaster(server.socket_path(), store.clone(), tmp.path()).await;
 
     let receipt = broadcaster
-        .broadcast_batch(authorize_ok(None), &[one_request()])
+        .broadcast_batch(authorize_ok(&store).await, &[one_request()])
         .await
         .expect("authorized single-request batch succeeds");
 
@@ -341,27 +361,32 @@ async fn valid_live_mode_sends_exactly_one_setchannel_call_with_typed_payload() 
 
 #[tokio::test]
 async fn quarantine_active_denies_authorization_construction_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
-    let active = revops_db::fee_runway::QuarantineRow {
-        id: 1,
-        reason: "ambiguous post-submission transport outcome".to_string(),
-        cycle_id: None,
-        channel_id: Some("1x1x0".to_string()),
-        request_id: Some("req-0".to_string()),
-        entered_at: 1_800_000_000,
-    };
+    let store = observer(tmp.path()).await;
+    store
+        .insert_execution_quarantine(QuarantineEntry {
+            reason: "ambiguous post-submission transport outcome".to_string(),
+            cycle_id: None,
+            channel_id: Some("1x1x0".to_string()),
+            request_id: Some("req-0".to_string()),
+            entered_at: 1_800_000_000,
+        })
+        .await
+        .unwrap();
+
     let (first, second) = stable_readings();
     let err = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-abc",
-        7,
-        7,
+        0,
         &first,
         &second,
         true,
         "authorized",
         "idem-1",
-        Some(active),
     )
+    .await
     .expect_err("active quarantine must deny authorization");
     assert!(matches!(err, LiveBatchDenyReason::QuarantineActive { .. }));
     assert_eq!(server.connection_count(), 0);
@@ -369,25 +394,27 @@ async fn quarantine_active_denies_authorization_construction_with_zero_calls() {
 
 #[tokio::test]
 async fn stale_state_generation_denies_authorization_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
     let (first, second) = stable_readings();
     let err = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-abc",
-        6, // candidate was built against generation 6
-        7, // current generation has already advanced to 7
+        6, // candidate was built against generation 6; the store is still 0
         &first,
         &second,
         true,
         "authorized",
         "idem-1",
-        None,
     )
+    .await
     .expect_err("stale state generation must deny authorization");
     assert!(matches!(
         err,
         LiveBatchDenyReason::StateGenerationStale {
             authorized_against: 6,
-            current: 7,
+            current: 0,
         }
     ));
     assert_eq!(server.connection_count(), 0);
@@ -395,7 +422,9 @@ async fn stale_state_generation_denies_authorization_with_zero_calls() {
 
 #[tokio::test]
 async fn unstable_python_authority_epoch_denies_authorization_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
     let first = PythonAuthorityOff {
         generation: 3,
         transitioned_at: 1_799_000_000,
@@ -407,16 +436,16 @@ async fn unstable_python_authority_epoch_denies_authorization_with_zero_calls() 
         observed_at: 1_800_000_010,
     };
     let err = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-abc",
-        7,
-        7,
+        0,
         &first,
         &second,
         true,
         "authorized",
         "idem-1",
-        None,
     )
+    .await
     .expect_err("unstable epoch must deny authorization");
     assert!(matches!(err, LiveBatchDenyReason::PythonAuthority(_)));
     assert_eq!(server.connection_count(), 0);
@@ -424,19 +453,21 @@ async fn unstable_python_authority_epoch_denies_authorization_with_zero_calls() 
 
 #[tokio::test]
 async fn governor_denial_denies_authorization_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
     let (first, second) = stable_readings();
     let err = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-abc",
-        7,
-        7,
+        0,
         &first,
         &second,
         false,
         "paused",
         "idem-1",
-        None,
     )
+    .await
     .expect_err("governor denial must deny authorization");
     assert!(matches!(
         err,
@@ -447,22 +478,66 @@ async fn governor_denial_denies_authorization_with_zero_calls() {
 
 #[tokio::test]
 async fn missing_ledger_reservation_denies_authorization_with_zero_calls() {
+    let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
     let (first, second) = stable_readings();
     let err = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-abc",
-        7,
-        7,
+        0,
         &first,
         &second,
         true,
         "authorized",
         "", // no reservation id
-        None,
     )
+    .await
     .expect_err("missing ledger reservation must deny authorization");
     assert!(matches!(err, LiveBatchDenyReason::LedgerReservationMissing));
     assert_eq!(server.connection_count(), 0);
+}
+
+/// Fix round 1, review finding 3: the store-backed quarantine re-check
+/// INSIDE `broadcast_batch` is the ONLY store-backed quarantine
+/// enforcement actually on the send path -- `authorization` was minted
+/// legitimately (the store showed no active quarantine at that moment),
+/// but a quarantine landed afterward (e.g. a concurrent caller observing
+/// an ambiguous outcome). Deleting `broadcast_batch`'s re-check would
+/// leave every OTHER test in this file green; this is the one that would
+/// catch it.
+#[tokio::test]
+async fn broadcast_batch_denies_on_store_backed_quarantine_even_when_authorization_predates_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A `Success` behavior queued but never reached -- if this fires, the
+    // re-check failed to stop the call.
+    let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({}))]);
+    let store = observer(tmp.path()).await;
+    let broadcaster = broadcaster(server.socket_path(), store.clone(), tmp.path()).await;
+
+    let authorization = authorize_ok(&store).await;
+
+    store
+        .insert_execution_quarantine(QuarantineEntry {
+            reason: "race: inserted after authorization was minted".to_string(),
+            cycle_id: None,
+            channel_id: Some("1x1x0".to_string()),
+            request_id: Some("req-race".to_string()),
+            entered_at: 1_800_000_000,
+        })
+        .await
+        .unwrap();
+
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("the store-backed re-check must still deny the batch");
+    assert!(matches!(err, BroadcastError::Quarantined));
+    assert_eq!(
+        server.connection_count(),
+        0,
+        "the re-check must happen BEFORE any RPC call"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -477,12 +552,10 @@ async fn explicit_rejection_is_reconciled_as_a_failure_row_without_quarantine() 
         message: "Rate exceeds maximum".to_string(),
     }]);
     let store = observer(tmp.path()).await;
-    let live_mode = real_live_mode(tmp.path(), "nonce-rejected");
-    let broadcaster =
-        ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 5, live_mode).await;
+    let broadcaster = broadcaster(server.socket_path(), store.clone(), tmp.path()).await;
 
     let err = broadcaster
-        .broadcast_batch(authorize_ok(None), &[one_request()])
+        .broadcast_batch(authorize_ok(&store).await, &[one_request()])
         .await
         .expect_err("explicit rejection must fail the batch");
     assert!(matches!(err, BroadcastError::Rejected { .. }));
@@ -503,38 +576,36 @@ async fn disconnect_after_submission_quarantines_and_blocks_next_batch() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![FakeBehavior::DisconnectAfterReceipt]);
     let store = observer(tmp.path()).await;
-    let live_mode = real_live_mode(tmp.path(), "nonce-ambiguous");
-    let broadcaster =
-        ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 5, live_mode).await;
+    let broadcaster = broadcaster(server.socket_path(), store.clone(), tmp.path()).await;
 
     let err = broadcaster
-        .broadcast_batch(authorize_ok(None), &[one_request()])
+        .broadcast_batch(authorize_ok(&store).await, &[one_request()])
         .await
         .expect_err("disconnect after receipt must be ambiguous");
     assert!(matches!(err, BroadcastError::Ambiguous { .. }));
     assert_eq!(server.connection_count(), 1, "exactly one attempt was made");
 
-    let active = store
+    store
         .active_execution_quarantine()
         .await
         .unwrap()
         .expect("ambiguous transport outcome must quarantine execution");
-    assert_eq!(active.request_id.as_deref(), Some("req-1"));
 
     // The NEXT batch is blocked: constructing a fresh authorization must
-    // now deny on the active quarantine, with zero further calls.
+    // now deny on the active quarantine (read straight from the store),
+    // with zero further calls.
     let (first, second) = stable_readings();
     let deny = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-def",
-        7,
-        7,
+        0,
         &first,
         &second,
         true,
         "authorized",
         "idem-2",
-        Some(active),
     )
+    .await
     .expect_err("the next batch must be denied while quarantine is active");
     assert!(matches!(deny, LiveBatchDenyReason::QuarantineActive { .. }));
     assert_eq!(
@@ -554,17 +625,110 @@ async fn hang_after_submission_times_out_as_ambiguous_and_quarantines() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![FakeBehavior::HangForever]);
     let store = observer(tmp.path()).await;
-    let live_mode = real_live_mode(tmp.path(), "nonce-hang");
     // Short timeout budget so the test doesn't wait out a production budget.
-    let broadcaster =
-        ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 1, live_mode).await;
+    let live_mode = real_live_mode(tmp.path(), "nonce-hang");
+    let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 1, live_mode)
+        .await
+        .expect("no orphaned intents to reconcile");
 
     let err = broadcaster
-        .broadcast_batch(authorize_ok(None), &[one_request()])
+        .broadcast_batch(authorize_ok(&store).await, &[one_request()])
         .await
         .expect_err("a hang past the timeout budget must be ambiguous");
     assert!(matches!(err, BroadcastError::Ambiguous { .. }));
     assert!(store.active_execution_quarantine().await.unwrap().is_some());
+}
+
+/// Fix round 1 (review finding 1, CRITICAL): if the quarantine insert
+/// ITSELF fails after an ambiguous outcome, the prior code still recorded
+/// the intent row as `outcome = 'ambiguous'` (never reconciled again on
+/// restart) and had no in-memory signal either -- fail-open both ways.
+/// This test sabotages ONLY the quarantine INSERT path (a `BEFORE INSERT`
+/// trigger installed via a second raw connection to the SAME observer db
+/// file, so no prod-only test hook is needed and every plain `SELECT`
+/// -- including this broadcaster's own re-checks -- keeps working
+/// normally) and proves: the intent row is left unresolved, and the
+/// broadcaster poisons itself in memory, refusing every further batch
+/// with zero additional RPC calls.
+#[tokio::test]
+async fn ambiguous_outcome_with_failed_quarantine_insert_fails_closed_in_process() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("observer.db");
+    let server = FakeClnServer::spawn(vec![FakeBehavior::DisconnectAfterReceipt]);
+    let store = observer(tmp.path()).await;
+    let broadcaster = broadcaster(server.socket_path(), store.clone(), tmp.path()).await;
+
+    // Sabotage ONLY the quarantine table's INSERT path. A plain SELECT
+    // (every quarantine READ this module performs) is completely
+    // unaffected -- this is deliberately NOT "drop the table" (which
+    // would also break the SELECT-based re-checks and misrepresent what
+    // this test is proving).
+    {
+        let raw = rusqlite::Connection::open(&db_path).expect("open raw connection to sabotage");
+        raw.execute_batch(
+            "CREATE TRIGGER quarantine_insert_fails
+                 BEFORE INSERT ON rust_execution_quarantine
+             BEGIN
+                 SELECT RAISE(ABORT, 'test-induced quarantine insert failure');
+             END;",
+        )
+        .expect("install failing trigger");
+    }
+
+    let err = broadcaster
+        .broadcast_batch(authorize_ok(&store).await, &[one_request()])
+        .await
+        .expect_err("an ambiguous outcome must still fail the batch");
+    assert!(matches!(err, BroadcastError::Ambiguous { .. }));
+    let message = err.to_string();
+    assert!(
+        message.contains("quarantine insert ALSO failed"),
+        "the error must surface the quarantine-insert failure: {message}"
+    );
+
+    // The store itself shows NO active quarantine -- the insert failed,
+    // so there is genuinely nothing there (proving this isn't just
+    // redundant with the happy-path quarantine test above).
+    assert!(
+        store.active_execution_quarantine().await.unwrap().is_none(),
+        "the quarantine insert failed -- the store must not show one"
+    );
+
+    // The intent row is left UNRESOLVED (`outcome IS NULL`), never marked
+    // 'ambiguous' -- exactly what restart reconciliation keys on.
+    let raw = rusqlite::Connection::open(&db_path).expect("reopen raw connection");
+    let outcome: Option<String> = raw
+        .query_row(
+            "SELECT outcome FROM rust_broadcast_attempts WHERE request_id = 'req-1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("the attempt's intent row exists");
+    assert!(
+        outcome.is_none(),
+        "the intent row must stay unresolved when the quarantine insert failed, got {outcome:?}"
+    );
+    drop(raw);
+
+    // In-process poison: the broadcaster now refuses EVERY further batch
+    // immediately -- zero further connections -- even on a fresh,
+    // otherwise-valid authorization, and even though the store's own
+    // quarantine read above would (misleadingly) report "none active".
+    let before = server.connection_count();
+    let second_request = PersistedFeeRequest {
+        request_id: "req-2".to_string(),
+        ..one_request()
+    };
+    let poisoned_err = broadcaster
+        .broadcast_batch(authorize_ok(&store).await, &[second_request])
+        .await
+        .expect_err("a poisoned broadcaster must refuse every further batch");
+    assert!(matches!(poisoned_err, BroadcastError::Poisoned));
+    assert_eq!(
+        server.connection_count(),
+        before,
+        "a poisoned broadcaster must make zero further RPC calls"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -596,15 +760,15 @@ async fn restart_restores_quarantine_before_the_arm_is_accepted() {
     // the broadcaster is usable at all.
     let server = FakeClnServer::spawn(vec![]);
     let live_mode = real_live_mode(tmp.path(), "nonce-restart");
-    let _broadcaster =
-        ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 5, live_mode).await;
+    let _broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 5, live_mode)
+        .await
+        .expect("reconciliation of a real orphaned intent must succeed");
 
-    let active = store
+    store
         .active_execution_quarantine()
         .await
         .unwrap()
         .expect("restart reconciliation must have restored quarantine");
-    assert_eq!(active.request_id.as_deref(), Some("req-crash"));
     assert_eq!(
         server.connection_count(),
         0,
@@ -615,16 +779,67 @@ async fn restart_restores_quarantine_before_the_arm_is_accepted() {
     // while that restored quarantine is active.
     let (first, second) = stable_readings();
     let deny = LiveBatchAuthorization::authorize(
+        &store,
         "candidate-sha-ghi",
-        7,
-        7,
+        0,
         &first,
         &second,
         true,
         "authorized",
         "idem-3",
-        Some(active),
     )
+    .await
     .expect_err("a freshly-accepted arm must still respect a restored quarantine");
     assert!(matches!(deny, LiveBatchDenyReason::QuarantineActive { .. }));
+}
+
+/// Fix round 1 (review finding 2): if restart reconciliation itself
+/// fails, `ClnFeeBroadcaster::new` must REFUSE construction outright --
+/// never hand back a usable broadcaster over an arm whose quarantine
+/// state could not be trusted. Sabotages ONLY the quarantine INSERT path
+/// (same seam as the poison test above) so `reconcile_quarantine_on_restart`
+/// finds a real orphaned intent, tries to insert the resulting
+/// quarantine, and fails.
+#[tokio::test]
+async fn new_refuses_construction_when_restart_reconciliation_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("observer.db");
+    let store = observer(tmp.path()).await;
+
+    store
+        .insert_broadcast_attempt(BroadcastAttemptIntent {
+            cycle_id: None,
+            channel_id: "1x1x0".to_string(),
+            request_id: "req-crash-2".to_string(),
+            method: "setchannel".to_string(),
+            params_json: r#"{"id":"1x1x0","feebase":0,"feeppm":150}"#.to_string(),
+            submitted_at: 1_800_000_000,
+        })
+        .await
+        .expect("seed orphaned intent");
+
+    {
+        let raw = rusqlite::Connection::open(&db_path).expect("open raw connection to sabotage");
+        raw.execute_batch(
+            "CREATE TRIGGER quarantine_insert_fails
+                 BEFORE INSERT ON rust_execution_quarantine
+             BEGIN
+                 SELECT RAISE(ABORT, 'test-induced quarantine insert failure');
+             END;",
+        )
+        .expect("install failing trigger");
+    }
+
+    let server = FakeClnServer::spawn(vec![]);
+    let live_mode = real_live_mode(tmp.path(), "nonce-restart-fails");
+    let result = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 5, live_mode).await;
+    assert!(
+        result.is_err(),
+        "construction must be refused when reconciliation cannot persist the quarantine"
+    );
+    assert_eq!(
+        server.connection_count(),
+        0,
+        "a refused construction must never dial CLN either"
+    );
 }

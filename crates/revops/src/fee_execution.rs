@@ -20,14 +20,19 @@
 //!    one-session-per-arm contract.
 //! 2. [`ClnFeeBroadcaster::broadcast_batch`] additionally requires a
 //!    freshly-constructed [`LiveBatchAuthorization`], consumed by value.
-//!    Its only constructor, [`LiveBatchAuthorization::authorize`], denies
-//!    construction outright (see [`LiveBatchDenyReason`]) unless an
-//!    active-quarantine observation, a matching state generation, a
-//!    stable bracketed Python-authority epoch, an authorized governor
-//!    decision, and a non-empty ledger reservation all hold. Every denial
-//!    path returns before `broadcast_batch` is ever callable -- there is
-//!    no partial authorization and no way to retry past a denial without
-//!    a fresh set of readings.
+//!    Its only constructor, [`LiveBatchAuthorization::authorize`], is
+//!    itself a VERIFIER, not a witness (fix round 1, review finding 4):
+//!    the quarantine-empty observation and the current state generation
+//!    are read directly from the Rust-owned store INSIDE `authorize`,
+//!    never accepted as caller-supplied parameters a bug (or a race)
+//!    could mint with a stale or absent value. `authorize` denies
+//!    construction outright (see [`LiveBatchDenyReason`]) unless the
+//!    store-read quarantine is empty, the store-read state generation
+//!    matches the candidate's, a stable bracketed Python-authority epoch
+//!    holds, the governor authorized, and a non-empty ledger reservation
+//!    was supplied. Every denial path returns before `broadcast_batch` is
+//!    ever callable -- there is no partial authorization and no way to
+//!    retry past a denial without a fresh set of readings.
 //!
 //! ## Persist intent before submission, result afterward
 //!
@@ -39,9 +44,11 @@
 //! recorded outcome -- ambiguous by construction, never silently lost --
 //! and [`ClnFeeBroadcaster::new`] runs
 //! [`revops_db::owner::ObserverHandle::reconcile_quarantine_on_restart`]
-//! as its FIRST action, before the arm it is given becomes usable at all.
-//! A restart can never accept a fresh cutover arm without first restoring
-//! whatever quarantine state the prior process left behind.
+//! as its FIRST action, REFUSING construction outright if it fails (fix
+//! round 1, review finding 2) -- the arm it is given never becomes usable
+//! unless reconciliation succeeded. A restart can never accept a fresh
+//! cutover arm without first restoring whatever quarantine state the
+//! prior process left behind.
 //!
 //! ## Transport classification (conservative by design)
 //!
@@ -58,10 +65,15 @@
 //!   answer came back (a disconnect, a timeout, or an undecodable
 //!   response) -- the request may or may not have been applied.
 //!   [`broadcast_batch`](ClnFeeBroadcaster::broadcast_batch) inserts a
-//!   persistent execution quarantine for this outcome and stops the batch
-//!   immediately: quarantine is never retried automatically (see
+//!   persistent execution quarantine for this outcome BEFORE recording
+//!   any terminal result (fix round 1, review finding 1) and stops the
+//!   batch immediately: quarantine is never retried automatically (see
 //!   `revops_db::fee_runway`'s module doc), only restored across a
-//!   restart.
+//!   restart. If the quarantine insert ITSELF fails, the intent row is
+//!   left unresolved (never marked with a terminal outcome, so restart
+//!   reconciliation still picks it up) AND this process poisons itself
+//!   in memory (see [`ClnFeeBroadcaster::broadcast_batch`]'s doc
+//!   comment) -- fail-open, in either direction, is not an option.
 //!
 //! The only action call site in this entire module (and, by the removed
 //! `tests/fee_scheduler.rs` source-scan guard, this entire crate) is
@@ -70,13 +82,12 @@
 //! &request.to_params())`.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
 
-use revops_db::fee_runway::{
-    BroadcastAttemptIntent, BroadcastAttemptOutcome, QuarantineEntry, QuarantineRow,
-};
+use revops_db::fee_runway::{BroadcastAttemptIntent, BroadcastAttemptOutcome, QuarantineEntry};
 use revops_db::owner::ObserverHandle;
 use revops_fees::execution::SetChannelRequest;
 
@@ -124,10 +135,17 @@ impl PersistedFeeRequest {
 /// existing variant -- add a new one instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveBatchDenyReason {
+    /// The store-backed active-quarantine read itself failed (fail
+    /// closed: an unreadable quarantine state is treated exactly like an
+    /// active one -- never as "probably empty").
+    QuarantineCheckFailed(String),
     /// An active execution quarantine is already on record (either from a
     /// prior ambiguous transport outcome, or restored at restart) --
     /// checked FIRST, before any other input is even considered.
     QuarantineActive { reason: String, entered_at: i64 },
+    /// The store-backed current-state-generation read itself failed
+    /// (fail closed, same rationale as [`Self::QuarantineCheckFailed`]).
+    StateGenerationCheckFailed(String),
     /// The candidate batch was computed against a Rust-owned state
     /// generation that is no longer current -- the store advanced (or
     /// diverged) between batch assembly and authorization.
@@ -150,7 +168,9 @@ impl LiveBatchDenyReason {
     /// Stable, machine-matchable code -- logged and reported verbatim.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::QuarantineCheckFailed(_) => "live_batch_quarantine_check_failed",
             Self::QuarantineActive { .. } => "live_batch_quarantine_active",
+            Self::StateGenerationCheckFailed(_) => "live_batch_state_generation_check_failed",
             Self::StateGenerationStale { .. } => "live_batch_state_generation_stale",
             Self::PythonAuthority(_) => "live_batch_python_authority_denied",
             Self::GovernorDenied { .. } => "live_batch_governor_denied",
@@ -162,11 +182,13 @@ impl LiveBatchDenyReason {
 impl std::fmt::Display for LiveBatchDenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::QuarantineCheckFailed(detail) => write!(f, "{}: {detail}", self.code()),
             Self::QuarantineActive { reason, entered_at } => write!(
                 f,
                 "{}: active execution quarantine since {entered_at} ({reason})",
                 self.code(),
             ),
+            Self::StateGenerationCheckFailed(detail) => write!(f, "{}: {detail}", self.code()),
             Self::StateGenerationStale {
                 authorized_against,
                 current,
@@ -217,37 +239,54 @@ impl LiveBatchAuthorization {
     /// generation, unstable/non-advancing Python-authority epoch,
     /// governor denial, missing ledger reservation.
     ///
-    /// `first_authority_reading`/`second_authority_reading` are the two
-    /// bracketing reads the caller already fetched (before assembling the
-    /// batch, and again immediately before authorizing it) -- this
-    /// function performs the bracketing check itself via
-    /// [`validate_stable_epoch`], but never fetches a reading; callers
-    /// (and tests) inject both so this stays a pure function of its
-    /// inputs.
+    /// Fix round 1 (review finding 4): the quarantine-empty observation
+    /// and the current state generation are NOT caller-supplied -- a
+    /// caller-supplied witness can always be minted with `None`/a stale
+    /// value by a bug or a race, which would make this authorizer a
+    /// witness rather than a verifier. Both are read HERE, directly from
+    /// `store`, so no caller can construct an authorization the store
+    /// itself disagrees with. `first_authority_reading`/
+    /// `second_authority_reading` remain injected: they come from the RPC
+    /// client (a later task's caller performs two genuinely separate
+    /// fetches), and their bracketing is enforced by
+    /// [`validate_stable_epoch`] (including
+    /// `NonAdvancingObservation`, which rejects a duplicated/non-advancing
+    /// pair) -- injecting them keeps this function testable against
+    /// fixtures without a live Python-authority RPC.
     #[allow(clippy::too_many_arguments)]
-    pub fn authorize(
+    pub async fn authorize(
+        store: &ObserverHandle,
         candidate_sha256: impl Into<String>,
         candidate_state_generation: u64,
-        current_state_generation: u64,
         first_authority_reading: &PythonAuthorityOff,
         second_authority_reading: &PythonAuthorityOff,
         governor_authorized: bool,
         governor_reason_code: impl Into<String>,
         ledger_reservation_id: impl Into<String>,
-        active_quarantine: Option<QuarantineRow>,
     ) -> Result<Self, LiveBatchDenyReason> {
+        let active_quarantine = store
+            .active_execution_quarantine()
+            .await
+            .map_err(|e| LiveBatchDenyReason::QuarantineCheckFailed(e.to_string()))?;
         if let Some(q) = active_quarantine {
             return Err(LiveBatchDenyReason::QuarantineActive {
                 reason: q.reason,
                 entered_at: q.entered_at,
             });
         }
+
+        let current_state_generation = store
+            .load_latest_fee_state()
+            .await
+            .map_err(|e| LiveBatchDenyReason::StateGenerationCheckFailed(e.to_string()))?
+            .generation;
         if candidate_state_generation != current_state_generation {
             return Err(LiveBatchDenyReason::StateGenerationStale {
                 authorized_against: candidate_state_generation,
                 current: current_state_generation,
             });
         }
+
         validate_stable_epoch(first_authority_reading, second_authority_reading)
             .map_err(LiveBatchDenyReason::PythonAuthority)?;
 
@@ -320,6 +359,15 @@ pub enum BroadcastError {
     /// after this authorization was constructed but before it was
     /// consumed here) -- refused before any RPC call.
     Quarantined,
+    /// Fix round 1 (review finding 1): a PRIOR call on this exact
+    /// broadcaster observed an ambiguous transport outcome and then
+    /// failed to persist the resulting quarantine -- this process can no
+    /// longer trust its own store-backed quarantine check, so it refuses
+    /// every further batch (in memory, immediately, zero calls) until a
+    /// restart re-reconciles. Distinct from [`Self::Quarantined`], which
+    /// means the store itself reported an active quarantine; this means
+    /// the store COULD NOT be trusted to report one.
+    Poisoned,
     /// CLN explicitly refused the request (a genuine JSON-RPC error
     /// code). Terminal; never quarantines.
     Rejected { request_id: String, detail: String },
@@ -345,6 +393,11 @@ impl std::fmt::Display for BroadcastError {
                     "execution quarantine active: refusing batch with zero RPC calls"
                 )
             }
+            Self::Poisoned => write!(
+                f,
+                "this process is poisoned after a quarantine-insert failure following an \
+                 ambiguous transport outcome; refusing all further batches until restart"
+            ),
             Self::Rejected { request_id, detail } => {
                 write!(
                     f,
@@ -380,12 +433,42 @@ enum SendOutcome {
     Ambiguous(String),
 }
 
+/// Fix round 1 (review finding 2): [`ClnFeeBroadcaster::new`]'s only
+/// failure mode -- restart quarantine reconciliation itself failed. The
+/// arm is REFUSED (never consumed) in this case: `live_mode.into_arm()`
+/// is only ever reached on the success path, so a reconciliation failure
+/// can never hand back a usable broadcaster.
+#[derive(Debug)]
+pub struct QuarantineReconciliationFailed(String);
+
+impl std::fmt::Display for QuarantineReconciliationFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "quarantine restart reconciliation failed ({}); refusing to accept this cutover arm \
+             -- a restart must be able to trust its own quarantine state before any arm is \
+             accepted",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for QuarantineReconciliationFailed {}
+
 /// The guarded CLN fee broadcaster: the ONLY component that may ever send
 /// a live `setchannel`. See the module doc for the full contract.
 pub struct ClnFeeBroadcaster {
     socket_path: PathBuf,
     store: ObserverHandle,
     timeout_seconds: u64,
+    /// Fix round 1 (review finding 1): set (and only ever set) when an
+    /// ambiguous transport outcome's quarantine-insert ITSELF fails --
+    /// i.e. the one moment this process can no longer trust its own
+    /// store-backed quarantine check. Checked FIRST in
+    /// [`Self::broadcast_batch`], before even reading the store, and
+    /// never cleared for the lifetime of this broadcaster (only a
+    /// restart -- a fresh process, fresh reconciliation -- can clear it).
+    poisoned: AtomicBool,
     /// The consumed cutover arm this broadcaster's whole session rests
     /// on. Private, no accessor: once stored here there is no way to
     /// extract it back out or mint a second broadcaster from the
@@ -401,33 +484,31 @@ impl ClnFeeBroadcaster {
     /// action, so a restart can never accept a fresh arm without first
     /// restoring whatever quarantine state the prior process left behind
     /// (brief Step 2: "restart restores quarantine before any arm is
-    /// accepted"). A reconciliation failure is logged loudly and never
-    /// panics -- matching every other log-and-continue posture in this
-    /// crate -- but leaves the orphaned intent(s) unresolved for the NEXT
-    /// restart to retry, rather than silently accepting the arm as if
-    /// nothing were wrong.
+    /// accepted").
+    ///
+    /// Fix round 1 (review finding 2): a reconciliation failure now
+    /// REFUSES construction outright (`live_mode` is dropped, never
+    /// converted via `into_arm()`) rather than logging and returning a
+    /// usable broadcaster anyway -- the prior behavior meant a wedged
+    /// observer DB at exactly the wrong moment would hand back a
+    /// broadcaster that skipped restoring quarantine, silently.
     pub async fn new(
         socket_path: PathBuf,
         store: ObserverHandle,
         timeout_seconds: u64,
         live_mode: LiveMode,
-    ) -> Self {
-        if let Err(e) = store
+    ) -> Result<Self, QuarantineReconciliationFailed> {
+        store
             .reconcile_quarantine_on_restart(crate::now_unix())
             .await
-        {
-            eprintln!(
-                "revops: quarantine restart reconciliation failed ({e:#}); any orphaned \
-                 broadcast intent from a prior process remains unresolved until the next \
-                 restart retries this"
-            );
-        }
-        Self {
+            .map_err(|e| QuarantineReconciliationFailed(e.to_string()))?;
+        Ok(Self {
             socket_path,
             store,
             timeout_seconds,
+            poisoned: AtomicBool::new(false),
             _session: live_mode.into_arm(),
-        }
+        })
     }
 
     /// Broadcast one authorized batch. Persists an intent row BEFORE each
@@ -435,16 +516,35 @@ impl ClnFeeBroadcaster {
     /// the module doc). Stops at the first non-success outcome: any
     /// requests after it in `requests` are never attempted (never even
     /// given an intent row).
+    ///
+    /// Refuses immediately, with zero RPC calls, if: this broadcaster is
+    /// [`poisoned`](Self) (a prior call's quarantine-insert failed after
+    /// an ambiguous outcome -- checked FIRST, before the store) or the
+    /// store reports an active quarantine (checked second -- the only
+    /// store-backed quarantine enforcement actually on this call path,
+    /// since `authorization`'s own quarantine read already happened and
+    /// returned before this method was ever invoked).
     pub async fn broadcast_batch(
         &self,
         authorization: LiveBatchAuthorization,
         requests: &[PersistedFeeRequest],
     ) -> Result<BatchReceipt, BroadcastError> {
-        // Defense in depth: `authorization` already bound a
-        // quarantine-empty observation at construction time, but a
-        // concurrent caller could have inserted one since. Re-checking
-        // here costs one DB read and means this path, too, sends zero
-        // calls while quarantined.
+        // Fix round 1 (review finding 1): checked FIRST, before even
+        // touching the store -- once poisoned, this process no longer
+        // trusts its own store-backed quarantine check (see `poisoned`'s
+        // doc comment), so nothing past this point may run.
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(BroadcastError::Poisoned);
+        }
+        // Defense in depth (review finding 3): `authorization` already
+        // bound a quarantine-empty observation at construction time (now
+        // read directly from the store -- see
+        // `LiveBatchAuthorization::authorize`'s fix-round-1 doc comment),
+        // but a concurrent caller could have inserted one since. This is
+        // the ONLY store-backed quarantine enforcement actually on the
+        // send path (`authorize` ran and returned before this call even
+        // began) -- re-checking here costs one DB read and means this
+        // path, too, sends zero calls while quarantined.
         if self
             .store
             .active_execution_quarantine()
@@ -513,13 +613,43 @@ impl ClnFeeBroadcaster {
                     });
                 }
                 SendOutcome::Ambiguous(detail) => {
+                    // Fix round 1 (review finding 1, CRITICAL): quarantine
+                    // is inserted BEFORE the terminal result is recorded,
+                    // and on a quarantine-insert FAILURE the result is
+                    // never recorded at all -- the intent row is left
+                    // `outcome IS NULL`, exactly what
+                    // `unresolved_broadcast_attempts`/restart
+                    // reconciliation keys on. The prior ordering (result
+                    // first, quarantine second, quarantine failure only
+                    // logged) meant a quarantine-insert failure left an
+                    // `outcome = 'ambiguous'` row that reconciliation
+                    // would never see again AND no in-memory signal --
+                    // fail-open in-process and across restart, exactly
+                    // what the doc comment two lines below used to
+                    // (wrongly) claim was prevented.
+                    if let Err(quarantine_err) = self.quarantine(request, &detail).await {
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        eprintln!(
+                            "revops: FAILED TO PERSIST EXECUTION QUARANTINE after an ambiguous \
+                             transport outcome for attempt {attempt_id} ({quarantine_err:#}); \
+                             its intent row is left UNRESOLVED (restart reconciliation will \
+                             pick it up) and THIS PROCESS IS NOW POISONED -- refusing every \
+                             further batch until restart"
+                        );
+                        return Err(BroadcastError::Ambiguous {
+                            request_id: request.request_id.clone(),
+                            detail: format!(
+                                "{detail} (quarantine insert ALSO failed: {quarantine_err:#}; \
+                                 this process is now poisoned)"
+                            ),
+                        });
+                    }
                     self.record_result(
                         attempt_id,
                         BroadcastAttemptOutcome::Ambiguous,
                         Some(detail.clone()),
                     )
                     .await;
-                    self.quarantine(request, &detail).await;
                     return Err(BroadcastError::Ambiguous {
                         request_id: request.request_id.clone(),
                         detail,
@@ -549,7 +679,13 @@ impl ClnFeeBroadcaster {
         }
     }
 
-    async fn quarantine(&self, request: &PersistedFeeRequest, detail: &str) {
+    /// Insert an execution quarantine after an ambiguous transport
+    /// outcome. Returns the underlying store error on failure -- the
+    /// caller (the `Ambiguous` arm of [`Self::broadcast_batch`]) is what
+    /// decides how to fail closed on that (leave the intent row
+    /// unresolved, poison the process); this method never itself decides
+    /// that policy or swallows the error.
+    async fn quarantine(&self, request: &PersistedFeeRequest, detail: &str) -> anyhow::Result<()> {
         let entry = QuarantineEntry {
             reason: format!("ambiguous post-submission transport outcome: {detail}"),
             cycle_id: None, // see fee_runway's DDL comment: no FK guarantee for live-mode cycles
@@ -557,13 +693,8 @@ impl ClnFeeBroadcaster {
             request_id: Some(request.request_id.clone()),
             entered_at: crate::now_unix(),
         };
-        if let Err(e) = self.store.insert_execution_quarantine(entry).await {
-            eprintln!(
-                "revops: FAILED TO PERSIST EXECUTION QUARANTINE after an ambiguous transport \
-                 outcome ({e:#}); this process refuses further batches, but a restart will not \
-                 see this quarantine on disk"
-            );
-        }
+        self.store.insert_execution_quarantine(entry).await?;
+        Ok(())
     }
 
     /// The only action call site in this module (and, by the removed
