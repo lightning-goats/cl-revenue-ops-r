@@ -30,6 +30,15 @@
 //!   and the amendment; added as a 10th table alongside the brief's 9.
 //! - `rust_mempool_fee_history` -- Rust's own decision-relevant mempool
 //!   sample cadence (cutover reads only these, never Python's).
+//! - `rust_mempool_ma_comparison` -- fix round 1 (review finding 1): the
+//!   shadow-window comparison of Rust's 24h mempool moving average
+//!   against Python's (R8 binding constraint), persisted instead of only
+//!   logged -- the daily rollup consumes DB evidence, never logs. One row
+//!   per `RehydratePerCycle` comparison; `python_ma`/`delta` are `NULL`
+//!   when Python's MA could not be read that cycle (recorded anyway, so
+//!   absence is itself evidence, never a skipped row) -- NOT in the
+//!   original Task 4/6 brief's table list, added here for the same
+//!   "extend, don't duplicate" reason `rust_fee_shadow_outcomes` was.
 //! - `rust_fee_trigger_events` -- trigger receipts and coalescing
 //!   decisions (`forward_event`, failed-forward nudges, policy changes,
 //!   wake-all, Vegas spike checks, fixed-interval scheduler).
@@ -143,6 +152,17 @@ CREATE TABLE IF NOT EXISTS rust_mempool_fee_history (
 );
 CREATE INDEX IF NOT EXISTS idx_rust_mempool_fee_history_ts
     ON rust_mempool_fee_history(sampled_at);
+
+CREATE TABLE IF NOT EXISTS rust_mempool_ma_comparison (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    cycle_ts INTEGER NOT NULL,
+    rust_ma REAL NOT NULL,
+    python_ma REAL,
+    delta REAL
+);
+CREATE INDEX IF NOT EXISTS idx_rust_mempool_ma_comparison_at
+    ON rust_mempool_ma_comparison(at);
 
 CREATE TABLE IF NOT EXISTS rust_fee_trigger_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -309,6 +329,23 @@ pub struct ShadowCycleOutcomeRow {
 pub struct MempoolSampleRow {
     pub sampled_at: i64,
     pub sat_per_vbyte: f64,
+}
+
+/// One shadow-window comparison of Rust's 24h mempool moving average
+/// against Python's (fix round 1, review finding 1; R8 binding
+/// constraint: "during shadow, compare the Rust 24h MA against Python's
+/// and record the comparison"). `python_ma` (and `delta`, always
+/// `rust_ma - python_ma` when both are present) are `NULL` when Python's
+/// MA could not be read this cycle (`FeeEvidence::mempool_ma_24h`'s `Err`
+/// case) -- the row is recorded regardless, so absence is itself
+/// evidence rather than a silently skipped comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MempoolMaComparisonRow {
+    pub at: i64,
+    pub cycle_ts: i64,
+    pub rust_ma: f64,
+    pub python_ma: Option<f64>,
+    pub delta: Option<f64>,
 }
 
 /// One trigger receipt / coalescing decision.
@@ -710,6 +747,51 @@ pub fn query_mempool_samples_since(conn: &Connection, since: i64) -> Result<Vec<
         .context("run mempool samples query")?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("collect mempool samples")?;
+    Ok(rows)
+}
+
+/// Persist one shadow-window mempool 24h-MA comparison (fix round 1,
+/// review finding 1). Returns the new row's `rowid`. `python_ma`/`delta`
+/// are recorded as-given, `NULL` included -- the caller decides absence,
+/// this function never substitutes a value.
+pub fn record_mempool_ma_comparison(
+    conn: &Connection,
+    row: &MempoolMaComparisonRow,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO rust_mempool_ma_comparison (at, cycle_ts, rust_ma, python_ma, delta)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![row.at, row.cycle_ts, row.rust_ma, row.python_ma, row.delta],
+    )
+    .context("record mempool MA comparison")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Every mempool MA comparison recorded at or after `since`, oldest
+/// first -- the daily rollup's read path (and this crate's own tests).
+pub fn query_mempool_ma_comparisons_since(
+    conn: &Connection,
+    since: i64,
+) -> Result<Vec<MempoolMaComparisonRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT at, cycle_ts, rust_ma, python_ma, delta FROM rust_mempool_ma_comparison
+             WHERE at >= ?1 ORDER BY at",
+        )
+        .context("prepare mempool MA comparison query")?;
+    let rows = stmt
+        .query_map(params![since], |r| {
+            Ok(MempoolMaComparisonRow {
+                at: r.get(0)?,
+                cycle_ts: r.get(1)?,
+                rust_ma: r.get(2)?,
+                python_ma: r.get(3)?,
+                delta: r.get(4)?,
+            })
+        })
+        .context("run mempool MA comparison query")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect mempool MA comparisons")?;
     Ok(rows)
 }
 

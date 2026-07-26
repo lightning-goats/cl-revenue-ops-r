@@ -9,7 +9,8 @@
 
 use crate::fee_runway::{
     self, FeeCycleCommit, FeeRestartMarkerRow, FeeSeedEventRow, FeeStateSnapshot,
-    FeeTriggerEventRow, MempoolSampleRow, QuarantineEntry, QuarantineRow, RunwaySnapshotRow,
+    FeeTriggerEventRow, MempoolMaComparisonRow, MempoolSampleRow, QuarantineEntry, QuarantineRow,
+    RunwaySnapshotRow,
 };
 use crate::notifications::{self, ForwardRow};
 use anyhow::{Context, Result};
@@ -56,6 +57,12 @@ enum Command {
     QueryMempoolSamplesSince {
         since: i64,
         reply: oneshot::Sender<Result<Vec<MempoolSampleRow>>>,
+    },
+    // -- Fix round 1 (review finding 1): persisted mempool 24h-MA
+    // comparison --
+    RecordMempoolMaComparison {
+        row: MempoolMaComparisonRow,
+        reply: oneshot::Sender<Result<i64>>,
     },
     RecordFeeTriggerEvent {
         event: FeeTriggerEventRow,
@@ -305,6 +312,32 @@ impl ObserverHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::QueryMempoolSamplesSince { since, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Fix round 1 (review finding 1): persist one shadow-window mempool
+    /// 24h-MA comparison row (`NULL` `python_ma`/`delta` included -- the
+    /// caller decides absence, this never substitutes a value).
+    pub async fn record_mempool_ma_comparison(&self, row: MempoolMaComparisonRow) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordMempoolMaComparison { row, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::record_mempool_ma_comparison`]
+    /// -- the scheduler's plain `std::thread` never `.await`s.
+    pub fn blocking_record_mempool_ma_comparison(
+        &self,
+        row: MempoolMaComparisonRow,
+    ) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RecordMempoolMaComparison { row, reply })
             .context("observer actor gone (blocking)")?;
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
@@ -606,6 +639,10 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::QueryMempoolSamplesSince { since, reply } => {
                     let result = fee_runway::query_mempool_samples_since(&conn, since);
+                    let _ = reply.send(result);
+                }
+                Command::RecordMempoolMaComparison { row, reply } => {
+                    let result = fee_runway::record_mempool_ma_comparison(&conn, &row);
                     let _ = reply.send(result);
                 }
                 Command::RecordFeeTriggerEvent { event, reply } => {

@@ -344,6 +344,14 @@ pub trait RunwayStateStore: Send {
         &self,
         since: i64,
     ) -> anyhow::Result<Vec<revops_db::fee_runway::MempoolSampleRow>>;
+    /// Fix round 1 (review finding 1): persist one shadow-window mempool
+    /// 24h-MA comparison row (`python_ma`/`delta` `NULL` when Python's MA
+    /// could not be read this cycle -- absence is itself evidence, never
+    /// a skipped row).
+    fn record_mempool_ma_comparison(
+        &self,
+        row: revops_db::fee_runway::MempoolMaComparisonRow,
+    ) -> anyhow::Result<i64>;
     /// Persist one trigger receipt (why a trigger did or did not produce a
     /// cycle).
     fn record_trigger_event(
@@ -392,6 +400,13 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         since: i64,
     ) -> anyhow::Result<Vec<revops_db::fee_runway::MempoolSampleRow>> {
         self.blocking_query_mempool_samples_since(since)
+    }
+
+    fn record_mempool_ma_comparison(
+        &self,
+        row: revops_db::fee_runway::MempoolMaComparisonRow,
+    ) -> anyhow::Result<i64> {
+        self.blocking_record_mempool_ma_comparison(row)
     }
 
     fn record_trigger_event(

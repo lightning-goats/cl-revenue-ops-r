@@ -1120,6 +1120,13 @@ mod seedonce_restart {
             fee_runway::query_mempool_samples_since(&self.conn(), since)
         }
 
+        fn record_mempool_ma_comparison(
+            &self,
+            row: fee_runway::MempoolMaComparisonRow,
+        ) -> anyhow::Result<i64> {
+            fee_runway::record_mempool_ma_comparison(&self.conn(), &row)
+        }
+
         fn record_trigger_event(
             &self,
             event: fee_runway::FeeTriggerEventRow,
@@ -1699,6 +1706,110 @@ mod seedonce_restart {
         assert!(
             matches!(outcome, CycleOutcome::Ran { .. }),
             "a fresh Rust-owned sample must satisfy the Vegas evidence gate: {outcome:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Fix round 1 (review finding 1): the shadow-window mempool 24h-MA
+    // comparison must be a PERSISTED row, not only a log line.
+    // -----------------------------------------------------------------
+
+    fn mempool_ma_comparisons(conn: &Connection) -> Vec<(i64, f64, Option<f64>, Option<f64>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT cycle_ts, rust_ma, python_ma, delta FROM rust_mempool_ma_comparison \
+                 ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, Option<f64>>(2)?,
+                r.get::<_, Option<f64>>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn mempool_ma_comparison_is_persisted_during_rehydrate_per_cycle_shadow_window() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        seed_fee_strategy_row(&fx.db_path, "chan_kept");
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        );
+        let mut clock = || NOW;
+        // `prepared()`'s `feerates` yields `sat_per_vbyte = 3.0`; the
+        // fixture's `mempool_fee_history` is empty, so Python's own
+        // `get_mempool_ma` parity fallback is exactly `1.0`.
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = Connection::open(&store_path).unwrap();
+        let rows = mempool_ma_comparisons(&conn);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the shadow-window MA comparison must be persisted, not only logged"
+        );
+        assert_eq!(rows[0].0, NOW, "cycle_ts is this cycle's single clock read");
+        assert_eq!(rows[0].1, 3.0, "rust_ma is this cycle's one fresh sample");
+        assert_eq!(
+            rows[0].2,
+            Some(1.0),
+            "python_ma is Python's own falsy-average fallback"
+        );
+        assert_eq!(rows[0].3, Some(2.0), "delta = rust_ma - python_ma");
+    }
+
+    #[test]
+    fn mempool_ma_comparison_not_recorded_outside_rehydrate_per_cycle() {
+        // SeedOnce already reads Rust rows as the decision-relevant
+        // evidence itself -- there is no separate Python value to compare
+        // against, so no comparison row is ever written.
+        let fx = fixture();
+        let conn = Connection::open(&fx.db_path).expect("open for seeding");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, \
+             sats_out, capacity, updated_at, kalman_flow_ratio, kalman_velocity) \
+             VALUES ('100x1x0', ?1, 'balanced', 0.1, 0, 0, 2000000, ?2, 0.05, 0.01)",
+            rusqlite::params![peer_a(), NOW - 60],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store_path = fx.journal_dir.join("rust-owned.db");
+        std::fs::create_dir_all(&fx.journal_dir).unwrap();
+        let fail_commits = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open(&store_path, Arc::clone(&fail_commits));
+        {
+            let conn = store.conn();
+            fee_runway::record_mempool_sample_pruned(&conn, NOW - 10, 42.0, NOW - 90_000).unwrap();
+        }
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let mut clock = || NOW;
+
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert!(
+            mempool_ma_comparisons(&conn).is_empty(),
+            "SeedOnce has no Python evidence value to compare against"
         );
     }
 

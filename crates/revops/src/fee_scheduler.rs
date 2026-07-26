@@ -1002,11 +1002,12 @@ impl CycleOwner {
     ///
     /// The shadow-window comparison (R8 binding constraint: "during
     /// shadow, compare the Rust 24h MA against Python's and record the
-    /// comparison") is recorded as a loud log line -- there is no
-    /// dedicated comparison table in this task's schema, and the
-    /// underlying `rust_mempool_fee_history` vs. production
-    /// `mempool_fee_history` rows remain independently queryable for a
-    /// later reporting task if a persisted row ever proves necessary.
+    /// comparison") is BOTH a loud log line AND a persisted
+    /// `rust_mempool_ma_comparison` row (fix round 1, review finding 1:
+    /// the daily rollup consumes DB evidence, never logs). A store-write
+    /// failure here is logged loudly and never fails the cycle -- this
+    /// recorder is bookkeeping, not decision-relevant evidence, in
+    /// `RehydratePerCycle` mode.
     fn record_mempool_evidence(&self, now: i64, snapshot: &EvidenceSnapshot, cfg: &FeeCfgSnapshot) {
         if !cfg.enable_vegas_reflex {
             return;
@@ -1034,18 +1035,42 @@ impl CycleOwner {
         match store.query_mempool_samples_since(retain_since) {
             Ok(rows) if !rows.is_empty() => {
                 let rust_ma = rows.iter().map(|r| r.sat_per_vbyte).sum::<f64>() / rows.len() as f64;
-                match snapshot.mempool_ma_24h() {
-                    Ok(python_ma) => eprintln!(
-                        "revops: mempool 24h MA comparison (shadow): rust={rust_ma:.4} \
-                         python={python_ma:.4} delta={:.4} rust_samples={}",
-                        rust_ma - python_ma,
-                        rows.len()
-                    ),
-                    Err(e) => eprintln!(
-                        "revops: mempool 24h MA comparison (shadow): rust={rust_ma:.4} \
-                         python=<unavailable: {e}> rust_samples={}",
-                        rows.len()
-                    ),
+                let (python_ma, delta) = match snapshot.mempool_ma_24h() {
+                    Ok(python_ma) => {
+                        eprintln!(
+                            "revops: mempool 24h MA comparison (shadow): rust={rust_ma:.4} \
+                             python={python_ma:.4} delta={:.4} rust_samples={}",
+                            rust_ma - python_ma,
+                            rows.len()
+                        );
+                        (Some(python_ma), Some(rust_ma - python_ma))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "revops: mempool 24h MA comparison (shadow): rust={rust_ma:.4} \
+                             python=<unavailable: {e}> rust_samples={}",
+                            rows.len()
+                        );
+                        // Fix round 1 (review finding 1): absence is
+                        // itself evidence -- record the row with
+                        // `python_ma`/`delta` NULL rather than skipping
+                        // it.
+                        (None, None)
+                    }
+                };
+                if let Err(e) = store.record_mempool_ma_comparison(
+                    revops_db::fee_runway::MempoolMaComparisonRow {
+                        at: now,
+                        cycle_ts: now,
+                        rust_ma,
+                        python_ma,
+                        delta,
+                    },
+                ) {
+                    eprintln!(
+                        "revops: mempool MA comparison record failed ({e:#}); shadow-window \
+                         evidence for this cycle has a gap"
+                    );
                 }
             }
             Ok(_) => {} // no Rust samples in the window yet -- nothing to compare

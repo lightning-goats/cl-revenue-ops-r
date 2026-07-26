@@ -4,10 +4,11 @@
 
 use revops_db::fee_runway::{
     active_quarantine, commit_fee_cycle, insert_quarantine, latest_runway_snapshot,
-    load_latest_state, mutation_count, query_mempool_samples_since, record_mempool_sample,
+    load_latest_state, mutation_count, query_mempool_ma_comparisons_since,
+    query_mempool_samples_since, record_mempool_ma_comparison, record_mempool_sample,
     record_mempool_sample_pruned, record_runway_snapshot, record_trigger_event, FeeCycleCommit,
-    FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow, PreparedFeeActionRow,
-    QuarantineEntry, RunwaySnapshotRow, ShadowCycleOutcomeRow,
+    FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow, MempoolMaComparisonRow,
+    PreparedFeeActionRow, QuarantineEntry, RunwaySnapshotRow, ShadowCycleOutcomeRow,
 };
 use revops_db::notifications::{
     compute_forward_hydration_start, init_schema, insert_channel_closure_event,
@@ -150,6 +151,7 @@ const RUST_FEE_TABLES: &[&str] = &[
     "rust_fee_requests",
     "rust_fee_shadow_outcomes",
     "rust_mempool_fee_history",
+    "rust_mempool_ma_comparison",
     "rust_fee_trigger_events",
     "rust_fee_ledger",
     "rust_execution_quarantine",
@@ -463,6 +465,63 @@ fn rust_fee_schema_mempool_sample_pruned_is_transactional() {
     assert_eq!(samples[0].sampled_at, 1_800_000_000);
     assert_eq!(samples[1].sampled_at, 1_800_003_600);
     assert_eq!(samples[1].sat_per_vbyte, 15.0);
+}
+
+/// Review finding 1 (fix round 1): the shadow-window mempool 24h-MA
+/// comparison (R8 binding constraint) must be a persisted row, not only a
+/// log line -- `revops`'s daily rollup consumes DB evidence, never logs.
+#[test]
+fn rust_fee_schema_mempool_ma_comparison_record_and_query() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    let id = record_mempool_ma_comparison(
+        &conn,
+        &MempoolMaComparisonRow {
+            at: 1_800_000_000,
+            cycle_ts: 1_800_000_000,
+            rust_ma: 12.5,
+            python_ma: Some(11.75),
+            delta: Some(0.75),
+        },
+    )
+    .unwrap();
+    assert!(id > 0);
+
+    let rows = query_mempool_ma_comparisons_since(&conn, 0).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cycle_ts, 1_800_000_000);
+    assert_eq!(rows[0].rust_ma, 12.5);
+    assert_eq!(rows[0].python_ma, Some(11.75));
+    assert_eq!(rows[0].delta, Some(0.75));
+}
+
+/// Python's MA can be genuinely unavailable this cycle (a fresh-state
+/// `DecisionInputError`) -- the row must still be recorded, with
+/// `python_ma`/`delta` NULL, so absence is itself evidence rather than a
+/// skipped row.
+#[test]
+fn rust_fee_schema_mempool_ma_comparison_records_null_python_ma_as_evidence() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    record_mempool_ma_comparison(
+        &conn,
+        &MempoolMaComparisonRow {
+            at: 1_800_000_100,
+            cycle_ts: 1_800_000_100,
+            rust_ma: 9.0,
+            python_ma: None,
+            delta: None,
+        },
+    )
+    .unwrap();
+
+    let rows = query_mempool_ma_comparisons_since(&conn, 0).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].python_ma, None);
+    assert_eq!(rows[0].delta, None);
+    assert_eq!(rows[0].rust_ma, 9.0);
 }
 
 #[test]

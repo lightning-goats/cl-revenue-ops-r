@@ -5,7 +5,7 @@
 
 use revops_db::fee_runway::{
     FeeCycleCommit, FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow,
-    PreparedFeeActionRow, QuarantineEntry, ShadowCycleOutcomeRow,
+    MempoolMaComparisonRow, PreparedFeeActionRow, QuarantineEntry, ShadowCycleOutcomeRow,
 };
 use revops_db::notifications::ForwardRow;
 use revops_db::owner::spawn_read_write;
@@ -271,6 +271,44 @@ async fn fee_cycle_transaction_mempool_trigger_and_quarantine_through_actor() {
         .unwrap()
         .expect("quarantine set");
     assert_eq!(active.channel_id.as_deref(), Some("1x1x0"));
+}
+
+/// Fix round 1 (review finding 1): the mempool 24h-MA comparison round
+/// trips through the actor, both async and blocking (the scheduler's
+/// plain OS thread never `.await`s).
+#[tokio::test]
+async fn mempool_ma_comparison_round_trips_through_actor_async_and_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let id = handle
+        .record_mempool_ma_comparison(MempoolMaComparisonRow {
+            at: 1_800_000_000,
+            cycle_ts: 1_800_000_000,
+            rust_ma: 10.0,
+            python_ma: Some(9.5),
+            delta: Some(0.5),
+        })
+        .await
+        .unwrap();
+    assert!(id > 0);
+
+    let blocking_handle = handle.clone();
+    let blocking_id = tokio::task::spawn_blocking(move || {
+        blocking_handle
+            .blocking_record_mempool_ma_comparison(MempoolMaComparisonRow {
+                at: 1_800_000_100,
+                cycle_ts: 1_800_000_100,
+                rust_ma: 11.0,
+                python_ma: None,
+                delta: None,
+            })
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(blocking_id > id);
 }
 
 /// Step 3: the bounded blocking bridge for the scheduler's plain
