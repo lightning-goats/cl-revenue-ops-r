@@ -59,9 +59,10 @@ struct State {
     /// RPC and wake triggers send through this. Set at most once, AFTER
     /// `configured.start` (the scheduler spawns post-start, but `State`
     /// is built pre-start -- hence `OnceLock` rather than an
-    /// `Option` field). Unset whenever the scheduler is off
-    /// (`revops-r-fee-dryrun=false`, or a missing db-path/journal-dir --
-    /// each case logged explicitly at init).
+    /// `Option` field). Unset whenever the scheduler is off (the resolved
+    /// mode is not autonomous shadow, i.e.
+    /// `revops-r-fee-stateful-shadow=false`, or a missing
+    /// db-path/journal-dir -- each case logged explicitly at init).
     scheduler: std::sync::OnceLock<revops::fee_scheduler::SchedulerHandle>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
@@ -630,18 +631,25 @@ async fn main() -> Result<()> {
 
     // T6 (Phase 4b): opt-in switch for the fee-cycle scheduler. Default
     // FALSE so a deploy/restart without explicit opt-in changes nothing
-    // (Global Constraint); `.dynamic()` per the plan so a later
-    // `setconfig` can flip it without a manifest change (T6 itself only
-    // reads it once at init -- the scheduler does not start unless it
-    // resolves true THERE; live-toggle handling is future work).
+    // (Global Constraint).
+    //
+    // NOT `.dynamic()` -- final-review finding I4 (2026-07-26). T6
+    // advertised it dynamic on the assumption that live-toggle handling
+    // would follow, but under the Task 10 mode matrix this option is one
+    // of the four inputs to a mode that is validated exactly ONCE, at
+    // init, and never re-read. `setconfig revops-r-fee-dryrun false`
+    // therefore returned success and changed nothing: a fake off-switch on
+    // a live node, which is worse than an absent one. It is now fixed for
+    // the process's whole lifetime, exactly like the three mode-matrix
+    // options below.
     let fee_dryrun_name = opt_name("fee-dryrun");
     let fee_dryrun_opt = DefaultBooleanConfigOption::new_bool_with_default(
         &fee_dryrun_name,
         false,
         "Run the ported fee controller in dry-run: journal decisions next to the observer db, \
-         never broadcast. The fee-cycle scheduler starts ONLY when this is true.",
-    )
-    .dynamic();
+         never broadcast. One of the four operating-mode inputs, validated once at startup: \
+         a runtime setconfig has no effect, restart the plugin to change it.",
+    );
 
     // Task 10 (stateful-shadow revision plan): the mode-matrix options.
     // NOT `.dynamic()` -- the operating mode is validated exactly ONCE, at
@@ -1025,13 +1033,15 @@ async fn main() -> Result<()> {
             "fee-controller diagnostic: one channel's DTS/cycle summary \
              (channel_id param) or the controller-wide summary \
              (last_decision_summary + a per-channel map); requires the \
-             fee-cycle scheduler running (revops-r-fee-dryrun=true)",
+             fee-cycle scheduler running (autonomous shadow: \
+             revops-r-fee-stateful-shadow=true)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 let s = p.state();
                 let Some(handle) = s.scheduler.get() else {
                     return Ok(serde_json::json!({
-                        "error": "fee-cycle scheduler not running (revops-r-fee-dryrun=false, \
-                                  or it failed to start -- see plugin log)"
+                        "error": "fee-cycle scheduler not running \
+                                  (revops-r-fee-stateful-shadow=false, or it failed to start \
+                                  -- see plugin log)"
                     }));
                 };
                 let query = match v.get("channel_id").and_then(|c| c.as_str()) {
@@ -1062,13 +1072,15 @@ async fn main() -> Result<()> {
             "operator/diagnostic: wake every sleeping channel immediately \
              (mirrors Python's revenue-wake-all semantics -- fire-and-forget: \
              see revenue-r-fee-debug for the resulting state); requires the \
-             fee-cycle scheduler running (revops-r-fee-dryrun=true)",
+             fee-cycle scheduler running (autonomous shadow: \
+             revops-r-fee-stateful-shadow=true)",
             |p: Plugin<SharedState>, _v| async move {
                 let s = p.state();
                 let Some(handle) = s.scheduler.get() else {
                     return Ok(serde_json::json!({
-                        "error": "fee-cycle scheduler not running (revops-r-fee-dryrun=false, \
-                                  or it failed to start -- see plugin log)"
+                        "error": "fee-cycle scheduler not running \
+                                  (revops-r-fee-stateful-shadow=false, or it failed to start \
+                                  -- see plugin log)"
                     }));
                 };
                 match handle.tx.send(revops::fee_scheduler::CycleMsg::WakeAll) {

@@ -163,10 +163,17 @@ fn manifest_registers_all_python_options_under_shadow_prefix() {
 
 /// Phase 4b Task 6 (non-negotiable plan constraint): `revops-r-fee-dryrun`
 /// is a bool option, default FALSE (a deploy/restart without explicit
-/// opt-in changes nothing), advertised `dynamic` so `setconfig` can flip
-/// it at runtime.
+/// opt-in changes nothing).
+///
+/// Final-review finding I4 (2026-07-26): it is NOT `dynamic`. It used to
+/// be, on the Task 6 assumption that a later `setconfig` could flip it --
+/// but under the Task 10 mode matrix the operating mode is validated
+/// exactly once, at init, and never re-read, so `setconfig
+/// revops-r-fee-dryrun false` returned success and changed nothing: a fake
+/// off-switch on a live node. The three mode-matrix options next to it are
+/// non-dynamic for exactly this reason; this one now matches them.
 #[test]
-fn manifest_fee_dryrun_is_bool_default_false_dynamic() {
+fn manifest_fee_dryrun_is_bool_default_false_not_dynamic() {
     let result = manifest();
     let opt = result["options"]
         .as_array()
@@ -177,7 +184,7 @@ fn manifest_fee_dryrun_is_bool_default_false_dynamic() {
         .clone();
     assert_eq!(opt["type"], serde_json::json!("bool"), "opt: {opt}");
     assert_eq!(opt["default"], serde_json::json!(false), "opt: {opt}");
-    assert_eq!(opt["dynamic"], serde_json::json!(true), "opt: {opt}");
+    assert_eq!(opt["dynamic"], serde_json::json!(false), "opt: {opt}");
 }
 
 /// Fix round 1 (I-2): pin `revops-r-fee-stateful-shadow`'s type, default,

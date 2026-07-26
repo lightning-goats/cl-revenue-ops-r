@@ -112,8 +112,19 @@ impl LiveMode {
         &self.arm
     }
 
-    /// Unwrap into the consumed arm, e.g. for audit logging at shutdown.
-    pub fn into_arm(self) -> LiveSessionArm {
+    /// Unwrap into the consumed arm.
+    ///
+    /// `pub(crate)` on purpose (final-review finding I6, 2026-07-26): its
+    /// ONLY legitimate caller is the live broadcaster's constructor in
+    /// `crate::fee_execution`, the terminal consumer of the arm. Public,
+    /// it re-opened the door this whole module exists to close -- an
+    /// external consumer could take the arm back out of a `LiveMode`, hand
+    /// it to [`validate_fee_mode`] again, and mint a SECOND `LiveMode`
+    /// (and so a second broadcaster) from one cutover arm, defeating the
+    /// one-session-per-arm contract asserted in `fee_execution`'s module
+    /// doc. Not reachable from any caller that existed when this was
+    /// tightened; keep it crate-private.
+    pub(crate) fn into_arm(self) -> LiveSessionArm {
         self.arm
     }
 }
