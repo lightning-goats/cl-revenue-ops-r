@@ -3,6 +3,10 @@
 //! Mirrors `actor.rs`'s single-owner-task pattern (see `actor_wal.rs`) but
 //! for a writable connection created fresh if the file doesn't exist yet.
 
+use revops_db::fee_runway::{
+    FeeCycleCommit, FeeStateRow, FeeTriggerEventRow, GovernorAuditRow, LedgerAuditRow,
+    PreparedFeeActionRow, QuarantineEntry, ShadowCycleOutcomeRow,
+};
 use revops_db::notifications::ForwardRow;
 use revops_db::owner::spawn_read_write;
 
@@ -87,4 +91,249 @@ async fn peer_and_closure_events_go_through_the_actor() {
         .unwrap();
     assert_eq!(peer_count, 1);
     assert_eq!(closure_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 (stateful-shadow plan): transactional Rust-owned fee state +
+// audit schema, through the single-owner actor.
+// ---------------------------------------------------------------------------
+
+fn sample_commit(cycle_id: &str, at: i64) -> FeeCycleCommit {
+    FeeCycleCommit {
+        cycle_id: cycle_id.to_string(),
+        started_at: at,
+        completed_at: at + 1,
+        source_commit: "f7ccc24".to_string(),
+        binary_sha256: "deadbeef".repeat(8),
+        state_rows: vec![FeeStateRow {
+            channel_id: "1x1x0".to_string(),
+            v2_state_json: r#"{"algorithm_version": "dts_pid_v1"}"#.to_string(),
+            last_update: at,
+        }],
+        requests: vec![PreparedFeeActionRow {
+            channel_id: "1x1x0".to_string(),
+            idempotency_key: Some("idem-1".to_string()),
+            old_fee_ppm: 100,
+            new_fee_ppm: 150,
+            feebase_msat: 0,
+            htlcmin_msat: Some(1000),
+            htlcmax_msat: None,
+            message: "Fee set to 150 PPM".to_string(),
+            at,
+        }],
+        governor: vec![GovernorAuditRow {
+            channel_id: "1x1x0".to_string(),
+            authorized: true,
+            reason_code: "authorized".to_string(),
+            intent_id: "intent-1".to_string(),
+            idempotency_key: "idem-1".to_string(),
+            at,
+        }],
+        ledger: vec![LedgerAuditRow {
+            channel_id: "1x1x0".to_string(),
+            event_type: "intent_proposed".to_string(),
+            intent_id: "intent-1".to_string(),
+            idempotency_key: "idem-1".to_string(),
+            snapshot_id: format!("fee-broadcast-{at}"),
+            at,
+            details_json: r#"{"target": "1x1x0"}"#.to_string(),
+        }],
+        outcomes: vec![ShadowCycleOutcomeRow {
+            cycle_ts: at,
+            channel_id: "1x1x0".to_string(),
+            would_broadcast: true,
+            has_algorithm_values: true,
+            disposition: Some("broadcast".to_string()),
+            skip_gate_comparable: true,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn fee_cycle_transaction_commits_atomically_and_bumps_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let generation = handle
+        .commit_fee_cycle(sample_commit("cycle-1", 1_800_000_000))
+        .await
+        .unwrap();
+    assert_eq!(generation, 1);
+
+    let snapshot = handle.load_latest_fee_state().await.unwrap();
+    assert_eq!(snapshot.generation, 1);
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].channel_id, "1x1x0");
+    assert_eq!(handle.fee_mutation_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn fee_cycle_transaction_rollback_leaves_generation_and_count_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    handle
+        .commit_fee_cycle(sample_commit("cycle-1", 1_800_000_000))
+        .await
+        .unwrap();
+    let baseline_generation = handle.load_latest_fee_state().await.unwrap().generation;
+    let baseline_count = handle.fee_mutation_count().await.unwrap();
+    assert_eq!(baseline_generation, 1);
+    assert_eq!(baseline_count, 1);
+
+    // Inject a request-row failure: duplicate channel_id within one cycle.
+    let mut broken = sample_commit("cycle-2", 1_800_000_100);
+    let duplicate = broken.requests[0].clone();
+    broken.requests.push(duplicate);
+
+    let result = handle.commit_fee_cycle(broken).await;
+    assert!(result.is_err(), "duplicate request identity must fail");
+
+    let snapshot = handle.load_latest_fee_state().await.unwrap();
+    assert_eq!(
+        snapshot.generation, baseline_generation,
+        "a failed commit must not bump the generation"
+    );
+    assert_eq!(
+        handle.fee_mutation_count().await.unwrap(),
+        baseline_count,
+        "a failed commit must not add request rows"
+    );
+}
+
+#[tokio::test]
+async fn fee_cycle_transaction_mempool_trigger_and_quarantine_through_actor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    handle
+        .record_mempool_sample(1_800_000_000, 12.5)
+        .await
+        .unwrap();
+    handle
+        .record_mempool_sample(1_800_003_600, 15.0)
+        .await
+        .unwrap();
+    let samples = handle
+        .query_mempool_samples_since(1_800_000_000)
+        .await
+        .unwrap();
+    assert_eq!(samples.len(), 2);
+
+    handle
+        .record_fee_trigger_event(FeeTriggerEventRow {
+            trigger_type: "wake_all".to_string(),
+            channel_id: None,
+            cycle_id: None,
+            cycle_ts: Some(1_800_000_000),
+            received_at: 1_800_000_000,
+            coalesced: true,
+            detail: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .is_none());
+    handle
+        .insert_execution_quarantine(QuarantineEntry {
+            reason: "ambiguous post-submission transport outcome".to_string(),
+            cycle_id: None,
+            channel_id: Some("1x1x0".to_string()),
+            request_id: Some("req-1".to_string()),
+            entered_at: 1_800_000_000,
+        })
+        .await
+        .unwrap();
+    let active = handle
+        .active_execution_quarantine()
+        .await
+        .unwrap()
+        .expect("quarantine set");
+    assert_eq!(active.channel_id.as_deref(), Some("1x1x0"));
+}
+
+/// Step 3: the bounded blocking bridge for the scheduler's plain
+/// `std::thread` -- no second SQLite connection, no Tokio runtime on that
+/// thread. Runs concurrently with an async writer on the SAME actor to
+/// prove the bridge does not corrupt interleaved commits.
+#[tokio::test]
+async fn fee_cycle_transaction_blocking_bridge_from_scheduler_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    // Seed generation 1 asynchronously (as the async ingestion side would).
+    handle
+        .commit_fee_cycle(sample_commit("cycle-1", 1_800_000_000))
+        .await
+        .unwrap();
+
+    // The scheduler's own plain OS thread, exactly like `fee_scheduler.rs`
+    // will run: no `.await`, only the `blocking_*` bridge.
+    let blocking_handle = handle.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let snapshot = blocking_handle.blocking_load_latest_fee_state().unwrap();
+        assert_eq!(snapshot.generation, 1);
+
+        let generation = blocking_handle
+            .blocking_commit_fee_cycle(sample_commit("cycle-2", 1_800_000_100))
+            .unwrap();
+        assert_eq!(generation, 2);
+
+        blocking_handle
+            .blocking_record_mempool_sample(1_800_000_200, 20.0)
+            .unwrap();
+        let samples = blocking_handle
+            .blocking_query_mempool_samples_since(0)
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+
+        blocking_handle
+            .blocking_record_fee_trigger_event(FeeTriggerEventRow {
+                trigger_type: "vegas_spike".to_string(),
+                channel_id: None,
+                cycle_id: Some("cycle-2".to_string()),
+                cycle_ts: Some(1_800_000_100),
+                received_at: 1_800_000_100,
+                coalesced: false,
+                detail: None,
+            })
+            .unwrap();
+
+        assert!(blocking_handle
+            .blocking_active_execution_quarantine()
+            .unwrap()
+            .is_none());
+        blocking_handle
+            .blocking_insert_execution_quarantine(QuarantineEntry {
+                reason: "test quarantine".to_string(),
+                cycle_id: Some("cycle-2".to_string()),
+                channel_id: None,
+                request_id: None,
+                entered_at: 1_800_000_100,
+            })
+            .unwrap();
+        assert!(blocking_handle
+            .blocking_active_execution_quarantine()
+            .unwrap()
+            .is_some());
+
+        blocking_handle.blocking_fee_mutation_count().unwrap()
+    })
+    .await
+    .expect("blocking scheduler thread must not panic");
+    assert_eq!(joined, 2, "one request per committed cycle");
+
+    // The async view sees exactly what the blocking bridge wrote -- same
+    // connection, same actor, no second SQLite connection was opened.
+    let snapshot = handle.load_latest_fee_state().await.unwrap();
+    assert_eq!(snapshot.generation, 2);
+    assert_eq!(handle.fee_mutation_count().await.unwrap(), 2);
 }

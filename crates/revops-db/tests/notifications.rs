@@ -2,6 +2,13 @@
 //! -- the Rust plugin's OWN writable sqlite file (never production). See
 //! `docs/superpowers/plans/2026-07-17-phase1b-observer.md` Task 2.
 
+use revops_db::fee_runway::{
+    active_quarantine, commit_fee_cycle, insert_quarantine, latest_runway_snapshot,
+    load_latest_state, mutation_count, query_mempool_samples_since, record_mempool_sample,
+    record_runway_snapshot, record_trigger_event, FeeCycleCommit, FeeStateRow, FeeTriggerEventRow,
+    GovernorAuditRow, LedgerAuditRow, PreparedFeeActionRow, QuarantineEntry, RunwaySnapshotRow,
+    ShadowCycleOutcomeRow,
+};
 use revops_db::notifications::{
     compute_forward_hydration_start, init_schema, insert_channel_closure_event,
     insert_forward_ignore_dup, insert_peer_connection_event, last_forward_ts, ForwardRow,
@@ -129,4 +136,381 @@ fn channel_closure_event_insert_and_count() {
         })
         .unwrap();
     assert_eq!(count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 (stateful-shadow plan): transactional Rust-owned fee state +
+// audit schema (`revops_db::fee_runway`).
+// ---------------------------------------------------------------------------
+
+const RUST_FEE_TABLES: &[&str] = &[
+    "rust_fee_state",
+    "rust_fee_state_generation",
+    "rust_fee_cycles",
+    "rust_fee_requests",
+    "rust_fee_shadow_outcomes",
+    "rust_mempool_fee_history",
+    "rust_fee_trigger_events",
+    "rust_fee_ledger",
+    "rust_execution_quarantine",
+    "rust_runway_snapshots",
+];
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap()
+        == 1
+}
+
+#[test]
+fn rust_fee_schema_creates_all_tables_idempotently() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    for table in RUST_FEE_TABLES {
+        assert!(table_exists(&conn, table), "missing table {table}");
+    }
+    // A second init call over the same connection must not error (the
+    // brief's "repeated initialization is safe" expectation).
+    init_schema(&conn).unwrap();
+    for table in RUST_FEE_TABLES {
+        assert!(table_exists(&conn, table), "table {table} lost on re-init");
+    }
+}
+
+#[test]
+fn rust_fee_schema_foreign_key_rejects_orphan_request() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    // No `rust_fee_cycles` row for "no-such-cycle" exists -- the FK must
+    // reject this insert (PRAGMA foreign_keys=ON, set by init_schema).
+    let result = conn.execute(
+        "INSERT INTO rust_fee_requests
+             (cycle_id, channel_id, idempotency_key, old_fee_ppm, new_fee_ppm,
+              feebase_msat, htlcmin_msat, htlcmax_msat, message, at)
+         VALUES ('no-such-cycle', '1x1x0', NULL, 100, 150, 0, NULL, NULL, 'Fee set to 150 PPM', 1)",
+        [],
+    );
+    assert!(result.is_err(), "orphan cycle_id must be rejected by FK");
+}
+
+fn sample_commit(cycle_id: &str, at: i64) -> FeeCycleCommit {
+    FeeCycleCommit {
+        cycle_id: cycle_id.to_string(),
+        started_at: at,
+        completed_at: at + 1,
+        source_commit: "f7ccc24".to_string(),
+        binary_sha256: "deadbeef".repeat(8),
+        state_rows: vec![FeeStateRow {
+            channel_id: "1x1x0".to_string(),
+            v2_state_json: r#"{"algorithm_version": "dts_pid_v1"}"#.to_string(),
+            last_update: at,
+        }],
+        requests: vec![PreparedFeeActionRow {
+            channel_id: "1x1x0".to_string(),
+            idempotency_key: Some("idem-1".to_string()),
+            old_fee_ppm: 100,
+            new_fee_ppm: 150,
+            feebase_msat: 0,
+            htlcmin_msat: Some(1000),
+            htlcmax_msat: None,
+            message: "Fee set to 150 PPM".to_string(),
+            at,
+        }],
+        governor: vec![GovernorAuditRow {
+            channel_id: "1x1x0".to_string(),
+            authorized: true,
+            reason_code: "authorized".to_string(),
+            intent_id: "intent-1".to_string(),
+            idempotency_key: "idem-1".to_string(),
+            at,
+        }],
+        ledger: vec![LedgerAuditRow {
+            channel_id: "1x1x0".to_string(),
+            event_type: "intent_proposed".to_string(),
+            intent_id: "intent-1".to_string(),
+            idempotency_key: "idem-1".to_string(),
+            snapshot_id: format!("fee-broadcast-{at}"),
+            at,
+            details_json: r#"{"target": "1x1x0"}"#.to_string(),
+        }],
+        outcomes: vec![ShadowCycleOutcomeRow {
+            cycle_ts: at,
+            channel_id: "1x1x0".to_string(),
+            would_broadcast: true,
+            has_algorithm_values: true,
+            disposition: Some("broadcast".to_string()),
+            skip_gate_comparable: true,
+        }],
+    }
+}
+
+#[test]
+fn rust_fee_schema_commit_and_load_state_round_trip() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    let generation = commit_fee_cycle(&conn, &sample_commit("cycle-1", 1_800_000_000)).unwrap();
+    assert_eq!(generation, 1);
+
+    let snapshot = load_latest_state(&conn).unwrap();
+    assert_eq!(snapshot.generation, 1);
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].channel_id, "1x1x0");
+    assert_eq!(
+        snapshot.rows[0].v2_state_json,
+        r#"{"algorithm_version": "dts_pid_v1"}"#
+    );
+
+    let request_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM rust_fee_requests", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(request_count, 1);
+    let ledger_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM rust_fee_ledger", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ledger_count, 2, "one governor row + one ledger row");
+    let outcome_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM rust_fee_shadow_outcomes", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(outcome_count, 1);
+
+    // A second cycle bumps the generation and REPLACES the channel's state
+    // row (not a new row -- `rust_fee_state` holds only the latest).
+    let mut second = sample_commit("cycle-2", 1_800_000_100);
+    second.state_rows[0].v2_state_json = r#"{"algorithm_version": "dts_pid_v2"}"#.to_string();
+    let generation2 = commit_fee_cycle(&conn, &second).unwrap();
+    assert_eq!(generation2, 2);
+    let snapshot2 = load_latest_state(&conn).unwrap();
+    assert_eq!(snapshot2.generation, 2);
+    assert_eq!(snapshot2.rows.len(), 1, "still one row per channel");
+    assert_eq!(
+        snapshot2.rows[0].v2_state_json,
+        r#"{"algorithm_version": "dts_pid_v2"}"#
+    );
+}
+
+#[test]
+fn rust_fee_schema_rollback_on_injected_request_failure() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    // Establish a known-good baseline generation and request count.
+    commit_fee_cycle(&conn, &sample_commit("cycle-1", 1_800_000_000)).unwrap();
+    let baseline_generation = load_latest_state(&conn).unwrap().generation;
+    let baseline_request_count = mutation_count(&conn).unwrap();
+    assert_eq!(baseline_generation, 1);
+    assert_eq!(baseline_request_count, 1);
+
+    // Inject a request-row failure: two requests in the SAME cycle with
+    // the same channel_id collide on the UNIQUE(cycle_id, channel_id)
+    // constraint.
+    let mut broken = sample_commit("cycle-2", 1_800_000_100);
+    let duplicate = broken.requests[0].clone();
+    broken.requests.push(duplicate);
+
+    let result = commit_fee_cycle(&conn, &broken);
+    assert!(result.is_err(), "duplicate request identity must fail");
+
+    // State, cycle, ledger, and requests must all be rolled back together
+    // -- the previous generation and request count are UNCHANGED.
+    let snapshot = load_latest_state(&conn).unwrap();
+    assert_eq!(snapshot.generation, baseline_generation);
+    assert_eq!(mutation_count(&conn).unwrap(), baseline_request_count);
+    let cycle_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rust_fee_cycles WHERE cycle_id = 'cycle-2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cycle_count, 0, "the failed cycle row must not exist");
+    let ledger_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rust_fee_ledger WHERE cycle_id = 'cycle-2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ledger_count, 0,
+        "the failed cycle's ledger rows must not exist"
+    );
+    let outcome_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rust_fee_shadow_outcomes WHERE cycle_id = 'cycle-2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome_count, 0,
+        "the failed cycle's outcome rows must not exist"
+    );
+}
+
+#[test]
+fn rust_fee_schema_shadow_outcome_columns_match_engagement_gate_contract() {
+    // 2026-07-26 revision plan Task R8 amendment #1: exact column names
+    // and Python-side truthiness (0/1 INTEGER) contract.
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    let mut commit = sample_commit("cycle-1", 1_800_000_000);
+    commit.outcomes = vec![
+        ShadowCycleOutcomeRow {
+            cycle_ts: 1_800_000_000,
+            channel_id: "1x1x0".to_string(),
+            would_broadcast: true,
+            has_algorithm_values: true,
+            disposition: Some("broadcast".to_string()),
+            skip_gate_comparable: true,
+        },
+        ShadowCycleOutcomeRow {
+            cycle_ts: 1_800_000_000,
+            channel_id: "2x2x0".to_string(),
+            would_broadcast: false,
+            has_algorithm_values: false,
+            disposition: Some("waiting_window".to_string()),
+            skip_gate_comparable: false,
+        },
+    ];
+    commit.requests.clear(); // avoid an unrelated FK/unique collision
+    commit_fee_cycle(&conn, &commit).unwrap();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT cycle_ts, channel_id, would_broadcast, has_algorithm_values,
+                    disposition, skip_gate_comparable
+             FROM rust_fee_shadow_outcomes ORDER BY channel_id",
+        )
+        .unwrap();
+    let rows: Vec<(i64, String, i64, i64, Option<String>, i64)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0],
+        (
+            1_800_000_000,
+            "1x1x0".to_string(),
+            1,
+            1,
+            Some("broadcast".to_string()),
+            1
+        )
+    );
+    assert_eq!(
+        rows[1],
+        (
+            1_800_000_000,
+            "2x2x0".to_string(),
+            0,
+            0,
+            Some("waiting_window".to_string()),
+            0
+        )
+    );
+}
+
+#[test]
+fn rust_fee_schema_mempool_samples_record_and_query() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    record_mempool_sample(&conn, 1_800_000_000, 12.5).unwrap();
+    record_mempool_sample(&conn, 1_800_003_600, 15.0).unwrap();
+    record_mempool_sample(&conn, 1_799_990_000, 9.0).unwrap(); // before the window
+
+    let samples = query_mempool_samples_since(&conn, 1_800_000_000).unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].sampled_at, 1_800_000_000);
+    assert_eq!(samples[0].sat_per_vbyte, 12.5);
+    assert_eq!(samples[1].sampled_at, 1_800_003_600);
+}
+
+#[test]
+fn rust_fee_schema_trigger_event_and_mutation_count() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    assert_eq!(mutation_count(&conn).unwrap(), 0);
+
+    record_trigger_event(
+        &conn,
+        &FeeTriggerEventRow {
+            trigger_type: "forward_event".to_string(),
+            channel_id: Some("1x1x0".to_string()),
+            cycle_id: None,
+            cycle_ts: None,
+            received_at: 1_800_000_000,
+            coalesced: false,
+            detail: Some("first forward".to_string()),
+        },
+    )
+    .unwrap();
+
+    commit_fee_cycle(&conn, &sample_commit("cycle-1", 1_800_000_000)).unwrap();
+    assert_eq!(mutation_count(&conn).unwrap(), 1);
+
+    let trigger_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM rust_fee_trigger_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(trigger_count, 1);
+}
+
+#[test]
+fn rust_fee_schema_quarantine_and_runway_snapshot() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    assert!(active_quarantine(&conn).unwrap().is_none());
+
+    let id = insert_quarantine(
+        &conn,
+        &QuarantineEntry {
+            reason: "ambiguous post-submission transport outcome".to_string(),
+            cycle_id: None,
+            channel_id: Some("1x1x0".to_string()),
+            request_id: Some("req-1".to_string()),
+            entered_at: 1_800_000_000,
+        },
+    )
+    .unwrap();
+    assert!(id > 0);
+
+    let active = active_quarantine(&conn).unwrap().expect("quarantine set");
+    assert_eq!(active.reason, "ambiguous post-submission transport outcome");
+    assert_eq!(active.channel_id.as_deref(), Some("1x1x0"));
+
+    assert!(latest_runway_snapshot(&conn).unwrap().is_none());
+    record_runway_snapshot(
+        &conn,
+        &RunwaySnapshotRow {
+            snapshot_at: 1_800_000_000,
+            report_schema_version: "1".to_string(),
+            source_commit: "f7ccc24".to_string(),
+            binary_sha256: "deadbeef".repeat(8),
+            summary_json: r#"{"cycles": 0}"#.to_string(),
+        },
+    )
+    .unwrap();
+    let snap = latest_runway_snapshot(&conn)
+        .unwrap()
+        .expect("snapshot set");
+    assert_eq!(snap.report_schema_version, "1");
 }

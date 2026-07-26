@@ -60,6 +60,12 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
              ts INTEGER NOT NULL
          );",
     )?;
+    // Task 4 (stateful-shadow plan): the Rust-owned transactional fee
+    // state + audit schema lives in `fee_runway` but shares this same
+    // connection/file -- initialize it here so every caller of this
+    // function (both `owner::spawn_read_write` and direct-connection
+    // tests) gets the full schema, including `PRAGMA foreign_keys = ON`.
+    crate::fee_runway::init_schema(conn)?;
     Ok(())
 }
 
