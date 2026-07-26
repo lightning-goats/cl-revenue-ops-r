@@ -956,13 +956,8 @@ async fn trigger_loop(
                         false
                     }
                 };
-                match dispatch_cycle(
-                    &socket_path,
-                    db_handle.as_ref(),
-                    &python_options,
-                    &tick_tx,
-                )
-                .await
+                match dispatch_cycle(&socket_path, db_handle.as_ref(), &python_options, &tick_tx)
+                    .await
                 {
                     Dispatch::Sent(interval) => interval_secs = interval,
                     Dispatch::Skipped => {}

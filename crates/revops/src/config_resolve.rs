@@ -290,7 +290,10 @@ impl PythonOptionCache {
 
     /// Clone of the current snapshot (short lock, no await inside).
     pub fn snapshot(&self) -> HashMap<String, options::Value> {
-        self.inner.read().expect("option cache lock poisoned").clone()
+        self.inner
+            .read()
+            .expect("option cache lock poisoned")
+            .clone()
     }
 
     /// Apply a fetch outcome: success replaces the snapshot wholesale
@@ -298,10 +301,7 @@ impl PythonOptionCache {
     /// failure keeps the previous snapshot untouched. Returns whether the
     /// fetch succeeded. Split from [`Self::refresh`] so the keep-on-
     /// failure contract is unit-testable without a socket.
-    pub fn apply_fetch(
-        &self,
-        fetched: Result<HashMap<String, options::Value>, String>,
-    ) -> bool {
+    pub fn apply_fetch(&self, fetched: Result<HashMap<String, options::Value>, String>) -> bool {
         match fetched {
             Ok(map) => {
                 *self.inner.write().expect("option cache lock poisoned") = map;

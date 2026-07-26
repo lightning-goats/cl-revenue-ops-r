@@ -280,8 +280,7 @@ pub fn recompute_posterior_legacy(
         variance = variance.max(0.0);
         variance = variance.max(MIN_STD * MIN_STD);
 
-        let prior_precision =
-            1.0 / (MIN_STD * MIN_STD).max(py_pow(state.prior_std_fee, 2.0));
+        let prior_precision = 1.0 / (MIN_STD * MIN_STD).max(py_pow(state.prior_std_fee, 2.0));
         let data_precision = total_weight / variance;
         let posterior_precision = prior_precision + data_precision;
 
@@ -548,8 +547,11 @@ pub fn recompute_posterior_core(state: &mut GaussianThompsonState, now: i64) {
                 continue;
             }
             let mean_rev: f64 = py_sum(entries.iter().map(|(_, r, w)| r * w)) / bw;
-            let var: f64 =
-                py_sum(entries.iter().map(|(_, r, w)| w * py_pow(r - mean_rev, 2.0))) / bw;
+            let var: f64 = py_sum(
+                entries
+                    .iter()
+                    .map(|(_, r, w)| w * py_pow(r - mean_rev, 2.0)),
+            ) / bw;
             let sq: f64 = py_sum(entries.iter().map(|(_, _, w)| w * w));
             let n_eff = if sq > 0.0 { bw * bw / sq } else { 1.0 };
             let lcb = mean_rev - var.max(0.0).sqrt() / n_eff.max(1.0).sqrt();

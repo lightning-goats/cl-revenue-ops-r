@@ -3884,7 +3884,9 @@ mod tests {
         assert_eq!(dominant_skip_reason(&clear), "waiting_time");
 
         let late_key: std::collections::BTreeMap<&'static str, i64> =
-            [("missing_channel_info", 2), ("error", 2)].into_iter().collect();
+            [("missing_channel_info", 2), ("error", 2)]
+                .into_iter()
+                .collect();
         assert_eq!(dominant_skip_reason(&late_key), "missing_channel_info");
     }
 }

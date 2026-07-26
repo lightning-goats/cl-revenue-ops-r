@@ -354,7 +354,10 @@ async fn resolve_fee_cfg_node_drain_bias_listconfigs_strict_cast() {
         cln_plugin::options::Value::String("yes".to_string()),
     );
     let cfg = revops::fee_config::resolve_fee_cfg(None, &py).await;
-    assert!(!cfg.node_drain_bias_enabled, "startup cast is .lower() == 'true'");
+    assert!(
+        !cfg.node_drain_bias_enabled,
+        "startup cast is .lower() == 'true'"
+    );
 }
 
 #[tokio::test]
@@ -374,5 +377,8 @@ async fn resolve_fee_cfg_vegas_listconfigs_true_still_true() {
 async fn resolve_fee_cfg_vegas_db_override_stays_tolerant() {
     let (handle, _tmp) = fixture_db_with_override("vegas-reflex", "1").await;
     let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
-    assert!(cfg.enable_vegas_reflex, "DB layer mirrors _apply_override: '1' is truthy");
+    assert!(
+        cfg.enable_vegas_reflex,
+        "DB layer mirrors _apply_override: '1' is truthy"
+    );
 }
