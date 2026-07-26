@@ -194,6 +194,29 @@ CREATE TABLE IF NOT EXISTS rust_runway_snapshots (
     binary_sha256 TEXT NOT NULL,
     summary_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS rust_fee_seed_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    seeded_at INTEGER NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('seeded', 'seed_refused')),
+    source_db_path TEXT NOT NULL,
+    source_max_last_update INTEGER NOT NULL,
+    row_count INTEGER NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    source_commit TEXT NOT NULL,
+    refused_channel TEXT,
+    refused_field TEXT,
+    detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS rust_fee_restart_markers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at INTEGER NOT NULL,
+    process_id INTEGER NOT NULL,
+    prior_generation INTEGER NOT NULL,
+    hydration_source TEXT NOT NULL,
+    source_commit TEXT NOT NULL
+);
 ";
 
 // ---------------------------------------------------------------------------
@@ -322,6 +345,51 @@ pub struct QuarantineRow {
     pub channel_id: Option<String>,
     pub request_id: Option<String>,
     pub entered_at: i64,
+}
+
+/// One SeedOnce seed event (Task 5 / revision-plan Task R6): either the
+/// ONE successful cold-start import from Python's `fee_strategy_state`
+/// (`outcome = 'seeded'`, provenance columns filled) or a fail-closed
+/// refusal (`outcome = 'seed_refused'`, plus the offending channel +
+/// field). There is deliberately no third outcome: a seed either imports
+/// EVERY row through the exact `from_dict` parity path or refuses the
+/// WHOLE snapshot -- no partial seed, no silent fresh-state fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeSeedEventRow {
+    pub seeded_at: i64,
+    /// `'seeded'` or `'seed_refused'` (CHECK-enforced).
+    pub outcome: String,
+    /// The production DB path the snapshot was READ from (read-only).
+    pub source_db_path: String,
+    /// `MAX(last_update)` over the snapshot rows at seed time (0 if none).
+    pub source_max_last_update: i64,
+    /// Snapshot row count at seed time.
+    pub row_count: i64,
+    /// sha256 (hex) of the serialized seed payload (caller-defined
+    /// canonical serialization; opaque to this crate).
+    pub payload_sha256: String,
+    /// The binary's source commit identity.
+    pub source_commit: String,
+    /// `seed_refused` only: the channel whose state Python's own
+    /// `from_dict` would raise on.
+    pub refused_channel: Option<String>,
+    /// `seed_refused` only: the offending field (dotted path).
+    pub refused_field: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// One scheduler restart marker (Task 5 step 4): process identity, the
+/// generation found in the Rust-owned store at startup, which hydration
+/// source was used, and the startup timestamp -- divergence evidence
+/// readable without ever touching Python state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeRestartMarkerRow {
+    pub started_at: i64,
+    pub process_id: i64,
+    pub prior_generation: i64,
+    /// `"python_seed"` or `"rust_generation:<n>"`.
+    pub hydration_source: String,
+    pub source_commit: String,
 }
 
 /// One runway timer snapshot / report identity row.
@@ -685,6 +753,104 @@ pub fn active_quarantine(conn: &Connection) -> Result<Option<QuarantineRow>> {
     )
     .optional()
     .context("read active execution quarantine")
+}
+
+// ---------------------------------------------------------------------------
+// seed events + restart markers (Task 5)
+// ---------------------------------------------------------------------------
+
+/// Record one seed event (successful import or fail-closed refusal).
+/// Returns the new row's id. The `outcome` CHECK rejects anything but
+/// `'seeded'`/`'seed_refused'`.
+pub fn record_seed_event(conn: &Connection, ev: &FeeSeedEventRow) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit, refused_channel, refused_field, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            ev.seeded_at,
+            ev.outcome,
+            ev.source_db_path,
+            ev.source_max_last_update,
+            ev.row_count,
+            ev.payload_sha256,
+            ev.source_commit,
+            ev.refused_channel,
+            ev.refused_field,
+            ev.detail,
+        ],
+    )
+    .context("insert fee seed event row")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// The most recently recorded seed event, if any.
+pub fn latest_seed_event(conn: &Connection) -> Result<Option<FeeSeedEventRow>> {
+    conn.query_row(
+        "SELECT seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+                payload_sha256, source_commit, refused_channel, refused_field, detail
+         FROM rust_fee_seed_events
+         ORDER BY id DESC
+         LIMIT 1",
+        [],
+        |r| {
+            Ok(FeeSeedEventRow {
+                seeded_at: r.get(0)?,
+                outcome: r.get(1)?,
+                source_db_path: r.get(2)?,
+                source_max_last_update: r.get(3)?,
+                row_count: r.get(4)?,
+                payload_sha256: r.get(5)?,
+                source_commit: r.get(6)?,
+                refused_channel: r.get(7)?,
+                refused_field: r.get(8)?,
+                detail: r.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .context("read latest fee seed event")
+}
+
+/// Record one restart marker. Returns the new row's id.
+pub fn record_restart_marker(conn: &Connection, marker: &FeeRestartMarkerRow) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO rust_fee_restart_markers
+             (started_at, process_id, prior_generation, hydration_source, source_commit)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            marker.started_at,
+            marker.process_id,
+            marker.prior_generation,
+            marker.hydration_source,
+            marker.source_commit,
+        ],
+    )
+    .context("insert fee restart marker row")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// The most recently recorded restart marker, if any.
+pub fn latest_restart_marker(conn: &Connection) -> Result<Option<FeeRestartMarkerRow>> {
+    conn.query_row(
+        "SELECT started_at, process_id, prior_generation, hydration_source, source_commit
+         FROM rust_fee_restart_markers
+         ORDER BY id DESC
+         LIMIT 1",
+        [],
+        |r| {
+            Ok(FeeRestartMarkerRow {
+                started_at: r.get(0)?,
+                process_id: r.get(1)?,
+                prior_generation: r.get(2)?,
+                hydration_source: r.get(3)?,
+                source_commit: r.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .context("read latest fee restart marker")
 }
 
 // ---------------------------------------------------------------------------

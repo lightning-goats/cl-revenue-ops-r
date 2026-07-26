@@ -636,6 +636,293 @@ fn convert_posterior_bias(arr: &[OValue]) -> Vec<(f64, f64, i64)> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Fail-closed seed-import parity check (stateful-shadow Task 5 / revision
+// plan Task R6)
+// ---------------------------------------------------------------------------
+
+/// One field where importing this dict through the Rust parity path would
+/// DIVERGE from Python: either Python's own `from_dict` would RAISE where
+/// the total Rust port silently falls back to a default, or (precision
+/// matrices only) Python would silently keep a value the Rust port
+/// silently replaces. Either way the SeedOnce import must refuse the whole
+/// snapshot rather than start autonomous mode on state Python would not
+/// have produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FromDictRaise {
+    /// The offending `thompson_state` key.
+    pub field: &'static str,
+    pub detail: String,
+}
+
+/// Detect the classes of input where `GaussianThompsonState.from_dict`
+/// (py 1784-1940) would raise -- the classes [`gts_from_dict`] deliberately
+/// maps to defaults for the Python-authoritative dry-run window, which is
+/// exactly wrong for a one-time seed that Rust then owns.
+///
+/// Mirrored raise sites, in Python's evaluation order:
+/// - `observations`: iterating a non-list raises; `tuple(obs)` on a
+///   non-iterable entry raises; the legacy-weight rescale's `float(t[1])` /
+///   `float(t[2])` raise on non-numeric values.
+/// - `contextual_posteriors`: `.items()` on a non-dict raises
+///   `AttributeError`; `tuple(v)` on a non-iterable value raises; the
+///   legacy 3-tuple conversion's `float(...)` raises on non-numeric
+///   mean/std.
+/// - `posterior_precision` / `_prior_precision`: the L5 guard expression
+///   itself can raise (`len()` of a non-sized value; `raw_prec[i][i] > 0`
+///   comparing a non-number, indexing a string row's char, or `KeyError`
+///   on a dict) -- emulated including `all(...)`'s short-circuit order.
+/// - `noise_variance`, `_last_fee_min`, `_last_fee_max`: bare `float(...)`
+///   with no try/except.
+/// - `posterior_bias`: `entry[0]` on a dict entry raises `KeyError`, which
+///   the restore loop's `except (TypeError, ValueError, IndexError)` does
+///   NOT catch.
+///
+/// Conservative bias: where Python's dynamic semantics are broader than a
+/// faithful static check (e.g. numeric strings with underscores, or
+/// iterable-but-not-list observation entries), this REFUSES -- a refusal
+/// where Python would accept keeps the plugin fail-closed passive-observer;
+/// the reverse direction (accepting where Python raises or diverges) is
+/// the unsafe one and never happens.
+pub fn gts_from_dict_would_raise(d: &OValue) -> Option<FromDictRaise> {
+    // observations (py 1796-1815).
+    if let Some(v) = d.get("observations") {
+        let Some(arr) = v.as_arr() else {
+            return Some(FromDictRaise {
+                field: "observations",
+                detail: "not a list: Python's iteration/tuple() would raise".to_string(),
+            });
+        };
+        let legacy_weights = d.get("weight_scheme").and_then(OValue::as_str) != Some(WEIGHT_SCHEME);
+        for (i, obs) in arr.iter().enumerate() {
+            let Some(t) = obs.as_arr() else {
+                return Some(FromDictRaise {
+                    field: "observations",
+                    detail: format!("entry {i} is not a list: tuple(obs) would raise"),
+                });
+            };
+            if legacy_weights && t.len() >= 4 {
+                for idx in [1usize, 2] {
+                    if !python_floatable(&t[idx]) {
+                        return Some(FromDictRaise {
+                            field: "observations",
+                            detail: format!(
+                                "entry {i} element {idx}: legacy-weight rescale float() would raise"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // contextual_posteriors (py 1820-1832).
+    if let Some(v) = d.get("contextual_posteriors") {
+        let Some(entries) = v.as_obj() else {
+            return Some(FromDictRaise {
+                field: "contextual_posteriors",
+                detail: "not a dict: .items() would raise AttributeError".to_string(),
+            });
+        };
+        for (key, value) in entries {
+            let Some(t) = value.as_arr() else {
+                return Some(FromDictRaise {
+                    field: "contextual_posteriors",
+                    detail: format!("entry {key:?} is not a list: tuple(v) would raise"),
+                });
+            };
+            if t.len() == 3 && (!python_floatable(&t[0]) || !python_floatable(&t[1])) {
+                return Some(FromDictRaise {
+                    field: "contextual_posteriors",
+                    detail: format!(
+                        "legacy 3-tuple entry {key:?}: float(mean)/float(std) would raise"
+                    ),
+                });
+            }
+        }
+    }
+
+    // posterior_precision / _prior_precision (py 1846-1852, 1866-1871).
+    for field in ["posterior_precision", "_prior_precision"] {
+        if let Some(v) = d.get(field) {
+            if let Some(detail) = precision_guard_divergence(v) {
+                return Some(FromDictRaise { field, detail });
+            }
+        }
+    }
+
+    // noise_variance / _last_fee_min / _last_fee_max: bare float() with no
+    // try/except (py 1855, 1873-1874).
+    for field in ["noise_variance", "_last_fee_min", "_last_fee_max"] {
+        if let Some(v) = d.get(field) {
+            if !python_floatable(v) {
+                return Some(FromDictRaise {
+                    field,
+                    detail: "non-numeric value: bare float() would raise".to_string(),
+                });
+            }
+        }
+    }
+
+    // posterior_bias (py 1877-1886): only the tail slice is iterated, and
+    // only a dict entry raises (KeyError is absent from the except tuple).
+    if let Some(arr) = d.get("posterior_bias").and_then(OValue::as_arr) {
+        let start = arr.len().saturating_sub(MAX_BIAS_NUDGES);
+        for (i, entry) in arr[start..].iter().enumerate() {
+            if matches!(entry, OValue::Obj(_)) {
+                return Some(FromDictRaise {
+                    field: "posterior_bias",
+                    detail: format!(
+                        "entry {} is a dict: entry[0] raises KeyError (uncaught)",
+                        start + i
+                    ),
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Python truthiness for the precision-matrix guard.
+fn python_truthy(v: &OValue) -> bool {
+    match v {
+        OValue::Null => false,
+        OValue::Bool(b) => *b,
+        OValue::Int(i) => *i != 0,
+        OValue::Float(f) => *f != 0.0,
+        OValue::Str(s) => !s.is_empty(),
+        OValue::Arr(a) => !a.is_empty(),
+        OValue::Obj(o) => !o.is_empty(),
+    }
+}
+
+/// `float(x)` succeeds in Python: numbers, bools, and parseable numeric
+/// strings. Rust's `str::parse::<f64>` is a conservative approximation of
+/// Python's `float(str)` (e.g. Python additionally accepts `"1_0"`); a
+/// string only Python can parse is REFUSED, never the reverse.
+fn python_floatable(v: &OValue) -> bool {
+    match v {
+        OValue::Int(_) | OValue::Float(_) | OValue::Bool(_) => true,
+        OValue::Str(s) => s.trim().parse::<f64>().is_ok(),
+        _ => false,
+    }
+}
+
+/// Emulate the L5 guard
+/// `raw_prec and len(raw_prec) == 3 and all(len(r) == 3 for r in raw_prec)
+///  and all(raw_prec[i][i] > 0 for i in range(3))`
+/// including `and`/`all` short-circuiting, returning `Some(detail)` when
+/// Python would RAISE evaluating it (a guard that evaluates to `False`
+/// falls back to the default matrix in both languages -- that is safe).
+/// Additionally refuses a guard-TRUE matrix carrying non-numeric
+/// OFF-diagonal elements: Python keeps them verbatim (`list(row)`), the
+/// Rust parity path (`parse_m3_pd`) silently defaults the whole matrix --
+/// a silent state divergence a Rust-owned seed must not import.
+fn precision_guard_divergence(v: &OValue) -> Option<String> {
+    if !python_truthy(v) {
+        return None; // guard false at `raw_prec and ...` -> default -> safe
+    }
+    let arr = match v {
+        OValue::Arr(a) => a,
+        // len("...") works; every char then fails len(r)==3 -> guard false.
+        OValue::Str(_) => return None,
+        OValue::Obj(entries) => {
+            // len(dict) then iteration over KEYS: any key of len != 3
+            // short-circuits the guard to False; if every key has len 3,
+            // `raw_prec[0]` raises KeyError (integer key on a JSON dict).
+            if entries.len() != 3 {
+                return None;
+            }
+            for (key, _) in entries {
+                if key.chars().count() != 3 {
+                    return None;
+                }
+            }
+            return Some("dict value: raw_prec[0] raises KeyError".to_string());
+        }
+        // Truthy int/float/bool: len() raises TypeError.
+        _ => return Some("len() of a non-sized value raises TypeError".to_string()),
+    };
+    if arr.len() != 3 {
+        return None; // guard false -> default
+    }
+    // all(len(r) == 3 for r in raw_prec), short-circuit on first False.
+    for row in arr {
+        match row {
+            OValue::Arr(a) => {
+                if a.len() != 3 {
+                    return None;
+                }
+            }
+            OValue::Str(s) => {
+                if s.chars().count() != 3 {
+                    return None;
+                }
+            }
+            OValue::Obj(o) => {
+                if o.len() != 3 {
+                    return None;
+                }
+            }
+            _ => return Some("len() of a non-sized row raises TypeError".to_string()),
+        }
+    }
+    // all(raw_prec[i][i] > 0 for i in range(3)), short-circuit on first
+    // False; a raise anywhere before that False propagates.
+    for (i, row) in arr.iter().enumerate() {
+        match row {
+            OValue::Arr(a) => match &a[i] {
+                OValue::Int(x) => {
+                    if *x <= 0 {
+                        return None;
+                    }
+                }
+                OValue::Float(f) => {
+                    if f.is_nan() || *f <= 0.0 {
+                        return None;
+                    }
+                }
+                OValue::Bool(b) => {
+                    if !*b {
+                        return None;
+                    }
+                }
+                _ => {
+                    return Some(format!(
+                        "diagonal [{i}][{i}] compares a non-number to 0: TypeError"
+                    ))
+                }
+            },
+            OValue::Str(_) => {
+                return Some(format!(
+                    "string row {i}: `char > 0` comparison raises TypeError"
+                ))
+            }
+            OValue::Obj(_) => return Some(format!("dict row {i}: row[{i}] raises KeyError")),
+            _ => unreachable!("non-sized rows already raised in the len() pass"),
+        }
+    }
+    // Guard TRUE: Python copies rows verbatim; Rust's parse_m3_pd requires
+    // all 9 elements numeric or defaults the matrix. Refuse the divergence.
+    for (i, row) in arr.iter().enumerate() {
+        let OValue::Arr(a) = row else {
+            return Some(format!(
+                "guard-true row {i} is not a list: Python list(row) keeps it, Rust defaults"
+            ));
+        };
+        for (j, x) in a.iter().enumerate() {
+            if !matches!(x, OValue::Int(_) | OValue::Float(_) | OValue::Bool(_)) {
+                return Some(format!(
+                    "element [{i}][{j}] is non-numeric: Python keeps it verbatim, the Rust \
+                     parity path defaults the whole matrix (silent divergence)"
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// `float(x)` with Python's `TypeError`/`ValueError` -> `None`.
 fn try_float(v: Option<&OValue>) -> Option<f64> {
     match v? {
@@ -664,3 +951,118 @@ fn try_int(v: Option<&OValue>) -> Option<i64> {
 /// directly (Task 2/7) without needing to import `super::` paths.
 pub const CONGESTION_FLAG: &str = CONGESTION_OBS_FLAG;
 pub const ZERO_PROBE_FLAG_STR: &str = ZERO_PROBE_FLAG;
+
+#[cfg(test)]
+mod seed_parity_tests {
+    use super::*;
+    use crate::pyjson::parse;
+
+    fn dict(json: &str) -> OValue {
+        parse(json).expect("valid JSON fixture")
+    }
+
+    /// Python's `all(len(r) == 3 for r in raw_prec)` SHORT-CIRCUITS: a
+    /// wrong-length row before an unsized row stops evaluation, so Python
+    /// never raises -- the emulation must not refuse.
+    #[test]
+    fn precision_guard_short_circuit_before_unsized_row_is_safe() {
+        let d = dict(r#"{"posterior_precision": [[1, 0, 0, 0], 5, [0, 0, 1]]}"#);
+        assert_eq!(gts_from_dict_would_raise(&d), None);
+    }
+
+    /// ...but an unsized row REACHED by the generator (all earlier rows
+    /// were len 3) raises `TypeError` in Python.
+    #[test]
+    fn precision_guard_unsized_row_after_len3_rows_raises() {
+        let d = dict(r#"{"posterior_precision": [[1, 0, 0], 5, [0, 0, 1]]}"#);
+        let raise = gts_from_dict_would_raise(&d).expect("must refuse");
+        assert_eq!(raise.field, "posterior_precision");
+    }
+
+    /// The diagonal loop also short-circuits: a non-positive diagonal
+    /// BEFORE a string row stops evaluation (guard False -> default), no
+    /// raise.
+    #[test]
+    fn precision_guard_nonpositive_diag_short_circuits_before_string_row() {
+        let d = dict(r#"{"posterior_precision": [[0, 0, 0], "abc", [0, 0, 1]]}"#);
+        assert_eq!(gts_from_dict_would_raise(&d), None);
+    }
+
+    /// Truthy non-sized value: `len(raw_prec)` raises immediately.
+    #[test]
+    fn precision_guard_truthy_scalar_raises() {
+        let d = dict(r#"{"posterior_precision": 7}"#);
+        assert!(gts_from_dict_would_raise(&d).is_some());
+    }
+
+    /// A top-level STRING is sized and every char fails `len(r) == 3`:
+    /// guard False, default, safe.
+    #[test]
+    fn precision_guard_top_level_string_is_safe() {
+        let d = dict(r#"{"posterior_precision": "abc"}"#);
+        assert_eq!(gts_from_dict_would_raise(&d), None);
+    }
+
+    /// A dict whose 3 keys all have length 3 reaches `raw_prec[0]` ->
+    /// `KeyError` (uncaught); a dict with any other key shape
+    /// short-circuits safely.
+    #[test]
+    fn precision_guard_dict_key_shapes() {
+        let raising = dict(r#"{"posterior_precision": {"abc": 1, "def": 2, "ghi": 3}}"#);
+        assert!(gts_from_dict_would_raise(&raising).is_some());
+        let safe = dict(r#"{"posterior_precision": {"ab": 1, "def": 2, "ghi": 3}}"#);
+        assert_eq!(gts_from_dict_would_raise(&safe), None);
+    }
+
+    /// Guard-TRUE matrix with a non-numeric OFF-diagonal: Python keeps it
+    /// verbatim, `parse_m3_pd` defaults the matrix -- silent divergence,
+    /// refused.
+    #[test]
+    fn precision_guard_true_with_string_offdiag_is_divergence() {
+        let d = dict(r#"{"posterior_precision": [[1, "x", 0], [0, 1, 0], [0, 0, 1]]}"#);
+        let raise = gts_from_dict_would_raise(&d).expect("must refuse divergence");
+        assert!(raise.detail.contains("divergence"), "{raise:?}");
+    }
+
+    /// `posterior_bias` only refuses dict entries INSIDE the evaluated
+    /// tail slice (`raw_bias[-MAX_BIAS_NUDGES:]`); an older dict entry is
+    /// never touched by Python either.
+    #[test]
+    fn posterior_bias_dict_outside_tail_slice_is_safe() {
+        let mut entries: Vec<String> = vec!["{\"k\": 1}".to_string()];
+        entries.extend((0..MAX_BIAS_NUDGES).map(|_| "[100.0, 0.5, 1]".to_string()));
+        let d = dict(&format!("{{\"posterior_bias\": [{}]}}", entries.join(", ")));
+        assert_eq!(gts_from_dict_would_raise(&d), None);
+        let d = dict(r#"{"posterior_bias": [[100.0, 0.5, 1], {"k": 1}]}"#);
+        assert!(gts_from_dict_would_raise(&d).is_some());
+    }
+
+    /// Legacy-weight observations (`weight_scheme` stale/absent) with
+    /// non-numeric rate/weight raise in the rescale's `float()`; under the
+    /// CURRENT scheme the same tuple is never float()ed.
+    #[test]
+    fn observations_legacy_rescale_float_raises_only_when_legacy() {
+        let legacy = dict(r#"{"observations": [[100, "x", 1.0, 5]]}"#);
+        assert!(gts_from_dict_would_raise(&legacy).is_some());
+        let current =
+            dict(r#"{"weight_scheme": "exposure_v2", "observations": [[100, "x", 1.0, 5]]}"#);
+        assert_eq!(gts_from_dict_would_raise(&current), None);
+    }
+
+    /// Non-iterable observation entries raise `tuple(obs)` regardless of
+    /// scheme.
+    #[test]
+    fn observations_non_list_entry_raises() {
+        let d = dict(r#"{"weight_scheme": "exposure_v2", "observations": [5]}"#);
+        assert!(gts_from_dict_would_raise(&d).is_some());
+    }
+
+    /// Bare-float() scalars: `null` raises too (`float(None)` is a
+    /// `TypeError`), absent keys are fine.
+    #[test]
+    fn bare_float_scalars_null_raises_absent_is_fine() {
+        assert!(gts_from_dict_would_raise(&dict(r#"{"noise_variance": null}"#)).is_some());
+        assert!(gts_from_dict_would_raise(&dict(r#"{"_last_fee_max": {}}"#)).is_some());
+        assert_eq!(gts_from_dict_would_raise(&dict("{}")), None);
+    }
+}

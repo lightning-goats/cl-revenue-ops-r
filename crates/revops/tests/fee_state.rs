@@ -561,3 +561,327 @@ fn journal_state_sink_preserves_restrictive_permissions() {
         "atomic replacement must preserve an operator-tightened mode"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 5 (stateful-shadow plan): restart-persistent SeedOnce -- the
+// fail-closed one-time seed from Python's `fee_strategy_state` (revision
+// plan Task R6) and strict hydration from Rust-owned rows.
+// ---------------------------------------------------------------------------
+
+use revops::fee_state::{
+    rehydrate_from_rows, seed_once_from_python, seed_payload_sha256, serialize_state_envelope,
+    HydrationSource, SeedOutcome,
+};
+use revops_db::fee_runway::FeeStateRow;
+
+const SEED_NOW: i64 = 1_800_000_000;
+
+/// A v2 blob whose `fee_state.thompson_state` is the given JSON value --
+/// `algorithm_version` is a KNOWN version, so Python's `from_v2_dict`
+/// WOULD call `GaussianThompsonState.from_dict` on it (py 2174-2183).
+fn blob_with_thompson(thompson: serde_json::Value) -> String {
+    serde_json::json!({
+        "fee_state": {
+            "algorithm_version": "dts_pid_v1",
+            "thompson_state": thompson,
+        },
+        "cycle_state": {},
+    })
+    .to_string()
+}
+
+fn valid_thompson() -> serde_json::Value {
+    serde_json::json!({
+        "weight_scheme": "exposure_v2",
+        "posterior_mean": 250.0,
+        "posterior_std": 80.0,
+        "_last_fee_min": 10.0,
+        "_last_fee_max": 900.0,
+        "posterior_precision": [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]],
+        "posterior_bias": [[100.0, 0.5, 1_700_000_000_i64]],
+    })
+}
+
+fn seed_fixture_conn(rows: &[(&str, String, i64)]) -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    create_schema(&conn);
+    for (channel_id, blob, last_update) in rows {
+        let mut row = sample_row(channel_id);
+        row.v2_state_json = blob.clone();
+        row.last_update = *last_update;
+        insert_row(&conn, &row);
+    }
+    conn
+}
+
+/// Runs the seed against one corrupt channel plus one VALID channel and
+/// asserts the WHOLE seed is refused: no partial import, state untouched,
+/// and the refusal names the corrupt channel + field.
+fn assert_whole_seed_refused(corrupt_thompson: serde_json::Value, expect_field_fragment: &str) {
+    let conn = seed_fixture_conn(&[
+        (
+            "chan_bad",
+            blob_with_thompson(corrupt_thompson),
+            SEED_NOW - 100,
+        ),
+        (
+            "chan_good",
+            blob_with_thompson(valid_thompson()),
+            SEED_NOW - 50,
+        ),
+    ]);
+    let mut state = ControllerState::new();
+    let outcome = seed_once_from_python(
+        &mut state,
+        &conn,
+        "/prod/revenue_ops.db",
+        SEED_NOW,
+        "649c320",
+    );
+    let event = match outcome {
+        SeedOutcome::Refused(event) => event,
+        SeedOutcome::Seeded(event) => {
+            panic!("seed must be refused, but imported: {event:?}")
+        }
+    };
+    assert_eq!(event.outcome, "seed_refused");
+    assert_eq!(event.refused_channel.as_deref(), Some("chan_bad"));
+    let field = event.refused_field.as_deref().unwrap_or_default();
+    assert!(
+        field.contains(expect_field_fragment),
+        "refused_field {field:?} must name {expect_field_fragment:?}"
+    );
+    assert!(
+        state.fee_states.is_empty() && state.cycle_states.is_empty(),
+        "a refused seed must leave the controller state untouched (no partial import)"
+    );
+    // Provenance is still recorded on refusal (auditable evidence).
+    assert_eq!(event.row_count, 2);
+    assert_eq!(event.source_db_path, "/prod/revenue_ops.db");
+    assert_eq!(event.seeded_at, SEED_NOW);
+}
+
+/// Task R6 refusal class 1: non-numeric `_last_fee_min` -- Python's
+/// `float(d.get("_last_fee_min", 0.0))` (py 1873) has no try/except and
+/// raises `ValueError`; Rust's total parity path would silently default to
+/// 0.0, so the seed must refuse instead.
+#[test]
+fn seed_once_refuses_non_numeric_last_fee_min() {
+    let mut thompson = valid_thompson();
+    thompson["_last_fee_min"] = serde_json::json!("not-a-number");
+    assert_whole_seed_refused(thompson, "_last_fee_min");
+}
+
+/// Task R6 refusal class 2: a string row inside `posterior_precision` --
+/// Python's L5 guard `all(len(r) == 3 ...)` passes for a 3-char string,
+/// then `raw_prec[i][i] > 0` compares a `str` to `int` and raises
+/// `TypeError`; Rust's `parse_m3_pd` would silently fall back to the
+/// default matrix.
+#[test]
+fn seed_once_refuses_string_rows_in_posterior_precision() {
+    let mut thompson = valid_thompson();
+    thompson["posterior_precision"] =
+        serde_json::json!(["abc", [0.0, 0.01, 0.0], [0.0, 0.0, 0.01]]);
+    assert_whole_seed_refused(thompson, "posterior_precision");
+}
+
+/// Task R6 refusal class 3: a dict entry inside `posterior_bias` --
+/// Python's restore loop catches `TypeError`/`ValueError`/`IndexError`
+/// but NOT `KeyError`, and `entry[0]` on a dict raises `KeyError`; Rust's
+/// `convert_posterior_bias` would silently skip the entry.
+#[test]
+fn seed_once_refuses_dict_entries_in_posterior_bias() {
+    let mut thompson = valid_thompson();
+    thompson["posterior_bias"] = serde_json::json!([{ "target_fee": 100.0 }]);
+    assert_whole_seed_refused(thompson, "posterior_bias");
+}
+
+/// Python's `float()` accepts numeric STRINGS (`float("1.5")` == 1.5), and
+/// the Rust parity path (`try_float`) parses them identically -- a numeric
+/// string must NOT trigger a spurious refusal.
+#[test]
+fn seed_once_accepts_numeric_string_scalars() {
+    let mut thompson = valid_thompson();
+    thompson["_last_fee_min"] = serde_json::json!("1.5");
+    let conn = seed_fixture_conn(&[("chan_a", blob_with_thompson(thompson), SEED_NOW - 10)]);
+    let mut state = ControllerState::new();
+    let outcome = seed_once_from_python(
+        &mut state,
+        &conn,
+        "/prod/revenue_ops.db",
+        SEED_NOW,
+        "649c320",
+    );
+    assert!(
+        matches!(outcome, SeedOutcome::Seeded(_)),
+        "numeric strings are Python-float()-accepted and must seed: {outcome:?}"
+    );
+    assert!(state.fee_states.contains_key("chan_a"));
+}
+
+/// Task R6 provenance: a successful seed records source DB path,
+/// MAX(last_update) at seed time, row count, the sha256 of the serialized
+/// seed payload, and the binary source commit -- and hydrates the state
+/// byte-identically to the plain `rehydrate` path.
+#[test]
+fn seed_once_records_provenance_readback() {
+    let conn = seed_fixture_conn(&[
+        (
+            "chan_a",
+            blob_with_thompson(valid_thompson()),
+            SEED_NOW - 500,
+        ),
+        (
+            "chan_b",
+            blob_with_thompson(valid_thompson()),
+            SEED_NOW - 100,
+        ),
+    ]);
+    let mut state = ControllerState::new();
+    let outcome = seed_once_from_python(
+        &mut state,
+        &conn,
+        "/prod/revenue_ops.db",
+        SEED_NOW,
+        "649c320",
+    );
+    let event = match outcome {
+        SeedOutcome::Seeded(event) => event,
+        SeedOutcome::Refused(event) => panic!("valid rows must seed, got refusal: {event:?}"),
+    };
+    assert_eq!(event.outcome, "seeded");
+    assert_eq!(event.source_db_path, "/prod/revenue_ops.db");
+    assert_eq!(event.source_max_last_update, SEED_NOW - 100);
+    assert_eq!(event.row_count, 2);
+    assert_eq!(event.source_commit, "649c320");
+    assert_eq!(event.seeded_at, SEED_NOW);
+    assert!(event.refused_channel.is_none() && event.refused_field.is_none());
+
+    // The payload hash is the canonical serialization's sha256: 64 hex
+    // chars, deterministic over the same rows, sensitive to any change.
+    let rows = revops_fees::state_store::read_fee_strategy_rows(&conn);
+    assert_eq!(event.payload_sha256, seed_payload_sha256(&rows));
+    assert_eq!(event.payload_sha256.len(), 64);
+    assert!(event.payload_sha256.chars().all(|c| c.is_ascii_hexdigit()));
+    let mut altered = rows.clone();
+    altered[0].v2_state_json.push(' ');
+    assert_ne!(event.payload_sha256, seed_payload_sha256(&altered));
+
+    // Round-trip through the Rust-owned store and read it back.
+    let store = Connection::open_in_memory().unwrap();
+    revops_db::notifications::init_schema(&store).unwrap();
+    revops_db::fee_runway::record_seed_event(&store, &event).unwrap();
+    let read = revops_db::fee_runway::latest_seed_event(&store)
+        .unwrap()
+        .expect("seed event persisted");
+    assert_eq!(read, event);
+
+    // Hydration matches the plain rehydrate path exactly.
+    let mut direct = ControllerState::new();
+    rehydrate(&mut direct, &conn);
+    for chan in ["chan_a", "chan_b"] {
+        assert_eq!(
+            dumps_python(&fee_state_to_v2_dict(&state.fee_states[chan])),
+            dumps_python(&fee_state_to_v2_dict(&direct.fee_states[chan])),
+            "seeded fee state must match rehydrate for {chan}"
+        );
+        assert_eq!(
+            dumps_python(&serialize_cycle_state_payload(&state.cycle_states[chan])),
+            dumps_python(&serialize_cycle_state_payload(&direct.cycle_states[chan])),
+            "seeded cycle state must match rehydrate for {chan}"
+        );
+    }
+}
+
+/// `HydrationSource` labels round-trip into the restart marker's
+/// `hydration_source` column format.
+#[test]
+fn seed_once_hydration_source_labels() {
+    assert_eq!(HydrationSource::PythonSeed.label(), "python_seed");
+    assert_eq!(
+        HydrationSource::RustGeneration(7).label(),
+        "rust_generation:7"
+    );
+}
+
+/// Task 5 step 2: `rehydrate_from_rows` hydrates from Rust-owned rows
+/// byte-identically to what was committed, and REPLACES the maps wholesale
+/// while preserving process-lifetime fields (same contract as `rehydrate`).
+#[test]
+fn seed_once_rehydrate_from_rows_round_trips_committed_state() {
+    // Build a source state via the Python-path loader over a real blob.
+    let conn = seed_fixture_conn(&[("chan_a", blob_with_thompson(valid_thompson()), SEED_NOW)]);
+    let mut source = ControllerState::new();
+    rehydrate(&mut source, &conn);
+
+    // Serialize exactly as the SeedOnce commit does.
+    let rows: Vec<FeeStateRow> = source
+        .cycle_states
+        .iter()
+        .map(|(id, cycle)| FeeStateRow {
+            channel_id: id.clone(),
+            v2_state_json: serialize_state_envelope(cycle, &source.fee_states[id]),
+            last_update: cycle.last_update,
+        })
+        .collect();
+
+    let mut restored = ControllerState::new();
+    restored
+        .fee_states
+        .insert("stale".to_string(), ChannelFeeState::default());
+    restored.vegas.intensity = 0.5;
+    restored.vegas_wake_armed = false;
+    rehydrate_from_rows(&mut restored, &rows).expect("hydrate from Rust-owned rows");
+
+    assert!(!restored.fee_states.contains_key("stale"), "maps replaced");
+    assert_eq!(restored.vegas.intensity, 0.5, "vegas preserved");
+    assert!(!restored.vegas_wake_armed, "wake-armed preserved");
+    assert_eq!(
+        dumps_python(&fee_state_to_v2_dict(&restored.fee_states["chan_a"])),
+        dumps_python(&fee_state_to_v2_dict(&source.fee_states["chan_a"])),
+        "fee state must survive the Rust-owned round trip byte-identically"
+    );
+    assert_eq!(
+        dumps_python(&serialize_cycle_state_payload(
+            &restored.cycle_states["chan_a"]
+        )),
+        dumps_python(&serialize_cycle_state_payload(
+            &source.cycle_states["chan_a"]
+        )),
+        "cycle state must survive the Rust-owned round trip byte-identically"
+    );
+    // Rust owns this state: the pre-decision epoch caches hold the
+    // hydrated epochs (amendment R5 -- gate epoch == owned last_update).
+    assert_eq!(
+        restored.skip_gate_prev.get("chan_a").map(|e| e.last_update),
+        Some(restored.cycle_states["chan_a"].last_update),
+    );
+}
+
+/// Rust-owned state is NEVER silently defaulted: a corrupt stored blob
+/// fails hydration closed instead of falling back to an empty envelope
+/// (which is `parse_v2_blob`'s Python-parity behavior for PYTHON blobs,
+/// wrong for state Rust itself wrote).
+#[test]
+fn seed_once_rehydrate_from_rows_fails_closed_on_corrupt_rows() {
+    let corrupt = FeeStateRow {
+        channel_id: "chan_a".to_string(),
+        v2_state_json: "{not json".to_string(),
+        last_update: SEED_NOW,
+    };
+    let mut state = ControllerState::new();
+    let err = rehydrate_from_rows(&mut state, &[corrupt]).expect_err("corrupt blob must fail");
+    assert!(err.to_string().contains("chan_a"), "{err}");
+    assert!(state.fee_states.is_empty(), "no partial hydration");
+
+    // A structurally-valid JSON blob MISSING the envelope keys Rust always
+    // writes is equally corrupt for Rust-owned rows.
+    let missing_keys = FeeStateRow {
+        channel_id: "chan_b".to_string(),
+        v2_state_json: "{}".to_string(),
+        last_update: SEED_NOW,
+    };
+    let mut state = ControllerState::new();
+    let err = rehydrate_from_rows(&mut state, &[missing_keys]).expect_err("missing envelope keys");
+    assert!(err.to_string().contains("chan_b"), "{err}");
+}

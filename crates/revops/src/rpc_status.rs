@@ -17,6 +17,11 @@ pub struct StatusInputs {
     pub observer: bool,
     pub db_path: Option<String>,
     pub db_tables: Option<usize>,
+    /// Task 5 step 4: the Rust-owned fee-runway identity (latest state
+    /// generation, seed provenance, restart marker), resolved live from
+    /// the OBSERVER db actor -- never from Python state. `None` when no
+    /// observer db is configured.
+    pub fee_runway: Option<Value>,
 }
 
 /// Build the `revenue-r-status` response body.
@@ -29,6 +34,7 @@ pub fn build_status(i: &StatusInputs) -> Value {
             "path": i.db_path,
             "tables": i.db_tables,
         },
+        "fee_runway": i.fee_runway,
     })
 }
 

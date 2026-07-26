@@ -337,3 +337,64 @@ async fn fee_cycle_transaction_blocking_bridge_from_scheduler_thread() {
     assert_eq!(snapshot.generation, 2);
     assert_eq!(handle.fee_mutation_count().await.unwrap(), 2);
 }
+
+/// Task 5 (stateful-shadow plan): seed-provenance events + restart markers
+/// through the single-owner actor -- async methods and the blocking bridge
+/// the SeedOnce scheduler thread uses, on the SAME connection.
+#[tokio::test]
+async fn fee_cycle_transaction_seed_event_and_restart_marker_through_actor() {
+    use revops_db::fee_runway::{FeeRestartMarkerRow, FeeSeedEventRow};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    assert!(handle.latest_fee_seed_event().await.unwrap().is_none());
+    assert!(handle.latest_fee_restart_marker().await.unwrap().is_none());
+
+    // Blocking side (the scheduler's plain-thread analog).
+    let blocking = handle.clone();
+    tokio::task::spawn_blocking(move || {
+        blocking
+            .blocking_record_fee_seed_event(FeeSeedEventRow {
+                seeded_at: 1_800_000_000,
+                outcome: "seeded".to_string(),
+                source_db_path: "/prod/revenue_ops.db".to_string(),
+                source_max_last_update: 1_799_999_000,
+                row_count: 3,
+                payload_sha256: "ab".repeat(32),
+                source_commit: "649c320".to_string(),
+                refused_channel: None,
+                refused_field: None,
+                detail: None,
+            })
+            .unwrap();
+        blocking
+            .blocking_record_fee_restart_marker(FeeRestartMarkerRow {
+                started_at: 1_800_000_000,
+                process_id: std::process::id() as i64,
+                prior_generation: 0,
+                hydration_source: "python_seed".to_string(),
+                source_commit: "649c320".to_string(),
+            })
+            .unwrap();
+    })
+    .await
+    .unwrap();
+
+    // Async side re-reads what the blocking side wrote: one connection.
+    let seed = handle
+        .latest_fee_seed_event()
+        .await
+        .unwrap()
+        .expect("seed event visible to async side");
+    assert_eq!(seed.outcome, "seeded");
+    assert_eq!(seed.row_count, 3);
+    let marker = handle
+        .latest_fee_restart_marker()
+        .await
+        .unwrap()
+        .expect("restart marker visible to async side");
+    assert_eq!(marker.hydration_source, "python_seed");
+    assert_eq!(marker.process_id, std::process::id() as i64);
+}

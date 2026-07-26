@@ -514,3 +514,96 @@ fn rust_fee_schema_quarantine_and_runway_snapshot() {
         .expect("snapshot set");
     assert_eq!(snap.report_schema_version, "1");
 }
+
+// ---------------------------------------------------------------------------
+// Task 5 (stateful-shadow plan): SeedOnce seed-provenance events + restart
+// markers (schema-direct; the actor plumbing is covered in tests/owner.rs).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rust_fee_schema_seed_event_records_provenance_and_refusal() {
+    use revops_db::fee_runway::{latest_seed_event, record_seed_event, FeeSeedEventRow};
+
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    assert!(latest_seed_event(&conn).unwrap().is_none());
+
+    let seeded = FeeSeedEventRow {
+        seeded_at: 1_800_000_000,
+        outcome: "seeded".to_string(),
+        source_db_path: "/prod/revenue_ops.db".to_string(),
+        source_max_last_update: 1_799_999_000,
+        row_count: 47,
+        payload_sha256: "ab".repeat(32),
+        source_commit: "649c320".to_string(),
+        refused_channel: None,
+        refused_field: None,
+        detail: None,
+    };
+    let id = record_seed_event(&conn, &seeded).unwrap();
+    assert!(id > 0);
+    let read = latest_seed_event(&conn).unwrap().expect("seed event");
+    assert_eq!(read, seeded);
+
+    // A later refusal supersedes as the LATEST event and carries the
+    // offending channel + field (fail-closed seed import, Task R6).
+    let refused = FeeSeedEventRow {
+        seeded_at: 1_800_000_100,
+        outcome: "seed_refused".to_string(),
+        source_db_path: "/prod/revenue_ops.db".to_string(),
+        source_max_last_update: 1_799_999_500,
+        row_count: 47,
+        payload_sha256: "cd".repeat(32),
+        source_commit: "649c320".to_string(),
+        refused_channel: Some("700x1x0".to_string()),
+        refused_field: Some("thompson_state._last_fee_min".to_string()),
+        detail: Some("non-numeric value where Python float() raises".to_string()),
+    };
+    record_seed_event(&conn, &refused).unwrap();
+    let read = latest_seed_event(&conn).unwrap().expect("refusal event");
+    assert_eq!(read, refused);
+
+    // Outcome vocabulary is closed: anything else is rejected by CHECK.
+    let bogus = FeeSeedEventRow {
+        outcome: "partial".to_string(),
+        ..seeded
+    };
+    assert!(
+        record_seed_event(&conn, &bogus).is_err(),
+        "outcome must be 'seeded' or 'seed_refused' -- no partial seeds exist"
+    );
+}
+
+#[test]
+fn rust_fee_schema_restart_marker_round_trip() {
+    use revops_db::fee_runway::{
+        latest_restart_marker, record_restart_marker, FeeRestartMarkerRow,
+    };
+
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    assert!(latest_restart_marker(&conn).unwrap().is_none());
+
+    let first = FeeRestartMarkerRow {
+        started_at: 1_800_000_000,
+        process_id: 4242,
+        prior_generation: 0,
+        hydration_source: "python_seed".to_string(),
+        source_commit: "649c320".to_string(),
+    };
+    record_restart_marker(&conn, &first).unwrap();
+
+    let second = FeeRestartMarkerRow {
+        started_at: 1_800_100_000,
+        process_id: 4300,
+        prior_generation: 12,
+        hydration_source: "rust_generation:12".to_string(),
+        source_commit: "649c320".to_string(),
+    };
+    record_restart_marker(&conn, &second).unwrap();
+
+    let read = latest_restart_marker(&conn).unwrap().expect("marker");
+    assert_eq!(read, second, "latest marker wins (newest restart)");
+}

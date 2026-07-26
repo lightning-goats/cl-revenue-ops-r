@@ -8,8 +8,8 @@
 //! contract over the production db.
 
 use crate::fee_runway::{
-    self, FeeCycleCommit, FeeStateSnapshot, FeeTriggerEventRow, MempoolSampleRow, QuarantineEntry,
-    QuarantineRow, RunwaySnapshotRow,
+    self, FeeCycleCommit, FeeRestartMarkerRow, FeeSeedEventRow, FeeStateSnapshot,
+    FeeTriggerEventRow, MempoolSampleRow, QuarantineEntry, QuarantineRow, RunwaySnapshotRow,
 };
 use crate::notifications::{self, ForwardRow};
 use anyhow::{Context, Result};
@@ -65,6 +65,17 @@ enum Command {
         reply: oneshot::Sender<Result<i64>>,
     },
     LatestRunwaySnapshot(oneshot::Sender<Result<Option<RunwaySnapshotRow>>>),
+    // -- Task 5: SeedOnce seed events + restart markers --
+    RecordFeeSeedEvent {
+        event: FeeSeedEventRow,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    LatestFeeSeedEvent(oneshot::Sender<Result<Option<FeeSeedEventRow>>>),
+    RecordFeeRestartMarker {
+        marker: FeeRestartMarkerRow,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    LatestFeeRestartMarker(oneshot::Sender<Result<Option<FeeRestartMarkerRow>>>),
 }
 
 /// Cheap, `Clone`-able handle to the observer-db owner task.
@@ -369,6 +380,86 @@ impl ObserverHandle {
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
     }
+
+    /// Record one SeedOnce seed event (import or fail-closed refusal).
+    pub async fn record_fee_seed_event(&self, event: FeeSeedEventRow) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordFeeSeedEvent { event, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::record_fee_seed_event`].
+    pub fn blocking_record_fee_seed_event(&self, event: FeeSeedEventRow) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RecordFeeSeedEvent { event, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// The most recently recorded seed event, if any.
+    pub async fn latest_fee_seed_event(&self) -> Result<Option<FeeSeedEventRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::LatestFeeSeedEvent(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::latest_fee_seed_event`].
+    pub fn blocking_latest_fee_seed_event(&self) -> Result<Option<FeeSeedEventRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::LatestFeeSeedEvent(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Record one scheduler restart marker.
+    pub async fn record_fee_restart_marker(&self, marker: FeeRestartMarkerRow) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordFeeRestartMarker { marker, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::record_fee_restart_marker`].
+    pub fn blocking_record_fee_restart_marker(&self, marker: FeeRestartMarkerRow) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RecordFeeRestartMarker { marker, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// The most recently recorded restart marker, if any.
+    pub async fn latest_fee_restart_marker(&self) -> Result<Option<FeeRestartMarkerRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::LatestFeeRestartMarker(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::latest_fee_restart_marker`].
+    pub fn blocking_latest_fee_restart_marker(&self) -> Result<Option<FeeRestartMarkerRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::LatestFeeRestartMarker(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
 }
 
 /// Open (creating the file and any missing parent directories if needed)
@@ -474,6 +565,22 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::LatestRunwaySnapshot(reply) => {
                     let result = fee_runway::latest_runway_snapshot(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::RecordFeeSeedEvent { event, reply } => {
+                    let result = fee_runway::record_seed_event(&conn, &event);
+                    let _ = reply.send(result);
+                }
+                Command::LatestFeeSeedEvent(reply) => {
+                    let result = fee_runway::latest_seed_event(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::RecordFeeRestartMarker { marker, reply } => {
+                    let result = fee_runway::record_restart_marker(&conn, &marker);
+                    let _ = reply.send(result);
+                }
+                Command::LatestFeeRestartMarker(reply) => {
+                    let result = fee_runway::latest_restart_marker(&conn);
                     let _ = reply.send(result);
                 }
             }

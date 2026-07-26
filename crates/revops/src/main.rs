@@ -537,11 +537,49 @@ async fn main() -> Result<()> {
                     Some(handle) => handle.table_count().await.ok(),
                     None => None,
                 };
+                // Task 5 step 4: latest generation, seed provenance, and
+                // restart marker -- resolved live from the Rust-owned
+                // observer db, NEVER from Python state.
+                let fee_runway = match &s.observer_db {
+                    Some(handle) => {
+                        let generation = handle
+                            .load_latest_fee_state()
+                            .await
+                            .ok()
+                            .map(|snap| snap.generation);
+                        let seed = handle.latest_fee_seed_event().await.ok().flatten();
+                        let restart = handle.latest_fee_restart_marker().await.ok().flatten();
+                        Some(serde_json::json!({
+                            "generation": generation,
+                            "seed": seed.map(|e| serde_json::json!({
+                                "outcome": e.outcome,
+                                "seeded_at": e.seeded_at,
+                                "source_db_path": e.source_db_path,
+                                "source_max_last_update": e.source_max_last_update,
+                                "row_count": e.row_count,
+                                "payload_sha256": e.payload_sha256,
+                                "source_commit": e.source_commit,
+                                "refused_channel": e.refused_channel,
+                                "refused_field": e.refused_field,
+                                "detail": e.detail,
+                            })),
+                            "restart": restart.map(|m| serde_json::json!({
+                                "started_at": m.started_at,
+                                "process_id": m.process_id,
+                                "prior_generation": m.prior_generation,
+                                "hydration_source": m.hydration_source,
+                                "source_commit": m.source_commit,
+                            })),
+                        }))
+                    }
+                    None => None,
+                };
                 Ok(build_status(&StatusInputs {
                     version: s.version.clone(),
                     observer: s.observer,
                     db_path: s.db_path.clone(),
                     db_tables,
+                    fee_runway,
                 }))
             },
         )
@@ -985,6 +1023,13 @@ async fn main() -> Result<()> {
                         },
                         s.db.clone(),
                         s.python_options.clone(),
+                        // Task 5: the Rust-owned state store (observer-db
+                        // actor). Unused by RehydratePerCycle; REQUIRED
+                        // once the lifecycle above flips to SeedOnce at
+                        // cutover (cycles fail closed without it).
+                        s.observer_db
+                            .clone()
+                            .map(|h| Box::new(h) as Box<dyn revops::fee_state::RunwayStateStore>),
                     ) {
                         Ok(handle) => {
                             let _ = s.scheduler.set(handle);

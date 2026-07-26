@@ -117,6 +117,10 @@ fn owner(fx: &Fixture, lifecycle: StateLifecycle) -> CycleOwner {
             trigger: TriggerMode::default(),
         },
         SEED,
+        // No Rust-owned store: correct for RehydratePerCycle (which never
+        // touches one); SeedOnce tests build their own via the
+        // seedonce_restart harness below.
+        None,
     )
 }
 
@@ -395,17 +399,21 @@ fn seed_once_hydrates_first_cycle_then_evolves_in_memory() {
     let fx = fixture();
     seed_channel_state(&fx.db_path);
     seed_fee_strategy_row(&fx.db_path, "chan_kept");
-    let mut owner = owner(&fx, StateLifecycle::SeedOnce);
+    // Task 5: SeedOnce is restart-persistent and REQUIRES a Rust-owned
+    // store (the no-store fail-closed case is pinned in seedonce_restart).
+    let mut owner = seedonce_restart::owner_with_test_store(&fx);
     let mut clock = || NOW;
 
-    owner.run_cycle(prepared(json!(3), false), &mut clock);
+    let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+    assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
     assert!(
         owner.state().fee_states.contains_key("chan_kept"),
         "SeedOnce must hydrate from the DB on the FIRST cycle"
     );
 
     delete_fee_strategy_row(&fx.db_path, "chan_kept");
-    owner.run_cycle(prepared(json!(3), false), &mut clock);
+    let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+    assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
     assert!(
         owner.state().fee_states.contains_key("chan_kept"),
         "SeedOnce must NOT re-read the DB after the first cycle"
@@ -697,6 +705,7 @@ fn spawn_surfaces_owner_thread_spawn_failure() {
         },
         None,
         revops::config_resolve::PythonOptionCache::empty(),
+        None,
         |_name, _body| Err(std::io::Error::other("no threads left")),
     );
     let err = match result {
@@ -958,6 +967,7 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
         },
         None,
         revops::config_resolve::PythonOptionCache::empty(),
+        None,
         |name, body| {
             std::thread::Builder::new()
                 .name(name.to_string())
@@ -1013,4 +1023,478 @@ fn no_setchannel_symbol_in_crate() {
         );
     }
     assert!(scanned >= 10, "scanned only {scanned} files -- wrong dir?");
+}
+
+// ---------------------------------------------------------------------------
+// Task 5 (stateful-shadow plan): restart-persistent SeedOnce -- Rust owns
+// autonomous state in its OWN store; Python is a one-time seed source only.
+// ---------------------------------------------------------------------------
+
+mod seedonce_restart {
+    use super::*;
+    use revops::fee_state::RunwayStateStore;
+    use revops_db::fee_runway::{self, FeeCycleCommit, FeeStateSnapshot};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Direct-connection store double for the owner thread: dispatches to
+    /// the SAME `revops_db::fee_runway` functions the production
+    /// `ObserverHandle` actor runs (whose delegation is covered by
+    /// `revops-db`'s own actor tests), against an on-disk file so a
+    /// "restart" (a brand-new `CycleOwner` + store instance) reopens the
+    /// same Rust-owned state.
+    struct TestStore {
+        path: PathBuf,
+        fail_commits: Arc<AtomicBool>,
+    }
+
+    impl TestStore {
+        fn open(path: &Path, fail_commits: Arc<AtomicBool>) -> TestStore {
+            let store = TestStore {
+                path: path.to_path_buf(),
+                fail_commits,
+            };
+            store.conn(); // create + init schema
+            store
+        }
+
+        fn conn(&self) -> Connection {
+            let conn = Connection::open(&self.path).expect("open rust-owned store");
+            revops_db::notifications::init_schema(&conn).expect("init store schema");
+            conn
+        }
+    }
+
+    impl RunwayStateStore for TestStore {
+        fn load_latest_state(&self) -> anyhow::Result<FeeStateSnapshot> {
+            fee_runway::load_latest_state(&self.conn())
+        }
+
+        fn commit_fee_cycle(&self, commit: FeeCycleCommit) -> anyhow::Result<u64> {
+            if self.fail_commits.load(Ordering::SeqCst) {
+                anyhow::bail!("injected commit failure");
+            }
+            fee_runway::commit_fee_cycle(&self.conn(), &commit)
+        }
+
+        fn record_seed_event(&self, event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
+            fee_runway::record_seed_event(&self.conn(), &event)
+        }
+
+        fn record_restart_marker(
+            &self,
+            marker: fee_runway::FeeRestartMarkerRow,
+        ) -> anyhow::Result<i64> {
+            fee_runway::record_restart_marker(&self.conn(), &marker)
+        }
+    }
+
+    const CHANNEL: &str = "700x1x0";
+
+    /// A SeedOnce owner over a fresh test store -- for tests OUTSIDE this
+    /// module that only need "SeedOnce with a working store".
+    pub fn owner_with_test_store(fx: &Fixture) -> CycleOwner {
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        owner_with_store(fx, Some(Box::new(store)))
+    }
+
+    pub struct SeedOnceHarness {
+        fx: Fixture,
+        owner: CycleOwner,
+        store_path: PathBuf,
+        fail_commits: Arc<AtomicBool>,
+        cycles: i64,
+    }
+
+    fn owner_with_store(fx: &Fixture, store: Option<Box<dyn RunwayStateStore>>) -> CycleOwner {
+        CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::SeedOnce,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            store,
+        )
+    }
+
+    /// The amendment-R5 harness: ONE channel (`700x1x0`) present in both
+    /// the production snapshot (channel_states + fee_strategy_state) and
+    /// the RPC prefetch, driving real `Ran` cycles against a fresh
+    /// Rust-owned store.
+    pub fn seedonce_harness_with_one_channel() -> SeedOnceHarness {
+        let fx = fixture();
+        let conn = Connection::open(&fx.db_path).expect("open for seeding");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, \
+             sats_out, capacity, updated_at, kalman_flow_ratio, kalman_velocity) \
+             VALUES (?1, ?2, 'balanced', 0.1, 0, 0, 2000000, ?3, 0.05, 0.01)",
+            rusqlite::params![CHANNEL, peer_a(), NOW - 60],
+        )
+        .expect("insert channel_states row");
+        conn.execute(
+            "INSERT INTO fee_strategy_state (channel_id, last_update, v2_state_json) \
+             VALUES (?1, ?2, '{}')",
+            rusqlite::params![CHANNEL, NOW - 900],
+        )
+        .expect("insert fee_strategy_state row");
+        drop(conn);
+
+        let store_path = fx.journal_dir.join("rust-owned.db");
+        std::fs::create_dir_all(&fx.journal_dir).expect("journal dir");
+        let fail_commits = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open(&store_path, Arc::clone(&fail_commits));
+        let owner = owner_with_store(&fx, Some(Box::new(store)));
+        SeedOnceHarness {
+            fx,
+            owner,
+            store_path,
+            fail_commits,
+            cycles: 0,
+        }
+    }
+
+    impl SeedOnceHarness {
+        /// One SeedOnce cycle; the clock advances one `fee_interval`
+        /// (1800s) per call so the second cycle genuinely re-evaluates.
+        pub fn run_cycle(&mut self) -> CycleOutcome {
+            self.cycles += 1;
+            self.run_cycle_at(NOW + self.cycles * 1800)
+        }
+
+        /// One SeedOnce cycle at an explicit clock value (e.g. re-running
+        /// at the LAST cycle's timestamp after a restart: hydration
+        /// happens, but the waiting-window gate holds every adjustment, so
+        /// the hydrated state itself is observable unevolved).
+        pub fn run_cycle_at(&mut self, now: i64) -> CycleOutcome {
+            let mut clock = || now;
+            self.owner.run_cycle(self.prepared(), &mut clock)
+        }
+
+        pub fn state(&self) -> &revops_fees::cycle::ControllerState {
+            self.owner.state()
+        }
+
+        /// Simulate a plugin restart: a brand-new `CycleOwner` (fresh
+        /// in-memory state, fresh `hydrated_once`) over the SAME
+        /// Rust-owned store file and production DB.
+        pub fn restart(&mut self) {
+            let store = TestStore::open(&self.store_path, Arc::clone(&self.fail_commits));
+            self.owner = owner_with_store(&self.fx, Some(Box::new(store)));
+        }
+
+        pub fn store_conn(&self) -> Connection {
+            Connection::open(&self.store_path).expect("open store for inspection")
+        }
+
+        pub fn prod_conn(&self) -> Connection {
+            Connection::open(&self.fx.db_path).expect("open prod for mutation")
+        }
+
+        fn prepared(&self) -> PreparedCycle {
+            let mut channel = canned_peer_channel();
+            channel["short_channel_id"] = json!("700:1:0");
+            channel["channel_id"] = json!("full_chan_700");
+            PreparedCycle {
+                cfg: FeeCfgSnapshot {
+                    enable_vegas_reflex: false,
+                    ..FeeCfgSnapshot::default()
+                },
+                min_competitors: json!(3),
+                rpc: RpcPrefetch {
+                    our_node_id: format!("02{}", "ee".repeat(32)),
+                    peer_channels: vec![channel],
+                    gossip_channels: Vec::new(),
+                    feerates: None,
+                },
+            }
+        }
+
+        fn seed_event_count(&self) -> i64 {
+            self.store_conn()
+                .query_row("SELECT COUNT(*) FROM rust_fee_seed_events", [], |r| {
+                    r.get(0)
+                })
+                .expect("count seed events")
+        }
+    }
+
+    #[test]
+    fn restart_empty_rust_db_seeds_once_from_python_and_commits_generation_1() {
+        let mut h = seedonce_harness_with_one_channel();
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert!(
+            h.state().fee_states.contains_key(CHANNEL),
+            "cycle 1 must hydrate the Python snapshot"
+        );
+
+        let conn = h.store_conn();
+        let seed = fee_runway::latest_seed_event(&conn)
+            .unwrap()
+            .expect("seed event recorded");
+        assert_eq!(seed.outcome, "seeded");
+        assert_eq!(seed.row_count, 1);
+        assert_eq!(seed.source_max_last_update, NOW - 900);
+        assert_eq!(seed.payload_sha256.len(), 64);
+
+        let snapshot = fee_runway::load_latest_state(&conn).unwrap();
+        assert_eq!(
+            snapshot.generation, 1,
+            "the first successful Rust commit records generation 1"
+        );
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].channel_id, CHANNEL);
+
+        let marker = fee_runway::latest_restart_marker(&conn)
+            .unwrap()
+            .expect("restart marker recorded");
+        assert_eq!(marker.hydration_source, "python_seed");
+        assert_eq!(marker.prior_generation, 0);
+        assert_eq!(marker.process_id, std::process::id() as i64);
+        assert_eq!(marker.started_at, SEED, "startup timestamp is spawn time");
+    }
+
+    #[test]
+    fn restart_scheduler_loads_rust_generation_even_if_python_state_changed() {
+        let mut h = seedonce_harness_with_one_channel();
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        let committed_fee = h.state().cycle_states[CHANNEL].last_fee_ppm;
+        assert_eq!(h.seed_event_count(), 1);
+
+        // Python's state changes (even disappears) after the seed: it must
+        // never be an autonomous-state source again.
+        h.prod_conn()
+            .execute(
+                "DELETE FROM fee_strategy_state WHERE channel_id = ?1",
+                [CHANNEL],
+            )
+            .expect("delete python row");
+
+        h.restart();
+        // Re-run at cycle 2's own timestamp: the waiting-window gate holds
+        // any further adjustment, so the state observed after this cycle
+        // is exactly what hydration produced.
+        let outcome = h.run_cycle_at(NOW + 2 * 1800);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert!(
+            h.state().fee_states.contains_key(CHANNEL),
+            "restart must hydrate from the RUST generation, not Python"
+        );
+        assert_eq!(
+            h.state().cycle_states[CHANNEL].last_fee_ppm,
+            committed_fee,
+            "restarted state must be the committed Rust state"
+        );
+        assert_eq!(h.seed_event_count(), 1, "no reseed on restart");
+
+        let conn = h.store_conn();
+        let marker = fee_runway::latest_restart_marker(&conn)
+            .unwrap()
+            .expect("restart marker");
+        assert_eq!(marker.hydration_source, "rust_generation:2");
+        assert_eq!(marker.prior_generation, 2);
+        assert_eq!(
+            fee_runway::load_latest_state(&conn).unwrap().generation,
+            3,
+            "the restarted cycle commits the next generation"
+        );
+    }
+
+    #[test]
+    fn restart_corrupt_rust_state_fails_closed_and_never_reseeds() {
+        let mut h = seedonce_harness_with_one_channel();
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        assert_eq!(h.seed_event_count(), 1);
+
+        // Corrupt the committed blob, then restart.
+        h.store_conn()
+            .execute("UPDATE rust_fee_state SET v2_state_json = '{corrupt'", [])
+            .expect("corrupt stored state");
+        h.restart();
+        let outcome = h.run_cycle();
+        assert_eq!(
+            outcome,
+            CycleOutcome::SkippedStateUnavailable,
+            "{outcome:?}"
+        );
+        assert!(
+            h.state().fee_states.is_empty(),
+            "fail-closed: no state hydrated from corruption"
+        );
+        assert_eq!(
+            h.seed_event_count(),
+            1,
+            "a recorded generation must NEVER fall back to reseeding from Python \
+             (the Python row is still present and seedable -- refusing proves fail-closed)"
+        );
+
+        // Missing rows behind a recorded generation are equally corrupt.
+        h.store_conn()
+            .execute("DELETE FROM rust_fee_state", [])
+            .expect("drop state rows");
+        h.restart();
+        let outcome = h.run_cycle();
+        assert_eq!(
+            outcome,
+            CycleOutcome::SkippedStateUnavailable,
+            "{outcome:?}"
+        );
+        assert_eq!(h.seed_event_count(), 1, "still no reseed");
+    }
+
+    #[test]
+    fn restart_commit_failure_is_persistence_failed_and_generation_holds() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.fail_commits.store(true, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert_eq!(outcome, CycleOutcome::PersistenceFailed, "{outcome:?}");
+        assert_eq!(h.owner.persistence_failures(), 1, "red error counter");
+        assert_eq!(
+            fee_runway::load_latest_state(&h.store_conn())
+                .unwrap()
+                .generation,
+            0,
+            "a failed commit must not advance the generation"
+        );
+
+        // Recovery: the next cycle commits normally.
+        h.fail_commits.store(false, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(h.owner.persistence_failures(), 1, "counter holds");
+        assert_eq!(
+            fee_runway::load_latest_state(&h.store_conn())
+                .unwrap()
+                .generation,
+            1
+        );
+    }
+
+    /// 2026-07-23 gate-starvation lesson: in shadow-RehydratePerCycle the
+    /// hydrated last_update is Python's POST-decision flush and the T8b
+    /// pre-decision epoch differs; the decision gate consumes the T8b
+    /// epoch (commit 993632d). Under SeedOnce the two MUST coincide --
+    /// divergence means an epoch bug was reintroduced where the engagement
+    /// gate can no longer see it.
+    #[test]
+    fn seedonce_pre_decision_epoch_equals_owned_last_update() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.run_cycle(); // cycle 1: seeds + writes Rust-owned state
+        h.run_cycle(); // cycle 2: hydrates Rust's own state
+        let cached = h.state().skip_gate_prev.get("700x1x0").unwrap().last_update;
+        let owned = h.state().cycle_states.get("700x1x0").unwrap().last_update;
+        assert_eq!(cached, owned);
+    }
+
+    #[test]
+    fn restart_seed_refusal_records_event_and_stays_passive() {
+        let mut h = seedonce_harness_with_one_channel();
+        // Poison the Python snapshot with a from_dict raise class.
+        h.prod_conn()
+            .execute(
+                "UPDATE fee_strategy_state SET v2_state_json = ?1 WHERE channel_id = ?2",
+                rusqlite::params![
+                    r#"{"fee_state": {"algorithm_version": "dts_pid_v1", "thompson_state": {"_last_fee_min": "not-a-number"}}, "cycle_state": {}}"#,
+                    CHANNEL
+                ],
+            )
+            .expect("poison python blob");
+
+        let outcome = h.run_cycle();
+        assert_eq!(
+            outcome,
+            CycleOutcome::SkippedStateUnavailable,
+            "{outcome:?}"
+        );
+        assert!(h.state().fee_states.is_empty(), "passive-observer");
+
+        let conn = h.store_conn();
+        let event = fee_runway::latest_seed_event(&conn)
+            .unwrap()
+            .expect("refusal recorded in the Rust-owned store");
+        assert_eq!(event.outcome, "seed_refused");
+        assert_eq!(event.refused_channel.as_deref(), Some(CHANNEL));
+        assert!(
+            event
+                .refused_field
+                .as_deref()
+                .unwrap_or_default()
+                .contains("_last_fee_min"),
+            "{event:?}"
+        );
+        assert_eq!(
+            fee_runway::load_latest_state(&conn).unwrap().generation,
+            0,
+            "no generation from a refused seed"
+        );
+
+        // Subsequent cycles stay fail-closed WITHOUT spamming refusals.
+        let outcome = h.run_cycle();
+        assert_eq!(
+            outcome,
+            CycleOutcome::SkippedStateUnavailable,
+            "{outcome:?}"
+        );
+        assert_eq!(
+            h.seed_event_count(),
+            1,
+            "one refusal event, not one per cycle"
+        );
+    }
+
+    #[test]
+    fn restart_seed_once_without_store_fails_closed() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        seed_fee_strategy_row(&fx.db_path, "chan_kept");
+        let mut owner = owner_with_store(&fx, None);
+        let mut clock = || NOW;
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert_eq!(
+            outcome,
+            CycleOutcome::SkippedStateUnavailable,
+            "{outcome:?}"
+        );
+        assert!(
+            owner.state().fee_states.is_empty(),
+            "SeedOnce without a Rust-owned store must never hydrate"
+        );
+    }
+
+    #[test]
+    fn restart_rehydrate_per_cycle_never_touches_the_rust_store() {
+        // RehydratePerCycle remains available for strict replay / legacy
+        // dry-run: even WITH a store wired, it must neither seed nor
+        // commit -- Python stays the per-cycle source.
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        seed_fee_strategy_row(&fx.db_path, "chan_kept");
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let fail = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open(&store_path, fail);
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        );
+        let mut clock = || NOW;
+        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(fee_runway::load_latest_state(&conn).unwrap().generation, 0);
+        assert!(fee_runway::latest_seed_event(&conn).unwrap().is_none());
+        assert!(fee_runway::latest_restart_marker(&conn).unwrap().is_none());
+    }
 }

@@ -41,7 +41,7 @@ use std::collections::HashSet;
 
 use crate::pid::{self, PidState};
 use crate::pyjson::OValue;
-use crate::thompson::serde::{gts_from_dict, gts_to_dict};
+use crate::thompson::serde::{gts_from_dict, gts_from_dict_would_raise, gts_to_dict};
 use crate::thompson::{
     CtxPosterior, GaussianThompsonState, Observation, EXPLORATION_BOOST_MAX, EXPLORATION_BOOST_MIN,
     MAX_BIAS_NUDGES, WEIGHT_SCHEME,
@@ -709,6 +709,51 @@ const FEE_STATE_KNOWN_VERSIONS: &[&str] = &["thompson_aimd_v1", "dts_pid_v1"];
 /// net that discards whatever `thompson_state` was persisted and starts
 /// from a fresh [`GaussianThompsonState::default`] — it must NOT be loaded
 /// via [`gts_from_dict`] in that case, even though a value is present.
+/// One field where the one-time SeedOnce import would diverge from Python
+/// (stateful-shadow Task 5 / revision plan Task R6). `field` is the dotted
+/// path inside the fee-state payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedParityViolation {
+    pub field: String,
+    pub detail: String,
+}
+
+/// Fail-closed check for the one-time seed import: would loading this
+/// envelope through Python's own `from_v2_dict`/`from_dict` raise (or
+/// silently diverge from the Rust parity path)? Mirrors `from_v2_dict`'s
+/// gate (py 2174-2183): `from_dict` runs only under a KNOWN
+/// `algorithm_version`, and only then can its raise classes trigger; a
+/// PRESENT but non-dict `thompson_state` raises inside `from_dict`'s very
+/// first `d.get` (`AttributeError`).
+pub fn seed_parity_violation(env: &V2StateEnvelope) -> Option<SeedParityViolation> {
+    let d = env.fee_state.as_ovalue();
+    let known_version = d
+        .get("algorithm_version")
+        .and_then(OValue::as_str)
+        .map(|v| FEE_STATE_KNOWN_VERSIONS.contains(&v))
+        .unwrap_or(false);
+    if !known_version {
+        // Migration path: Python builds a FRESH GaussianThompsonState and
+        // never calls from_dict -- nothing to raise, and the Rust path does
+        // the same.
+        return None;
+    }
+    match d.get("thompson_state") {
+        // Absent key: from_dict({}) -- all defaults, no raise.
+        None => None,
+        Some(ts @ OValue::Obj(_)) => {
+            gts_from_dict_would_raise(ts).map(|raise| SeedParityViolation {
+                field: format!("thompson_state.{}", raise.field),
+                detail: raise.detail,
+            })
+        }
+        Some(_) => Some(SeedParityViolation {
+            field: "thompson_state".to_string(),
+            detail: "not a dict: from_dict's d.get(...) raises AttributeError".to_string(),
+        }),
+    }
+}
+
 pub fn load_fee_state(env: &V2StateEnvelope, row: &FeeStrategyRow) -> ChannelFeeState {
     let d = env.fee_state.as_ovalue();
     let empty = OValue::obj(vec![]);

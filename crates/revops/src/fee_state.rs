@@ -46,6 +46,7 @@ use revops_fees::pyjson::{dumps_python, OValue};
 use revops_fees::pyrand::DecisionInputError;
 use revops_fees::state_store::{
     fee_state_to_v2_dict, load_cycle_state, load_fee_state, parse_v2_blob, read_fee_strategy_rows,
+    FeeStrategyRow,
 };
 
 /// Default journal file name under the dry-run journal directory.
@@ -63,10 +64,17 @@ pub const STATE_JOURNAL_FILE_NAME: &str = "fee_dryrun_state.jsonl";
 /// (or was never persisted) does not linger as stale in-memory state.
 pub fn rehydrate(state: &mut ControllerState, conn: &rusqlite::Connection) {
     let rows = read_fee_strategy_rows(conn);
+    hydrate_from_strategy_rows(state, &rows);
+}
+
+/// The body of [`rehydrate`], factored so the SeedOnce one-time import
+/// ([`seed_once_from_python`]) can hydrate from rows it has ALREADY read
+/// (and strictly validated) without a second production-DB read.
+fn hydrate_from_strategy_rows(state: &mut ControllerState, rows: &[FeeStrategyRow]) {
     let mut cycle_states = std::collections::BTreeMap::new();
     let mut fee_states = std::collections::BTreeMap::new();
 
-    for row in &rows {
+    for row in rows {
         let env = parse_v2_blob(&row.v2_state_json, row);
         let fee_state = load_fee_state(&env, row);
         let cycle_state = load_cycle_state(&env, row);
@@ -102,6 +110,250 @@ pub fn rehydrate(state: &mut ControllerState, conn: &rusqlite::Connection) {
 
     state.cycle_states = cycle_states;
     state.fee_states = fee_states;
+}
+
+// ---------------------------------------------------------------------------
+// Restart-persistent SeedOnce (stateful-shadow Task 5, amendments R5/R6)
+// ---------------------------------------------------------------------------
+
+/// Where a `SeedOnce` scheduler's state came from at startup (Task 5 step
+/// 2). Once a Rust generation exists, Python is NEVER an autonomous-state
+/// source again -- `PythonSeed` can only ever happen with an empty
+/// Rust-owned store (generation 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydrationSource {
+    /// One-time cold-start import from Python's `fee_strategy_state`
+    /// snapshot (read-only), through the exact `from_dict` parity path
+    /// with the fail-closed refusal rules of [`seed_once_from_python`].
+    PythonSeed,
+    /// Restart: hydrated from the Rust-owned store's recorded generation.
+    RustGeneration(u64),
+}
+
+impl HydrationSource {
+    /// The `rust_fee_restart_markers.hydration_source` column encoding.
+    pub fn label(&self) -> String {
+        match self {
+            HydrationSource::PythonSeed => "python_seed".to_string(),
+            HydrationSource::RustGeneration(generation) => {
+                format!("rust_generation:{generation}")
+            }
+        }
+    }
+}
+
+/// Hydrate `ControllerState` from Rust-OWNED [`FeeStateRow`]s (a restart
+/// under `SeedOnce`). Unlike [`rehydrate`] over Python rows, this is
+/// STRICT: Rust wrote these envelopes itself ([`serialize_state_envelope`]),
+/// so an unparseable blob or a missing `fee_state`/`cycle_state` key is
+/// corruption, not legacy drift -- the whole hydration fails closed
+/// (`Err`, state untouched) rather than silently defaulting any channel.
+///
+/// On success the skip-gate epoch caches (`skip_gate_prev`/`skip_gate_seen`)
+/// are set to the hydrated epochs: under SeedOnce Rust owns the state, so
+/// the pre-decision epoch the gate consumes IS the owned `last_update`
+/// (amendment R5) -- there is no Python post-decision flush to correct for.
+pub fn rehydrate_from_rows(
+    state: &mut ControllerState,
+    rows: &[revops_db::fee_runway::FeeStateRow],
+) -> Result<(), DecisionInputError> {
+    use revops_fees::pyjson::parse;
+
+    // Validate EVERY row before touching `state` (no partial hydration).
+    let mut strategy_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let parsed = parse(&row.v2_state_json).map_err(|e| {
+            DecisionInputError::new(format!(
+                "corrupt Rust-owned state row for channel {}: {e}",
+                row.channel_id
+            ))
+        })?;
+        let has_envelope_keys = matches!(parsed.get("fee_state"), Some(v) if v.as_obj().is_some())
+            && matches!(parsed.get("cycle_state"), Some(v) if v.as_obj().is_some());
+        if !has_envelope_keys {
+            return Err(DecisionInputError::new(format!(
+                "corrupt Rust-owned state row for channel {}: missing fee_state/cycle_state \
+                 envelope keys Rust always writes",
+                row.channel_id
+            )));
+        }
+        strategy_rows.push(FeeStrategyRow {
+            channel_id: row.channel_id.clone(),
+            last_update: row.last_update,
+            v2_state_json: row.v2_state_json.clone(),
+            ..FeeStrategyRow::default()
+        });
+    }
+
+    hydrate_from_strategy_rows(state, &strategy_rows);
+    set_skip_gates_to_owned(state);
+    Ok(())
+}
+
+/// Rust owns the state: pre-decision epoch caches == owned epochs
+/// (amendment R5). Called after every SeedOnce hydration and at the top of
+/// every SeedOnce cycle by the scheduler.
+pub fn set_skip_gates_to_owned(state: &mut ControllerState) {
+    let epochs: std::collections::BTreeMap<String, SkipGateEpoch> = state
+        .cycle_states
+        .iter()
+        .map(|(id, c)| {
+            (
+                id.clone(),
+                SkipGateEpoch {
+                    last_update: c.last_update,
+                    is_sleeping: c.is_sleeping,
+                },
+            )
+        })
+        .collect();
+    state.skip_gate_seen = epochs.clone();
+    state.skip_gate_prev = epochs;
+}
+
+/// sha256 (hex) of the canonical seed-payload serialization: rows sorted
+/// by `channel_id`, each contributing `channel_id`, `v2_state_json`, and
+/// `last_update` separated by newlines. Recorded in the seed event's
+/// provenance so a later audit can prove exactly what was imported.
+pub fn seed_payload_sha256(rows: &[FeeStrategyRow]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&FeeStrategyRow> = rows.iter().collect();
+    sorted.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+    let mut hasher = Sha256::new();
+    for row in sorted {
+        hasher.update(row.channel_id.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(row.v2_state_json.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(row.last_update.to_string().as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// What the one-time seed attempt produced (Task R6): either the state was
+/// hydrated and a `seeded` provenance event should be recorded, or the
+/// WHOLE snapshot was refused (state untouched) and a `seed_refused` event
+/// should be recorded. There is no partial-seed variant on purpose.
+#[derive(Debug)]
+pub enum SeedOutcome {
+    Seeded(revops_db::fee_runway::FeeSeedEventRow),
+    Refused(revops_db::fee_runway::FeeSeedEventRow),
+}
+
+/// The one-time cold-start seed from Python's `fee_strategy_state`
+/// (READ-ONLY -- `conn` is the per-cycle evidence snapshot's pinned
+/// read-only connection; nothing here writes anywhere).
+///
+/// Fail-closed rule (revision plan Task R6): every row is checked through
+/// the EXACT `from_dict` parity classes
+/// ([`revops_fees::state_store::seed_parity_violation`]) BEFORE any state
+/// is touched. Any field where Python's own `from_dict` would raise
+/// (non-numeric `_last_fee_min`, string rows inside `posterior_precision`,
+/// dict entries in `posterior_bias`, ...) refuses the WHOLE seed: the
+/// offending channel+field are logged and returned in the `seed_refused`
+/// event row, and the controller state is left untouched -- no partial
+/// seed, no silent fresh-state fallback.
+pub fn seed_once_from_python(
+    state: &mut ControllerState,
+    conn: &rusqlite::Connection,
+    source_db_path: &str,
+    now: i64,
+    source_commit: &str,
+) -> SeedOutcome {
+    use revops_db::fee_runway::FeeSeedEventRow;
+    use revops_fees::state_store::seed_parity_violation;
+
+    let rows = read_fee_strategy_rows(conn);
+    let base = FeeSeedEventRow {
+        seeded_at: now,
+        outcome: "seeded".to_string(),
+        source_db_path: source_db_path.to_string(),
+        source_max_last_update: rows.iter().map(|r| r.last_update).max().unwrap_or(0),
+        row_count: rows.len() as i64,
+        payload_sha256: seed_payload_sha256(&rows),
+        source_commit: source_commit.to_string(),
+        refused_channel: None,
+        refused_field: None,
+        detail: None,
+    };
+
+    for row in &rows {
+        let env = parse_v2_blob(&row.v2_state_json, row);
+        if let Some(violation) = seed_parity_violation(&env) {
+            eprintln!(
+                "revops: SEED REFUSED (fail closed, staying passive-observer): channel {} \
+                 field {}: {} -- no partial seed, no fresh-state fallback",
+                row.channel_id, violation.field, violation.detail
+            );
+            return SeedOutcome::Refused(FeeSeedEventRow {
+                outcome: "seed_refused".to_string(),
+                refused_channel: Some(row.channel_id.clone()),
+                refused_field: Some(violation.field),
+                detail: Some(violation.detail),
+                ..base
+            });
+        }
+    }
+
+    hydrate_from_strategy_rows(state, &rows);
+    set_skip_gates_to_owned(state);
+    SeedOutcome::Seeded(base)
+}
+
+/// The Rust-owned state store as the `SeedOnce` scheduler sees it, from
+/// its plain `std::thread` (hence the blocking shape). The production
+/// implementation is [`revops_db::owner::ObserverHandle`] (the observer-db
+/// single-owner actor: writable, Rust-owned, structurally never the
+/// production DB); tests substitute a direct-connection double that calls
+/// the same `revops_db::fee_runway` functions.
+pub trait RunwayStateStore: Send {
+    fn load_latest_state(&self) -> anyhow::Result<revops_db::fee_runway::FeeStateSnapshot>;
+    fn commit_fee_cycle(
+        &self,
+        commit: revops_db::fee_runway::FeeCycleCommit,
+    ) -> anyhow::Result<u64>;
+    fn record_seed_event(
+        &self,
+        event: revops_db::fee_runway::FeeSeedEventRow,
+    ) -> anyhow::Result<i64>;
+    fn record_restart_marker(
+        &self,
+        marker: revops_db::fee_runway::FeeRestartMarkerRow,
+    ) -> anyhow::Result<i64>;
+}
+
+impl RunwayStateStore for revops_db::owner::ObserverHandle {
+    fn load_latest_state(&self) -> anyhow::Result<revops_db::fee_runway::FeeStateSnapshot> {
+        self.blocking_load_latest_fee_state()
+    }
+
+    fn commit_fee_cycle(
+        &self,
+        commit: revops_db::fee_runway::FeeCycleCommit,
+    ) -> anyhow::Result<u64> {
+        self.blocking_commit_fee_cycle(commit)
+    }
+
+    fn record_seed_event(
+        &self,
+        event: revops_db::fee_runway::FeeSeedEventRow,
+    ) -> anyhow::Result<i64> {
+        self.blocking_record_fee_seed_event(event)
+    }
+
+    fn record_restart_marker(
+        &self,
+        marker: revops_db::fee_runway::FeeRestartMarkerRow,
+    ) -> anyhow::Result<i64> {
+        self.blocking_record_fee_restart_marker(marker)
+    }
 }
 
 /// One flushed channel's would-be persisted envelope, in the same
@@ -140,6 +392,15 @@ fn state_envelope(cycle: &ChannelCycleState, fee: &ChannelFeeState) -> OValue {
                 .unwrap_or(OValue::Null),
         ),
     ])
+}
+
+/// The serialized envelope string a Rust-owned `rust_fee_state.v2_state_json`
+/// column carries -- [`state_envelope`] rendered through `dumps_python`,
+/// i.e. exactly what [`JournalStateSink`] writes per row. The SeedOnce
+/// commit path uses this to build [`revops_db::fee_runway::FeeStateRow`]s,
+/// and [`rehydrate_from_rows`] requires its envelope keys on the way back.
+pub fn serialize_state_envelope(cycle: &ChannelCycleState, fee: &ChannelFeeState) -> String {
+    dumps_python(&state_envelope(cycle, fee))
 }
 
 /// `StateSink` that never touches the production DB: serializes each

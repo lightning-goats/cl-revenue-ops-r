@@ -133,21 +133,31 @@ use std::time::Duration;
 
 use cln_plugin::options::Value as OptValue;
 use revops_db::actor::DbHandle;
+use revops_db::fee_runway::{
+    FeeCycleCommit, FeeRestartMarkerRow, GovernorAuditRow, PreparedFeeActionRow,
+    ShadowCycleOutcomeRow,
+};
 use revops_fees::cycle::{
     handle_policy_change, maybe_wake_for_vegas_spike, run_fee_cycle, wake_all_sleeping_channels,
     ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot, FixedDecisionClock,
     StateSink,
 };
-use revops_fees::execution::{GovernedFeeAuthorizer, PureFeeExecutor};
-use revops_fees::journal::Journal;
+use revops_fees::execution::{
+    FeeExecutor, GovernedFeeAuthorizer, PureFeeExecutor, RecordingFeeExecutor,
+};
+use revops_fees::journal::{FeeDecision, Journal};
 use revops_fees::profiles::fee_profile;
+use revops_fees::pyjson::OValue as PyOValue;
 use revops_fees::pyrand::PyRandom;
 
 use crate::config_resolve::PythonOptionCache;
 use crate::fee_config;
 use crate::fee_evidence::{build_evidence_snapshot, prefetch_rpc, RpcPrefetch};
 use crate::fee_governor::GovernorWiring;
-use crate::fee_state::{rehydrate, JournalStateSink};
+use crate::fee_state::{
+    rehydrate, rehydrate_from_rows, seed_once_from_python, serialize_state_envelope,
+    set_skip_gates_to_owned, HydrationSource, JournalStateSink, RunwayStateStore, SeedOutcome,
+};
 
 /// T6's fixed tick phase offset from plugin start, kept as the
 /// [`TriggerMode::FixedInterval`] default for cutover. During the dry-run
@@ -164,6 +174,54 @@ pub const DEFAULT_FLUSH_POLL_SECS: u64 = 30;
 /// the flush transaction and Python's immediate cycle-tail writes
 /// (`_prune_stale_states`, decision-summary bookkeeping) go quiescent.
 pub const DEFAULT_FLUSH_SETTLE_SECS: u64 = 30;
+
+/// The binary's source-commit identity for provenance rows (seed events,
+/// cycle commits, restart markers). Release builds inject the real commit
+/// via the `REVOPS_SOURCE_COMMIT` build-time env var; a plain `cargo
+/// build` falls back to the crate version so the column is never empty.
+pub fn source_commit() -> &'static str {
+    match option_env!("REVOPS_SOURCE_COMMIT") {
+        Some(commit) if !commit.is_empty() => commit,
+        _ => concat!("cargo:", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// sha256 (hex) of the running binary, computed once per process (the
+/// `rust_fee_cycles.binary_sha256` identity column). `"unavailable"` when
+/// the executable cannot be read -- identity degrades loudly-typed, never
+/// panics.
+fn binary_sha256() -> &'static str {
+    use std::sync::OnceLock;
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let bytes = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::read(path).ok());
+        match bytes {
+            Some(bytes) => {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(&bytes);
+                let mut hex = String::with_capacity(64);
+                for byte in digest {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                hex
+            }
+            None => "unavailable".to_string(),
+        }
+    })
+}
+
+/// Undo an in-memory hydration that could not be fully recorded (seed
+/// provenance / restart marker write failure): back to the pre-hydration
+/// empty maps so the next cycle's retry starts clean.
+fn clear_hydrated_state(state: &mut ControllerState) {
+    state.cycle_states.clear();
+    state.fee_states.clear();
+    state.skip_gate_prev.clear();
+    state.skip_gate_seen.clear();
+}
 
 /// When a cycle runs (T6b's decision enum; see the module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +523,15 @@ pub enum CycleOutcome {
     /// A replayable clock, entropy, or authorizer input failed. The cycle
     /// stops before journaling any partial decision set.
     SkippedDecisionInput,
+    /// `SeedOnce` fail-closed (Task 5): the Rust-owned state was
+    /// unavailable -- no store configured, the store load failed, a
+    /// recorded generation's rows were corrupt/missing (NEVER reseeded
+    /// from Python), or the one-time seed was refused. No cycle runs.
+    SkippedStateUnavailable,
+    /// `SeedOnce`: the cycle ran but the atomic Rust-owned commit failed.
+    /// The generation did not advance and the red
+    /// [`CycleOwner::persistence_failures`] counter was incremented.
+    PersistenceFailed,
 }
 
 /// The single owner of `ControllerState` + the ONE long-lived `PyRandom`.
@@ -479,6 +546,21 @@ pub struct CycleOwner {
     lifecycle: StateLifecycle,
     /// `SeedOnce` only: whether the one-time hydration has happened.
     hydrated_once: bool,
+    /// `SeedOnce` only (Task 5): the one-time seed was refused this
+    /// process lifetime -- every later cycle fails closed without
+    /// re-attempting (and re-recording) the refusal; a restart re-attempts
+    /// against the then-current snapshot.
+    seed_refused: bool,
+    /// The Rust-owned state store (Task 5). REQUIRED for `SeedOnce`
+    /// (cycles fail closed without it); ignored by `RehydratePerCycle`,
+    /// which never reads or writes Rust-owned state.
+    store: Option<Box<dyn RunwayStateStore>>,
+    /// Spawn-time clock read, recorded as the restart marker's startup
+    /// timestamp (distinct from the per-cycle clock reads).
+    spawn_now: i64,
+    /// Red error counter (Task 5 step 3): committed-cycle persistence
+    /// failures. Never reset.
+    persistence_failures: u64,
     db_path: PathBuf,
     /// `None` only if the journal dir could not be created -- logged
     /// loudly at construction; cycles still run (decisions are lost to
@@ -506,7 +588,11 @@ impl CycleOwner {
     /// Never panics: any IO failure degrades that one output channel with
     /// a loud stderr line, matching `JournalStateSink`/`GovernorWiring`'s
     /// log-and-continue posture.
-    pub fn new(cfg: &SchedulerConfig, seed_now: i64) -> CycleOwner {
+    pub fn new(
+        cfg: &SchedulerConfig,
+        seed_now: i64,
+        store: Option<Box<dyn RunwayStateStore>>,
+    ) -> CycleOwner {
         let journal = match Journal::open_dir(&cfg.journal_dir) {
             Ok(j) => Some(j),
             Err(e) => {
@@ -534,6 +620,10 @@ impl CycleOwner {
             rng: PyRandom::seed_from_u64(seed_now.max(0) as u64),
             lifecycle: cfg.lifecycle,
             hydrated_once: false,
+            seed_refused: false,
+            store,
+            spawn_now: seed_now,
+            persistence_failures: 0,
             db_path: cfg.db_path.clone(),
             journal,
             state_sink,
@@ -623,12 +713,30 @@ impl CycleOwner {
         // (4) State lifecycle (Design Note 1), over the snapshot's pinned
         // read-only connection -- hydration sees the exact same frozen DB
         // view as every other evidence read this cycle.
+        //
+        // Task 5: `SeedOnce` is restart-persistent. Rust-owned state is
+        // queried FIRST; Python is consulted only when Rust reports no
+        // prior generation, and once a Rust generation exists Python is
+        // never an autonomous-state source again. Every failure path is
+        // fail-closed (no cycle, no reseed).
         match self.lifecycle {
             StateLifecycle::RehydratePerCycle => rehydrate(&mut self.state, snapshot.conn()),
             StateLifecycle::SeedOnce => {
                 if !self.hydrated_once {
-                    rehydrate(&mut self.state, snapshot.conn());
+                    if let Err(reason) = self.seed_once_hydrate(snapshot.conn(), now) {
+                        eprintln!(
+                            "revops: FEE CYCLE FAIL-CLOSED (SeedOnce state unavailable): {reason}"
+                        );
+                        return CycleOutcome::SkippedStateUnavailable;
+                    }
                     self.hydrated_once = true;
+                } else {
+                    // Top-of-cycle epoch refresh: under SeedOnce, Rust
+                    // owns the state, so the T8b pre-decision epoch the
+                    // skip gate consumes IS the owned live epoch (which
+                    // also folds in any out-of-cycle wake since the last
+                    // cycle) -- exactly Python's own pre-decision read.
+                    set_skip_gates_to_owned(&mut self.state);
                 }
             }
         }
@@ -642,18 +750,36 @@ impl CycleOwner {
         // (7) would double-write every line, and relying on the internal
         // append alone would lose failures the window contract requires
         // logged loudly. Step (7) below is the single, loud append.
+        //
+        // Task 5: `SeedOnce` swaps in a capability-free
+        // `RecordingFeeExecutor` (it owns no socket or broadcaster) so the
+        // cycle's would-broadcast prepared intents can be drained into the
+        // atomic Rust-owned commit; the state JSONL sink is bypassed --
+        // the transactional store commit below IS the state persistence.
         let governed = self.governor.governed_deps(&prepared.cfg);
         let authorizer = GovernedFeeAuthorizer::new(&governed);
-        let executor = PureFeeExecutor;
+        let pure_executor = PureFeeExecutor;
+        let recording_executor =
+            matches!(self.lifecycle, StateLifecycle::SeedOnce).then(RecordingFeeExecutor::default);
+        let executor: &dyn FeeExecutor = match &recording_executor {
+            Some(recording) => recording,
+            None => &pure_executor,
+        };
+        let state_sink = match self.lifecycle {
+            StateLifecycle::RehydratePerCycle => {
+                self.state_sink.as_ref().map(|s| s as &dyn StateSink)
+            }
+            StateLifecycle::SeedOnce => None,
+        };
         let mut deps = CycleDeps {
             evidence: &snapshot,
             cfg: &prepared.cfg,
             rng: &mut self.rng,
             clock: decision_clock,
             authorizer: Some(&authorizer),
-            executor: &executor,
+            executor,
             journal: None,
-            state_sink: self.state_sink.as_ref().map(|s| s as &dyn StateSink),
+            state_sink,
             min_competitors,
         };
         let decisions = match run_fee_cycle(&mut self.state, &mut deps) {
@@ -663,6 +789,16 @@ impl CycleOwner {
                 return CycleOutcome::SkippedDecisionInput;
             }
         };
+
+        // Task 5 / amendment R5: end-of-cycle epoch refresh. The owned
+        // post-cycle epochs are the NEXT cycle's pre-decision epochs, and
+        // the invariant `skip_gate_prev == owned cycle.last_update` after
+        // every SeedOnce cycle is exactly what the epoch-identity test
+        // pins (a divergence would mean the RehydratePerCycle-era
+        // post-decision-epoch bug was reintroduced).
+        if matches!(self.lifecycle, StateLifecycle::SeedOnce) {
+            set_skip_gates_to_owned(&mut self.state);
+        }
 
         // (7) The one journal append -- loud on failure, never fatal.
         if let Some(journal) = &self.journal {
@@ -676,8 +812,253 @@ impl CycleOwner {
             }
         }
 
+        // (8) Task 5 step 3: `SeedOnce` commits state + the full audit
+        // batch atomically after each successful cycle. A commit error is
+        // `PersistenceFailed`: the generation does not advance, the red
+        // counter increments, and the next cycle continues from in-memory
+        // state (a restart would resume from the last COMMITTED
+        // generation, discarding this cycle -- recorded divergence, never
+        // silent).
+        if matches!(self.lifecycle, StateLifecycle::SeedOnce) {
+            let intents = recording_executor
+                .as_ref()
+                .map(|r| r.recorded_actions())
+                .unwrap_or_default();
+            let commit = self.build_cycle_commit(now, &decisions, &intents);
+            let store = self
+                .store
+                .as_ref()
+                .expect("SeedOnce hydration guarantees a store");
+            if let Err(e) = store.commit_fee_cycle(commit) {
+                self.persistence_failures += 1;
+                eprintln!(
+                    "revops: FEE CYCLE PERSISTENCE FAILED (failure #{}): {e:#}; generation NOT \
+                     advanced; this cycle's state evolution is uncommitted (a restart resumes \
+                     from the last committed generation)",
+                    self.persistence_failures
+                );
+                return CycleOutcome::PersistenceFailed;
+            }
+        }
+
         CycleOutcome::Ran {
             decisions: decisions.len(),
+        }
+    }
+
+    /// Red error counter: SeedOnce cycles whose atomic commit failed.
+    pub fn persistence_failures(&self) -> u64 {
+        self.persistence_failures
+    }
+
+    /// The one-time `SeedOnce` hydration decision (Task 5 step 2):
+    /// Rust-owned state first; Python only on a genuinely empty store;
+    /// everything else fails closed with a loud reason.
+    fn seed_once_hydrate(
+        &mut self,
+        prod_conn: &rusqlite::Connection,
+        now: i64,
+    ) -> Result<(), String> {
+        let Some(store) = self.store.as_ref() else {
+            return Err(
+                "no Rust-owned state store configured (SeedOnce requires one); \
+                 refusing to run autonomous cycles"
+                    .to_string(),
+            );
+        };
+        if self.seed_refused {
+            return Err(
+                "the one-time seed was refused earlier this process lifetime; staying \
+                 passive-observer (restart to re-attempt against the current snapshot)"
+                    .to_string(),
+            );
+        }
+
+        let stored = store
+            .load_latest_state()
+            .map_err(|e| format!("Rust-owned state load failed: {e:#}"))?;
+        let source = if stored.generation > 0 {
+            if stored.rows.is_empty() {
+                return Err(format!(
+                    "generation {} is recorded but no state rows exist: corrupt Rust-owned \
+                     store; refusing to reseed from Python",
+                    stored.generation
+                ));
+            }
+            rehydrate_from_rows(&mut self.state, &stored.rows).map_err(|e| {
+                format!(
+                    "corrupt Rust-owned state at generation {}: {e}; refusing to reseed \
+                     from Python",
+                    stored.generation
+                )
+            })?;
+            HydrationSource::RustGeneration(stored.generation)
+        } else {
+            if !stored.rows.is_empty() {
+                return Err(
+                    "state rows exist at generation 0: corrupt Rust-owned store".to_string()
+                );
+            }
+            let source_db_path = self.db_path.display().to_string();
+            match seed_once_from_python(
+                &mut self.state,
+                prod_conn,
+                &source_db_path,
+                now,
+                source_commit(),
+            ) {
+                SeedOutcome::Seeded(event) => {
+                    if let Err(e) = store.record_seed_event(event) {
+                        // Provenance is part of the seed contract: without
+                        // it the import didn't happen. Roll the hydration
+                        // back and retry next cycle (the seed is
+                        // deterministic over the snapshot).
+                        clear_hydrated_state(&mut self.state);
+                        return Err(format!(
+                            "seed provenance record failed: {e:#} (seed rolled back; will \
+                             retry next cycle)"
+                        ));
+                    }
+                    HydrationSource::PythonSeed
+                }
+                SeedOutcome::Refused(event) => {
+                    self.seed_refused = true;
+                    if let Err(e) = store.record_seed_event(event) {
+                        eprintln!(
+                            "revops: seed refusal could not be recorded in the Rust-owned \
+                             store: {e:#} (refusal still enforced in-process)"
+                        );
+                    }
+                    return Err(
+                        "the one-time seed was refused (see the SEED REFUSED log line); \
+                         staying passive-observer"
+                            .to_string(),
+                    );
+                }
+            }
+        };
+
+        // Task 5 step 4: the restart marker -- process identity, prior
+        // generation, hydration source, startup timestamp. A store that
+        // cannot record it could not commit the coming cycle either, so
+        // this too fails closed (hydration rolled back; retried next
+        // cycle -- both hydration paths are deterministic reads).
+        let marker = FeeRestartMarkerRow {
+            started_at: self.spawn_now,
+            process_id: std::process::id() as i64,
+            prior_generation: stored.generation as i64,
+            hydration_source: source.label(),
+            source_commit: source_commit().to_string(),
+        };
+        if let Err(e) = store.record_restart_marker(marker) {
+            clear_hydrated_state(&mut self.state);
+            return Err(format!("restart marker record failed: {e:#}"));
+        }
+        Ok(())
+    }
+
+    /// Build the atomic per-cycle commit (Task 5 step 3): every channel's
+    /// CURRENT owned state (all channels, not just cycle-dirty ones, so a
+    /// restart hydrates the complete set), the drained would-broadcast
+    /// intents, the governor traces, and one terminal outcome row per
+    /// decision. `ledger` rows stay empty here: `EconLedger` events keep
+    /// their own Rust-owned dry-run ledger DB (`GovernorWiring`), which is
+    /// not part of the per-cycle transactional batch.
+    fn build_cycle_commit(
+        &self,
+        now: i64,
+        decisions: &[FeeDecision],
+        intents: &[revops_fees::execution::PreparedFeeAction],
+    ) -> FeeCycleCommit {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Unique cycle identity even under a frozen test clock or a
+        // same-second restart: wall time + pid + a process-wide sequence.
+        static COMMIT_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = COMMIT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let cycle_id = format!("rust-fee-{now}-{}-{seq}", std::process::id());
+
+        let mut state_rows = Vec::with_capacity(self.state.cycle_states.len());
+        for (channel_id, cycle) in &self.state.cycle_states {
+            let Some(fee) = self.state.fee_states.get(channel_id) else {
+                eprintln!(
+                    "revops: channel {channel_id} has cycle state but no fee state; \
+                     excluded from this commit"
+                );
+                continue;
+            };
+            state_rows.push(revops_db::fee_runway::FeeStateRow {
+                channel_id: channel_id.clone(),
+                v2_state_json: serialize_state_envelope(cycle, fee),
+                last_update: cycle.last_update,
+            });
+        }
+
+        let governor: Vec<GovernorAuditRow> = decisions
+            .iter()
+            .filter_map(|d| {
+                d.governed.as_ref().map(|g| GovernorAuditRow {
+                    channel_id: d.channel_id.clone(),
+                    authorized: g.authorized,
+                    reason_code: g.reason_code.clone(),
+                    intent_id: g.intent_id.clone(),
+                    idempotency_key: g.idempotency_key.clone(),
+                    at: d.at,
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<ShadowCycleOutcomeRow> = decisions
+            .iter()
+            .map(|d| ShadowCycleOutcomeRow {
+                cycle_ts: now,
+                channel_id: d.channel_id.clone(),
+                would_broadcast: d.would_broadcast,
+                has_algorithm_values: !matches!(d.algorithm_values, PyOValue::Null),
+                disposition: d
+                    .trace
+                    .get("disposition")
+                    .and_then(PyOValue::as_str)
+                    .map(str::to_string),
+                skip_gate_comparable: !matches!(
+                    d.trace.get("skip_gate_comparable"),
+                    Some(PyOValue::Bool(false))
+                ),
+            })
+            .collect();
+
+        let requests: Vec<PreparedFeeActionRow> = intents
+            .iter()
+            .map(|action| {
+                let idempotency_key = decisions
+                    .iter()
+                    .find(|d| d.channel_id == action.request.id)
+                    .and_then(|d| d.governed.as_ref())
+                    .map(|g| g.idempotency_key.clone());
+                PreparedFeeActionRow {
+                    channel_id: action.request.id.clone(),
+                    idempotency_key,
+                    old_fee_ppm: action.old_fee_ppm,
+                    new_fee_ppm: action.decision.clamped_fee_ppm,
+                    feebase_msat: action.expected_base_fee_msat,
+                    htlcmin_msat: action.request.htlcmin.map(|v| v as i64),
+                    htlcmax_msat: action.request.htlcmax.map(|v| v as i64),
+                    message: action.decision.message.clone(),
+                    at: now,
+                }
+            })
+            .collect();
+
+        FeeCycleCommit {
+            cycle_id,
+            started_at: now,
+            completed_at: now,
+            source_commit: source_commit().to_string(),
+            binary_sha256: binary_sha256().to_string(),
+            state_rows,
+            requests,
+            governor,
+            ledger: Vec::new(),
+            outcomes,
         }
     }
 
@@ -777,8 +1158,9 @@ pub fn spawn(
     cfg: SchedulerConfig,
     db_handle: Option<DbHandle>,
     python_options: PythonOptionCache,
+    store: Option<Box<dyn RunwayStateStore>>,
 ) -> anyhow::Result<SchedulerHandle> {
-    spawn_with_thread_spawner(cfg, db_handle, python_options, |name, body| {
+    spawn_with_thread_spawner(cfg, db_handle, python_options, store, |name, body| {
         std::thread::Builder::new()
             .name(name.to_string())
             .spawn(body)
@@ -793,6 +1175,7 @@ pub fn spawn_with_thread_spawner<S>(
     cfg: SchedulerConfig,
     db_handle: Option<DbHandle>,
     python_options: PythonOptionCache,
+    store: Option<Box<dyn RunwayStateStore>>,
     thread_spawner: S,
 ) -> anyhow::Result<SchedulerHandle>
 where
@@ -811,7 +1194,7 @@ where
     // caller gets `Err` instead of a dead-letter handle.
     let owner_wake = wake_tx.clone();
     let owner_body: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
-        let mut owner = CycleOwner::new(&cfg, crate::now_unix());
+        let mut owner = CycleOwner::new(&cfg, crate::now_unix(), store);
         let mut clock = crate::now_unix;
         while let Ok(msg) = rx.recv() {
             match msg {
@@ -1150,6 +1533,7 @@ mod decision_clock_tests {
                 trigger: TriggerMode::default(),
             },
             42,
+            None,
         );
         let prepared = PreparedCycle {
             cfg: FeeCfgSnapshot {

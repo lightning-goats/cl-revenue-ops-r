@@ -18,8 +18,8 @@ revops-econ = { path = "../revops-econ" }
 revops-fees = { path = "../revops-fees" }
 revops-rpc = { path = "../revops-rpc" }
 rusqlite.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
