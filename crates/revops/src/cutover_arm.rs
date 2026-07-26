@@ -163,6 +163,16 @@ pub enum CutoverArmDenyReason {
     Expired,
     /// `nonce` is the empty string.
     EmptyNonce,
+    /// `nonce` is non-empty but is not a bare, safe filesystem path
+    /// component: it contains a character outside `[A-Za-z0-9_-]`, or it
+    /// is longer than 64 characters. Checked -- and denied -- BEFORE the
+    /// nonce is ever used to build a filesystem path (`consumed_dir.join`
+    /// in [`consume`]), because an unconstrained nonce (an absolute path,
+    /// a `../` traversal segment, or an oversized value) could otherwise
+    /// make the one-time-consumption rename land outside `consumed_dir`
+    /// entirely, scattering or overwriting things the single-use replay
+    /// ledger depends on. Carries the offending value found.
+    InvalidNonce(String),
     /// A DIFFERENT arm (any source path) already consumed this exact
     /// nonce. The original file is left untouched -- the reuse is detected
     /// entirely inside the atomic consumption step, before any rename of
@@ -192,6 +202,7 @@ impl CutoverArmDenyReason {
             Self::NotYetValid => "not_yet_valid",
             Self::Expired => "expired",
             Self::EmptyNonce => "empty_nonce",
+            Self::InvalidNonce(_) => "invalid_nonce",
             Self::ReusedNonce => "reused_nonce",
             Self::ConsumeFailed(_) => "consume_failed",
         }
@@ -209,7 +220,8 @@ impl std::fmt::Display for CutoverArmDenyReason {
             | Self::WrongNode(found)
             | Self::WrongSubsystem(found)
             | Self::WrongCommit(found)
-            | Self::WrongBinaryHash(found) => write!(f, "{}: {found}", self.code()),
+            | Self::WrongBinaryHash(found)
+            | Self::InvalidNonce(found) => write!(f, "{}: {found}", self.code()),
             _ => write!(f, "{}", self.code()),
         }
     }
@@ -220,16 +232,74 @@ impl std::error::Error for CutoverArmDenyReason {}
 /// The capability that one arm was validated and atomically consumed in
 /// THIS process session. See the module doc's "One-session consumption"
 /// for why this deliberately carries no `Serialize`/`Deserialize` impl.
+///
+/// Every field is private and there is no public constructor other than
+/// [`validate_and_consume`] -- this is what makes the type an actual
+/// capability rather than a plain data bag: possessing a value of this
+/// type is proof that a real arm file was validated and atomically
+/// consumed in this process, because there is no other way to build one.
+/// If the fields were `pub`, any code anywhere could mint
+/// `LiveSessionArm { .. }` by hand and hand it to a caller expecting proof
+/// of a real cutover, defeating the whole point of the type. This is
+/// pinned by a `compile_fail` doctest below so a future edit that widens
+/// visibility is caught at documentation-test time, not just by code
+/// review.
+///
+/// ```compile_fail
+/// // Fields are private outside this module -- this must NOT compile.
+/// let forged = revops::cutover_arm::LiveSessionArm {
+///     node_id: "lnnode".to_string(),
+///     subsystem: "fees".to_string(),
+///     source_commit: "deadbeef".to_string(),
+///     binary_sha256: "0".repeat(64),
+///     nonce: "forged-nonce".to_string(),
+///     consumed_path: std::path::PathBuf::from("/tmp/forged"),
+/// };
+/// ```
 #[derive(Debug)]
 pub struct LiveSessionArm {
-    pub node_id: String,
-    pub subsystem: String,
-    pub source_commit: String,
-    pub binary_sha256: String,
-    pub nonce: String,
+    node_id: String,
+    subsystem: String,
+    source_commit: String,
+    binary_sha256: String,
+    nonce: String,
     /// Where the consumed arm now lives (`consumed_dir/<nonce>`), kept for
     /// audit logging -- never re-read to reconstruct authority.
-    pub consumed_path: PathBuf,
+    consumed_path: PathBuf,
+}
+
+impl LiveSessionArm {
+    /// The node identity the consumed arm was bound to.
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    /// The subsystem the consumed arm authorized (always
+    /// [`CUTOVER_SUBSYSTEM_FEES`] today).
+    pub fn subsystem(&self) -> &str {
+        &self.subsystem
+    }
+
+    /// The Rust source commit the consumed arm was bound to.
+    pub fn source_commit(&self) -> &str {
+        &self.source_commit
+    }
+
+    /// The running binary's SHA-256 the consumed arm was bound to.
+    pub fn binary_sha256(&self) -> &str {
+        &self.binary_sha256
+    }
+
+    /// The arm's unique, now-consumed nonce.
+    pub fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    /// Where the consumed arm now lives (`consumed_dir/<nonce>`) -- for
+    /// audit logging only, never re-read to reconstruct authority.
+    pub fn consumed_path(&self) -> &Path {
+        &self.consumed_path
+    }
 }
 
 /// SHA-256 (lowercase hex) of the CURRENTLY RUNNING executable's bytes,
@@ -302,7 +372,11 @@ pub fn validate_and_consume(
     if !metadata.is_file() {
         return Err(CutoverArmDenyReason::NotRegularFile);
     }
-    let mode = metadata.permissions().mode() & 0o777;
+    // Masked with `0o7777`, not `0o777`: setuid/setgid/sticky are real mode
+    // bits that a bare `0o777` mask would silently discard, letting e.g.
+    // `0o4600` (setuid + owner rw) coincidentally read as the required
+    // `0600`. Masking in the extra bits means they must be exactly absent.
+    let mode = metadata.permissions().mode() & 0o7777;
     if mode != REQUIRED_MODE {
         return Err(CutoverArmDenyReason::WrongMode(mode));
     }
@@ -361,6 +435,13 @@ fn validate_fields(
     if arm.nonce.is_empty() {
         return Err(CutoverArmDenyReason::EmptyNonce);
     }
+    // Gate the nonce's shape BEFORE it is ever used to build a filesystem
+    // path (`consume` joins it onto `consumed_dir` verbatim). An absolute
+    // path, a `../` traversal segment, or an oversized value must never
+    // reach that join.
+    if !is_safe_nonce(&arm.nonce) {
+        return Err(CutoverArmDenyReason::InvalidNonce(arm.nonce.clone()));
+    }
     // Activation is inclusive (`now == not_before` is valid); expiry is
     // exclusive (`now == expires_at` is already expired) -- a zero-width
     // valid window is never accidentally valid.
@@ -371,6 +452,21 @@ fn validate_fields(
         return Err(CutoverArmDenyReason::Expired);
     }
     Ok(())
+}
+
+/// A nonce is safe to use as a single filesystem path COMPONENT once
+/// joined onto `consumed_dir`: 1..=64 ASCII characters, each an
+/// alphanumeric, `_`, or `-`. This rules out `/` (so an absolute nonce or a
+/// `../` traversal segment can never be built), any other path separator,
+/// and unbounded length, without needing a platform-specific path parser --
+/// the charset alone makes `Path::join` behave exactly like appending a
+/// plain filename.
+fn is_safe_nonce(nonce: &str) -> bool {
+    !nonce.is_empty()
+        && nonce.len() <= 64
+        && nonce
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Rename `arm_path` to `consumed_dir/<nonce>` with `RENAME_NOREPLACE`, so

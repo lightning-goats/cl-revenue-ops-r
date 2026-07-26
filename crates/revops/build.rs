@@ -25,27 +25,42 @@
 //! (the release build pipeline staging the exact artifact to be deployed)
 //! wins outright — this script never overrides an externally supplied
 //! value, it only re-exports it so `option_env!` can see it.
+//!
+//! ## Deliberately NO `cargo:rerun-if-*` directives (tradeoff, pinned)
+//!
+//! This script emits no `cargo:rerun-if-changed` or
+//! `cargo:rerun-if-env-changed` directive at all. The moment a build
+//! script emits ANY such directive, cargo stops treating "always re-run"
+//! as the default and instead skips re-running the script unless one of
+//! the watched paths/env-vars actually changed. That is exactly wrong for
+//! a `-dirty` provenance stamp: editing a tracked source file after a
+//! clean build changes `git status --porcelain`'s output but touches none
+//! of the paths a plausible watch list would name (`.git/HEAD`,
+//! `packed-refs`, a specific ref file) until the NEXT commit or checkout,
+//! so a previously-clean build's stale `REVOPS_SOURCE_COMMIT` would keep
+//! being embedded into every following binary — silently claiming a clean
+//! commit for a binary that no longer matches it. Emitting no directives
+//! at all keeps cargo's un-opted-in default: this build script re-runs on
+//! EVERY build, so the provenance stamp can never go stale. The cost is
+//! literally running this script (a couple of `git` subprocess calls)
+//! once per build, which is trivial next to what "guaranteed-fresh
+//! provenance for a live-authority cutover gate" is worth.
 
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     if let Ok(pinned) = std::env::var("REVOPS_SOURCE_COMMIT") {
         if !pinned.is_empty() {
             println!("cargo:rustc-env=REVOPS_SOURCE_COMMIT={pinned}");
-            println!("cargo:rerun-if-env-changed=REVOPS_SOURCE_COMMIT");
             return;
         }
     }
-    println!("cargo:rerun-if-env-changed=REVOPS_SOURCE_COMMIT");
 
     let Some(commit) = run_git(&["rev-parse", "HEAD"]).filter(|s| !s.is_empty()) else {
         // No git checkout available (e.g. a source tarball build outside a
         // repo). Leave REVOPS_SOURCE_COMMIT unset -- `source_commit()`'s
         // `cargo:<version>` fallback is the reportable-but-never-matching
-        // placeholder described above. Re-run only if this script changes;
-        // there is no git state to watch.
-        println!("cargo:rerun-if-changed=build.rs");
+        // placeholder described above.
         return;
     };
 
@@ -62,8 +77,6 @@ fn main() {
         commit
     };
     println!("cargo:rustc-env=REVOPS_SOURCE_COMMIT={value}");
-
-    watch_git_refs();
 }
 
 fn run_git(args: &[&str]) -> Option<String> {
@@ -74,30 +87,4 @@ fn run_git(args: &[&str]) -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .map(|s| s.trim().to_string())
-}
-
-/// Best-effort rebuild triggers so a later commit or branch switch is
-/// picked up without a full `cargo clean`. Missing paths are harmless --
-/// cargo re-runs the build script whenever a watched path does not (yet)
-/// exist, which only makes provenance MORE likely to be freshly recomputed,
-/// never less.
-fn watch_git_refs() {
-    if let Some(git_dir) = run_git(&["rev-parse", "--git-dir"]) {
-        rerun_if_exists(&Path::new(&git_dir).join("HEAD"));
-    }
-    // Worktrees keep HEAD private but share refs/heads through the common
-    // dir, so branch-tip advances have to be watched there instead.
-    if let Some(common_dir) = run_git(&["rev-parse", "--git-common-dir"]) {
-        let common_dir = PathBuf::from(common_dir);
-        rerun_if_exists(&common_dir.join("packed-refs"));
-        if let Some(branch) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"]) {
-            if branch != "HEAD" {
-                rerun_if_exists(&common_dir.join("refs").join("heads").join(branch));
-            }
-        }
-    }
-}
-
-fn rerun_if_exists(path: &Path) {
-    println!("cargo:rerun-if-changed={}", path.display());
 }

@@ -94,12 +94,12 @@ fn valid_arm_is_validated_and_consumed() {
     let session = validate_and_consume(&arm_path, &consumed_dir, &identity)
         .expect("a correctly bound, in-window arm must validate");
 
-    assert_eq!(session.node_id, NODE_ID);
-    assert_eq!(session.subsystem, CUTOVER_SUBSYSTEM_FEES);
-    assert_eq!(session.source_commit, SOURCE_COMMIT);
-    assert_eq!(session.binary_sha256, BINARY_SHA256);
-    assert_eq!(session.nonce, "nonce-1");
-    assert_eq!(session.consumed_path, consumed_dir.join("nonce-1"));
+    assert_eq!(session.node_id(), NODE_ID);
+    assert_eq!(session.subsystem(), CUTOVER_SUBSYSTEM_FEES);
+    assert_eq!(session.source_commit(), SOURCE_COMMIT);
+    assert_eq!(session.binary_sha256(), BINARY_SHA256);
+    assert_eq!(session.nonce(), "nonce-1");
+    assert_eq!(session.consumed_path(), consumed_dir.join("nonce-1"));
 
     // The arm is gone from its original path -- nothing left to re-read.
     assert!(
@@ -120,13 +120,13 @@ fn atomic_consumption_preserves_bytes_and_mode_moves_original() {
     let session =
         validate_and_consume(&arm_path, &consumed_dir, &identity).expect("valid arm consumes");
 
-    let consumed_bytes = std::fs::read(&session.consumed_path).expect("read consumed arm");
+    let consumed_bytes = std::fs::read(session.consumed_path()).expect("read consumed arm");
     assert_eq!(
         consumed_bytes,
         json.as_bytes(),
         "rename must preserve the exact original bytes, not rewrite them"
     );
-    let consumed_mode = std::fs::metadata(&session.consumed_path)
+    let consumed_mode = std::fs::metadata(session.consumed_path())
         .expect("stat consumed arm")
         .permissions()
         .mode()
@@ -289,6 +289,58 @@ fn empty_nonce_is_denied() {
 }
 
 #[test]
+fn absolute_path_nonce_is_denied_and_leaves_arm_untouched() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let json = valid_arm_json("/etc/passwd");
+    let arm_path = write_arm(tmp.path(), "arm.json", &json);
+    let owner_uid = current_owner_uid(&arm_path);
+    let identity = matching_identity(owner_uid);
+
+    let result = validate_and_consume(&arm_path, &tmp.path().join("consumed"), &identity);
+    assert_eq!(
+        result.unwrap_err(),
+        CutoverArmDenyReason::InvalidNonce("/etc/passwd".to_string())
+    );
+    let bytes = std::fs::read(&arm_path).expect("arm file must be untouched");
+    assert_eq!(bytes, json.as_bytes());
+}
+
+#[test]
+fn traversal_nonce_is_denied_and_leaves_arm_untouched() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let json = valid_arm_json("../../escape");
+    let arm_path = write_arm(tmp.path(), "arm.json", &json);
+    let owner_uid = current_owner_uid(&arm_path);
+    let identity = matching_identity(owner_uid);
+
+    let result = validate_and_consume(&arm_path, &tmp.path().join("consumed"), &identity);
+    assert_eq!(
+        result.unwrap_err(),
+        CutoverArmDenyReason::InvalidNonce("../../escape".to_string())
+    );
+    let bytes = std::fs::read(&arm_path).expect("arm file must be untouched");
+    assert_eq!(bytes, json.as_bytes());
+}
+
+#[test]
+fn oversize_nonce_is_denied_and_leaves_arm_untouched() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let oversize_nonce = "a".repeat(65);
+    let json = valid_arm_json(&oversize_nonce);
+    let arm_path = write_arm(tmp.path(), "arm.json", &json);
+    let owner_uid = current_owner_uid(&arm_path);
+    let identity = matching_identity(owner_uid);
+
+    let result = validate_and_consume(&arm_path, &tmp.path().join("consumed"), &identity);
+    assert_eq!(
+        result.unwrap_err(),
+        CutoverArmDenyReason::InvalidNonce(oversize_nonce)
+    );
+    let bytes = std::fs::read(&arm_path).expect("arm file must be untouched");
+    assert_eq!(bytes, json.as_bytes());
+}
+
+#[test]
 fn reused_nonce_is_denied_and_leaves_prior_evidence_and_the_second_file_intact() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let consumed_dir = tmp.path().join("consumed");
@@ -310,7 +362,7 @@ fn reused_nonce_is_denied_and_leaves_prior_evidence_and_the_second_file_intact()
         "a denied second arm must not be consumed"
     );
     // The first consumption's evidence must be untouched too.
-    let consumed_bytes = std::fs::read(&first.consumed_path).expect("first consumption intact");
+    let consumed_bytes = std::fs::read(first.consumed_path()).expect("first consumption intact");
     assert_eq!(consumed_bytes, valid_arm_json("shared-nonce").as_bytes());
 }
 
@@ -355,6 +407,25 @@ fn wrong_mode_is_denied() {
 
     let result = validate_and_consume(&arm_path, &tmp.path().join("consumed"), &identity);
     assert_eq!(result.unwrap_err(), CutoverArmDenyReason::WrongMode(0o644));
+}
+
+#[test]
+fn setuid_bit_on_otherwise_0600_mode_is_denied() {
+    // A raw `& 0o777` mask would strip setuid/setgid/sticky bits and let
+    // this coincidentally read as the required 0600. Masking with
+    // `0o7777` instead ensures the exactly-0600 check also rejects them.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm_path = write_arm_with_mode(
+        tmp.path(),
+        "arm.json",
+        &valid_arm_json("nonce-setuid"),
+        0o4600,
+    );
+    let owner_uid = current_owner_uid(&arm_path);
+    let identity = matching_identity(owner_uid);
+
+    let result = validate_and_consume(&arm_path, &tmp.path().join("consumed"), &identity);
+    assert_eq!(result.unwrap_err(), CutoverArmDenyReason::WrongMode(0o4600));
 }
 
 #[test]
