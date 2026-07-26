@@ -884,9 +884,17 @@ pub fn load_cycle_state(env: &V2StateEnvelope, _row: &FeeStrategyRow) -> Channel
     // `_safe_entry_fee` (py 8352-8357): same clamp shape.
     let congestion_entry_fee_ppm = get_i64("congestion_entry_fee_ppm", 0).clamp(0, ABS_MAX_FEE_PPM);
 
+    // Audit low (2026-07-22): `resync_broadcast_fee` computes
+    // `(actual - tracked).abs()`, which overflows (debug panic) when a
+    // hand-corrupted blob carries last_broadcast_fee_ppm near i64::MIN.
+    // Python does not clamp these (bigints can't overflow, so it has no
+    // need); this clamp is reachable only from values Python can never
+    // write (its own writers bound fees <= 100_000). Replay fixtures carry
+    // Python-written values and are unaffected. Same [0, ABS_MAX_FEE_PPM]
+    // shape as the pending_target_ppm/congestion_entry_fee_ppm clamps above.
     let mut state = ChannelCycleState {
         last_revenue_rate: get_f64("last_revenue_rate", 0.0),
-        last_fee_ppm: get_i64("last_fee_ppm", 0),
+        last_fee_ppm: get_i64("last_fee_ppm", 0).clamp(0, ABS_MAX_FEE_PPM),
         trend_direction: get_i64("trend_direction", 1),
         step_ppm: get_i64("step_ppm", 50),
         last_update: get_i64("last_update", 0),
@@ -895,7 +903,7 @@ pub fn load_cycle_state(env: &V2StateEnvelope, _row: &FeeStrategyRow) -> Channel
         is_sleeping: get_bool("is_sleeping", false),
         sleep_until: get_i64("sleep_until", 0),
         stable_cycles: get_i64("stable_cycles", 0),
-        last_broadcast_fee_ppm: get_i64("last_broadcast_fee_ppm", 0),
+        last_broadcast_fee_ppm: get_i64("last_broadcast_fee_ppm", 0).clamp(0, ABS_MAX_FEE_PPM),
         last_state: get_str("last_state", "balanced"),
         forward_count_since_update: get_i64("forward_count_since_update", 0),
         last_volume_sats: get_i64("last_volume_sats", 0),
@@ -1937,6 +1945,37 @@ mod tests {
         assert_eq!(flushed[0].v2_state_json, "{\"v\": 2}");
         assert_eq!(flushed[1].channel_id, "chan2");
         assert_eq!(flushed[1].v2_state_json, "{\"v\": 3}");
+    }
+
+    /// Test-only load-path helper: no dedicated P2-clamp unit test exists
+    /// for `load_cycle_state` yet (the brief's target file,
+    /// `tests/state_serde.rs`, actually covers `GaussianThompsonState`
+    /// to_dict/from_dict, not `load_cycle_state` — this adapts to the
+    /// real load path, `parse_v2_blob` + `load_cycle_state`, defined right
+    /// here). Wraps the given fields under the nested `cycle_state` key,
+    /// same shape `extract_cycle_state_payload` reads.
+    fn load_cycle_state_from_json(cycle_fields: &serde_json::Value) -> ChannelCycleState {
+        let blob = serde_json::json!({ "cycle_state": cycle_fields }).to_string();
+        let r = row("c1");
+        let env = parse_v2_blob(&blob, &r);
+        load_cycle_state(&env, &r)
+    }
+
+    /// Audit low (2026-07-22): `resync_broadcast_fee` computes
+    /// `(actual - tracked).abs()`, which overflows (debug panic) when a
+    /// hand-corrupted blob carries last_broadcast_fee_ppm near i64::MIN.
+    /// The P2 hardening clamped pending_target_ppm and
+    /// congestion_entry_fee_ppm at load; the broadcast/last fee fields get
+    /// the same [0, ABS_MAX_FEE_PPM] clamp.
+    #[test]
+    fn load_cycle_state_clamps_poisoned_fee_fields() {
+        let blob = serde_json::json!({
+            "last_broadcast_fee_ppm": i64::MIN + 5,
+            "last_fee_ppm": -7,
+        });
+        let state = load_cycle_state_from_json(&blob);
+        assert_eq!(state.last_broadcast_fee_ppm, 0);
+        assert_eq!(state.last_fee_ppm, 0);
     }
 
     #[test]

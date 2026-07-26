@@ -405,6 +405,34 @@ mod replay {
             "expected Err on reconciliation_completed spend overflow, got {result:?}"
         );
     }
+
+    /// Audit low F1 (2026-07-22): the one unchecked arithmetic site in
+    /// replay. A cost_recorded event with cost_msat near i64::MIN against a
+    /// large positive reservation overflows `cur_reserved - cost`. Python's
+    /// bigint `max(0, reserved - cost)` cannot overflow; Rust fails CLOSED
+    /// like the checked_add three lines above.
+    ///
+    /// (No `reserve_event`/`cost_event` free-function helpers exist in this
+    /// file; `append_with_amounts(&ledger, "budget_reserved"/"cost_recorded",
+    /// ...)` against a real `EconLedger` + `ledger.replay()` is the file's
+    /// existing event-builder/replay pattern, reused here.)
+    #[test]
+    fn replay_reservation_release_overflow_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let ledger = new_ledger(&dir);
+        append_with_amounts(
+            &ledger,
+            "budget_reserved",
+            KEY,
+            &[("reserved_msat", i64::MAX - 10)],
+        );
+        append_with_amounts(&ledger, "cost_recorded", KEY, &[("cost_msat", i64::MIN + 2)]);
+        let result = ledger.replay();
+        assert!(
+            result.is_err(),
+            "expected Err on cur_reserved - cost overflow, got {result:?}"
+        );
+    }
 }
 
 /// Phase 2 pilot B: `reconciliation_completed` corrects replay state

@@ -241,7 +241,12 @@ pub fn supported_fee_ceiling(
     }
     // masses.sort(key=lambda fm: fm[0]) — stable sort by fee ONLY (ties
     // keep their winsorized-list order).
-    masses.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("fee is never NaN"));
+    //
+    // Corrupt-only divergence: Python's sorted() tolerates a NaN fee
+    // without raising (arbitrary placement); Rust orders NaN last via
+    // total_cmp. Reachable only from a hand-corrupted blob — the plugin
+    // must degrade, not die (audit low, 2026-07-22).
+    masses.sort_by(|a, b| a.0.total_cmp(&b.0));
     let threshold = total * SUPPORTED_CEILING_MASS_QUANTILE;
     let mut acc = 0.0;
     let mut quantile_fee = masses[masses.len() - 1].0;

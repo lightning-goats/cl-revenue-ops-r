@@ -339,7 +339,20 @@ impl EconLedger {
                         ),
                     })?;
                     spent.insert(key.clone(), new_spent);
-                    reserved.insert(key.clone(), (cur_reserved - cost).max(0));
+                    // Audit low F1 (2026-07-22): the one unchecked
+                    // arithmetic site in replay. Python's bigint
+                    // `max(0, reserved - cost)` cannot overflow; an
+                    // adversarial/corrupted ledger (cost_msat near
+                    // i64::MIN against a large positive reservation) can
+                    // overflow this i64 subtraction. Fail closed like the
+                    // checked_add above rather than panicking or wrapping.
+                    let new_reserved = cur_reserved.checked_sub(cost).ok_or_else(|| EconError {
+                        msg: format!(
+                            "ledger replay: reservation release overflow for {key}: \
+                             {cur_reserved} - {cost}"
+                        ),
+                    })?;
+                    reserved.insert(key.clone(), new_reserved.max(0));
                 }
                 "reservation_released" => {
                     reserved.insert(key.clone(), 0);

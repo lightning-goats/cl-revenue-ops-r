@@ -618,3 +618,41 @@ fn pinned_failcode_constant_matches_python_source() {
     assert_eq!(FEE_RELEVANT_FAILCODES, &[0x1000 | 12]);
     assert_eq!(FEE_RELEVANT_FAILCODES, &[4108]);
 }
+
+// ---------------------------------------------------------------------------
+// Audit low (2026-07-22): corrupt-blob panic hardening for
+// `supported_fee_ceiling`. No fixture drives this file's `obs`/`state_ceiling`
+// names, so both are thin local wrappers around `Observation::new` and
+// `supported_fee_ceiling` respectively, matching the brief's helper shapes.
+// ---------------------------------------------------------------------------
+
+const NOW: i64 = 1_753_200_000;
+
+fn obs(fee: f64, revenue_rate: f64, weight: f64, ts: i64) -> Observation {
+    Observation::new(fee, revenue_rate, weight, ts, "any")
+}
+
+fn state_ceiling(state: &GaussianThompsonState, now: i64, floor_ppm: Option<f64>) -> Option<f64> {
+    supported_fee_ceiling(state, now, floor_ppm)
+}
+
+/// Audit low (2026-07-22): a corrupt/hand-edited blob can carry a NaN
+/// observation fee (pyjson deliberately parses the NaN literal, and
+/// serde passes fees through unsanitized, as Python does). Python's
+/// sorted() tolerates NaN; the Rust comparator panicked and killed the
+/// plugin. Corrupt-only input: deterministic non-crash ordering
+/// (total_cmp, NaN last) is the contract, not byte parity.
+#[test]
+fn supported_fee_ceiling_survives_nan_observation_fee() {
+    let state = GaussianThompsonState {
+        observations: vec![
+            obs(300.0, 120.0, 1.0, NOW - 3600),
+            obs(f64::NAN, 5.0, 1.0, NOW - 7200), // positive revenue, finite mass
+            obs(500.0, 90.0, 1.0, NOW - 1800),
+        ],
+        ..GaussianThompsonState::default()
+    };
+    // Must return without panicking; the exact value is NOT pinned
+    // (corrupt-input, documented divergence).
+    let _ = state_ceiling(&state, NOW, None);
+}
