@@ -426,7 +426,12 @@ mod replay {
             KEY,
             &[("reserved_msat", i64::MAX - 10)],
         );
-        append_with_amounts(&ledger, "cost_recorded", KEY, &[("cost_msat", i64::MIN + 2)]);
+        append_with_amounts(
+            &ledger,
+            "cost_recorded",
+            KEY,
+            &[("cost_msat", i64::MIN + 2)],
+        );
         let result = ledger.replay();
         assert!(
             result.is_err(),

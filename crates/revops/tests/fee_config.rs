@@ -391,10 +391,14 @@ async fn resolve_fee_cfg_vegas_db_override_stays_tolerant() {
 #[tokio::test]
 async fn resolve_fee_cfg_lowercases_profile_and_market_mode_from_listconfigs() {
     let mut py = HashMap::new();
-    py.insert("revenue-ops-fee-profile".to_string(),
-              cln_plugin::options::Value::String("Active".to_string()));
-    py.insert("revenue-ops-market-fee-mode".to_string(),
-              cln_plugin::options::Value::String("UNDERCUT".to_string()));
+    py.insert(
+        "revenue-ops-fee-profile".to_string(),
+        cln_plugin::options::Value::String("Active".to_string()),
+    );
+    py.insert(
+        "revenue-ops-market-fee-mode".to_string(),
+        cln_plugin::options::Value::String("UNDERCUT".to_string()),
+    );
     let cfg = revops::fee_config::resolve_fee_cfg(None, &py).await;
     assert_eq!(cfg.fee_profile, "active");
     assert_eq!(cfg.market_fee_mode, "undercut");
@@ -415,8 +419,7 @@ async fn resolve_fee_cfg_repairs_crossed_min_max() {
 
 #[tokio::test]
 async fn resolve_fee_cfg_repairs_crossed_receivable_band() {
-    let (handle, _tmp) =
-        fixture_db_with_override("receivable-ratio-floor", "0.6").await;
+    let (handle, _tmp) = fixture_db_with_override("receivable-ratio-floor", "0.6").await;
     // target stays default 0.30 -> floor repaired to target.
     let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
     assert_eq!(cfg.receivable_ratio_floor, cfg.receivable_ratio_target);
