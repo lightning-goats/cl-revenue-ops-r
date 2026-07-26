@@ -14,6 +14,7 @@
 
 use revops_econ::pyfloat::py_repr;
 use revops_fees::pyjson::{dumps_python, parse, OValue};
+use revops_fees::thompson::recompute::recompute_posterior_core;
 use revops_fees::thompson::serde::{gts_from_dict, gts_to_dict};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -247,4 +248,68 @@ fn int_typed_posterior_mean_and_std_keep_json_typing() {
     let out = gts_to_dict(&state);
     assert_eq!(out.get("posterior_mean"), Some(&OValue::Int(200)));
     assert_eq!(out.get("posterior_std"), Some(&OValue::Int(50)));
+}
+
+/// Review finding (12eb167 follow-up): `posterior_mean_is_int`/
+/// `posterior_std_is_int` are reset at every runtime mutation of
+/// `posterior_mean`/`posterior_std` (5 call sites across `recompute.rs` and
+/// `dynamics.rs`). Seed a state whose blob-sourced `posterior_mean`/
+/// `posterior_std` are int-typed (200/50) AND which carries enough
+/// observations for `recompute_posterior_core` to fit the quadratic
+/// polynomial path (>= 3 non-probe observations, fee range >= 5.0,
+/// non-singular fit) and drive both fields to freshly computed FRACTIONAL
+/// values. If the `posterior_mean_is_int`/`posterior_std_is_int` reset at
+/// the top of `recompute_posterior_core` were dropped, the stale `true`
+/// flags from `from_dict` would survive the recompute and `gts_to_dict`
+/// would truncate the fractional result back to an `OValue::Int` --
+/// silently corrupting the persisted blob.
+#[test]
+fn int_typed_posterior_flags_reset_after_recompute() {
+    let blob = r#"{
+        "weight_scheme": "exposure_v2",
+        "posterior_mean": 200,
+        "posterior_std": 50,
+        "observations": [
+            [100, 5.0, 100.0, 1000, "normal"],
+            [140, 12.0, 100.0, 1000, "normal"],
+            [180, 15.0, 100.0, 1000, "normal"],
+            [220, 11.0, 100.0, 1000, "normal"],
+            [260, 4.0, 100.0, 1000, "normal"]
+        ]
+    }"#;
+    let parsed = parse(blob).unwrap();
+    let mut state = gts_from_dict(&parsed);
+
+    // Sanity: the seeded flags really did come in `true` (JSON ints, no
+    // decimal point) before the recompute runs.
+    assert!(state.posterior_mean_is_int, "seed: posterior_mean_is_int");
+    assert!(state.posterior_std_is_int, "seed: posterior_std_is_int");
+
+    recompute_posterior_core(&mut state, 1000);
+
+    // The recompute must have actually produced fractional values (not
+    // just flipped the flag) -- otherwise this test wouldn't distinguish a
+    // reset int(200.0)/int(50.0) from a genuinely non-integer result.
+    assert_ne!(
+        state.posterior_mean.fract(),
+        0.0,
+        "posterior_mean must be fractional after recompute: {}",
+        state.posterior_mean
+    );
+    assert_ne!(
+        state.posterior_std.fract(),
+        0.0,
+        "posterior_std must be fractional after recompute: {}",
+        state.posterior_std
+    );
+
+    let out = gts_to_dict(&state);
+    match out.get("posterior_mean") {
+        Some(OValue::Float(_)) => {}
+        other => panic!("posterior_mean must re-emit as Float, got {other:?}"),
+    }
+    match out.get("posterior_std") {
+        Some(OValue::Float(_)) => {}
+        other => panic!("posterior_std must re-emit as Float, got {other:?}"),
+    }
 }
