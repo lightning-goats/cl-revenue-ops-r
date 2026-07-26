@@ -41,7 +41,9 @@ use std::collections::HashSet;
 
 use crate::pid::{self, PidState};
 use crate::pyjson::OValue;
-use crate::thompson::serde::{gts_from_dict, gts_from_dict_would_raise, gts_to_dict};
+use crate::thompson::serde::{
+    gts_from_dict, gts_from_dict_would_raise, gts_to_dict, python_floatable, python_intable,
+};
 use crate::thompson::{
     CtxPosterior, GaussianThompsonState, Observation, EXPLORATION_BOOST_MAX, EXPLORATION_BOOST_MIN,
     MAX_BIAS_NUDGES, WEIGHT_SCHEME,
@@ -719,12 +721,23 @@ pub struct SeedParityViolation {
 }
 
 /// Fail-closed check for the one-time seed import: would loading this
-/// envelope through Python's own `from_v2_dict`/`from_dict` raise (or
-/// silently diverge from the Rust parity path)? Mirrors `from_v2_dict`'s
-/// gate (py 2174-2183): `from_dict` runs only under a KNOWN
-/// `algorithm_version`, and only then can its raise classes trigger; a
-/// PRESENT but non-dict `thompson_state` raises inside `from_dict`'s very
-/// first `d.get` (`AttributeError`).
+/// envelope through Python's own `from_v2_dict`/`from_dict`/`_get_cycle_state`
+/// raise (or silently diverge from the Rust parity path)? The binding
+/// Global Constraint is that ANY field where Python would raise refuses
+/// the WHOLE seed — no partial seed, no silent fresh-state fallback — so
+/// this scans all three load paths a seeded channel goes through, in
+/// Python's own evaluation order:
+///
+/// 1. `thompson_state` — gated on `from_v2_dict`'s known-version check
+///    (py 2174-2183): `from_dict` runs ONLY under a known
+///    `algorithm_version`, and only then can its raise classes trigger; a
+///    PRESENT but non-dict `thompson_state` raises inside `from_dict`'s
+///    very first `d.get` (`AttributeError`).
+/// 2. `pid_state` — NOT gated on the version check (py 2224-2226 runs
+///    unconditionally, outside the `if ... in known_versions` branch).
+///    See [`pid_state_violation`].
+/// 3. `cycle_state` — a wholly separate load path (`_get_cycle_state`,
+///    py 8994-9040), likewise ungated. See [`cycle_state_violation`].
 pub fn seed_parity_violation(env: &V2StateEnvelope) -> Option<SeedParityViolation> {
     let d = env.fee_state.as_ovalue();
     let known_version = d
@@ -732,26 +745,116 @@ pub fn seed_parity_violation(env: &V2StateEnvelope) -> Option<SeedParityViolatio
         .and_then(OValue::as_str)
         .map(|v| FEE_STATE_KNOWN_VERSIONS.contains(&v))
         .unwrap_or(false);
-    if !known_version {
-        // Migration path: Python builds a FRESH GaussianThompsonState and
-        // never calls from_dict -- nothing to raise, and the Rust path does
-        // the same.
+    // Migration path: under an UNKNOWN version Python builds a FRESH
+    // GaussianThompsonState and never calls from_dict -- nothing to raise,
+    // and the Rust path does the same. `pid_state`/`cycle_state` below are
+    // NOT excused by it: neither sits inside that branch.
+    if known_version {
+        let thompson = match d.get("thompson_state") {
+            // Absent key: from_dict({}) -- all defaults, no raise.
+            None => None,
+            Some(ts @ OValue::Obj(_)) => {
+                gts_from_dict_would_raise(ts).map(|raise| SeedParityViolation {
+                    field: format!("thompson_state.{}", raise.field),
+                    detail: raise.detail,
+                })
+            }
+            Some(_) => Some(SeedParityViolation {
+                field: "thompson_state".to_string(),
+                detail: "not a dict: from_dict's d.get(...) raises AttributeError".to_string(),
+            }),
+        };
+        if thompson.is_some() {
+            return thompson;
+        }
+    }
+    if let Some(violation) = pid_state_violation(d.get("pid_state")) {
+        return Some(violation);
+    }
+    cycle_state_violation(env.cycle_state.as_ovalue())
+}
+
+/// The eight bare casts of `PIDState.from_dict` (py 2060-2069), in
+/// Python's own assignment order — seven `float(...)` and one `int(...)`,
+/// with NO try/except anywhere. Rust's [`crate::pid::pid_from_dict`]
+/// silently substitutes the field default on each, and PID output
+/// multiplies the fee target directly, so a silently-defaulted PID is
+/// state Python would never have produced.
+const PID_FROM_DICT_CASTS: &[(&str, bool)] = &[
+    ("kp", false),
+    ("ki", false),
+    ("kd", false),
+    ("ewma_error", false),
+    ("integral_error", false),
+    ("prev_ewma_error", false),
+    ("last_update_time", true),
+    ("integral_clamp", false),
+];
+
+/// `from_v2_dict` py 2225-2226:
+///
+/// ```python
+/// pid_data = d.get("pid_state", {})
+/// state.pid = PIDState.from_dict(pid_data) if pid_data else PIDState()
+/// ```
+///
+/// A FALSY `pid_state` (absent, `null`, `0`, `""`, `[]`, `{}`, `false`)
+/// never reaches `from_dict` at all — a fresh-default path in both
+/// languages, no divergence. A TRUTHY one is passed straight in with no
+/// isinstance check, so a truthy NON-dict raises `AttributeError` on
+/// `from_dict`'s very first `d.get(...)`, and a truthy dict is subject to
+/// [`PID_FROM_DICT_CASTS`].
+fn pid_state_violation(value: Option<&OValue>) -> Option<SeedParityViolation> {
+    let value = value?;
+    if !truthy(value) {
         return None;
     }
-    match d.get("thompson_state") {
-        // Absent key: from_dict({}) -- all defaults, no raise.
-        None => None,
-        Some(ts @ OValue::Obj(_)) => {
-            gts_from_dict_would_raise(ts).map(|raise| SeedParityViolation {
-                field: format!("thompson_state.{}", raise.field),
-                detail: raise.detail,
-            })
-        }
-        Some(_) => Some(SeedParityViolation {
-            field: "thompson_state".to_string(),
-            detail: "not a dict: from_dict's d.get(...) raises AttributeError".to_string(),
-        }),
+    if value.as_obj().is_none() {
+        return Some(SeedParityViolation {
+            field: "pid_state".to_string(),
+            detail: "truthy non-dict: PIDState.from_dict's d.get(...) raises AttributeError"
+                .to_string(),
+        });
     }
+    for (key, is_int) in PID_FROM_DICT_CASTS {
+        let Some(v) = value.get(key) else { continue };
+        let ok = if *is_int {
+            python_intable(v)
+        } else {
+            python_floatable(v)
+        };
+        if !ok {
+            let cast = if *is_int { "int" } else { "float" };
+            return Some(SeedParityViolation {
+                field: format!("pid_state.{key}"),
+                detail: format!("bare {cast}() with no try/except would raise on this value"),
+            });
+        }
+    }
+    None
+}
+
+/// `_get_cycle_state`'s ONE unguarded cast (py 9027):
+///
+/// ```python
+/// congestion_quiet_cycles=int(cycle_data.get("congestion_quiet_cycles", 0) or 0)
+/// ```
+///
+/// Unlike its `pending_target_ppm` (py 8999-9002) and `_safe_entry_fee`
+/// (py 9004-9009) neighbours, this one has no try/except. The `or 0`
+/// short-circuits every FALSY value to a literal `0` before the cast, so
+/// only a TRUTHY non-int-castable value raises — `TypeError` for a
+/// list/dict, `ValueError` for a string that is not an integer literal.
+/// Rust's [`load_cycle_state`] silently defaults it instead.
+fn cycle_state_violation(cd: &OValue) -> Option<SeedParityViolation> {
+    let v = cd.get("congestion_quiet_cycles")?;
+    if truthy(v) && !python_intable(v) {
+        return Some(SeedParityViolation {
+            field: "cycle_state.congestion_quiet_cycles".to_string(),
+            detail: "truthy non-integer value: the bare int(... or 0) cast would raise".to_string(),
+        });
+    }
+    None
 }
 
 pub fn load_fee_state(env: &V2StateEnvelope, row: &FeeStrategyRow) -> ChannelFeeState {
@@ -2041,5 +2144,159 @@ mod tests {
             merged.get("dynamic_htlcmin_baseline_msat"),
             Some(&OValue::Int(900))
         );
+    }
+
+    // -----------------------------------------------------------------
+    // seed_parity_violation: the pid_state and cycle_state arms
+    // (final-review finding I2, 2026-07-26)
+    // -----------------------------------------------------------------
+
+    fn seed_scan(blob: &str) -> Option<SeedParityViolation> {
+        let r = row("c1");
+        seed_parity_violation(&parse_v2_blob(blob, &r))
+    }
+
+    fn pid_blob(pid: &str) -> String {
+        format!(r#"{{"algorithm_version": "dts_pid_v1", "pid_state": {pid}}}"#)
+    }
+
+    fn cycle_blob(quiet: &str) -> String {
+        format!(
+            r#"{{"algorithm_version": "dts_pid_v1", "cycle_state": {{"congestion_quiet_cycles": {quiet}}}}}"#
+        )
+    }
+
+    /// `from_v2_dict` (py 2225-2226) calls `PIDState.from_dict(pid_data)`
+    /// whenever `pid_data` is TRUTHY, with no isinstance check -- so a
+    /// truthy non-dict raises `AttributeError` inside `from_dict`'s very
+    /// first `d.get(...)`, exactly like the `thompson_state` arm.
+    #[test]
+    fn seed_refuses_truthy_non_dict_pid_state() {
+        for pid in [r#""not-a-dict""#, "5", "[1, 2]", "true"] {
+            let v = seed_scan(&pid_blob(pid))
+                .unwrap_or_else(|| panic!("{pid} must refuse the whole seed"));
+            assert_eq!(v.field, "pid_state", "{pid}");
+        }
+    }
+
+    /// A FALSY `pid_state` never reaches `from_dict` at all (py 2226's
+    /// `if pid_data else PIDState()`), so it is a fresh-default path in
+    /// BOTH languages -- no divergence, no refusal.
+    #[test]
+    fn seed_accepts_falsy_pid_state() {
+        for pid in ["null", "0", r#""""#, "[]", "{}", "false"] {
+            assert_eq!(seed_scan(&pid_blob(pid)), None, "{pid}");
+        }
+    }
+
+    /// `PIDState.from_dict` (py 2060-2069) is eight BARE casts with no
+    /// try/except: seven `float(...)` and one `int(...)`. Rust's
+    /// `pid_from_dict` silently substitutes the default on each -- and PID
+    /// output multiplies the fee target directly, so a silently-defaulted
+    /// PID is a seed Python would never have produced.
+    #[test]
+    fn seed_refuses_pid_fields_whose_bare_float_cast_would_raise() {
+        for key in [
+            "kp",
+            "ki",
+            "kd",
+            "ewma_error",
+            "integral_error",
+            "prev_ewma_error",
+            "integral_clamp",
+        ] {
+            for bad in ["null", r#""abc""#, "[]", "{}"] {
+                let blob = pid_blob(&format!(r#"{{"{key}": {bad}}}"#));
+                let v = seed_scan(&blob)
+                    .unwrap_or_else(|| panic!("{key}={bad} must refuse the whole seed"));
+                assert_eq!(v.field, format!("pid_state.{key}"), "{key}={bad}");
+            }
+        }
+    }
+
+    /// `int(d.get("last_update_time", 0))` is narrower than `float`:
+    /// `int("1.5")` raises `ValueError` where `float("1.5")` does not.
+    #[test]
+    fn seed_refuses_pid_last_update_time_whose_bare_int_cast_would_raise() {
+        for bad in ["null", r#""abc""#, r#""1.5""#, "[]", "{}"] {
+            let blob = pid_blob(&format!(r#"{{"last_update_time": {bad}}}"#));
+            let v = seed_scan(&blob)
+                .unwrap_or_else(|| panic!("last_update_time={bad} must refuse the whole seed"));
+            assert_eq!(v.field, "pid_state.last_update_time", "{bad}");
+        }
+    }
+
+    /// The casts SUCCEED for numbers, bools, and parseable numeric
+    /// strings; `int(1.9)` truncates rather than raising. Absent keys take
+    /// the default. None of these refuse.
+    #[test]
+    fn seed_accepts_pid_values_python_can_cast() {
+        for pid in [
+            r#"{}"#,
+            r#"{"kp": 2.5}"#,
+            r#"{"kp": "2.5"}"#,
+            r#"{"kp": 3}"#,
+            r#"{"kp": true}"#,
+            r#"{"last_update_time": 1}"#,
+            r#"{"last_update_time": 1.9}"#,
+            r#"{"last_update_time": "17"}"#,
+            r#"{"unknown_key": "whatever"}"#,
+        ] {
+            assert_eq!(seed_scan(&pid_blob(pid)), None, "{pid}");
+        }
+    }
+
+    /// `pid_state` is loaded OUTSIDE `from_v2_dict`'s known-version gate
+    /// (py 2224-2226 runs unconditionally; only `thompson_state` sits
+    /// inside the `if d.get("algorithm_version") in known_versions`
+    /// branch), so an unknown/migrating version does NOT excuse a raising
+    /// `pid_state`.
+    #[test]
+    fn seed_pid_arm_is_not_gated_on_a_known_algorithm_version() {
+        let blob = r#"{"algorithm_version": "something_else", "pid_state": {"kp": null}}"#;
+        let v = seed_scan(blob).expect("pid_state must be scanned regardless of version");
+        assert_eq!(v.field, "pid_state.kp");
+    }
+
+    /// `congestion_quiet_cycles=int(cycle_data.get(..., 0) or 0)` (py
+    /// 9027) is a BARE cast, unlike its `pending_target_ppm` /
+    /// `_safe_entry_fee` neighbours which are try/except-guarded. Rust's
+    /// `load_cycle_state` silently defaults it, and the seed scan never
+    /// looked at `cycle_state` at all.
+    #[test]
+    fn seed_refuses_congestion_quiet_cycles_whose_bare_int_cast_would_raise() {
+        for bad in [r#""abc""#, r#""1.5""#, "[1]", r#"{"a": 1}"#] {
+            let v = seed_scan(&cycle_blob(bad))
+                .unwrap_or_else(|| panic!("congestion_quiet_cycles={bad} must refuse"));
+            assert_eq!(v.field, "cycle_state.congestion_quiet_cycles", "{bad}");
+        }
+    }
+
+    /// The `or 0` short-circuits every FALSY value to a literal `0`
+    /// before the cast, so those never raise; truthy int-castable values
+    /// pass the cast.
+    #[test]
+    fn seed_accepts_congestion_quiet_cycles_python_can_cast() {
+        for ok in [
+            "null", "0", r#""""#, "[]", "{}", "false", "3", "1.9", "true", r#""7""#,
+        ] {
+            assert_eq!(seed_scan(&cycle_blob(ok)), None, "{ok}");
+        }
+    }
+
+    /// The thompson arm keeps precedence (it is Python's first raise
+    /// site), and a clean envelope still seeds.
+    #[test]
+    fn seed_accepts_a_clean_envelope_and_keeps_thompson_precedence() {
+        assert_eq!(
+            seed_scan(r#"{"algorithm_version": "dts_pid_v1", "thompson_state": {}}"#),
+            None
+        );
+        let v = seed_scan(
+            r#"{"algorithm_version": "dts_pid_v1", "thompson_state": {"noise_variance": null},
+                "pid_state": {"kp": null}}"#,
+        )
+        .expect("must refuse");
+        assert_eq!(v.field, "thompson_state.noise_variance");
     }
 }

@@ -801,10 +801,27 @@ fn python_truthy(v: &OValue) -> bool {
 /// strings. Rust's `str::parse::<f64>` is a conservative approximation of
 /// Python's `float(str)` (e.g. Python additionally accepts `"1_0"`); a
 /// string only Python can parse is REFUSED, never the reverse.
-fn python_floatable(v: &OValue) -> bool {
+pub(crate) fn python_floatable(v: &OValue) -> bool {
     match v {
         OValue::Int(_) | OValue::Float(_) | OValue::Bool(_) => true,
         OValue::Str(s) => s.trim().parse::<f64>().is_ok(),
+        _ => false,
+    }
+}
+
+/// `int(x)` succeeds in Python. NARROWER than [`python_floatable`] in two
+/// ways that matter for the seed scan: a string must be an INTEGER
+/// literal (`int("1.5")` raises `ValueError` where `float("1.5")` does
+/// not), and a non-finite float raises (`int(nan)` -> `ValueError`,
+/// `int(inf)` -> `OverflowError`) where `float(nan)` is fine. A finite
+/// float truncates rather than raising. Same conservative bias as
+/// [`python_floatable`]: a string only Python can parse (e.g. `"1_0"`) is
+/// REFUSED, never the reverse.
+pub(crate) fn python_intable(v: &OValue) -> bool {
+    match v {
+        OValue::Int(_) | OValue::Bool(_) => true,
+        OValue::Float(f) => f.is_finite(),
+        OValue::Str(s) => s.trim().parse::<i64>().is_ok(),
         _ => false,
     }
 }

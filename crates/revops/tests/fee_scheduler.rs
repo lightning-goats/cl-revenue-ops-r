@@ -1508,14 +1508,110 @@ mod seedonce_restart {
     /// epoch (commit 993632d). Under SeedOnce the two MUST coincide --
     /// divergence means an epoch bug was reintroduced where the engagement
     /// gate can no longer see it.
+    ///
+    /// Final-review finding I1 (2026-07-26): the original form of this
+    /// test asserted `skip_gate_prev[ch].last_update == cycle_states[ch]
+    /// .last_update` AFTER cycle 2 -- i.e. immediately after
+    /// `set_skip_gates_to_owned` had copied one into the other, so it
+    /// could only ever pass. It now asserts CONSUMPTION instead:
+    ///
+    /// 1. the pre-decision epoch cycle 2 will read is captured BEFORE
+    ///    cycle 2 runs, and cross-checked against the independently
+    ///    PERSISTED cycle-1 `last_update` (the committed generation row in
+    ///    the Rust-owned store -- not the in-memory map it was assigned
+    ///    from);
+    /// 2. that epoch is exactly one `fee_interval` behind cycle 2's own
+    ///    clock, so the decision path sees ~0.5h elapsed, not ~0; and
+    /// 3. cycle 2's RECORDED decision surface proves the epoch was
+    ///    consumed: `skip_gate_comparable` is set (the gate had a cached
+    ///    prior, so the engagement gate counts this channel) and the
+    ///    disposition is NOT `waiting_window` -- the starvation signature
+    ///    a fresh/zero epoch produces.
+    ///
+    /// NOTE on mutation coverage: mutating `cycle.rs`'s
+    /// `let epoch_last_update = ctx.pre_last_update;` to `cycle
+    /// .last_update` cannot be detected from HERE, and provably so: under
+    /// SeedOnce the scheduler calls `set_skip_gates_to_owned` both at the
+    /// top of every cycle and at the end of every cycle, and nothing
+    /// between that refresh and `adjust_channel_fee`'s read mutates
+    /// `cycle.last_update`, so the two expressions are the SAME VALUE by
+    /// construction -- which is precisely the invariant this test exists
+    /// to pin. The mutation is caught by the kernel tests that can inject
+    /// the divergence directly
+    /// (`revops-fees/tests/cycle.rs::decision_gate_uses_pre_decision_epoch_not_fresh_flush`
+    /// and `::observation_cursor_uses_pre_decision_epoch`); do not weaken
+    /// them. What THIS test catches is the SeedOnce-layer regression class:
+    /// an epoch cache that is not refreshed from the owned state, a seed
+    /// or commit that persists the wrong `last_update`, or a decision that
+    /// stops consuming the cached epoch at all.
     #[test]
-    fn seedonce_pre_decision_epoch_equals_owned_last_update() {
+    fn seedonce_second_cycle_consumes_the_committed_first_cycle_epoch() {
+        const INTERVAL: i64 = 1800;
         let mut h = seedonce_harness_with_one_channel();
-        h.run_cycle(); // cycle 1: seeds + writes Rust-owned state
-        h.run_cycle(); // cycle 2: hydrates Rust's own state
-        let cached = h.state().skip_gate_prev.get("700x1x0").unwrap().last_update;
-        let owned = h.state().cycle_states.get("700x1x0").unwrap().last_update;
-        assert_eq!(cached, owned);
+
+        // Cycle 1: seeds from Python, decides, and commits Rust-owned state.
+        let cycle1_ts = NOW + INTERVAL;
+        assert!(
+            matches!(h.run_cycle_at(cycle1_ts), CycleOutcome::Ran { .. }),
+            "cycle 1 must run to have an epoch to commit"
+        );
+
+        // (1) The epoch cycle 2 WILL read, captured before cycle 2 runs,
+        // cross-checked against what cycle 1 actually persisted.
+        let epoch_for_cycle2 = h
+            .state()
+            .skip_gate_prev
+            .get(CHANNEL)
+            .expect("cycle 1 must leave a cached pre-decision epoch")
+            .last_update;
+        let committed = fee_runway::load_latest_state(&h.store_conn()).unwrap();
+        let persisted_last_update = committed
+            .rows
+            .iter()
+            .find(|r| r.channel_id == CHANNEL)
+            .expect("cycle 1 committed a state row")
+            .last_update;
+        assert_eq!(
+            epoch_for_cycle2, persisted_last_update,
+            "the cached pre-decision epoch must be the last_update cycle 1 COMMITTED, \
+             not a value only the in-memory map holds"
+        );
+
+        // (2) One full interval old from cycle 2's point of view -- the
+        // decision path must see ~1 interval elapsed, never ~0.
+        let cycle2_ts = cycle1_ts + INTERVAL;
+        assert_eq!(
+            cycle2_ts - epoch_for_cycle2,
+            INTERVAL,
+            "cycle 2's pre-decision epoch must be one fee_interval behind its clock"
+        );
+
+        assert!(
+            matches!(h.run_cycle_at(cycle2_ts), CycleOutcome::Ran { .. }),
+            "cycle 2 must run"
+        );
+
+        // (3) The RECORDED decision surface proves consumption.
+        let conn = h.store_conn();
+        let (disposition, comparable) = conn
+            .query_row(
+                "SELECT disposition, skip_gate_comparable FROM rust_fee_shadow_outcomes \
+                 WHERE cycle_ts = ?1 AND channel_id = ?2",
+                rusqlite::params![cycle2_ts, CHANNEL],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .expect("cycle 2 recorded a shadow outcome row");
+        assert_eq!(
+            comparable, 1,
+            "cycle 2 had a cached pre-decision epoch, so the engagement gate must \
+             count this channel as comparable"
+        );
+        assert_ne!(
+            disposition.as_deref(),
+            Some("waiting_window"),
+            "gate starvation: cycle 2 held the channel as if no time had elapsed since \
+             cycle 1's committed epoch ({epoch_for_cycle2}) at clock {cycle2_ts}"
+        );
     }
 
     #[test]
@@ -1572,6 +1668,82 @@ mod seedonce_restart {
             1,
             "one refusal event, not one per cycle"
         );
+    }
+
+    /// Final-review finding I2 (2026-07-26): the fail-closed scan used to
+    /// inspect `thompson_state` ONLY, so the two other Python load paths
+    /// that raise on a corrupt field -- `PIDState.from_dict`'s eight bare
+    /// casts (py 2060-2069, reached unconditionally from `from_v2_dict`
+    /// py 2225-2226) and `_get_cycle_state`'s bare
+    /// `int(congestion_quiet_cycles or 0)` (py 9027) -- were silently
+    /// defaulted into a Rust-owned seed. The binding Global Constraint is
+    /// that ANY such field refuses the WHOLE seed. End-to-end, per raise
+    /// class.
+    #[test]
+    fn restart_seed_refusal_covers_pid_state_and_cycle_state_raise_classes() {
+        for (blob, expected_field) in [
+            // PIDState.from_dict on a truthy non-dict -> AttributeError.
+            (
+                r#"{"fee_state": {"algorithm_version": "dts_pid_v1", "pid_state": "not-a-dict"}, "cycle_state": {}}"#,
+                "pid_state",
+            ),
+            // Bare float() on a non-numeric kp -> ValueError/TypeError.
+            (
+                r#"{"fee_state": {"algorithm_version": "dts_pid_v1", "pid_state": {"kp": "not-a-number"}}, "cycle_state": {}}"#,
+                "pid_state.kp",
+            ),
+            // Bare int() on a non-integer last_update_time -> ValueError.
+            (
+                r#"{"fee_state": {"algorithm_version": "dts_pid_v1", "pid_state": {"last_update_time": "1.5"}}, "cycle_state": {}}"#,
+                "pid_state.last_update_time",
+            ),
+            // Bare int(... or 0) on a truthy non-integer -> ValueError.
+            (
+                r#"{"fee_state": {"algorithm_version": "dts_pid_v1"}, "cycle_state": {"congestion_quiet_cycles": "many"}}"#,
+                "cycle_state.congestion_quiet_cycles",
+            ),
+            // ... and on a truthy non-scalar -> TypeError.
+            (
+                r#"{"fee_state": {"algorithm_version": "dts_pid_v1"}, "cycle_state": {"congestion_quiet_cycles": [1]}}"#,
+                "cycle_state.congestion_quiet_cycles",
+            ),
+        ] {
+            let mut h = seedonce_harness_with_one_channel();
+            h.prod_conn()
+                .execute(
+                    "UPDATE fee_strategy_state SET v2_state_json = ?1 WHERE channel_id = ?2",
+                    rusqlite::params![blob, CHANNEL],
+                )
+                .expect("poison python blob");
+
+            let outcome = h.run_cycle();
+            assert_eq!(
+                outcome,
+                CycleOutcome::SkippedStateUnavailable,
+                "{expected_field}: {outcome:?}"
+            );
+            assert!(
+                h.state().fee_states.is_empty(),
+                "{expected_field}: no partial seed, no fresh-state fallback"
+            );
+
+            let conn = h.store_conn();
+            let event = fee_runway::latest_seed_event(&conn)
+                .unwrap()
+                .expect("refusal recorded in the Rust-owned store");
+            assert_eq!(event.outcome, "seed_refused", "{expected_field}");
+            assert_eq!(event.refused_channel.as_deref(), Some(CHANNEL));
+            assert_eq!(
+                event.refused_field.as_deref(),
+                Some(expected_field),
+                "{event:?}"
+            );
+            assert_eq!(
+                fee_runway::load_latest_state(&conn).unwrap().generation,
+                0,
+                "{expected_field}: no generation from a refused seed"
+            );
+        }
     }
 
     #[test]
