@@ -1,5 +1,13 @@
 # Rust Stateful Shadow and Dormant Live-Adapter Implementation Plan
 
+> **REVISED 2026-07-26:** execute through
+> `docs/superpowers/plans/2026-07-26-stateful-shadow-revision.md`, which
+> rebases the partially-complete branch (Tasks 2–3 done at `dcaf00c`),
+> front-loads the decision-path audit-low batch, pins the SeedOnce
+> epoch-identity invariant (2026-07-23 gate-starvation lesson), and amends
+> Tasks 4–12 (amendments ledger, Task R8). Do not execute this document
+> standalone.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Run the complete Rust fee-authority candidate autonomously in live shadow with restart-persistent Rust-owned state, decision-relevant recorders, production triggers, governor/ledger evidence, and exact outbound request construction, while compiling a real `setchannel` adapter that cannot be selected without a one-session cutover arm and positive Python handoff.
