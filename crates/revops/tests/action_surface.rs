@@ -24,18 +24,52 @@ use std::path::{Path, PathBuf};
 ///   defines and validates `SetChannelRequest` (the exact wire params the
 ///   guarded call site sends); its doc comments and validation-error
 ///   strings legitimately name the CLN RPC method it serializes for.
+///
+/// Task 11 addition (2026-07-26): the rehearsal harness. It builds a real
+/// `PersistedFeeRequest`, whose params field is typed `SetChannelRequest`, and
+/// that type name alone trips this case-insensitive scan — a rehearsal cannot
+/// construct the request it rehearses without naming its type. Same
+/// non-production reasoning as `CLN_FEE_BROADCASTER_ALLOWED_FILES` below.
+///
+/// Kept as narrow as possible: `tests/fee_cutover_rehearsal.rs` is deliberately
+/// NOT listed. It drives the binary as a subprocess and its one incidental
+/// mention was reworded specifically to avoid widening this list twice.
+///
+/// REVIEW ITEM for the task-29 verifier: a deliberate widening of a guard
+/// certified under task 28. Scrutinise rather than accept.
 const ALLOWED_FILES: &[&str] = &[
     "crates/revops/src/fee_execution.rs",
     "crates/revops-fees/src/execution.rs",
+    "crates/revops/src/bin/rehearse_fee_cutover.rs",
 ];
 
 /// Files (workspace-relative) exempt from the `ClnFeeBroadcaster` mention
 /// check: the type's own defining module, and `main.rs`, which is the
 /// ONLY legitimate construction site (the live-authority mode gate) per
 /// Task 10's wiring.
+///
+/// Task 11 addition (2026-07-26): the rehearsal harness is a SECOND legitimate
+/// construction site. It exists to exercise the real broadcaster against a fake
+/// socket and copied databases, so it must name the type; there is no way to
+/// rehearse a capability without holding it.
+///
+/// Why this does not weaken the boundary the other two entries protect:
+/// - it is a standalone `[[bin]]`, never linked into the CLN plugin, so nothing
+///   it constructs can be reached by a running node;
+/// - it refuses any path bearing a production marker before opening anything,
+///   and requires an explicit `--rehearsal-root`, so it has no default that
+///   could resolve to the live socket or a production database;
+/// - it still cannot mint a `LiveMode` except by consuming a real arm through
+///   the real mode matrix — the arms it mints are bound to a synthetic node id
+///   and a zeroed commit/binary hash, and so can never validate in production.
+///
+/// REVIEW ITEM for the task-29 verifier: this is a deliberate widening of a
+/// safety guard certified under task 28. Scrutinise it rather than taking the
+/// reasoning above at face value.
 const CLN_FEE_BROADCASTER_ALLOWED_FILES: &[&str] = &[
     "crates/revops/src/fee_execution.rs",
     "crates/revops/src/main.rs",
+    "crates/revops/src/bin/rehearse_fee_cutover.rs",
 ];
 
 /// This crate's own manifest directory (`crates/revops`), two levels
