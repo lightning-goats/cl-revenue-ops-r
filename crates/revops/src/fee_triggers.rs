@@ -78,6 +78,16 @@ pub enum FeeTrigger {
     /// `_maybe_wake_for_vegas_spike` (py 4386-4411): the edge-triggered
     /// Vegas-spike wake, offered between full cycles.
     VegasSpike,
+    /// Fix round 1 (review finding 2): CLN's own `forward_event`
+    /// notification (`main.rs`'s subscription) -- a forward through
+    /// `channel_id` occurred (any status: settled, failed, local_failed).
+    /// Recording-only, same posture [`FeeTrigger::FailedForward`] already
+    /// carries: the per-channel fee-nudge/posterior effect this
+    /// notification could drive is unported scheduler-side work, deferred
+    /// explicitly to cutover -- this variant only closes the queue-
+    /// accounting gap (the runway design spec's queue list names
+    /// `forward_event` alongside the other five surfaces).
+    ForwardEvent { channel_id: String },
 }
 
 impl FeeTrigger {
@@ -89,15 +99,16 @@ impl FeeTrigger {
             FeeTrigger::PolicyChanged { .. } => "policy_changed",
             FeeTrigger::WakeAll => "wake_all",
             FeeTrigger::VegasSpike => "vegas_spike",
+            FeeTrigger::ForwardEvent { .. } => "forward_event",
         }
     }
 
     /// The scope-keyed channel/peer id this trigger carries, if any.
     pub fn channel_id(&self) -> Option<&str> {
         match self {
-            FeeTrigger::FailedForward { channel_id } | FeeTrigger::PolicyChanged { channel_id } => {
-                Some(channel_id.as_str())
-            }
+            FeeTrigger::FailedForward { channel_id }
+            | FeeTrigger::PolicyChanged { channel_id }
+            | FeeTrigger::ForwardEvent { channel_id } => Some(channel_id.as_str()),
             FeeTrigger::FixedInterval | FeeTrigger::WakeAll | FeeTrigger::VegasSpike => None,
         }
     }

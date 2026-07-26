@@ -74,6 +74,46 @@ fn vegas_spike_trigger_is_enqueued() {
     );
 }
 
+/// Fix round 1 (review finding 2): CLN's own `forward_event` notification
+/// is a sixth trigger kind, keyed by channel like `FailedForward`.
+#[test]
+fn forward_event_trigger_is_enqueued_and_keyed_by_channel() {
+    let mut q = TriggerQueue::new(8);
+    let outcome = q.offer(
+        FeeTrigger::ForwardEvent {
+            channel_id: "100x1x0".to_string(),
+        },
+        NOW,
+    );
+    assert_eq!(outcome, TriggerOutcome::Enqueued);
+    assert_eq!(q.pending_len(), 1);
+
+    // A DIFFERENT channel's forward event is a distinct pending entry.
+    let outcome2 = q.offer(
+        FeeTrigger::ForwardEvent {
+            channel_id: "200x2x0".to_string(),
+        },
+        NOW,
+    );
+    assert_eq!(outcome2, TriggerOutcome::Enqueued);
+    assert_eq!(q.pending_len(), 2);
+}
+
+#[test]
+fn forward_event_trigger_type_is_stable_text_identity() {
+    let row = build_receipt(
+        &FeeTrigger::ForwardEvent {
+            channel_id: "100x1x0".to_string(),
+        },
+        NOW,
+        false,
+        None,
+        "forward_event received",
+    );
+    assert_eq!(row.trigger_type, "forward_event");
+    assert_eq!(row.channel_id.as_deref(), Some("100x1x0"));
+}
+
 // ---------------------------------------------------------------------------
 // Coalescing keys
 // ---------------------------------------------------------------------------

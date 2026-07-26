@@ -485,6 +485,19 @@ async fn main() -> Result<()> {
                     Some(handle) => notify::on_forward_event(&handle, &v).await,
                     None => log_observer_db_drop_once(&FORWARD_EVENT_DROP_LOGGED, "forward_event"),
                 }
+                // Fix round 1 (review finding 2): additionally offer this
+                // occurrence to the bounded trigger queue (recording-only
+                // -- see `CycleOwner::handle_forward_event`), independent
+                // of whether the dedup-insert above ran. A `None`
+                // scheduler (dry-run off, or it failed to start) is a
+                // silent no-op, same as every other trigger source that
+                // predates the scheduler existing.
+                if let Some(handle) = p.state().scheduler.get() {
+                    let channel_id = notify::forward_trigger_channel_id(&v);
+                    let _ = handle
+                        .tx
+                        .send(revops::fee_scheduler::CycleMsg::ForwardEvent { channel_id });
+                }
                 Ok(())
             },
         )

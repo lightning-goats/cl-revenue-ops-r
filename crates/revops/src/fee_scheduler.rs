@@ -485,6 +485,16 @@ pub enum CycleMsg {
     FailedForward {
         channel_id: String,
     },
+    /// Fix round 1 (review finding 2): CLN's own `forward_event`
+    /// notification (`main.rs`'s subscription) offering `channel_id` to
+    /// the trigger queue -- recording-only, same "handler is real, effect
+    /// is future work" posture [`CycleMsg::FailedForward`] already
+    /// carries (see `CycleOwner::handle_forward_event`). Wired
+    /// ALONGSIDE, not in place of, the existing `notify::on_forward_event`
+    /// dedup-insert.
+    ForwardEvent {
+        channel_id: String,
+    },
     /// A `revenue-r-fee-debug` query; the owner thread answers over the
     /// included reply channel without ever blocking on IO.
     Query(FeeDebugQuery, mpsc::Sender<serde_json::Value>),
@@ -1498,6 +1508,43 @@ impl CycleOwner {
         );
     }
 
+    /// [`CycleMsg::ForwardEvent`]'s handler -- fix round 1 (review finding
+    /// 2): CLN's own `forward_event` notification (`main.rs`'s
+    /// subscription), offered to the trigger queue alongside the existing
+    /// dedup-insert (`notify::on_forward_event`), which this does not
+    /// replace or gate. Recording-only, the EXACT same posture
+    /// [`Self::handle_failed_forward`] carries: no fee-nudge or posterior
+    /// effect runs here -- porting that effect is unported scheduler-side
+    /// work, explicitly deferred to cutover.
+    pub fn handle_forward_event(&mut self, channel_id: &str, now: i64) {
+        let trigger = FeeTrigger::ForwardEvent {
+            channel_id: channel_id.to_string(),
+        };
+        let outcome = self.trigger_queue.offer(trigger.clone(), now);
+        if matches!(outcome, TriggerOutcome::Dropped) {
+            eprintln!(
+                "revops: TRIGGER DROPPED (bounded queue at capacity): forward_event channel \
+                 {channel_id} at {now}"
+            );
+            self.record_trigger_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "DROPPED: bounded trigger queue at capacity (backpressure)",
+            );
+            return;
+        }
+        self.record_trigger_receipt(
+            &trigger,
+            now,
+            matches!(outcome, TriggerOutcome::Coalesced),
+            None,
+            "forward_event received; fee-nudge/posterior effect application is not yet wired \
+             to the scheduler (recording only) -- did not itself run a cycle",
+        );
+    }
+
     /// Total triggers ever dropped for backpressure (Task 6's red
     /// counter, alongside [`Self::persistence_failures`]).
     pub fn trigger_queue_dropped_total(&self) -> u64 {
@@ -1642,6 +1689,9 @@ where
                 }
                 CycleMsg::FailedForward { channel_id } => {
                     owner.handle_failed_forward(&channel_id, crate::now_unix());
+                }
+                CycleMsg::ForwardEvent { channel_id } => {
+                    owner.handle_forward_event(&channel_id, crate::now_unix());
                 }
                 CycleMsg::Query(query, reply) => {
                     // Never block the owner thread on a slow/uncooperative

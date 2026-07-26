@@ -1911,6 +1911,66 @@ mod seedonce_restart {
         assert_eq!(events[0].0, "vegas_spike");
     }
 
+    /// Fix round 1 (review finding 2): CLN's `forward_event` notification
+    /// is wired through the trigger queue, recording-only -- same posture
+    /// `handle_failed_forward` already carries (no fee-nudge/posterior
+    /// effect; that stays deferred to cutover).
+    #[test]
+    fn forward_event_trigger_receipt_is_persisted() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        owner.handle_forward_event("100x1x0", NOW);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "forward_event");
+        assert_eq!(events[0].1.as_deref(), Some("100x1x0"));
+        assert!(!events[0].2, "the FIRST occurrence must not be coalesced");
+    }
+
+    #[test]
+    fn repeated_forward_event_for_the_same_channel_coalesces_the_receipt() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        owner.handle_forward_event("100x1x0", NOW);
+        owner.handle_forward_event("100x1x0", NOW + 1);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        assert_eq!(events.len(), 2);
+        assert!(!events[0].2);
+        assert!(
+            events[1].2,
+            "the SECOND occurrence must be recorded as coalesced"
+        );
+    }
+
+    #[test]
+    fn a_dropped_forward_event_trigger_is_a_persisted_red_event() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+
+        // Saturate the bounded queue with DISTINCT forward-event channel
+        // keys past its capacity.
+        for i in 0..(TRIGGER_QUEUE_CAPACITY + 1) {
+            owner.handle_forward_event(&format!("chan-{i}"), NOW);
+        }
+        assert_eq!(owner.trigger_queue_dropped_total(), 1);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let events = trigger_events(&conn);
+        let dropped: Vec<_> = events
+            .iter()
+            .filter(|(_, _, _, detail)| detail.as_deref().is_some_and(|d| d.contains("DROPPED")))
+            .collect();
+        assert_eq!(
+            dropped.len(),
+            1,
+            "exactly one occurrence must be recorded as a dropped/red event"
+        );
+    }
+
     #[test]
     fn a_dropped_trigger_is_a_persisted_red_event() {
         let fx = fixture();

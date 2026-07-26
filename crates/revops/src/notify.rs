@@ -104,6 +104,25 @@ async fn try_on_forward_event(handle: &ObserverHandle, event: &Value) -> anyhow:
     Ok(())
 }
 
+/// Fix round 1 (review finding 2): the trigger-queue scope key `main.rs`'s
+/// `forward_event` subscription offers `FeeTrigger::ForwardEvent` under --
+/// the OUTGOING channel (the hop whose fee decision this notification is
+/// about) if present, else the INCOMING channel, else `""` (unresolved --
+/// mirrors [`forward_row_from_json`]'s own `unwrap_or_default` convention
+/// for an absent SCID). Accepts either the nested `{"forward_event": {...}}`
+/// envelope or a flat payload, exactly like [`on_forward_event`] -- offered
+/// for EVERY status (settled, failed, local_failed), unlike the
+/// settled-only dedup-insert this does not replace or gate.
+pub fn forward_trigger_channel_id(event: &Value) -> String {
+    let event = event.get("forward_event").unwrap_or(event);
+    let row = forward_row_from_json(event);
+    if !row.out_channel.is_empty() {
+        row.out_channel
+    } else {
+        row.in_channel
+    }
+}
+
 /// Extract a [`ForwardRow`] out of either a `forward_event` notification
 /// payload or a raw `listforwards` entry -- both shapes carry the same
 /// field names (`in_channel`/`out_channel`/`*_msat`/`*_msatoshi`/
@@ -286,6 +305,38 @@ mod tests {
     fn normalize_scid_replaces_colons() {
         assert_eq!(normalize_scid("931308:1256:1"), "931308x1256x1");
         assert_eq!(normalize_scid("931308x1256x1"), "931308x1256x1");
+    }
+
+    /// Fix round 1 (review finding 2): the trigger-queue scope key
+    /// `main.rs`'s `forward_event` subscription offers the queue --
+    /// prefers `out_channel`, falls back to `in_channel`, accepts either
+    /// the nested `{"forward_event": {...}}` envelope or a flat payload.
+    #[test]
+    fn forward_trigger_channel_id_prefers_out_channel_and_normalizes() {
+        let event = json!({
+            "status": "settled",
+            "in_channel": "1:1:0",
+            "out_channel": "2:2:0",
+        });
+        assert_eq!(forward_trigger_channel_id(&event), "2x2x0");
+    }
+
+    #[test]
+    fn forward_trigger_channel_id_falls_back_to_in_channel() {
+        let event = json!({"status": "local_failed", "in_channel": "1:1:0"});
+        assert_eq!(forward_trigger_channel_id(&event), "1x1x0");
+    }
+
+    #[test]
+    fn forward_trigger_channel_id_empty_when_neither_channel_present() {
+        let event = json!({"status": "local_failed"});
+        assert_eq!(forward_trigger_channel_id(&event), "");
+    }
+
+    #[test]
+    fn forward_trigger_channel_id_accepts_nested_envelope() {
+        let event = json!({"forward_event": {"out_channel": "3:3:0"}});
+        assert_eq!(forward_trigger_channel_id(&event), "3x3x0");
     }
 
     #[test]
