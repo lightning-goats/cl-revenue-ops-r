@@ -953,3 +953,171 @@ async fn new_refuses_construction_when_restart_reconciliation_fails() {
         "a refused construction must never dial CLN either"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Final-review finding I7 (2026-07-26): live-path items that must not
+// survive to cutover. All inert today (zero production callers), all on the
+// one path that will eventually touch real funds.
+// ---------------------------------------------------------------------------
+
+/// I7a: the audit row's `params_json` used to be
+/// `serde_json::to_string(...).unwrap_or_default()` -- an EMPTY string on
+/// any serialization failure -- while the wire call re-serializes the real
+/// params independently. The ledger and the socket must never be able to
+/// disagree about what was sent.
+#[tokio::test]
+async fn broadcast_attempt_row_records_exactly_the_params_sent_on_the_wire() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
+    let store = observer(tmp.path()).await;
+    let broadcaster = broadcaster(server.socket_path(), store.clone(), tmp.path()).await;
+
+    broadcaster
+        .broadcast_batch(authorize_ok(&store).await, &[one_request()])
+        .await
+        .expect("authorized single-request batch succeeds");
+
+    let conn = rusqlite::Connection::open(tmp.path().join("observer.db")).unwrap();
+    let recorded: String = conn
+        .query_row(
+            "SELECT params_json FROM rust_broadcast_attempts ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("the broadcast attempt intent row");
+    assert!(!recorded.is_empty(), "an empty params_json is never valid");
+
+    let on_the_wire = server.received_params();
+    assert_eq!(on_the_wire.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&recorded).expect("params_json is valid JSON"),
+        on_the_wire[0],
+        "the audit ledger and the socket must agree on the params"
+    );
+}
+
+/// I7b: `authorize` read the CURRENT state generation via
+/// `load_latest_fee_state()`, which materialises every channel's state row
+/// through the same single-owner actor the cycle loop writes through, then
+/// throws all of them away. `current_state_generation()` exists precisely
+/// to avoid that head-of-line stall. The swap must not change the answer,
+/// including once the store has actually committed rows.
+#[tokio::test]
+async fn state_generation_check_agrees_with_the_committed_generation_after_a_real_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeClnServer::spawn(vec![]);
+    let store = observer(tmp.path()).await;
+
+    store
+        .commit_fee_cycle(revops_db::fee_runway::FeeCycleCommit {
+            cycle_id: "live-gen-1".to_string(),
+            started_at: 1_800_000_000,
+            completed_at: 1_800_000_001,
+            source_commit: SOURCE_COMMIT.to_string(),
+            binary_sha256: BINARY_SHA256.to_string(),
+            state_rows: vec![revops_db::fee_runway::FeeStateRow {
+                channel_id: "1x1x0".to_string(),
+                v2_state_json: r#"{"fee_state": {}, "cycle_state": {}}"#.to_string(),
+                last_update: 1_800_000_000,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("commit one generation");
+
+    // Authorizing against the pre-commit generation is now stale, and the
+    // reported `current` is the generation the commit produced.
+    let (first, second) = stable_readings();
+    let err = LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        0,
+        &first,
+        &second,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect_err("a candidate built against generation 0 is stale after a commit");
+    assert_eq!(
+        err,
+        LiveBatchDenyReason::StateGenerationStale {
+            authorized_against: 0,
+            current: 1,
+        }
+    );
+    assert_eq!(server.connection_count(), 0);
+
+    // ... and authorizing against the committed generation still passes.
+    LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        1,
+        &first,
+        &second,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect("the committed generation authorizes");
+}
+
+/// I7c: every store call on this path is budgeted. A wedged single-owner
+/// actor must DENY (fail closed, zero RPC calls) rather than hang the CLN
+/// handler that called in -- the RPC half was already budgeted, the store
+/// half was not.
+///
+/// The wedge is real, not simulated: a second connection holds a write
+/// transaction on the observer db, so the actor's `insert_broadcast_attempt`
+/// blocks. The broadcaster's budget (1s here) is well under
+/// `revops_db::BUSY_TIMEOUT_MS` (5s), so the budget fires first and the
+/// outcome is deterministic.
+#[tokio::test]
+async fn a_wedged_store_actor_denies_the_batch_instead_of_hanging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
+    let store = observer(tmp.path()).await;
+
+    // Everything that needs a responsive store happens BEFORE the wedge.
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+    let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 1, live_mode)
+        .await
+        .expect("no orphaned intents in a fresh store");
+    let authorization = authorize_ok(&store).await;
+
+    // Wedge: hold a write transaction on the observer db from another
+    // connection. WAL keeps readers going, so the batch gets as far as
+    // persisting its intent -- and blocks there.
+    let blocker = rusqlite::Connection::open(tmp.path().join("observer.db")).unwrap();
+    blocker
+        .busy_timeout(std::time::Duration::from_secs(60))
+        .unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let started = std::time::Instant::now();
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("a wedged store must deny the batch");
+    let elapsed = started.elapsed();
+
+    match &err {
+        BroadcastError::Persistence(detail) => assert!(
+            detail.contains("budget") || detail.contains("timed out"),
+            "the deny reason must name the exceeded budget, got {detail}"
+        ),
+        other => panic!("expected a persistence denial, got {other:?}"),
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "the budget must fire well before sqlite's own busy_timeout, took {elapsed:?}"
+    );
+    assert_eq!(
+        server.connection_count(),
+        0,
+        "a batch that could not record its intent must send zero RPC calls"
+    );
+    blocker.execute_batch("ROLLBACK").unwrap();
+}

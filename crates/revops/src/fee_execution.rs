@@ -103,6 +103,43 @@ use crate::python_authority::{
 /// this line.
 pub const SETCHANNEL_METHOD: &str = "setchannel";
 
+/// Wall-clock budget for the two Rust-owned-store reads
+/// [`LiveBatchAuthorization::authorize`] performs (final-review finding
+/// I7, 2026-07-26). Deliberately a little ABOVE
+/// [`revops_db::BUSY_TIMEOUT_MS`] so a legitimate sqlite lock wait is
+/// never cut short and misreported as a wedged actor -- see [`budgeted`]
+/// for why any budget at all is required. `broadcast_batch` uses the
+/// broadcaster's own `timeout_seconds` instead, so the whole live path has
+/// exactly one operator-visible number.
+const AUTHORIZE_STORE_BUDGET: Duration = Duration::from_millis(revops_db::BUSY_TIMEOUT_MS + 2_000);
+
+/// Budget ONE Rust-owned-store call and turn an expiry into a denial
+/// string (final-review finding I7, 2026-07-26).
+///
+/// The store is a single-owner actor behind a channel: a wedged actor (a
+/// blocking task stuck on a lock it never gets, a reply that never comes)
+/// makes an unbudgeted `.await` here hang the CLN handler that called in,
+/// forever. The RPC half of this module has been budgeted since Task 9
+/// (see [`ClnFeeBroadcaster::attempt_send`]); this is its store-side
+/// counterpart, so every wait on the live path either answers or DENIES.
+/// Failing closed is always available -- the deny reasons already exist --
+/// whereas a hang is not a decision at all.
+async fn budgeted<T>(
+    budget: Duration,
+    what: &str,
+    call: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(budget, call).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(format!("{e:#}")),
+        Err(_) => Err(format!(
+            "{what} exceeded its {:?} Rust-owned-store budget: the single-owner actor did not \
+             answer, so this call fails closed rather than hanging its caller",
+            budget
+        )),
+    }
+}
+
 /// One prepared, would-broadcast fee request, bound to its cycle/request
 /// identity for persistence and audit (the interface note's
 /// "`PersistedFeeRequest`-like rows exist as `rust_fee_requests`" --
@@ -264,10 +301,13 @@ impl LiveBatchAuthorization {
         governor_reason_code: impl Into<String>,
         ledger_reservation_id: impl Into<String>,
     ) -> Result<Self, LiveBatchDenyReason> {
-        let active_quarantine = store
-            .active_execution_quarantine()
-            .await
-            .map_err(|e| LiveBatchDenyReason::QuarantineCheckFailed(e.to_string()))?;
+        let active_quarantine = budgeted(
+            AUTHORIZE_STORE_BUDGET,
+            "the active-quarantine read",
+            store.active_execution_quarantine(),
+        )
+        .await
+        .map_err(LiveBatchDenyReason::QuarantineCheckFailed)?;
         if let Some(q) = active_quarantine {
             return Err(LiveBatchDenyReason::QuarantineActive {
                 reason: q.reason,
@@ -275,11 +315,20 @@ impl LiveBatchAuthorization {
             });
         }
 
-        let current_state_generation = store
-            .load_latest_fee_state()
-            .await
-            .map_err(|e| LiveBatchDenyReason::StateGenerationCheckFailed(e.to_string()))?
-            .generation;
+        // `current_state_generation` (a single scalar SELECT), NOT
+        // `load_latest_fee_state().generation` -- final-review finding I7,
+        // 2026-07-26. The latter materialises EVERY channel's state row
+        // through the same single-owner actor the cycle loop writes
+        // through, and then discards all of them; this scalar sibling
+        // exists precisely to avoid that head-of-line stall. Same answer,
+        // by construction (both read `rust_fee_state_generation`).
+        let current_state_generation = budgeted(
+            AUTHORIZE_STORE_BUDGET,
+            "the state-generation read",
+            store.current_state_generation(),
+        )
+        .await
+        .map_err(LiveBatchDenyReason::StateGenerationCheckFailed)?;
         if candidate_state_generation != current_state_generation {
             return Err(LiveBatchDenyReason::StateGenerationStale {
                 authorized_against: candidate_state_generation,
@@ -545,12 +594,14 @@ impl ClnFeeBroadcaster {
         // send path (`authorize` ran and returned before this call even
         // began) -- re-checking here costs one DB read and means this
         // path, too, sends zero calls while quarantined.
-        if self
-            .store
-            .active_execution_quarantine()
-            .await
-            .map_err(|e| BroadcastError::Persistence(e.to_string()))?
-            .is_some()
+        if budgeted(
+            self.store_budget(),
+            "the send-path active-quarantine read",
+            self.store.active_execution_quarantine(),
+        )
+        .await
+        .map_err(BroadcastError::Persistence)?
+        .is_some()
         {
             return Err(BroadcastError::Quarantined);
         }
@@ -562,7 +613,18 @@ impl ClnFeeBroadcaster {
 
         let mut outcomes = Vec::with_capacity(requests.len());
         for request in requests {
-            let params_json = serde_json::to_string(&request.to_params()).unwrap_or_default();
+            // NOT `unwrap_or_default()` -- final-review finding I7,
+            // 2026-07-26. An empty `params_json` in the audit row while
+            // the wire call re-serializes the real params (see
+            // `attempt_send`) means the ledger and the socket disagree
+            // about what was sent, on the one path that touches real
+            // funds. Unrecordable intent, unsendable batch.
+            let params_json = serde_json::to_string(&request.to_params()).map_err(|e| {
+                BroadcastError::Persistence(format!(
+                    "serialize setchannel params for request {}: {e}",
+                    request.request_id
+                ))
+            })?;
             let submitted_at = crate::now_unix();
             let intent = BroadcastAttemptIntent {
                 cycle_id: request.cycle_id.clone(),
@@ -572,11 +634,13 @@ impl ClnFeeBroadcaster {
                 params_json,
                 submitted_at,
             };
-            let attempt_id = self
-                .store
-                .insert_broadcast_attempt(intent)
-                .await
-                .map_err(|e| BroadcastError::Persistence(e.to_string()))?;
+            let attempt_id = budgeted(
+                self.store_budget(),
+                "the broadcast-attempt intent write",
+                self.store.insert_broadcast_attempt(intent),
+            )
+            .await
+            .map_err(BroadcastError::Persistence)?;
 
             match self.attempt_send(request).await {
                 SendOutcome::Success(response) => {
@@ -660,19 +724,34 @@ impl ClnFeeBroadcaster {
         Ok(BatchReceipt { outcomes })
     }
 
+    /// The store budget for every call `broadcast_batch` and its helpers
+    /// make (final-review finding I7, 2026-07-26): the SAME number that
+    /// budgets the RPC half, so a broadcaster has exactly one
+    /// operator-visible timeout. See [`budgeted`].
+    fn store_budget(&self) -> Duration {
+        Duration::from_secs(self.timeout_seconds)
+    }
+
     async fn record_result(
         &self,
         attempt_id: i64,
         outcome: BroadcastAttemptOutcome,
         detail: Option<String>,
     ) {
-        if let Err(e) = self
-            .store
-            .record_broadcast_attempt_result(attempt_id, outcome, detail, crate::now_unix())
-            .await
+        if let Err(e) = budgeted(
+            self.store_budget(),
+            "the broadcast-attempt result write",
+            self.store.record_broadcast_attempt_result(
+                attempt_id,
+                outcome,
+                detail,
+                crate::now_unix(),
+            ),
+        )
+        .await
         {
             eprintln!(
-                "revops: broadcast attempt result record failed ({e:#}) for attempt {attempt_id}; \
+                "revops: broadcast attempt result record failed ({e}) for attempt {attempt_id}; \
                  the intent row stays unresolved and will be treated as ambiguous on the next \
                  restart"
             );
@@ -693,7 +772,13 @@ impl ClnFeeBroadcaster {
             request_id: Some(request.request_id.clone()),
             entered_at: crate::now_unix(),
         };
-        self.store.insert_execution_quarantine(entry).await?;
+        budgeted(
+            self.store_budget(),
+            "the execution-quarantine write",
+            self.store.insert_execution_quarantine(entry),
+        )
+        .await
+        .map_err(|detail| anyhow::anyhow!(detail))?;
         Ok(())
     }
 
