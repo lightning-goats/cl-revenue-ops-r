@@ -21,7 +21,9 @@ use revops::fee_evidence::{RpcPrefetch, MEMPOOL_MA_WINDOW_SECONDS};
 use revops::fee_scheduler::{
     read_flush_marker, CycleMsg, CycleOutcome, CycleOwner, FailedForwardSignal, FeeDebugQuery,
     FlushWatcher, PollOutcome, PreparedCycle, SchedulerConfig, StateLifecycle, TriggerMode,
-    WatchParams, DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS, TRIGGER_QUEUE_CAPACITY,
+    WatchParams, DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS,
+    FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS, FAILURE_NUDGE_MIN_INTERVAL_SECONDS,
+    TRIGGER_QUEUE_CAPACITY,
 };
 use revops::fee_state::STATE_JOURNAL_FILE_NAME;
 use revops_fees::cycle::{ChannelCycleState, ChannelFeeState, ChannelStateRow, FeeCfgSnapshot};
@@ -2334,6 +2336,165 @@ mod seedonce_restart {
         assert_eq!(
             cycle_ts, outcome_cycle_ts,
             "trigger receipt and shadow outcome must share the same cycle_ts key"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 44 / A1: the failed-forward posterior nudge, through the full
+    // CycleOwner. Before this wiring landed, `handle_failed_forward`
+    // recorded a receipt and returned -- so after cutover, with Python
+    // off, no bias nudge would ever be written again.
+    // -----------------------------------------------------------------
+
+    /// Seed a channel that already has posterior state and a live fee, so
+    /// the nudge's "never a channel's first posterior evidence" guard is
+    /// satisfied.
+    fn seed_nudgeable_channel(owner: &mut CycleOwner, channel_id: &str, fee_ppm: i64) {
+        let mut fee_state = ChannelFeeState::default();
+        fee_state.last_fee_ppm = fee_ppm;
+        owner
+            .state_mut()
+            .fee_states
+            .insert(channel_id.to_string(), fee_state);
+    }
+
+    fn nudges(owner: &CycleOwner, channel_id: &str) -> usize {
+        owner.state().fee_states[channel_id]
+            .thompson
+            .posterior_bias
+            .len()
+    }
+
+    /// THE REVERT TRIPWIRE. Reverting `handle_failed_forward` to
+    /// recording-only leaves `posterior_bias` empty and this reds.
+    #[test]
+    fn a_fee_relevant_failure_writes_a_durable_posterior_nudge() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+        assert_eq!(nudges(&owner, "1x1x0"), 0, "precondition: no nudges yet");
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+
+        assert_eq!(
+            nudges(&owner, "1x1x0"),
+            1,
+            "a fee-relevant failure must durably nudge the posterior, not just record a receipt"
+        );
+        let (target, _weight, ts) = owner.state().fee_states["1x1x0"].thompson.posterior_bias[0];
+        assert_eq!(target, 400.0, "py: int(current_fee_ppm * 0.8)");
+        assert_eq!(
+            ts, NOW,
+            "stamped with the EVENT's clock, not the dispatch clock"
+        );
+
+        let conn = Connection::open(&store_path).unwrap();
+        let detail = trigger_events(&conn)
+            .into_iter()
+            .find(|(t, ..)| t == "failed_forward")
+            .and_then(|(_, _, _, d)| d)
+            .expect("a failed_forward receipt");
+        assert!(
+            detail.contains("APPLIED"),
+            "the receipt must state what actually happened, got: {detail}"
+        );
+    }
+
+    /// The never-first-evidence invariant (py `has_persisted_dts`).
+    /// Control for the test above: identical signal, no seeded channel.
+    #[test]
+    fn a_channel_without_posterior_state_is_never_nudged() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+
+        assert!(
+            !owner.state().fee_states.contains_key("1x1x0"),
+            "a failed forward must never fabricate posterior state"
+        );
+        let conn = Connection::open(&store_path).unwrap();
+        let detail = trigger_events(&conn)
+            .into_iter()
+            .find(|(t, ..)| t == "failed_forward")
+            .and_then(|(_, _, _, d)| d)
+            .expect("a receipt is still recorded");
+        assert!(detail.contains("NOT applied"), "{detail}");
+    }
+
+    /// A channel with no positive fee has nothing to imply a target from.
+    #[test]
+    fn a_channel_with_no_positive_fee_is_not_nudged() {
+        let fx = fixture();
+        let (mut owner, _p) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 0);
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+
+        assert_eq!(nudges(&owner, "1x1x0"), 0);
+    }
+
+    /// SL-2 gossip settle: failures inside the window after OUR OWN apply
+    /// are still being routed against the old fee.
+    #[test]
+    fn a_failure_inside_the_gossip_settle_window_is_not_nudged() {
+        let fx = fixture();
+        let (mut owner, _p) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+        owner.note_fee_applied("1x1x0", NOW);
+
+        owner.handle_failed_forward(&failed_forward(
+            "1x1x0",
+            NOW + FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS - 1,
+        ));
+        assert_eq!(nudges(&owner, "1x1x0"), 0, "inside the window: suppressed");
+
+        // ...and the boundary is not off by one: at exactly the window it
+        // is allowed again.
+        owner.handle_failed_forward(&failed_forward(
+            "1x1x0",
+            NOW + FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS,
+        ));
+        assert_eq!(
+            nudges(&owner, "1x1x0"),
+            1,
+            "at the window boundary: allowed"
+        );
+    }
+
+    /// SL-2 rate limit: one nudge per channel per window, so a burst from
+    /// a single payment attempt cannot stack into a large fake signal.
+    #[test]
+    fn a_second_failure_inside_the_rate_limit_window_is_not_nudged() {
+        let fx = fixture();
+        let (mut owner, _p) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+        assert_eq!(nudges(&owner, "1x1x0"), 1);
+
+        owner.handle_failed_forward(&failed_forward(
+            "1x1x0",
+            NOW + FAILURE_NUDGE_MIN_INTERVAL_SECONDS - 1,
+        ));
+        assert_eq!(nudges(&owner, "1x1x0"), 1, "rate limited: still one nudge");
+
+        // Past the window the nudge is allowed again -- but the COUNT stays
+        // 1, because `record_posterior_nudge`'s M4 dedup refreshes an entry
+        // within NUDGE_DEDUP_TOLERANCE of an existing target instead of
+        // appending, and both nudges imply the same 400 ppm. The observable
+        // proof that it fired is the refreshed timestamp.
+        let before = owner.state().fee_states["1x1x0"].thompson.posterior_bias[0].2;
+        owner.handle_failed_forward(&failed_forward(
+            "1x1x0",
+            NOW + FAILURE_NUDGE_MIN_INTERVAL_SECONDS,
+        ));
+        let after = owner.state().fee_states["1x1x0"].thompson.posterior_bias[0].2;
+        assert_eq!(before, NOW);
+        assert_eq!(
+            after,
+            NOW + FAILURE_NUDGE_MIN_INTERVAL_SECONDS,
+            "past the window the nudge fires again and refreshes the entry (M4 dedup)"
         );
     }
 }

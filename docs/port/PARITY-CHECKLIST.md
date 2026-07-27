@@ -44,7 +44,7 @@ components). Audited 2026-07-27, evidence in
 | 9 | Per-channel state persistence | `state_store.rs`, `thompson/serde.rs` | `state_serde`, `state_roundtrip`, `production_blobs` | round-trip | `[x]` |
 | 10 | Fee execution | `execution.rs`, `revops/fee_execution.rs` | `tests/execution.rs`, `fee_execution` | action-surface scan | `[x]` |
 | 11 | Governor authorization | `revops-econ` | `governor`, `intents` | fail-closed tests | `[x]` |
-| 12 | Failed-forward signal | `dynamics.rs` + `fee_scheduler.rs` | see §2 A1 | **partial** | `[~]` |
+| 12 | Failed-forward signal | `dynamics.rs` + `fee_scheduler.rs` | see §2 A1 | mutation-verified | `[x]` |
 | 13 | Config | `fee_config.rs`, `config_resolve.rs` | `fee_config`, `config_resolve` | validation tests | `[x]` |
 | 14 | DB persistence (fee subset) | `revops-db` | `owner`, `queries`, `budget` | schema tests | `[x]` |
 | 15 | DataService (RPC cache) | `fee_evidence.rs` | `fee_evidence`, `read_rpcs` | TTL tests | `[x]` |
@@ -72,22 +72,29 @@ that mutate fee state.
 - [x] cooldowns: gossip-settle 3600s, rate limit 1800s, measured from **event**
       time (carried in the message, not the dispatch clock)
 - [x] never-first-evidence rule (absence of `fee_states` entry ⇒ skip)
-- [ ] **scheduler-side behaviour tests** — each guard driven through
-      `handle_failed_forward`, asserting the receipt text
-- [ ] **revert tripwire** — a test that reds if the effect is reverted to
-      recording-only
+- [x] **scheduler-side behaviour tests** — 5 tests driving each guard through
+      `handle_failed_forward`, incl. both cooldown boundaries (off-by-one
+      checked on each side)
+- [x] **revert tripwire** — MUTATION-VERIFIED: reverting the effect to
+      recording-only reds 3 tests; file restored byte-exact (sha256)
 - [ ] `note_fee_applied` called from Rust's own broadcast path (inert until
       cutover; today nothing applies fees, so the gossip-settle window never
       opens — matches Python only post-cutover)
 
 ### A2 — peer policy change (py `_handle_policy_change`:7871)
 
-- [ ] producer. **Design decision pending:** Python's producer is the process
-      that made the change; Rust cannot use that because Python owns the policy
-      RPC today. Proposed: diff `peer_policies.updated_at` per peer at cycle
-      top — works before *and* after cutover.
-- [ ] effect: wake every channel with that peer (trigger carries a **peer** id)
-- [ ] tests + revert tripwire
+**Audit correction (2026-07-27):** the EFFECT is already ported. My first pass
+called this "receipt only, no kernel"; in fact `CycleOwner::handle_policy_changed`
+already calls `policy_changed` -> `revops_fees::cycle::handle_policy_change`,
+which wakes the peer's channels. Only the producer is missing.
+
+- [x] effect: wake every channel with that peer (`handle_policy_change`)
+- [x] trigger receipt + bounded-queue/backpressure handling
+- [ ] **producer** — nothing constructs `CycleMsg::PolicyChanged`. Python's
+      producer is the process that made the change, which Rust cannot use while
+      Python owns the policy RPC. Plan: remember `peer_policies.updated_at` per
+      peer and dispatch on advance at cycle top — works before AND after cutover.
+- [ ] tests + revert tripwire for the producer
 
 ### A3 — new-channel initial fee (py `set_initial_fee`:8584)
 
