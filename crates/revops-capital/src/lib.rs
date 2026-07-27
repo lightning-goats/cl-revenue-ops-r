@@ -18,13 +18,19 @@
 //! rather than reinventing money-safety code.
 //!
 //! [`planner`] ports a curated, pure subset of `CapacityPlanner`
-//! (py `modules/capacity_planner.py`, ~4,200 LOC) — the decision gates and
-//! EV/ROI math that are pure functions of already-fetched evidence. It does
-//! **not** port `execute_cycle`, the five discovery strategies, or any of
-//! the `_execute_*` methods that perform CLN RPC calls (fundchannel/close/
-//! rebalance): those remain Python-owned. See
-//! `crates/revops-capital/ENTRYPOINTS.md` for the complete list of what is
-//! and is not wired, and what a caller integrating this crate must supply.
+//! (py `modules/capacity_planner.py`, ~4,200 LOC) — the decision gates,
+//! EV/ROI math, candidate-discovery strategies, winner/loser
+//! classification, candidate scoring, and the `execute_cycle`
+//! orchestration itself (as [`planner::cycle::plan_cycle`]), all as pure
+//! functions of already-fetched evidence. It does **not** port any of the
+//! `_execute_*` methods that perform CLN RPC calls (fundchannel/close/
+//! rebalance) — those remain Python-owned, and this crate is structurally
+//! incapable of calling them (no RPC client type anywhere in the crate).
+//! See `crates/revops-capital/ENTRYPOINTS.md` for the complete list of
+//! what is and is not wired, what a caller integrating this crate must
+//! supply, and the honestly-declared gaps (the capital-efficiency-aware
+//! branch of neighbor discovery, `_arbitrate_close_list`'s conflict
+//! arming, LN+ swap evaluation).
 //!
 //! Not ported at all in this pass: `BoltzCliManager` (py
 //! `modules/boltz_manager.py`, ~2,670 LOC), `BoltzAutoCycle` (py
