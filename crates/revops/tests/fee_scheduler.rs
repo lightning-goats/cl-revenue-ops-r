@@ -87,6 +87,19 @@ fn seed_channel_state(db_path: &Path) {
     .expect("insert channel_states row");
 }
 
+/// Insert or update a `peer_policies` row for `peer_a()`, which is what
+/// the A2 producer watches via `updated_at`.
+fn upsert_peer_policy(db_path: &Path, updated_at: i64, fee_ppm_target: i64) {
+    let conn = Connection::open(db_path).expect("open for seeding");
+    conn.execute(
+        "INSERT INTO peer_policies (peer_id, strategy, fee_ppm_target, updated_at) \
+         VALUES (?1, 'static', ?2, ?3) \
+         ON CONFLICT(peer_id) DO UPDATE SET fee_ppm_target = ?2, updated_at = ?3",
+        rusqlite::params![peer_a(), fee_ppm_target, updated_at],
+    )
+    .expect("upsert peer_policies row");
+}
+
 /// A `fee_strategy_state` row for `channel_id` (empty v2 blob -- the
 /// hydration path fills defaults), for the lifecycle tests.
 fn seed_fee_strategy_row(db_path: &Path, channel_id: &str) {
@@ -2496,5 +2509,107 @@ mod seedonce_restart {
             NOW + FAILURE_NUDGE_MIN_INTERVAL_SECONDS,
             "past the window the nudge fires again and refreshes the entry (M4 dedup)"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 44 / A2: the policy-change PRODUCER. The effect was already
+    // ported (handle_policy_change wakes the peer's channels); nothing
+    // ever constructed CycleMsg::PolicyChanged, so a policy change only
+    // took effect at the next full cycle.
+    // -----------------------------------------------------------------
+
+    fn policy_receipts(conn: &Connection) -> Vec<(Option<String>, Option<String>)> {
+        trigger_events(conn)
+            .into_iter()
+            .filter(|(t, ..)| t == "policy_changed")
+            .map(|(_, chan, _, detail)| (chan, detail))
+            .collect()
+    }
+
+    /// A restart is not a policy change: the FIRST time a peer is seen the
+    /// producer only records a baseline. Without this, every restart would
+    /// wake the whole node once.
+    #[test]
+    fn the_first_observation_of_a_peer_is_a_baseline_not_a_change() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        upsert_peer_policy(&fx.db_path, NOW - 600, 400);
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        let mut clock = || NOW;
+
+        owner.run_cycle(prepared(json!(3), false), &mut clock);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert!(
+            policy_receipts(&conn).is_empty(),
+            "a first sighting must not be reported as a policy change"
+        );
+    }
+
+    /// THE REVERT TRIPWIRE for A2. Removing the `detect_policy_changes`
+    /// call leaves no policy_changed receipt and this reds.
+    #[test]
+    fn an_advanced_policy_updated_at_produces_a_policy_change() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        upsert_peer_policy(&fx.db_path, NOW - 600, 400);
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        let mut clock = || NOW;
+
+        // Cycle 1 establishes the baseline.
+        owner.run_cycle(prepared(json!(3), false), &mut clock);
+        // The operator (Python today, Rust after cutover) edits the policy.
+        upsert_peer_policy(&fx.db_path, NOW - 10, 900);
+        owner.run_cycle(prepared(json!(3), false), &mut clock);
+
+        let conn = Connection::open(&store_path).unwrap();
+        let receipts = policy_receipts(&conn);
+        assert_eq!(
+            receipts.len(),
+            1,
+            "an advanced updated_at must produce exactly one policy change, got {receipts:?}"
+        );
+        assert_eq!(
+            receipts[0].0.as_deref(),
+            Some(peer_a().as_str()),
+            "the receipt is scoped by PEER id, not channel id"
+        );
+    }
+
+    /// An unchanged policy must stay silent, however many cycles run --
+    /// the control that proves the test above is not just "any cycle
+    /// emits a receipt".
+    #[test]
+    fn an_unchanged_policy_never_produces_a_policy_change() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        upsert_peer_policy(&fx.db_path, NOW - 600, 400);
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        let mut clock = || NOW;
+
+        for _ in 0..3 {
+            owner.run_cycle(prepared(json!(3), false), &mut clock);
+        }
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert!(policy_receipts(&conn).is_empty());
+    }
+
+    /// A policy row going BACKWARDS (clock skew, a restored backup) is not
+    /// a change -- only an advance is.
+    #[test]
+    fn a_regressed_updated_at_is_not_a_policy_change() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        upsert_peer_policy(&fx.db_path, NOW - 10, 400);
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        let mut clock = || NOW;
+
+        owner.run_cycle(prepared(json!(3), false), &mut clock);
+        upsert_peer_policy(&fx.db_path, NOW - 600, 400);
+        owner.run_cycle(prepared(json!(3), false), &mut clock);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert!(policy_receipts(&conn).is_empty());
     }
 }

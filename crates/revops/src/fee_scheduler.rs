@@ -674,6 +674,10 @@ pub struct CycleOwner {
     /// py `_last_failure_nudge_ts` (3011): when this channel last took a
     /// failure nudge, for the per-window rate limit.
     last_failure_nudge_ts: HashMap<String, i64>,
+    /// Task 44 / A2: last seen `peer_policies.updated_at` per peer, so a
+    /// change can be detected whoever made it (see
+    /// [`Self::detect_policy_changes`]).
+    last_policy_updated_at: HashMap<String, i64>,
     /// Seeded exactly ONCE, in [`CycleOwner::new`] (production: from
     /// `now_unix()` at spawn). Never reseeded -- every cycle continues
     /// this one stream, mirroring Python's module-level `random` instance.
@@ -770,6 +774,7 @@ impl CycleOwner {
             lifecycle: cfg.lifecycle,
             last_fee_apply_ts: HashMap::new(),
             last_failure_nudge_ts: HashMap::new(),
+            last_policy_updated_at: HashMap::new(),
             hydrated_once: false,
             seed_refused: false,
             store,
@@ -943,6 +948,10 @@ impl CycleOwner {
         // lifecycles (building continuity ahead of cutover); never fails
         // the cycle.
         self.record_mempool_evidence(now, &snapshot, &prepared.cfg);
+
+        // Task 44 / A2: the policy-change PRODUCER. See
+        // `Self::detect_policy_changes`.
+        self.detect_policy_changes(&snapshot, now);
 
         // (4) State lifecycle (Design Note 1), over the snapshot's pinned
         // read-only connection -- hydration sees the exact same frozen DB
@@ -1709,6 +1718,52 @@ impl CycleOwner {
     /// applied a fee, starting this channel's gossip-settle window.
     pub fn note_fee_applied(&mut self, channel_id: &str, now: i64) {
         self.last_fee_apply_ts.insert(channel_id.to_string(), now);
+    }
+
+    /// Task 44 / A2: the producer for `_handle_policy_change` (py 7871).
+    ///
+    /// The EFFECT was already ported ([`Self::policy_changed`] ->
+    /// `revops_fees::cycle::handle_policy_change`); nothing ever called it,
+    /// because nothing constructs [`CycleMsg::PolicyChanged`].
+    ///
+    /// Python's producer is the process that MADE the change: its policy
+    /// RPC calls the handler directly. Rust cannot copy that — Python owns
+    /// the `revenue-policy-*` RPCs today, so a Rust-side RPC hook would
+    /// observe nothing during the whole shadow and cutover window. Instead
+    /// this remembers each peer's `peer_policies.updated_at` and fires when
+    /// it ADVANCES, which detects the change whoever made it. That keeps
+    /// working unchanged after cutover, when Rust owns the RPC.
+    ///
+    /// First observation of a peer NEVER wakes: on a fresh process every
+    /// peer would look "changed", which would wake the whole node once per
+    /// restart — a restart is not a policy change.
+    fn detect_policy_changes(&mut self, snapshot: &EvidenceSnapshot, now: i64) {
+        let channel_states = snapshot.channel_states();
+        let mut seen: Vec<&str> = Vec::new();
+        for row in &channel_states {
+            let peer_id = row.peer_id.as_str();
+            if peer_id.is_empty() || seen.contains(&peer_id) {
+                continue;
+            }
+            seen.push(peer_id);
+
+            let Some(policy) = snapshot.policy(peer_id) else {
+                continue;
+            };
+            match self.last_policy_updated_at.get(peer_id) {
+                None => {
+                    // Baseline only.
+                    self.last_policy_updated_at
+                        .insert(peer_id.to_string(), policy.updated_at);
+                }
+                Some(&prev) if policy.updated_at > prev => {
+                    self.last_policy_updated_at
+                        .insert(peer_id.to_string(), policy.updated_at);
+                    self.handle_policy_changed(&channel_states, peer_id, now);
+                }
+                Some(_) => {}
+            }
+        }
     }
 
     /// [`CycleMsg::ForwardEvent`]'s handler -- fix round 1 (review finding

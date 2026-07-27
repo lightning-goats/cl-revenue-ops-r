@@ -90,17 +90,47 @@ which wakes the peer's channels. Only the producer is missing.
 
 - [x] effect: wake every channel with that peer (`handle_policy_change`)
 - [x] trigger receipt + bounded-queue/backpressure handling
-- [ ] **producer** — nothing constructs `CycleMsg::PolicyChanged`. Python's
-      producer is the process that made the change, which Rust cannot use while
-      Python owns the policy RPC. Plan: remember `peer_policies.updated_at` per
-      peer and dispatch on advance at cycle top — works before AND after cutover.
-- [ ] tests + revert tripwire for the producer
+- [x] **producer** `CycleOwner::detect_policy_changes` — remembers
+      `peer_policies.updated_at` per peer and fires on ADVANCE, so the change is
+      detected whoever made it. Works before AND after cutover, unlike an
+      RPC-side hook (Python owns the policy RPC today). First sighting is a
+      baseline only: a restart is not a policy change.
+- [x] tests + **revert tripwire** — MUTATION-VERIFIED: removing the producer
+      call reds `an_advanced_policy_updated_at_produces_a_policy_change`.
+      Controls: unchanged policy over 3 cycles stays silent; a REGRESSED
+      `updated_at` (clock skew, restored backup) is not a change.
 
 ### A3 — new-channel initial fee (py `set_initial_fee`:8584)
 
-- [ ] producer: `channel_state_changed` → CHANNELD_NORMAL. Today
-      `notify.rs` is deliberately closure-events-only.
-- [ ] effect: PASSIVE skip / STATIC target / DYNAMIC prior sample
+**Audit refinement (2026-07-27):** A3 is NOT one job. It splits into two halves
+with very different risk and very different timing, and only one of them can be
+done before cutover.
+
+**A3a — persistent prior seed (audit F5). Shadow-safe, do this first.**
+Pure state mutation, exactly the class A1 is in: on a new channel with a network
+gossip prior, seed the PERSISTENT thompson state's `prior_mean_fee` /
+`prior_std_fee` and record one durable nudge at
+`INITIAL_PRIOR_NUDGE_WEIGHT` (0.3, already ported at `market.rs:331`).
+Python's own audit note quantifies the defect when this is missing: the
+persistent state stays at the default prior (200/100), so the first regular fee
+cycle samples from the default and *walks the fee away from the best available
+evidence by up to ~460 ppm/cycle*.
+- [ ] seed persistent prior + durable nudge on new-channel observation
+- [ ] tests + revert tripwire
+
+**A3b — the initial broadcast. LIVE-ONLY, structurally blocked in shadow.**
+Ends in `set_channel_fee`, i.e. a real `setchannel`. Rust must NOT broadcast in
+shadow, so this path cannot be exercised before cutover; the shadow-correct
+behaviour is to compute and RECORD the would-be initial fee, never send it.
+- [ ] producer: `channel_state_changed` → CHANNELD_NORMAL (today `notify.rs` is
+      deliberately closure-events-only)
+- [ ] channel resolution via `listpeerchannels` (match by SCID or funding
+      channel_id; single-NORMAL-channel fallback)
+- [ ] decision branches: PASSIVE skip / STATIC target / DYNAMIC prior sample
+- [ ] `_select_best_fee_prior` → `_get_network_fee_prior` (an UNCACHED
+      `listchannels` RPC — must stay off the per-cycle locked path)
+- [ ] shadow: record the would-be fee; live: broadcast through the guarded
+      adapter only
 - [ ] tests + revert tripwire
 
 ### Already wired
