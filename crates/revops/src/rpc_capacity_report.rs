@@ -22,6 +22,19 @@
 
 use serde_json::{json, Value};
 
+/// Task 50 correction round, F2: the Rust plugin has no capacity planner
+/// at all -- Python's OWN answer for that exact condition is this 1-key
+/// shape with NO `timestamp` (cl-revenue-ops.py:4586-4587), not the
+/// success-shaped 6-key stub [`build_capacity_report`] produces. Until a
+/// real planner exists, the wiring layer must return this instead of
+/// calling [`build_capacity_report`] at all -- a caller's `if "error" in
+/// resp` guard must fire, and `winners`/`losers`/`recommendations`/
+/// `summary`/`mempool_recommendation` must not exist as `null` where
+/// Python guarantees list/dict/str.
+pub fn capacity_planner_not_initialized_error() -> Value {
+    json!({"error": "Capacity planner not initialized"})
+}
+
 /// Port of `generate_report`'s response shape. `timestamp` is the only
 /// live-computable field (`int(time.time())`, cl-revenue-ops.py doesn't
 /// even need a DB/RPC call for it) -- injected by the caller, never read
@@ -47,6 +60,18 @@ pub fn build_capacity_report(timestamp: i64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_initialized_error_matches_python_byte_exact_one_key_no_timestamp() {
+        let v = capacity_planner_not_initialized_error();
+        assert_eq!(v, json!({"error": "Capacity planner not initialized"}));
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            1,
+            "must be exactly 1 key: {v}"
+        );
+        assert!(v.get("timestamp").is_none());
+    }
 
     #[test]
     fn timestamp_is_wired_everything_else_is_an_honest_gap() {

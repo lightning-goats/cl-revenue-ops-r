@@ -34,6 +34,7 @@ pub mod rpc_hot_channel_protection_peers;
 pub mod rpc_list_banned;
 pub mod rpc_list_ignored;
 pub mod rpc_lnplus_status;
+pub mod rpc_params;
 pub mod rpc_planner_candidate_sources;
 pub mod rpc_planner_candidates;
 pub mod rpc_planner_history;

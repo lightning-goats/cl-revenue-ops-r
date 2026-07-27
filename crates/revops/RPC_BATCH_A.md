@@ -410,8 +410,42 @@ there too, or that test will fail once these are wired in.
 
 ## 5. Verification status
 
+**Updated by Task 49 (Wave 2 / RPC Batch A), 2026-07-27.** Section 3's
+handlers are no longer wiring instructions -- they are registered verbatim
+(modulo `_p`/`p` unused-binding cleanups clippy required) in
+`crates/revops/src/main.rs`, and `crates/revops/tests/manifest.rs` proves
+both the exact registered names (shadow + canonical) and, for every handler
+with a real `revops-db` query, that it actually calls that query rather than
+a hand-built shape (a seeded-row round-trip test per RPC). Red/green
+transcripts and the per-RPC evidence table are in
+`crates/revops/TASK49-REPORT.md`; the same table also lives in
+`docs/port/PARITY-CHECKLIST.md` under "Task 49 (Wave 2 / RPC Batch A) —
+reachability". Per that checklist's honest progress model, this is a
+**reachable** claim only -- `revenue-profitability`, `revenue-analyze`,
+`revenue-capacity-report`, and `revenue-econ-snapshot` are registered but
+still return their honest null/`_gaps`/`disabled` shape (no live evidence
+pipeline behind them yet); none of the ten is claimed effective,
+transport-proven, or promotion-ready from this task alone.
+
 The response builders are compiled modules and their unit tests run under
 `cargo test -p revops`. The DB reads in section 2 are covered by
-`crates/revops-db/tests/queries.rs`. The handlers in section 3 remain wiring
-instructions until they are registered in `main.rs`; do not advertise these
-RPCs as live before manifest/reachability tests exercise the real handlers.
+`crates/revops-db/tests/queries.rs`.
+
+**Superseded by the Task 50 correction round, 2026-07-27.** A Python-side
+adversarial audit (`/home/sat/agent-tasks/task-50-batch-a-semantics.md`)
+found that section 3's snippets, wired VERBATIM by Task 49, would ship
+several fabrication/collision defects if left as pasted: econ-snapshot's
+`enabled=false` and capacity-report's success-shaped stub could misreport
+node state; profitability's and analyze's not-wired shapes collided with
+Python's own legitimate "unknown channel"/"empty fleet" answers; policy's
+`since` coercion and hot-channel-protection-peers' action normalization
+silently diverged from Python; several `?`-propagated DB calls turned into
+whole-call JSON-RPC failures instead of Python's always-in-band errors. The
+snippets in section 3 above are LEFT AS-IS in this document for historical
+reference (they show what Task 49 pasted), but `crates/revops/src/main.rs`'s
+ACTUAL wiring no longer matches them verbatim for `econ-snapshot`,
+`capacity-report`, `profitability`, `analyze`, `policy`, and
+`hot-channel-protection-peers` — see `crates/revops/TASK49-REPORT.md`'s
+"Task-50 correction round" section for the exact fixes, red/green
+transcripts, and `docs/port/PARITY-CHECKLIST.md`'s "Task 50" subsection for
+the per-finding evidence table.

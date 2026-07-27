@@ -14,11 +14,64 @@
 //! is the explicit `null`/`unknown` result; it is not a declared gap and is
 //! never promoted to fabricated full coverage.
 
+use crate::rpc_params::{is_truthy_py, python_int};
 use serde_json::{json, Value};
 
 /// Shared DB-owned ledger contracts. Re-exported to preserve this builder's
 /// public API while plugin wiring fetches the values from `revops_db::queries`.
 pub use revops_db::queries::{ActiveReservation, SpendLedgerAggregates};
+
+/// Task 50 correction round, F7: `revenue_spend_ledger`'s
+/// `window_hours: int = 24` (cl-revenue-ops.py:7780-7796) then unconditional
+/// `int(window_hours)` inside a try/except -- an ABSENT key binds the
+/// literal default `24` directly (never coerced, can't error); an EXPLICIT
+/// value (any JSON type) always goes through `int()`. `Database
+/// .get_spend_ledger_summary` then applies `max(1, int(window_hours))` --
+/// floored at 1, deliberately NO upper clamp (contrast
+/// `rpc_total_cost_budget::parse_window_hours`'s `[1,168]` for a DIFFERENT
+/// RPC). The OLD wiring was `.and_then(as_i64).unwrap_or(24).max(1)`,
+/// which silently substitutes the default for ANY non-JSON-number
+/// `window_hours` (a numeric STRING like `"48"`, a garbage string, `null`)
+/// instead of coercing or erroring -- "a confident ledger for the wrong
+/// window", per the audit.
+///
+/// `Ok(n)` (already floored at 1, no ceiling) on success; `Err(message)`
+/// (Python's own `int()` exception text) on garbage, for the caller to
+/// wrap as `{"error": message}` matching Python's in-band style.
+pub fn parse_window_hours(raw: Option<&Value>) -> Result<i64, String> {
+    let n = match raw {
+        None => 24,
+        Some(v) => python_int(v)?,
+    };
+    Ok(n.max(1))
+}
+
+/// Same convention as [`parse_window_hours`] for `reservation_limit: int =
+/// 50` (also always `int()`-coerced, then `max(1, ...)` inside
+/// `get_spend_ledger_summary`, only when `include_reservations` is true --
+/// but coerced unconditionally by the outer wrapper regardless).
+pub fn parse_reservation_limit(raw: Option<&Value>) -> Result<i64, String> {
+    let n = match raw {
+        None => 50,
+        Some(v) => python_int(v)?,
+    };
+    Ok(n.max(1))
+}
+
+/// `include_reservations: bool = False` (cl-revenue-ops.py:7783), then
+/// `bool(include_reservations)` -- Python TRUTHINESS, not a strict JSON
+/// bool parse: `bool("false")` is `True` (a non-empty string is always
+/// truthy, whatever it says). The OLD wiring's `.and_then(as_bool)`
+/// silently dropped anything that wasn't a literal JSON `true`/`false`
+/// (including the string `"true"`) to the `unwrap_or(false)` default --
+/// this instead matches Python's actual (admittedly surprising)
+/// truthiness rule byte-for-byte via [`is_truthy_py`].
+pub fn parse_include_reservations(raw: Option<&Value>) -> bool {
+    match raw {
+        None => false,
+        Some(v) => is_truthy_py(v),
+    }
+}
 
 /// Port of `Database.get_spend_ledger_summary`. `window_hours` is the
 /// (already-clamped, `max(1, int(window_hours))`) request window;
@@ -84,6 +137,60 @@ pub fn build_spend_ledger(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn parse_window_hours_absent_defaults_to_24() {
+        assert_eq!(parse_window_hours(None), Ok(24));
+    }
+
+    #[test]
+    fn parse_window_hours_numeric_string_coerces_like_python_int() {
+        assert_eq!(parse_window_hours(Some(&json!("48"))), Ok(48));
+    }
+
+    #[test]
+    fn parse_window_hours_float_truncates() {
+        assert_eq!(parse_window_hours(Some(&json!(48.9))), Ok(48));
+    }
+
+    #[test]
+    fn parse_window_hours_floors_at_one_never_clamps_the_top() {
+        assert_eq!(parse_window_hours(Some(&json!(0))), Ok(1));
+        assert_eq!(parse_window_hours(Some(&json!(-5))), Ok(1));
+        // Deliberately NO upper clamp -- unlike
+        // rpc_total_cost_budget::parse_window_hours's [1,168].
+        assert_eq!(parse_window_hours(Some(&json!(999))), Ok(999));
+    }
+
+    #[test]
+    fn parse_window_hours_garbage_is_an_error_not_a_silent_default() {
+        let err = parse_window_hours(Some(&json!("abc"))).unwrap_err();
+        assert!(err.contains("invalid literal for int()"));
+    }
+
+    #[test]
+    fn parse_window_hours_explicit_null_errors_like_python_int_none() {
+        // Explicit `null` is NOT the same as an absent key: Python's
+        // `int(None)` raises; only an absent key binds the signature
+        // default directly.
+        assert!(parse_window_hours(Some(&Value::Null)).is_err());
+    }
+
+    #[test]
+    fn parse_reservation_limit_absent_defaults_to_50_floors_at_one() {
+        assert_eq!(parse_reservation_limit(None), Ok(50));
+        assert_eq!(parse_reservation_limit(Some(&json!(0))), Ok(1));
+    }
+
+    #[test]
+    fn parse_include_reservations_matches_python_truthiness() {
+        assert!(!parse_include_reservations(None));
+        assert!(!parse_include_reservations(Some(&json!(false))));
+        assert!(!parse_include_reservations(Some(&json!(""))));
+        assert!(parse_include_reservations(Some(&json!(true))));
+        // The exact quirk the audit calls out.
+        assert!(parse_include_reservations(Some(&json!("false"))));
+    }
 
     fn sample_aggregates() -> SpendLedgerAggregates {
         let mut spent_by_category = BTreeMap::new();

@@ -214,6 +214,38 @@ pub fn build_profitability_summary(results: &[ChannelProfitability]) -> Value {
     })
 }
 
+/// Task 50 correction round, F4: until the `ChannelProfitability` assembly
+/// pipeline exists, the wiring layer has no way to tell "channel genuinely
+/// unknown" from "port not wired" -- [`build_profitability_channel`]'s
+/// `None` branch produces `{"channel_id": id, "error": "No data
+/// available"}`, which is BYTE-IDENTICAL to Python's legitimate
+/// unknown-channel answer (cl-revenue-ops.py:4985-4986). Reusing that
+/// builder from the wiring layer today would silently claim "this channel
+/// doesn't exist" for every channel, known or not. This shape instead
+/// carries an unmistakable `not_yet_ported` marker.
+pub fn build_profitability_channel_not_wired(channel_id: &str) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "error": "not_yet_ported",
+        "detail": "ChannelProfitability assembly pipeline not wired in this port",
+    })
+}
+
+/// Task 50 correction round, F3: [`build_profitability_summary`] called
+/// with an empty slice produces a fully-formed "0 channels, 0 profit, ROI
+/// 0" summary -- indistinguishable from a real empty fleet, with no error
+/// and no `_gaps` entry. This shape instead carries the SAME
+/// `not_yet_ported` marker as the single-channel not-wired shape, and
+/// deliberately does NOT reuse the `summary`/`channels_by_class` keys
+/// Python's real fleet answer uses (a caller keying off those two names
+/// must not see zeros that look like real data).
+pub fn build_profitability_summary_not_wired() -> Value {
+    json!({
+        "error": "not_yet_ported",
+        "detail": "ChannelProfitability assembly pipeline not wired in this port",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +294,28 @@ mod tests {
             sourced_forward_count_30d: 1,
             window_30d_available: true,
         }
+    }
+
+    #[test]
+    fn not_wired_channel_shape_does_not_collide_with_python_unknown_channel() {
+        let v = build_profitability_channel_not_wired("123x1x0");
+        assert_eq!(v["channel_id"], "123x1x0");
+        assert_eq!(v["error"], "not_yet_ported");
+        assert_ne!(
+            v["error"], "No data available",
+            "must not collide with Python's legitimate unknown-channel answer"
+        );
+    }
+
+    #[test]
+    fn not_wired_summary_shape_is_not_success_shaped_zeros() {
+        let v = build_profitability_summary_not_wired();
+        assert_eq!(v["error"], "not_yet_ported");
+        assert!(
+            v.get("summary").is_none(),
+            "must not reuse the real fleet-summary shape's key: {v}"
+        );
+        assert!(v.get("channels_by_class").is_none());
     }
 
     #[test]

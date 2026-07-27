@@ -15,6 +15,7 @@
 //! wiring layer's job (see `crates/revops/RPC_BATCH_A.md`: `policy_manager`
 //! has no `revops-db` query equivalent yet).
 
+use crate::rpc_params::{is_truthy_py, python_int};
 use revops_analytics::policy::PeerPolicy;
 use serde_json::{json, Value};
 
@@ -43,9 +44,33 @@ pub fn peer_policy_to_json(p: &PeerPolicy, now: i64) -> Value {
     })
 }
 
-/// `action or "list"`, then `.strip().lower()` (cl-revenue-ops.py:5397).
-pub fn normalize_action(raw: Option<&str>) -> String {
-    raw.unwrap_or("list").trim().to_lowercase()
+/// Task 50 correction round, F9: `revenue_policy`'s signature default is
+/// `action: str = "list"` (cl-revenue-ops.py:5326) -- an ABSENT `action`
+/// key binds to the literal string `"list"` before any of Python's own
+/// body code runs. An EXPLICIT `action` (present in params, whatever its
+/// JSON type) instead goes through `str(action or "").strip().lower()`
+/// (cl-revenue-ops.py:5397): `action=null`/`0`/`false`/`""` (Python-falsy)
+/// -> `""` -> the unknown-action error; a non-empty string is
+/// stripped+lowercased. The OLD Rust wiring collapsed BOTH cases (absent
+/// key, and explicit null/non-string) through `Option<&str>`, so an
+/// explicit `action: null` silently succeeded as `list` where Python
+/// errors. Taking the raw `&Value` here lets the two cases be told apart:
+/// `None` (key absent) is the ONLY path that defaults to `"list"`.
+///
+/// Non-string truthy JSON values (numbers, arrays, objects) are folded to
+/// the empty string too, by scope decision -- Python's `str(x)` on those
+/// produces exotic reprs (`"5"`, `"[1]"`, `"True"`) that would only ever
+/// match `"true"` by coincidence; folding them to `""` still reaches the
+/// SAME unknown-action error family Python reaches for all of them except
+/// the one exact string `"true"` (an accepted simplification, not a byte-
+/// exact port of Python's `str()`).
+pub fn normalize_action(raw: Option<&Value>) -> String {
+    match raw {
+        None => "list".to_string(),
+        Some(v) if !is_truthy_py(v) => String::new(),
+        Some(Value::String(s)) => s.trim().to_lowercase(),
+        Some(_) => String::new(),
+    }
 }
 
 /// Routes `action` before any DB fetch happens: `Some(error)` for a
@@ -99,6 +124,33 @@ pub fn invalid_peer_id_error() -> Value {
 /// `action=changes`'s `since` coercion error (cl-revenue-ops.py:5537-5538).
 pub fn invalid_since_error() -> Value {
     json!({"error": "Invalid 'since' timestamp. Must be a Unix timestamp."})
+}
+
+/// Task 50 correction round, F6: `action=changes`'s `since` coercion
+/// (cl-revenue-ops.py:5524-5529): `since = kwargs.get('since', 0)`, then
+/// `since = int(since) if since else 0` inside a `try`, catching
+/// `(ValueError, TypeError)` into [`invalid_since_error`]. The OLD Rust
+/// wiring was `v.get("since").and_then(as_i64).unwrap_or(0)`, which
+/// silently maps ANY non-numeric-JSON `since` (a garbage string like
+/// `"abc"`, a numeric-looking string like `"1700000000"`, a float, `null`)
+/// to `0` and returns the FULL policy table as "changes since the epoch" --
+/// exactly the fabrication the audit flagged.
+///
+/// This mirrors Python's `if since` truthiness gate FIRST (a Python-falsy
+/// `since` -- absent, `null`, `0`, `""`, an empty array/object -- short-
+/// circuits to `0` with NO coercion attempt, so it can never error), then
+/// [`python_int`] on anything truthy. `Some(0)` on falsy/absent; `Some(n)`
+/// on a successful coercion; `None` on garbage (the caller returns
+/// [`invalid_since_error`]). `Option`, not `Result<i64, ()>`, since every
+/// success case already produces a value and the only thing a caller ever
+/// does with the error case is substitute a fixed response -- there is no
+/// error payload to carry.
+pub fn coerce_since(raw: Option<&Value>) -> Option<i64> {
+    let truthy = raw.map(is_truthy_py).unwrap_or(false);
+    if !truthy {
+        return Some(0);
+    }
+    python_int(raw.expect("truthy implies Some")).ok()
 }
 
 /// `action=list` (cl-revenue-ops.py:5407-5411).
@@ -213,9 +265,68 @@ mod tests {
     }
 
     #[test]
-    fn normalize_action_defaults_and_lowercases() {
+    fn normalize_action_absent_key_defaults_to_list() {
         assert_eq!(normalize_action(None), "list");
-        assert_eq!(normalize_action(Some(" GET ")), "get");
+    }
+
+    #[test]
+    fn normalize_action_string_is_trimmed_and_lowercased() {
+        assert_eq!(normalize_action(Some(&json!(" GET "))), "get");
+    }
+
+    /// Task 50 correction round, F9: an EXPLICIT `action: null` must NOT
+    /// default to `"list"` (that only happens when the key is absent
+    /// entirely) -- it normalizes to `""`, which the action gate then
+    /// rejects as unknown, matching Python's `str(None or "")` -> `""`.
+    #[test]
+    fn normalize_action_explicit_null_is_not_list() {
+        assert_eq!(normalize_action(Some(&Value::Null)), "");
+        assert_ne!(normalize_action(Some(&Value::Null)), "list");
+    }
+
+    #[test]
+    fn normalize_action_falsy_non_string_values_fold_to_empty() {
+        assert_eq!(normalize_action(Some(&json!(0))), "");
+        assert_eq!(normalize_action(Some(&json!(false))), "");
+        assert_eq!(normalize_action(Some(&json!(""))), "");
+    }
+
+    #[test]
+    fn normalize_action_explicit_null_reaches_the_unknown_action_error() {
+        let action = normalize_action(Some(&Value::Null));
+        let err = policy_action_gate(&action).expect("null action must be refused");
+        assert!(err["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Unknown action:"));
+    }
+
+    #[test]
+    fn coerce_since_absent_and_falsy_values_are_zero_no_error() {
+        assert_eq!(coerce_since(None), Some(0));
+        assert_eq!(coerce_since(Some(&Value::Null)), Some(0));
+        assert_eq!(coerce_since(Some(&json!(0))), Some(0));
+        assert_eq!(coerce_since(Some(&json!(""))), Some(0));
+    }
+
+    #[test]
+    fn coerce_since_numeric_string_coerces_like_python_int() {
+        assert_eq!(
+            coerce_since(Some(&json!("1700000000"))),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            coerce_since(Some(&json!(1_700_000_000i64))),
+            Some(1_700_000_000)
+        );
+    }
+
+    #[test]
+    fn coerce_since_garbage_is_an_error_not_a_silent_zero() {
+        assert_eq!(coerce_since(Some(&json!("abc"))), None);
+        // A garbage `since` must NOT silently become 0 (which would fetch
+        // the FULL policy table as "changes since the epoch").
+        assert_ne!(coerce_since(Some(&json!("abc"))), Some(0));
     }
 
     #[test]

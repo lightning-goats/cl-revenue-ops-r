@@ -704,6 +704,21 @@ async fn main() -> Result<()> {
     // mode (per the plan's own literal naming).
     let fee_runway_status_name = "revops-fee-runway-status";
 
+    // Task 49 (Wave 2 / RPC Batch A): ten more read-only response
+    // builders, already compiled (see `lib.rs`) but previously
+    // unreachable -- nothing registered them. See `RPC_BATCH_A.md` for
+    // the full wiring contract each handler below follows.
+    let health_name = rpc_name("health");
+    let profitability_name = rpc_name("profitability");
+    let analyze_name = rpc_name("analyze");
+    let policy_name = rpc_name("policy");
+    let list_banned_name = rpc_name("list-banned");
+    let list_ignored_name = rpc_name("list-ignored");
+    let hot_channel_protection_peers_name = rpc_name("hot-channel-protection-peers");
+    let capacity_report_name = rpc_name("capacity-report");
+    let econ_snapshot_name = rpc_name("econ-snapshot");
+    let spend_ledger_name = rpc_name("spend-ledger");
+
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
         // lightningd only allows `plugin start`/`plugin stop` at runtime when
@@ -1299,6 +1314,399 @@ async fn main() -> Result<()> {
                     "prepared_request_count": prepared_request_count,
                     "mutation_call_count": mutation_call_count,
                 }))
+            },
+        )
+        .rpcmethod(
+            &health_name,
+            "consolidated operator health check (Phase: financials.today/.week are \
+             DB-backed; annualized_roc_pct and sections 2-9 are gap-marked, see _gaps)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let s = p.state();
+                let now = now_unix();
+                // Round-2 correction, P1 (codex re-review): `db=None` is a
+                // REAL, reachable degraded state -- the plugin deliberately
+                // comes up running with `db=None` when the DEFAULT db-path
+                // misses (see the "default-path miss" ruling in this
+                // file's init wiring), not just in some theoretical
+                // never-happens branch. Python's `revenue_health` NEVER
+                // carries a top-level `error` key; every section is
+                // independently populated or gap-marked -- the OLD
+                // `{"error": "Plugin not initialized"}` short-circuit here
+                // collapsed a PARTIAL evidence-loss condition (no DB, but
+                // every other section's honest gap/computed shape is still
+                // knowable) into a whole-call failure, discarding
+                // generated_at, the honest boltz={"enabled": false}
+                // answer, and every gap-section shape a caller could
+                // otherwise rely on. `build_health(now, None, None, None)`
+                // is exactly what a live `pnl_summary` failure already
+                // falls back to below (F11) -- reusing it here for the
+                // upfront no-DB case keeps both degraded paths consistent.
+                let Some(handle) = &s.db else {
+                    return Ok(revops::rpc_health::build_health(now, None, None, None));
+                };
+                // Task 50 correction round, F11: Python's `revenue_health`
+                // try/excepts EACH section independently (cl-revenue-ops.py:
+                // 6217-6218) -- a `pnl_summary` DB failure becomes an
+                // in-band `financials: {"error": ...}` with the other
+                // eight sections still present. The OLD `?` on
+                // `pnl_summary(...).await?` instead turned any DB failure
+                // into a whole-call JSON-RPC error, losing every section.
+                let pnl = async {
+                    let pnl_1d = queries::pnl_summary(handle, 1, now).await?;
+                    let pnl_7d = queries::pnl_summary(handle, 7, now).await?;
+                    Ok::<_, anyhow::Error>((pnl_1d, pnl_7d))
+                }
+                .await;
+                // total_capacity_sats: a live `listpeerchannels` sum -- omit
+                // (pass `None`) until that RPC call is wired; annualized_roc_pct
+                // will then show as `null` + gap-listed, per the builder's
+                // contract.
+                match pnl {
+                    Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health(
+                        now,
+                        Some(&pnl_1d),
+                        Some(&pnl_7d),
+                        None,
+                    )),
+                    Err(e) => {
+                        let mut out = revops::rpc_health::build_health(now, None, None, None);
+                        out["financials"] = serde_json::json!({"error": e.to_string()});
+                        // This is a LIVE failure, not a declared "not
+                        // wired yet" gap -- `_gaps` must not carry it (a
+                        // `_gaps` entry tells the harness to skip the
+                        // field, which would hide this real failure).
+                        if let Some(gaps) = out["_gaps"].as_array_mut() {
+                            gaps.retain(|g| g != "financials");
+                        }
+                        Ok(out)
+                    }
+                }
+            },
+        )
+        .rpcmethod(
+            &profitability_name,
+            "channel profitability analysis (single channel_id, or fleet-wide summary) \
+             -- Phase: the ChannelProfitability assembly pipeline is not wired yet, so \
+             every call returns an explicit not_yet_ported marker (see \
+             revops::rpc_profitability)",
+            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                // Task 50 correction round, F3/F4: this needs a
+                // `ChannelProfitability` assembly pipeline (see
+                // RPC_BATCH_A.md section 2) that does not exist yet. The
+                // OLD wiring called `build_profitability_channel(id, None)`
+                // / `build_profitability_summary(&[])` -- shapes that
+                // reuse Python's own legitimate "unknown channel" /
+                // "empty fleet" vocabulary and so cannot be told apart
+                // from real answers. Until the pipeline exists, return the
+                // explicitly-marked not-wired shapes instead.
+                let channel_id = v.get("channel_id").and_then(|c| c.as_str());
+                match channel_id {
+                    Some(id) => Ok(
+                        revops::rpc_profitability::build_profitability_channel_not_wired(id),
+                    ),
+                    None => Ok(revops::rpc_profitability::build_profitability_summary_not_wired()),
+                }
+            },
+        )
+        .rpcmethod(
+            &analyze_name,
+            "read-only flow analysis for a single channel_id (SCID); the whole-fleet \
+             sweep (no channel_id) is a mutating background job and is NOT ported here",
+            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                // Task 50 correction round, F5: `metrics` needs a
+                // `FlowMetrics` assembly pipeline (live channel +
+                // forward-history evidence through revops_analytics::flow)
+                // that does not exist yet -- `NotWired` marks that this
+                // request never actually looked anything up, so the
+                // builder can distinguish it from a genuine "channel
+                // unknown to the flow analyzer" answer.
+                Ok(revops::rpc_analyze::build_analyze(
+                    v.get("channel_id"),
+                    revops::rpc_analyze::MetricsLookup::NotWired,
+                ))
+            },
+        )
+        .rpcmethod(
+            &policy_name,
+            "peer policy diagnostics (READ-ONLY in this port: list/get/find/changes; \
+             set/delete/tag/untag/batch are refused -- see revops::rpc_policy)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let s = p.state();
+                // Task 50 correction round, F9: pass the raw `Value` (not
+                // `.and_then(as_str)`) so an ABSENT `action` key (Python's
+                // signature default, "list") can be told apart from an
+                // EXPLICIT `action: null`/non-string (Python's
+                // `str(x or "")` -> `""` -> unknown-action error) -- the
+                // OLD wiring collapsed both to `None` -> "list".
+                let action = revops::rpc_policy::normalize_action(v.get("action"));
+                if let Some(err) = revops::rpc_policy::policy_action_gate(&action) {
+                    return Ok(err);
+                }
+                let Some(handle) = &s.db else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                let now = now_unix();
+                // Task 50 correction round, F11: every DB read below is
+                // wrapped so an actor/SQL failure comes back as Python's
+                // own in-band shape (`{"status":"error","error":
+                // "Unexpected error: {e}"}`, cl-revenue-ops.py's
+                // catch-all) instead of a `?`-propagated JSON-RPC error
+                // envelope that a `result.get("error")` caller never sees.
+                let result: anyhow::Result<serde_json::Value> = async {
+                    match action.as_str() {
+                        "list" => {
+                            let policies = queries::all_policies(handle, now).await?;
+                            Ok(revops::rpc_policy::build_policy_list(&policies, now))
+                        }
+                        "get" => {
+                            let Some(peer_id) = v.get("peer_id").and_then(|p| p.as_str()) else {
+                                return Ok(revops::rpc_policy::get_usage_error());
+                            };
+                            if !revops_analytics::policy::is_valid_peer_id(peer_id) {
+                                return Ok(revops::rpc_policy::invalid_peer_id_error());
+                            }
+                            let policy = queries::policy_for_peer(handle, peer_id, now).await?;
+                            Ok(revops::rpc_policy::build_policy_get(&policy, now))
+                        }
+                        "find" => {
+                            let Some(tag) = v.get("tag").and_then(|t| t.as_str()) else {
+                                return Ok(revops::rpc_policy::find_usage_error());
+                            };
+                            let policies = queries::policies_by_tag(handle, tag, now).await?;
+                            Ok(revops::rpc_policy::build_policy_find(tag, &policies, now))
+                        }
+                        "changes" => {
+                            // Task 50 correction round, F6: Python coerces
+                            // `since` via `int(since) if since else 0`
+                            // (falsy -> 0, no error) inside a try/except
+                            // that returns the exact `invalid_since_error`
+                            // string on garbage -- the OLD wiring silently
+                            // mapped ANY non-numeric-JSON `since` to `0`
+                            // and returned the full table.
+                            let since = match revops::rpc_policy::coerce_since(v.get("since")) {
+                                Some(since) => since,
+                                None => {
+                                    return Ok(revops::rpc_policy::invalid_since_error())
+                                }
+                            };
+                            let changes =
+                                queries::policy_changes_since(handle, since, now).await?;
+                            let last_update =
+                                queries::last_policy_change_timestamp(handle).await?;
+                            Ok(revops::rpc_policy::build_policy_changes(
+                                since,
+                                &changes,
+                                last_update,
+                                now,
+                            ))
+                        }
+                        _ => unreachable!(
+                            "policy_action_gate already filtered to the 4 read actions"
+                        ),
+                    }
+                }
+                .await;
+                Ok(result.unwrap_or_else(|e| {
+                    serde_json::json!({"status": "error", "error": format!("Unexpected error: {e}")})
+                }))
+            },
+        )
+        .rpcmethod(
+            &list_banned_name,
+            "peers with an operator ban (revenue-ban)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                // Task 50 correction round, F11: an actor/SQL failure
+                // comes back in-band rather than a `?`-propagated
+                // JSON-RPC error envelope.
+                match queries::all_policies(handle, now_unix()).await {
+                    Ok(policies) => Ok(revops::rpc_list_banned::build_list_banned(&policies)),
+                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
+                }
+            },
+        )
+        .rpcmethod(
+            &list_ignored_name,
+            "DEPRECATED: peers with strategy=passive + rebalance=disabled",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                match queries::all_policies(handle, now_unix()).await {
+                    Ok(policies) => Ok(revops::rpc_list_ignored::build_list_ignored(&policies)),
+                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
+                }
+            },
+        )
+        .rpcmethod(
+            &hot_channel_protection_peers_name,
+            "list persistent hot-channel-protection peer overrides (READ-ONLY in \
+             this port: add/remove/clear are DB writes and are refused)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                // Task 50 correction round, F8: `str(action or
+                // "list").lower()`, NO `.strip()` -- the OLD wiring
+                // compared the raw string directly against `"list"` with
+                // no lowercasing, so `action="LIST"` was wrongly refused
+                // and `action=""`/`null` were also wrongly refused
+                // (Python defaults both to `list`).
+                let action =
+                    revops::rpc_hot_channel_protection_peers::normalize_action(v.get("action"));
+                if revops::rpc_hot_channel_protection_peers::WRITE_ACTIONS.contains(&action.as_str())
+                {
+                    // H6: a REAL write action (a genuine scope boundary),
+                    // distinct from the unknown-action message below.
+                    return Ok(
+                        revops::rpc_hot_channel_protection_peers::write_action_refused_error(
+                            &action,
+                        ),
+                    );
+                }
+                if action != "list" {
+                    return Ok(
+                        revops::rpc_hot_channel_protection_peers::unknown_action_error(&action),
+                    );
+                }
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                match queries::hot_channel_protection_override_peers(handle).await {
+                    Ok(rows) => Ok(
+                        revops::rpc_hot_channel_protection_peers::build_hot_channel_protection_peers_list(
+                            &rows,
+                        ),
+                    ),
+                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
+                }
+            },
+        )
+        .rpcmethod(
+            &capacity_report_name,
+            "strategic capital redeployment report (Phase: no capacity planner exists \
+             yet -- returns Python's own exact \"not initialized\" error, cl-revenue-ops.py:4586-4587)",
+            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                // Task 50 correction round, F2: no capacity planner exists
+                // in this port. The OLD wiring called
+                // `build_capacity_report(now_unix())` unconditionally --
+                // a success-shaped 6-key object that hides the
+                // "if error in resp" guard every real caller uses. Python's
+                // own answer for this exact condition is the 1-key error
+                // below (no `timestamp`), so return that instead.
+                Ok(revops::rpc_capacity_report::capacity_planner_not_initialized_error())
+            },
+        )
+        .rpcmethod(
+            &econ_snapshot_name,
+            "READ-ONLY preview of the canonical EconomicSnapshot, assembled from \
+             live channels + already-computed profitability + budget (requires \
+             econ_shadow_enabled) -- Phase: the econ_shadow_enabled config surface \
+             is not wired into this port yet, so every call returns an explicit \
+             not_yet_ported marker rather than a possibly-false enabled/disabled answer",
+            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                // Task 50 correction round, F1: there is no `EconShadow`
+                // equivalent (or `econ_shadow_enabled` config read) in this
+                // Rust port at all -- the OLD wiring hardcoded
+                // `let enabled = false`, which is a FALSE statement about
+                // node state on any node where Python's real config has
+                // econ_shadow_enabled=true, with no gap marker. Do NOT
+                // fabricate a config read that does not exist; return an
+                // explicitly-marked not-wired shape instead.
+                Ok(revops::rpc_econ_snapshot::build_econ_snapshot_not_wired())
+            },
+        )
+        .rpcmethod(
+            &spend_ledger_name,
+            "summary of generic spend-ledger events/reservations (opens/closes/etc.)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let s = p.state();
+                let Some(handle) = &s.db else {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                // Task 50 correction round, F7: `window_hours`/
+                // `reservation_limit` coerce like Python's `int()`
+                // (numeric strings included, garbage errors -- see
+                // `rpc_spend_ledger::parse_window_hours`'s doc comment for
+                // why this deliberately has NO upper clamp, unlike
+                // `_total_cost_budget_status`'s [1,168]);
+                // `include_reservations` matches Python truthiness
+                // (`bool("false")` is `True`). The OLD wiring silently
+                // substituted defaults for anything that wasn't already a
+                // JSON number/bool, instead of coercing or erroring.
+                let window_hours =
+                    match revops::rpc_spend_ledger::parse_window_hours(v.get("window_hours")) {
+                        Ok(w) => w,
+                        Err(message) => return Ok(serde_json::json!({"error": message})),
+                    };
+                let include_reservations = revops::rpc_spend_ledger::parse_include_reservations(
+                    v.get("include_reservations"),
+                );
+                let reservation_limit = match revops::rpc_spend_ledger::parse_reservation_limit(
+                    v.get("reservation_limit"),
+                ) {
+                    Ok(n) => n,
+                    Err(message) => return Ok(serde_json::json!({"error": message})),
+                };
+                let now = now_unix();
+                // Task 50 correction round, F11: an actor/SQL failure
+                // comes back in-band (matching the existing db-None
+                // string's style) rather than a `?`-propagated JSON-RPC
+                // error envelope.
+                let result: anyhow::Result<serde_json::Value> = async {
+                    let aggregates =
+                        queries::spend_ledger_aggregates(handle, window_hours, now).await?;
+                    let reservations = if include_reservations {
+                        Some(
+                            queries::active_spend_reservations(
+                                handle,
+                                window_hours,
+                                reservation_limit,
+                                now,
+                            )
+                            .await?,
+                        )
+                    } else {
+                        None
+                    };
+                    Ok(revops::rpc_spend_ledger::build_spend_ledger(
+                        window_hours,
+                        now,
+                        &aggregates,
+                        reservations.as_deref(),
+                    ))
+                }
+                .await;
+                Ok(result.unwrap_or_else(|e| serde_json::json!({"error": e.to_string()})))
             },
         );
     let builder = register_python_options(builder, canonical_names());

@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use revops::now_unix;
 use revops_db::fee_runway::{record_seed_event, FeeSeedEventRow};
 
 /// Speak the first half of the CLN plugin handshake to the compiled binary
@@ -330,11 +331,20 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-rebalance-plan"),
         "methods: {methods:?}"
     );
-    // Exactly 10 rpc methods total (no leftover revenue-r-* names bleeding
+    // Task 49 (Wave 2 / RPC Batch A): ten more read-only builders --
+    // health, profitability, analyze, policy, list-banned, list-ignored,
+    // hot-channel-protection-peers, capacity-report, econ-snapshot,
+    // spend-ledger -- registered as real `.rpcmethod()` handlers. See
+    // `manifest_batch_a_methods_registered_canonical_mode` /
+    // `_shadow_mode` below for the exact-name assertions.
+    for name in BATCH_A_CANONICAL_METHODS {
+        assert!(methods.contains(name), "methods: {methods:?}");
+    }
+    // Exactly 20 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
-    // fee-debug/fee-wake, Task 10's runway status RPC, and the read-only
-    // rebalance planner.
+    // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
+    // rebalance planner, and Task 49's ten Batch A builders.
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -342,7 +352,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        10,
+        20,
         "methods: {methods:?}"
     );
 
@@ -858,5 +868,1372 @@ fn init_cutover_arm_path_without_journal_dir_refuses_before_touching_arm() {
     assert!(
         !arm_path.exists(),
         "the arm path must never be created or touched by this refusal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 49 (Wave 2 / RPC Batch A): register the ten read-only response
+// builders documented in `crates/revops/RPC_BATCH_A.md` as real
+// `.rpcmethod()` handlers. Before this change all ten `rpc_*` modules were
+// COMPILED (declared in `lib.rs`, see that module's doc comment) but
+// UNREACHABLE -- nothing in `main.rs` ever called them, so no manifest
+// test could see them either.
+//
+// The tests below pin two separate things per the task's reachability
+// contract: (1) the exact registered method name in both naming modes,
+// and (2) that each handler which HAS a real `revops-db` read query calls
+// THAT query rather than returning a parallel hand-built shape -- proven
+// by seeding a distinctive row directly into a copy of the production
+// schema and asserting it round-trips through the live RPC call. Handlers
+// that intentionally have no wired evidence source yet (profitability,
+// analyze, capacity-report, econ-snapshot, and most of health) are
+// instead pinned to their honest null/`_gaps` contract, so a future
+// change that fabricates data to "complete" the response reds here too.
+// ---------------------------------------------------------------------------
+
+/// Batch A's ten methods, shadow-mode names (the `revops-r-*` /
+/// `revenue-r-*` mapping `rpc_name()` produces when `REVOPS_CANONICAL_NAMES`
+/// is unset).
+const BATCH_A_SHADOW_METHODS: &[&str] = &[
+    "revenue-r-health",
+    "revenue-r-profitability",
+    "revenue-r-analyze",
+    "revenue-r-policy",
+    "revenue-r-list-banned",
+    "revenue-r-list-ignored",
+    "revenue-r-hot-channel-protection-peers",
+    "revenue-r-capacity-report",
+    "revenue-r-econ-snapshot",
+    "revenue-r-spend-ledger",
+];
+
+/// Same ten, canonical-mode names.
+const BATCH_A_CANONICAL_METHODS: &[&str] = &[
+    "revenue-health",
+    "revenue-profitability",
+    "revenue-analyze",
+    "revenue-policy",
+    "revenue-list-banned",
+    "revenue-list-ignored",
+    "revenue-hot-channel-protection-peers",
+    "revenue-capacity-report",
+    "revenue-econ-snapshot",
+    "revenue-spend-ledger",
+];
+
+#[test]
+fn manifest_batch_a_methods_registered_shadow_mode() {
+    let result = manifest_with(false);
+    let methods: Vec<&str> = result["rpcmethods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    for name in BATCH_A_SHADOW_METHODS {
+        assert!(
+            methods.contains(name),
+            "Batch A shadow method {name} not registered: {methods:?}"
+        );
+    }
+}
+
+#[test]
+fn manifest_batch_a_methods_registered_canonical_mode() {
+    let result = manifest_with(true);
+    let methods: Vec<&str> = result["rpcmethods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    for name in BATCH_A_CANONICAL_METHODS {
+        assert!(
+            methods.contains(name),
+            "Batch A canonical method {name} not registered: {methods:?}"
+        );
+    }
+}
+
+/// Copy the empty, schema-only `fixtures/fixture.db` into `<home>/prod.db`
+/// and return its path -- the same pattern
+/// `runway_status_autonomous_shadow_reports_seed_once_lifecycle` uses for
+/// the observer db, reused here so the caller-tripwire tests below can
+/// seed real production-schema rows via a raw `rusqlite` connection BEFORE
+/// the plugin process ever starts.
+fn copy_fixture_db(home: &std::path::Path) -> std::path::PathBuf {
+    let fixture_db =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+    let prod_db_path = home.join("prod.db");
+    std::fs::copy(&fixture_db, &prod_db_path).expect("copy fixture.db");
+    prod_db_path
+}
+
+/// [`call_after_init`] plus an explicit `params` object for the final RPC
+/// call, instead of the fixed `{}` that helper always sends -- needed by
+/// the mutation-gate tripwire below, which must send `action: "set"`.
+fn call_after_init_with_params(
+    canonical: bool,
+    db_path_override: Option<&str>,
+    home: &std::path::Path,
+    init_extra: &[(&str, serde_json::Value)],
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let bin = env!("CARGO_BIN_EXE_revops");
+    let mut cmd = Command::new(bin);
+    if canonical {
+        cmd.env("REVOPS_CANONICAL_NAMES", "1");
+    } else {
+        cmd.env_remove("REVOPS_CANONICAL_NAMES");
+    }
+    cmd.env("HOME", home);
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn revops");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+
+    let manifest_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getmanifest", "params": {}
+    });
+    write!(stdin, "{}\n\n", manifest_req).unwrap();
+    drain_one_frame(&mut reader);
+
+    let db_path_name = if canonical {
+        "revenue-ops-db-path"
+    } else {
+        "revops-r-db-path"
+    };
+    let mut options = serde_json::Map::new();
+    if let Some(p) = db_path_override {
+        options.insert(db_path_name.to_string(), serde_json::json!(p));
+    }
+    for (name, value) in init_extra {
+        options.insert((*name).to_string(), value.clone());
+    }
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "init",
+        "params": {
+            "options": options,
+            "configuration": {
+                "lightning-dir": home.join(".lightning").to_string_lossy(),
+                "rpc-file": "lightning-rpc",
+                "startup": true,
+                "network": "regtest",
+                "feature_set": {
+                    "init": "", "node": "", "channel": "", "invoice": ""
+                }
+            }
+        }
+    });
+    write!(stdin, "{}\n\n", init_req).unwrap();
+    let init_body = drain_one_frame(&mut reader);
+    let init_resp: serde_json::Value = serde_json::from_str(&init_body).expect("init json");
+    assert!(
+        init_resp["result"].get("disable").is_none(),
+        "call_after_init_with_params: init must not disable for this scenario: {init_resp:?}"
+    );
+
+    let call_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": method, "params": params
+    });
+    write!(stdin, "{}\n\n", call_req).unwrap();
+    let call_body = drain_one_frame(&mut reader);
+
+    child.kill().ok();
+    child.wait().ok();
+
+    let resp: serde_json::Value = serde_json::from_str(&call_body).expect("call json");
+    resp["result"].clone()
+}
+
+/// 66 lowercase hex chars, `prefix` (2 chars) + `fill` repeated 32 times --
+/// a syntactically valid peer_id shape (`is_valid_peer_id`) built without
+/// depending on any real node's pubkey.
+fn fake_peer_id(prefix: &str, fill: char) -> String {
+    format!("{prefix}{}", fill.to_string().repeat(64))
+}
+
+/// `revenue-r-policy list` must read the REAL `peer_policies` table
+/// through `queries::all_policies`, not a hand-built empty/fixed shape:
+/// seed two distinguishable rows directly into a production-schema copy
+/// and assert both come back with their exact seeded fields.
+#[test]
+fn revenue_r_policy_list_reflects_real_peer_policies_rows() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let peer_a = fake_peer_id("02", 'a');
+    let peer_b = fake_peer_id("03", 'b');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at) \
+             VALUES (?1, 'dynamic', 'enabled', 777, '[\"batch-a-tripwire\"]', ?2)",
+            rusqlite::params![peer_a, 1_800_000_000i64],
+        )
+        .expect("seed peer_a row");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at) \
+             VALUES (?1, 'static', 'disabled', 250, '[]', ?2)",
+            rusqlite::params![peer_b, 1_800_000_100i64],
+        )
+        .expect("seed peer_b row");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+    );
+
+    assert_eq!(result["count"], serde_json::json!(2), "result: {result:?}");
+    let policies = result["policies"].as_array().expect("policies array");
+    let a = policies
+        .iter()
+        .find(|p| p["peer_id"] == serde_json::json!(peer_a))
+        .unwrap_or_else(|| panic!("seeded peer_a not in response: {result:?}"));
+    assert_eq!(a["fee_ppm_target"], serde_json::json!(777));
+    assert_eq!(a["tags"], serde_json::json!(["batch-a-tripwire"]));
+    let b = policies
+        .iter()
+        .find(|p| p["peer_id"] == serde_json::json!(peer_b))
+        .unwrap_or_else(|| panic!("seeded peer_b not in response: {result:?}"));
+    assert_eq!(b["strategy"], serde_json::json!("static"));
+    assert_eq!(b["rebalance_mode"], serde_json::json!("disabled"));
+}
+
+/// `revenue-r-policy` mutation actions must be refused BEFORE any DB
+/// access (task rule 3) -- no db-path override is supplied here, so a
+/// handler that checked `s.db` first would answer "Plugin not
+/// initialized" instead of the tactical-action refusal. Asserting the
+/// refusal text specifically pins the ordering, not just "some error".
+#[test]
+fn revenue_r_policy_set_action_is_refused_before_any_db_access() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "set", "peer_id": "irrelevant"}),
+    );
+    let err = result["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a refusal error, got: {result:?}"));
+    assert!(
+        err.contains("deprecated for normal operator use"),
+        "must be the tactical-action refusal, not a DB-access error: {err}"
+    );
+}
+
+/// Task 50 correction round, F9: an EXPLICIT `action: null` must be
+/// refused as an unknown action (Python: `str(None or "")` -> `""` ->
+/// unknown-action error), NOT silently treated as `list` -- the OLD wiring
+/// collapsed `v.get("action").and_then(as_str)` to `None` for both an
+/// ABSENT key and an explicit `null`, so both defaulted to "list".
+#[test]
+fn revenue_r_policy_explicit_null_action_is_refused_not_treated_as_list() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": null}),
+    );
+    let err = result["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an unknown-action refusal, got: {result:?}"));
+    assert!(
+        err.starts_with("Unknown action:"),
+        "explicit null action must be refused like Python's str(None or \"\"): {err}"
+    );
+    assert!(
+        result.get("policies").is_none(),
+        "must not silently succeed as `list`: {result:?}"
+    );
+}
+
+/// Task 50 correction round, F6: `action=changes` with a non-numeric
+/// `since` must return Python's exact coercion-error string
+/// (cl-revenue-ops.py:5537-5538), not silently substitute `0` and return
+/// the full policy table as "changes since the epoch". A valid numeric
+/// STRING must still coerce like Python's `int()`.
+#[test]
+fn revenue_r_policy_changes_since_coercion_matches_python() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let peer = fake_peer_id("02", 'f');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at) \
+             VALUES (?1, 'dynamic', 'enabled', NULL, '[]', ?2)",
+            rusqlite::params![peer, 1_800_000_500i64],
+        )
+        .expect("seed row");
+    }
+
+    let garbage = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "changes", "since": "abc"}),
+    );
+    assert_eq!(
+        garbage["error"],
+        serde_json::json!("Invalid 'since' timestamp. Must be a Unix timestamp."),
+        "garbage since: {garbage:?}"
+    );
+    assert!(
+        garbage.get("changes").is_none(),
+        "must not fall through to the full policy table: {garbage:?}"
+    );
+
+    // A valid numeric STRING must still coerce like Python's int().
+    let numeric_string = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "changes", "since": "1800000000"}),
+    );
+    assert_eq!(numeric_string["since"], serde_json::json!(1_800_000_000));
+    assert_eq!(
+        numeric_string["count"],
+        serde_json::json!(1),
+        "since=1800000000 is strictly before the seeded row's updated_at \
+         (1800000500): {numeric_string:?}"
+    );
+
+    // `since` strictly AFTER the seeded row's updated_at excludes it.
+    let after = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "changes", "since": "1800000500"}),
+    );
+    assert_eq!(
+        after["count"],
+        serde_json::json!(0),
+        "since == updated_at is NOT strictly greater, so excluded: {after:?}"
+    );
+}
+
+/// `revenue-r-list-banned` and `revenue-r-list-ignored` both derive from
+/// the SAME real `queries::all_policies` read (task rule 4), filtered
+/// differently -- seed one banned-tagged row and one passive+disabled row
+/// into a production-schema copy and confirm each RPC returns exactly its
+/// own peer, not the other's, and not a fixed empty shape.
+#[test]
+fn revenue_r_list_banned_and_list_ignored_reflect_real_peer_policies_rows() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let banned_peer = fake_peer_id("02", 'c');
+    let ignored_peer = fake_peer_id("03", 'd');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at) \
+             VALUES (?1, 'dynamic', 'enabled', NULL, '[\"banned\",\"whale\"]', ?2)",
+            rusqlite::params![banned_peer, 1_800_000_200i64],
+        )
+        .expect("seed banned row");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at) \
+             VALUES (?1, 'passive', 'disabled', NULL, '[]', ?2)",
+            rusqlite::params![ignored_peer, 1_800_000_300i64],
+        )
+        .expect("seed ignored row");
+    }
+
+    let banned = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-list-banned",
+    );
+    assert_eq!(banned["count"], serde_json::json!(1), "banned: {banned:?}");
+    assert_eq!(
+        banned["banned_peers"][0]["peer_id"],
+        serde_json::json!(banned_peer)
+    );
+
+    let ignored = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-list-ignored",
+    );
+    assert_eq!(
+        ignored["count"],
+        serde_json::json!(1),
+        "ignored: {ignored:?}"
+    );
+    assert_eq!(
+        ignored["ignored_peers"][0]["peer_id"],
+        serde_json::json!(ignored_peer)
+    );
+    assert_eq!(ignored["ignored_peers"][0]["reason"], "manual");
+}
+
+/// Task 50 correction round, F10 (RPC-level tripwire): a banned peer whose
+/// row has ONE malformed scalar column (`expires_at` holding non-numeric
+/// text) must still appear in `revenue-r-list-banned` -- proving the
+/// `revops-db::queries` fix reaches the actual RPC, not just the query
+/// layer's own unit tests.
+#[test]
+fn revenue_r_list_banned_does_not_drop_a_banned_peer_with_a_malformed_column() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let banned_peer = fake_peer_id("02", 'g');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at) \
+             VALUES (?1, 'dynamic', 'enabled', '[\"banned\"]', ?2, 'not-an-integer')",
+            rusqlite::params![banned_peer, 1_800_000_600i64],
+        )
+        .expect("seed banned row with a malformed expires_at");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-list-banned",
+    );
+    assert_eq!(
+        result["count"],
+        serde_json::json!(1),
+        "the banned peer must not silently vanish over one malformed \
+         column: {result:?}"
+    );
+    assert_eq!(
+        result["banned_peers"][0]["peer_id"],
+        serde_json::json!(banned_peer)
+    );
+}
+
+/// Round-2 correction, CRITICAL (codex re-review): the F10 fix above only
+/// covers a malformed SCALAR column. Valid SQLite JSON like `["banned", 7]`
+/// is a perfectly legal Python list -- `"banned" in tags` is still `True`
+/// in Python with the stray `7` present. The pre-round-2 decode parsed the
+/// WHOLE tags column as `Vec<String>`, which fails outright on the first
+/// non-string element, and defaulted the ENTIRE array to `[]` --
+/// re-creating exactly the "banned peer vanishes from
+/// revenue-r-list-banned" failure F10 was supposed to close, through a
+/// tags-array-shaped hole instead of a scalar-column-shaped one. Captured
+/// RED-first against unmodified `2b3d356`.
+#[test]
+fn revenue_r_list_banned_does_not_drop_a_peer_over_a_mixed_type_tags_array() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let banned_peer = fake_peer_id("02", 'h');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, tags, updated_at) \
+             VALUES (?1, 'dynamic', 'enabled', '[\"banned\", 7]', ?2)",
+            rusqlite::params![banned_peer, 1_800_000_700i64],
+        )
+        .expect("seed banned row with a mixed-type tags array");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-list-banned",
+    );
+    assert_eq!(
+        result["count"],
+        serde_json::json!(1),
+        "a peer whose real \"banned\" tag sits next to one malformed \
+         non-string sibling element must NOT vanish from \
+         revenue-r-list-banned: {result:?}"
+    );
+    assert_eq!(
+        result["banned_peers"][0]["peer_id"],
+        serde_json::json!(banned_peer)
+    );
+    assert_eq!(
+        result["banned_peers"][0]["tags"],
+        serde_json::json!(["banned"]),
+        "the surviving tags must keep the valid string member, dropping \
+         only the malformed element individually: {result:?}"
+    );
+}
+
+/// Round-2 correction, CRITICAL, ignored-path equivalent (see the
+/// query-layer test's doc comment for why `revenue-r-list-ignored`'s
+/// MEMBERSHIP can't disappear over tags the way a banned peer's can --
+/// this proves the equivalent-severity failure on the `reason` field
+/// reaches the real RPC).
+#[test]
+fn revenue_r_list_ignored_preserves_reason_tag_despite_mixed_type_tags_array() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let ignored_peer = fake_peer_id("03", 'i');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, tags, updated_at) \
+             VALUES (?1, 'passive', 'disabled', '[\"low_value\", 42]', ?2)",
+            rusqlite::params![ignored_peer, 1_800_000_800i64],
+        )
+        .expect("seed ignored row with a mixed-type tags array");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-list-ignored",
+    );
+    assert_eq!(result["count"], serde_json::json!(1), "result: {result:?}");
+    assert_eq!(
+        result["ignored_peers"][0]["reason"],
+        serde_json::json!("low_value"),
+        "the real reason tag must survive the malformed numeric sibling, \
+         not silently fall back to the generic \"manual\" default: {result:?}"
+    );
+}
+
+/// `revenue-r-hot-channel-protection-peers` (`list` action) must read the
+/// real `hot_channel_protection_overrides` table.
+#[test]
+fn revenue_r_hot_channel_protection_peers_list_reflects_a_real_row() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let peer_id = fake_peer_id("02", 'e');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO hot_channel_protection_overrides \
+             (peer_id, added_at, note, min_depletion_trigger_pct) \
+             VALUES (?1, ?2, 'batch-a-tripwire-note', 0.42)",
+            rusqlite::params![peer_id, 1_800_000_400i64],
+        )
+        .expect("seed hot-channel-protection override row");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+    );
+    assert_eq!(result["count"], serde_json::json!(1), "result: {result:?}");
+    assert_eq!(result["peers"][0]["peer_id"], serde_json::json!(peer_id));
+    assert_eq!(
+        result["peers"][0]["note"],
+        serde_json::json!("batch-a-tripwire-note")
+    );
+    assert_eq!(result["peers"][0]["min_depletion_trigger_pct"], 0.42);
+
+    // `action != "list"` must be refused, never treated as an implicit
+    // list -- add/remove/clear are DB writes and stay out of this
+    // read-only port's scope.
+    let refused = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!({"action": "add"}),
+    );
+    let err = refused["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a refusal error, got: {refused:?}"));
+    assert!(
+        err.contains("not available in this read-only port"),
+        "{err}"
+    );
+}
+
+/// Task 50 correction round, F8 + H6: `action="LIST"` must succeed
+/// (Python lowercases, no strip); `action=""`/`null` must default to
+/// `list` and succeed (Python's `action or "list"`); `action=" list"`
+/// (leading space) must be REFUSED as unknown (Python does NOT strip);
+/// and the write-action refusal ("add" -- a real scope boundary) must be a
+/// DIFFERENT message from the unknown-action refusal (a typo/garbage
+/// string), so a caller can tell "not implemented here" from "doesn't
+/// exist at all".
+#[test]
+fn revenue_r_hot_channel_protection_peers_action_normalization_matches_python() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    let uppercase = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!({"action": "LIST"}),
+    );
+    assert_eq!(
+        uppercase["status"],
+        serde_json::json!("success"),
+        "action=LIST must succeed like Python: {uppercase:?}"
+    );
+
+    let empty_string = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!({"action": ""}),
+    );
+    assert_eq!(
+        empty_string["status"],
+        serde_json::json!("success"),
+        "action=\"\" must default to list like Python: {empty_string:?}"
+    );
+
+    let null_action = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!({"action": null}),
+    );
+    assert_eq!(
+        null_action["status"],
+        serde_json::json!("success"),
+        "action=null must default to list like Python: {null_action:?}"
+    );
+
+    // Leading whitespace: Python does NOT strip, so " list" != "list" ->
+    // unknown action, refused.
+    let leading_space = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!({"action": " list"}),
+    );
+    let leading_space_err = leading_space["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an unknown-action refusal: {leading_space:?}"));
+    assert!(
+        leading_space_err.starts_with("Unknown action:"),
+        "{leading_space_err}"
+    );
+
+    // H6: the write-action refusal and the unknown-action refusal must be
+    // DIFFERENT messages.
+    let write_refused = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!({"action": "remove"}),
+    );
+    let write_refused_err = write_refused["error"].as_str().unwrap();
+    assert!(write_refused_err.contains("not available in this read-only port"));
+    assert_ne!(
+        write_refused_err, leading_space_err,
+        "a real write action's refusal must read differently from an unknown-action refusal"
+    );
+}
+
+/// `revenue-r-spend-ledger` must read the real `spend_events` table
+/// through `queries::spend_ledger_aggregates`.
+#[test]
+fn revenue_r_spend_ledger_reflects_a_real_spend_events_row() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let event_ts = now_unix() - 60;
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO spend_events \
+             (event_id, category, subcategory, amount_sats, timestamp) \
+             VALUES ('batch-a-ev1', 'batch_a_tripwire', NULL, 12345, ?1)",
+            rusqlite::params![event_ts],
+        )
+        .expect("seed spend_events row");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+    );
+    assert_eq!(
+        result["spent_24h_sats"],
+        serde_json::json!(12345),
+        "result: {result:?}"
+    );
+    assert_eq!(
+        result["spent_by_category"]["batch_a_tripwire"],
+        serde_json::json!(12345)
+    );
+    assert_eq!(result["_gaps"], serde_json::json!([]));
+}
+
+/// Task 50 correction round, F7: `window_hours` as a numeric STRING
+/// (`"48"`) must coerce like Python's `int()`, not silently fall back to
+/// the 24h default; garbage must return an in-band error, not a confident
+/// ledger for the wrong window; `include_reservations` must match Python
+/// truthiness (`"false"` the STRING is truthy).
+#[test]
+fn revenue_r_spend_ledger_window_hours_and_truthiness_match_python() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    // A row 36h old: inside a 48h window, outside the 24h default.
+    let event_ts = now_unix() - 36 * 3600;
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO spend_events \
+             (event_id, category, subcategory, amount_sats, timestamp) \
+             VALUES ('batch-a-ev2', 'batch_a_tripwire', NULL, 777, ?1)",
+            rusqlite::params![event_ts],
+        )
+        .expect("seed spend_events row");
+    }
+
+    // Numeric STRING window_hours must coerce, not silently default to 24h
+    // (which would miss the 36h-old row entirely).
+    let string_window = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!({"window_hours": "48"}),
+    );
+    assert_eq!(string_window["window_hours"], serde_json::json!(48));
+    assert_eq!(
+        string_window["spent_24h_sats"],
+        serde_json::json!(777),
+        "a 48h numeric-string window must include the 36h-old row: {string_window:?}"
+    );
+
+    // Garbage window_hours must be an in-band error, not a silent default.
+    let garbage_window = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!({"window_hours": "abc"}),
+    );
+    assert!(
+        garbage_window["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid literal for int()"),
+        "garbage window_hours must be a Python-style int() error, not a silent \
+         default: {garbage_window:?}"
+    );
+    assert!(garbage_window.get("spent_24h_sats").is_none());
+
+    // include_reservations=(the STRING) "false" is Python-truthy.
+    let string_false = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!({"include_reservations": "false"}),
+    );
+    assert!(
+        string_false.get("active_reservations").is_some(),
+        "the STRING \"false\" is Python-truthy, so include_reservations must \
+         fire: {string_false:?}"
+    );
+}
+
+/// Round-2 correction, P1 (codex re-review): `python_int` used
+/// `u as i64`/`f.trunc() as i64`, which WRAP/SATURATE instead of erroring
+/// on a value outside `i64`'s range. `u64::MAX` as `window_hours` wraps to
+/// `-1`, then `parse_window_hours`'s `.max(1)` silently turns that into a
+/// CLEAN 1-hour ledger -- a confident, wrong-window response instead of a
+/// loud rejection of the impossible request. This is the exact scenario
+/// the audit named; asserting on the REAL `revenue-r-spend-ledger` handler
+/// (not just the `python_int` unit tests) proves the fix reaches the
+/// query path, not just the helper.
+#[test]
+fn revenue_r_spend_ledger_rejects_out_of_range_window_hours_instead_of_wrapping() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    // A row far outside any real window a wrapped/saturated value could
+    // honestly cover, so a silently-substituted window would still show a
+    // WRONG (but plausible-looking) answer rather than an obvious one.
+    let event_ts = now_unix() - 10 * 3600;
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO spend_events \
+             (event_id, category, subcategory, amount_sats, timestamp) \
+             VALUES ('batch-a-ev3', 'batch_a_tripwire', NULL, 999, ?1)",
+            rusqlite::params![event_ts],
+        )
+        .expect("seed spend_events row");
+    }
+
+    // u64::MAX: the OLD `u as i64` cast wraps to -1; `.max(1)` then ran a
+    // "clean" 1-hour ledger instead of rejecting the request.
+    let huge_u64 = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!({"window_hours": u64::MAX}),
+    );
+    assert!(
+        huge_u64.get("window_hours") != Some(&serde_json::json!(1)),
+        "u64::MAX window_hours must NOT silently become a clean 1-hour \
+         ledger: {huge_u64:?}"
+    );
+    assert!(
+        huge_u64["error"].as_str().is_some(),
+        "u64::MAX window_hours must be a loud in-band error, not a \
+         successful response: {huge_u64:?}"
+    );
+    assert!(huge_u64.get("spent_24h_sats").is_none());
+
+    // An out-of-i64-range FLOAT: the OLD `f.trunc() as i64` SATURATES
+    // (Rust's float->int cast behavior) instead of erroring -- a
+    // different-but-still-wrong value succeeding silently.
+    let huge_float = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!({"window_hours": 1e20}),
+    );
+    assert!(
+        huge_float["error"].as_str().is_some(),
+        "an out-of-range float window_hours must be a loud in-band error, \
+         not a saturated success: {huge_float:?}"
+    );
+    assert!(huge_float.get("spent_24h_sats").is_none());
+}
+
+/// Round-2 correction, P1: the same `python_int` helper feeds
+/// `reservation_limit` -- an out-of-range value there must error the same
+/// way, not silently run the query with a wrapped/saturated limit.
+#[test]
+fn revenue_r_spend_ledger_rejects_out_of_range_reservation_limit() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!({"include_reservations": true, "reservation_limit": u64::MAX}),
+    );
+    assert!(
+        result["error"].as_str().is_some(),
+        "u64::MAX reservation_limit must be a loud in-band error: {result:?}"
+    );
+    assert!(result.get("active_reservations").is_none());
+}
+
+/// Round-2 correction, P1: `revenue-r-policy`'s `changes` action feeds
+/// `since` through the SAME `python_int` helper (via `coerce_since`). An
+/// out-of-range `since` must be refused via `invalid_since_error`, never
+/// silently coerced to a wrapped/saturated value that returns a
+/// materially wrong "changes since" answer.
+#[test]
+fn revenue_r_policy_changes_rejects_out_of_range_since() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let peer = fake_peer_id("02", 'j');
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at) \
+             VALUES (?1, 'dynamic', 'enabled', NULL, '[]', ?2)",
+            rusqlite::params![peer, 1_800_000_900i64],
+        )
+        .expect("seed row");
+    }
+
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "changes", "since": u64::MAX}),
+    );
+    assert_eq!(
+        result["error"],
+        serde_json::json!("Invalid 'since' timestamp. Must be a Unix timestamp."),
+        "u64::MAX since must be refused, not wrapped to -1 and treated as \
+         \"changes since before every row\": {result:?}"
+    );
+    assert!(
+        result.get("changes").is_none(),
+        "must not fall through to the full policy table: {result:?}"
+    );
+}
+
+/// Task 50 correction round, F11: a DB failure inside `pnl_summary` (e.g.
+/// a schema mismatch -- SOME tables exist, so the actor's own
+/// `table_names` open-time probe succeeds, but `forwards` specifically
+/// doesn't) must become an in-band `financials: {"error": ...}` section
+/// with the other eight sections still present and still honestly
+/// gap-marked -- NOT a whole-call JSON-RPC error that loses every other
+/// section (the OLD `?` on `pnl_summary(...).await?` behavior; Python's
+/// own per-section try/except never does this, cl-revenue-ops.py:
+/// 6217-6218).
+#[test]
+fn revenue_r_health_pnl_failure_is_an_in_band_financials_error_not_a_whole_call_failure() {
+    let home = tempfile::tempdir().expect("tempdir");
+    // A DB with SOME table (so the actor's open-time `table_names` probe
+    // succeeds and the plugin does not disable) but NOT the `forwards`
+    // table `pnl_summary` needs -- a real, reachable SQL failure.
+    let prod_db_path = home.path().join("no-forwards.db");
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open db");
+        conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)", [])
+            .expect("seed one unrelated table");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-health",
+    );
+    assert!(
+        result["financials"].is_object(),
+        "financials must be an in-band error OBJECT, not a whole-call failure: {result:?}"
+    );
+    assert!(
+        result["financials"].get("error").is_some(),
+        "financials must carry an in-band error key: {result:?}"
+    );
+    // The other eight sections must still be present (not lost to a
+    // whole-call JSON-RPC error).
+    for field in [
+        "channels",
+        "fees",
+        "rebalancer",
+        "budget",
+        "boltz",
+        "planner",
+        "top_routes",
+        "loops",
+    ] {
+        assert!(
+            result.get(field).is_some(),
+            "{field} must still be present when only financials failed: {result:?}"
+        );
+    }
+    assert!(
+        result.get("generated_at").is_some(),
+        "top-level shape must survive a financials-only failure: {result:?}"
+    );
+}
+
+/// Round-2 correction, P1 (codex re-review): `db=None` is a REAL,
+/// reachable degraded state -- a fresh `$HOME` with no explicit db-path
+/// override misses the fixture default and comes up with `db=None` BY
+/// DESIGN (see the "default-path miss" ruling in `main.rs`'s init
+/// wiring; `init_canonical_mode_default_db_path_miss_does_not_disable`
+/// pins that the plugin does not disable for it). The pre-round-2
+/// `revenue-r-health` handler collapsed this into a bare
+/// `{"error": "Plugin not initialized"}` -- Python's own `revenue_health`
+/// NEVER carries a top-level `error` key; every section is independently
+/// populated or gap-marked (Task 50's own F11 fix already established this
+/// convention for a LIVE pnl failure -- this is the same contract for the
+/// upfront no-DB case, which the F11 fix didn't cover). Captured RED-first
+/// against unmodified `2b3d356`: no db-path override, a fresh tempdir
+/// `$HOME`, so the plugin comes up running with `db=None`.
+#[test]
+fn revenue_r_health_with_no_db_returns_honest_shape_not_a_top_level_error() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init(false, None, home.path(), &[], "revenue-r-health");
+
+    assert!(
+        result.get("error").is_none(),
+        "revenue-r-health must never carry a top-level error, even with no \
+         DB -- Python's own revenue_health never does: {result:?}"
+    );
+    assert!(
+        result.get("generated_at").is_some(),
+        "generated_at must survive a no-DB call: {result:?}"
+    );
+    assert_eq!(
+        result["financials"],
+        serde_json::Value::Null,
+        "financials must be the honest null+gap shape with no DB, not \
+         fabricated: {result:?}"
+    );
+    assert_eq!(
+        result["boltz"],
+        serde_json::json!({"enabled": false}),
+        "boltz's honest computed answer must survive a no-DB call too: {result:?}"
+    );
+    let gaps: Vec<&str> = result["_gaps"]
+        .as_array()
+        .unwrap_or_else(|| panic!("_gaps must be present: {result:?}"))
+        .iter()
+        .map(|g| g.as_str().unwrap())
+        .collect();
+    assert!(
+        gaps.contains(&"financials"),
+        "financials must be gap-declared with no DB: {gaps:?}"
+    );
+    for field in [
+        "channels",
+        "fees",
+        "rebalancer",
+        "budget",
+        "planner",
+        "top_routes",
+        "loops",
+    ] {
+        assert!(
+            result.get(field).is_some(),
+            "{field} must still be present (null) with no DB, not lost to \
+             a whole-call failure: {result:?}"
+        );
+    }
+}
+
+/// `revenue-r-health`'s `financials` section must be built from the real
+/// `pnl_summary` query (task rule 1) while every other section stays an
+/// honest gap (per `RPC_BATCH_A.md`'s wiring note: `total_capacity_sats`
+/// is not yet wired, so `annualized_roc_pct` and sections 2-9 stay null).
+#[test]
+fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let fwd_ts = now_unix() - 60;
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO forwards \
+             (in_channel, out_channel, in_msat, out_msat, fee_msat, timestamp, resolved_time) \
+             VALUES ('1x1x0', '2x2x0', 101000, 100000, 5000, ?1, ?1)",
+            rusqlite::params![fwd_ts],
+        )
+        .expect("seed forwards row");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-health",
+    );
+    assert_eq!(
+        result["financials"]["today"]["revenue_sats"],
+        serde_json::json!(5),
+        "result: {result:?}"
+    );
+    assert_eq!(result["financials"]["today"]["forward_count"], 1);
+    assert_eq!(result["financials"]["week"]["forward_count"], 1);
+    assert_eq!(
+        result["financials"]["week"]["annualized_roc_pct"],
+        serde_json::Value::Null
+    );
+    let gaps: Vec<&str> = result["_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g.as_str().unwrap())
+        .collect();
+    for g in [
+        "financials.week.annualized_roc_pct",
+        "channels",
+        "fees",
+        "rebalancer",
+        "budget",
+        "planner",
+        "top_routes",
+        "loops",
+    ] {
+        assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
+    }
+    assert!(!gaps.contains(&"financials"), "gaps: {gaps:?}");
+    // Task 50 correction round ("should NOT stay gaps"): boltz is no
+    // longer a null+gap -- it's Python's own honest `{"enabled": false}`
+    // answer with no Boltz manager wired.
+    assert!(!gaps.contains(&"boltz"), "gaps: {gaps:?}");
+    assert_eq!(result["boltz"], serde_json::json!({"enabled": false}));
+}
+
+/// Task 50 correction round, supervisor scope update #2: EVERY Batch-A
+/// handler must explicitly refuse a NON-EMPTY positional (array) params
+/// value -- `lightning-cli revenue-r-spend-ledger 48` must NOT silently
+/// run with the 24h default (the audit's example of pyln's positional
+/// binding falling through to defaults with no error at all). An EMPTY
+/// array (`[]`) is `lightning-cli`'s own no-argument call shape and must
+/// still mean "no params", so every bare invocation continues to succeed.
+#[test]
+fn revenue_r_batch_a_methods_reject_nonempty_positional_params_empty_array_still_succeeds() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    for method in BATCH_A_SHADOW_METHODS {
+        // Non-empty positional array -> explicit in-band refusal, never a
+        // silent fallback to named-param defaults.
+        let rejected = call_after_init_with_params(
+            false,
+            Some(prod_db_path.to_str().unwrap()),
+            home.path(),
+            &[],
+            method,
+            serde_json::json!([48]),
+        );
+        let err = rejected["error"].as_str().unwrap_or_else(|| {
+            panic!("{method}: expected a positional-params refusal, got: {rejected:?}")
+        });
+        assert!(
+            err.contains("positional parameters are not supported"),
+            "{method}: {err}"
+        );
+
+        // Empty array ([]) is lightning-cli's own bare-call shape -- must
+        // NOT be refused (every no-argument call must keep working).
+        let bare = call_after_init_with_params(
+            false,
+            Some(prod_db_path.to_str().unwrap()),
+            home.path(),
+            &[],
+            method,
+            serde_json::json!([]),
+        );
+        let bare_err = bare.get("error").and_then(|e| e.as_str());
+        assert!(
+            bare_err
+                != Some(
+                    "positional parameters are not supported by this port; \
+                              use named parameters (a JSON object), e.g. {\"window_hours\": 48}"
+                ),
+            "{method}: an EMPTY array must be treated as no-params, not refused: {bare:?}"
+        );
+    }
+}
+
+/// Recursively replace the VALUE of any object key in `DOCUMENTED_
+/// NONDETERMINISTIC_FIELDS` with a fixed placeholder, everywhere it
+/// appears in the tree (nested objects/arrays included) -- used below so
+/// two responses captured from two SEPARATE process invocations (which
+/// can legitimately land in different wall-clock seconds) can still be
+/// compared for semantic equality without a real behavioral difference
+/// being masked by an unrelated clock tick.
+const DOCUMENTED_NONDETERMINISTIC_FIELDS: &[&str] = &["generated_at", "timestamp"];
+
+fn normalize_nondeterministic_fields(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if DOCUMENTED_NONDETERMINISTIC_FIELDS.contains(&k.as_str()) {
+                    out.insert(k.clone(), serde_json::json!("<normalized>"));
+                } else {
+                    out.insert(k.clone(), normalize_nondeterministic_fields(val));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(normalize_nondeterministic_fields)
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Round-2 correction, P3 (codex re-review): the positional-params test
+/// above only proves an empty array (`[]`) response is not the EXACT
+/// positional-refusal error string -- it does NOT prove `[]` behaves like
+/// the no-params `{}` call. A handler that returned some OTHER error, or a
+/// divergent default result, for `[]` vs `{}` would still pass that
+/// assertion. This test asserts full SEMANTIC EQUALITY (after normalizing
+/// only the documented nondeterministic wall-clock fields) between the two
+/// call shapes, table-driven over every Batch-A no-argument handler --
+/// closing the gap the empty-array-only check left open.
+#[test]
+fn revenue_r_batch_a_methods_empty_array_and_empty_object_params_are_semantically_equal() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    for method in BATCH_A_SHADOW_METHODS {
+        let via_empty_array = call_after_init_with_params(
+            false,
+            Some(prod_db_path.to_str().unwrap()),
+            home.path(),
+            &[],
+            method,
+            serde_json::json!([]),
+        );
+        let via_empty_object = call_after_init_with_params(
+            false,
+            Some(prod_db_path.to_str().unwrap()),
+            home.path(),
+            &[],
+            method,
+            serde_json::json!({}),
+        );
+
+        let normalized_array = normalize_nondeterministic_fields(&via_empty_array);
+        let normalized_object = normalize_nondeterministic_fields(&via_empty_object);
+        assert_eq!(
+            normalized_array, normalized_object,
+            "{method}: an EMPTY array ([]) call must be semantically \
+             equivalent to a no-params ({{}}) call, not merely \"not the \
+             positional-refusal string\" -- []: {via_empty_array:?} vs \
+             {{}}: {via_empty_object:?}"
+        );
+    }
+}
+
+/// Task 50 correction round (F1-F5): the four builders with no wired
+/// live-evidence pipeline yet (profitability, analyze, capacity-report,
+/// econ-snapshot) must come back through their real registered handler in
+/// an UNMISTAKABLY-MARKED not-wired shape -- never a shape that collides
+/// with one of Python's own legitimate answers (a real empty fleet, a real
+/// unknown channel/SCID, a real disabled-by-config answer) and never a
+/// success-shaped stub. These need no DB at all (none of the four handlers
+/// touches `s.db`), so no db-path override is supplied.
+///
+/// This replaces the pre-Task-50 version of this test, which pinned the
+/// OLD (fabrication/collision) shapes the audit flagged as F1-F5 -- see
+/// `crates/revops/TASK49-REPORT.md`'s "Task-50 correction round" section
+/// for the red transcript this test produced against unmodified `a61ccee`.
+#[test]
+fn revenue_r_gap_only_batch_a_methods_stay_honest() {
+    let home = tempfile::tempdir().expect("tempdir");
+
+    // F3/F4: no `ChannelProfitability` pipeline exists -- both branches
+    // must carry an in-band `not_yet_ported` marker, never Python's real
+    // vocabulary ("No data available" for a genuinely unknown channel, or a
+    // real empty-fleet summary shape with `summary`/`channels_by_class`).
+    let profitability = call_after_init(false, None, home.path(), &[], "revenue-r-profitability");
+    assert_eq!(profitability["error"], serde_json::json!("not_yet_ported"));
+    assert!(
+        profitability.get("summary").is_none(),
+        "must not reuse Python's real fleet-summary shape: {profitability:?}"
+    );
+
+    let profitability_single = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-profitability",
+        serde_json::json!({"channel_id": "123x456x789"}),
+    );
+    assert_eq!(
+        profitability_single["error"],
+        serde_json::json!("not_yet_ported")
+    );
+    assert_eq!(
+        profitability_single["channel_id"],
+        serde_json::json!("123x456x789")
+    );
+    assert_ne!(
+        profitability_single["error"],
+        serde_json::json!("No data available"),
+        "must not collide with Python's real unknown-channel answer: {profitability_single:?}"
+    );
+
+    // No channel_id: the whole-fleet sweep is a mutating background job
+    // and is deliberately NOT ported here (RPC_BATCH_A.md's contract) --
+    // the handler must say so honestly, not silently return an empty
+    // single-channel shape.
+    let analyze_no_id = call_after_init(false, None, home.path(), &[], "revenue-r-analyze");
+    assert_eq!(analyze_no_id["error"], serde_json::json!("not_yet_ported"));
+
+    // F5: with a channel_id, `metrics` is unwired (main.rs always passes
+    // `None`) -- the response must carry a `not_yet_ported` marker so it
+    // cannot collide with Python's real unknown-channel answer, which is
+    // the SAME `{"channel": ..., "analysis": null}` shape with NO error key.
+    let analyze_with_id = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-analyze",
+        serde_json::json!({"channel_id": "123x456x789"}),
+    );
+    assert_eq!(analyze_with_id["channel"], serde_json::json!("123x456x789"));
+    assert_eq!(analyze_with_id["analysis"], serde_json::Value::Null);
+    assert_eq!(
+        analyze_with_id["error"],
+        serde_json::json!("not_yet_ported"),
+        "must be marked, not collide with Python's real unknown-channel null: {analyze_with_id:?}"
+    );
+
+    // F2: no capacity planner exists -- must be Python's EXACT error shape
+    // (cl-revenue-ops.py:4586-4587), 1 key, no timestamp, not a
+    // success-shaped stub.
+    let capacity_report =
+        call_after_init(false, None, home.path(), &[], "revenue-r-capacity-report");
+    assert_eq!(
+        capacity_report,
+        serde_json::json!({"error": "Capacity planner not initialized"}),
+        "must be Python's exact 1-key error shape: {capacity_report:?}"
+    );
+
+    // F1: no EconShadow config surface exists in Rust -- must NOT claim
+    // `enabled: false` (a hardcoded lie on any node where Python's real
+    // config has econ_shadow_enabled=true). Must be an in-band error that
+    // cannot be read as either a true or false `enabled` answer.
+    let econ_snapshot = call_after_init(false, None, home.path(), &[], "revenue-r-econ-snapshot");
+    assert!(
+        econ_snapshot.get("enabled").is_none(),
+        "must not claim any enabled state (true or false) when the config \
+         surface isn't wired: {econ_snapshot:?}"
+    );
+    assert_eq!(
+        econ_snapshot["error"],
+        serde_json::json!("econ shadow not_yet_ported")
     );
 }

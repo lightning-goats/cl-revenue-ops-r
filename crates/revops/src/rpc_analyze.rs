@@ -34,16 +34,33 @@ fn normalize_scid(s: &str) -> String {
     s.replace(':', "x")
 }
 
+/// Task 50 correction round, F5: whether the caller actually ran the
+/// `FlowMetrics` assembly pipeline for this request. [`build_analyze`]'s
+/// old behavior (always `None`, no marker) produced `{"channel": id,
+/// "analysis": null}` for EVERY valid SCID -- byte-identical to Python's
+/// legitimate *unknown/non-CHANNELD_NORMAL channel* answer
+/// (cl-revenue-ops.py:4538). A live channel with real flow would read as
+/// nonexistent. `NotWired` marks "the pipeline was never even attempted"
+/// distinctly from `Ready(None)`, which is the genuine "pipeline ran, this
+/// channel has no data" case Python's own shape already models correctly.
+pub enum MetricsLookup<'a> {
+    /// No `FlowMetrics` assembly pipeline exists yet -- this request never
+    /// actually looked anything up. Must be marked, not silently `null`.
+    NotWired,
+    /// The pipeline ran (or would run, once wired); `None` here is a
+    /// genuine "channel unknown to the flow analyzer" -- Python's own
+    /// `{"channel": ..., "analysis": null}` shape, no marker needed.
+    Ready(Option<&'a FlowMetrics>),
+}
+
 /// Port of `revenue_analyze`. `channel_id_raw` is the raw JSON param (kept
 /// as `&Value`, not `&str`, to reproduce Python's `isinstance(channel_id,
 /// str)` type gate against a caller that can pass any JSON type -- same
 /// convention as `rpc_dashboard::parse_window_days`).
 ///
-/// `metrics`: the ALREADY-FETCHED `flow_analyzer.analyze_channel()` result
-/// for the (normalized) requested channel -- `None` when Python's
-/// `analyze_channel` would return falsy (channel unknown to the flow
-/// analyzer).
-pub fn build_analyze(channel_id_raw: Option<&Value>, metrics: Option<&FlowMetrics>) -> Value {
+/// `metrics`: see [`MetricsLookup`] -- distinguishes "pipeline not wired"
+/// from "pipeline ran, channel has no data" so the two cannot collide.
+pub fn build_analyze(channel_id_raw: Option<&Value>, metrics: MetricsLookup) -> Value {
     let channel_id = match channel_id_raw {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.as_str()),
@@ -66,8 +83,17 @@ pub fn build_analyze(channel_id_raw: Option<&Value>, metrics: Option<&FlowMetric
                 });
             }
             let normalized = normalize_scid(id);
-            let analysis = metrics.map(flow_metrics_to_json).unwrap_or(Value::Null);
-            json!({"channel": normalized, "analysis": analysis})
+            match metrics {
+                MetricsLookup::NotWired => json!({
+                    "channel": normalized,
+                    "analysis": Value::Null,
+                    "error": "not_yet_ported",
+                }),
+                MetricsLookup::Ready(m) => {
+                    let analysis = m.map(flow_metrics_to_json).unwrap_or(Value::Null);
+                    json!({"channel": normalized, "analysis": analysis})
+                }
+            }
         }
         None => json!({
             "error": "not_yet_ported",
@@ -136,7 +162,7 @@ mod tests {
 
     #[test]
     fn missing_channel_id_is_documented_not_faked() {
-        let v = build_analyze(None, None);
+        let v = build_analyze(None, MetricsLookup::NotWired);
         assert_eq!(v["error"], "not_yet_ported");
         // Control: must NOT claim Python's "Flow analysis triggered" --
         // this builder performs no side effect.
@@ -145,13 +171,13 @@ mod tests {
 
     #[test]
     fn empty_string_channel_id_behaves_like_absent() {
-        let v = build_analyze(Some(&json!("")), None);
+        let v = build_analyze(Some(&json!("")), MetricsLookup::NotWired);
         assert_eq!(v["error"], "not_yet_ported");
     }
 
     #[test]
     fn non_string_channel_id_is_rejected() {
-        let v = build_analyze(Some(&json!(123)), None);
+        let v = build_analyze(Some(&json!(123)), MetricsLookup::NotWired);
         assert_eq!(
             v["error"],
             "channel_id must be a string SCID (e.g., 123x456x789)."
@@ -160,7 +186,7 @@ mod tests {
 
     #[test]
     fn malformed_scid_is_rejected() {
-        let v = build_analyze(Some(&json!("not-a-scid")), None);
+        let v = build_analyze(Some(&json!("not-a-scid")), MetricsLookup::NotWired);
         assert_eq!(
             v["error"],
             "Invalid channel format: not-a-scid. Use SCID format (e.g., 123x456x789)."
@@ -170,17 +196,34 @@ mod tests {
     #[test]
     fn valid_scid_with_colon_separator_is_normalized_and_wrapped() {
         let m = sample_metrics();
-        let v = build_analyze(Some(&json!("123:456:789")), Some(&m));
+        let v = build_analyze(Some(&json!("123:456:789")), MetricsLookup::Ready(Some(&m)));
         assert_eq!(v["channel"], "123x456x789");
         assert_eq!(v["analysis"]["channel_id"], "123x456x789");
         assert_eq!(v["analysis"]["state"], "balanced");
         assert_eq!(v["analysis"]["forward_count"], 12);
+        // A genuinely-ready lookup carries no `not_yet_ported` marker.
+        assert!(v.get("error").is_none());
     }
 
     #[test]
-    fn valid_scid_with_no_data_yields_null_analysis() {
-        let v = build_analyze(Some(&json!("1x1x1")), None);
+    fn valid_scid_with_no_data_yields_null_analysis_when_pipeline_is_ready() {
+        let v = build_analyze(Some(&json!("1x1x1")), MetricsLookup::Ready(None));
         assert_eq!(v["channel"], "1x1x1");
         assert_eq!(v["analysis"], Value::Null);
+        // Genuine "pipeline ran, channel unknown" -- Python's own shape,
+        // no marker.
+        assert!(v.get("error").is_none());
+    }
+
+    /// Task 50 correction round, F5: a valid SCID with the pipeline
+    /// NOT-WIRED must carry the `not_yet_ported` marker so it cannot
+    /// collide with the genuinely-ready-but-empty case above (a real live
+    /// channel would otherwise read as nonexistent).
+    #[test]
+    fn valid_scid_not_wired_carries_marker_distinct_from_genuine_unknown() {
+        let v = build_analyze(Some(&json!("1x1x1")), MetricsLookup::NotWired);
+        assert_eq!(v["channel"], "1x1x1");
+        assert_eq!(v["analysis"], Value::Null);
+        assert_eq!(v["error"], "not_yet_ported");
     }
 }

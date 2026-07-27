@@ -19,9 +19,72 @@ Status key for "Tripwire": does a test RED if the wiring is removed?
 
 ## Scope note
 
-The **fee subsystem** is the only cutover scope. Rebalance, capital planner,
-Boltz, LN+ swaps and most operator RPCs remain Python-owned and are tracked here
-only so the boundary is explicit, not because they gate cutover.
+**Superseded 2026-07-27.** The former "fee subsystem is the only cutover scope"
+note below is implementation evidence, not the current programme boundary. The
+operator-approved design in
+`docs/superpowers/specs/2026-07-27-whole-plugin-rust-cutover-design.md` sets the
+scope to the **whole plugin**: fee decisions and execution; governed economics,
+budget, settlement, reconciliation; profitability, policy, configuration, and
+operator RPCs; rebalance planning and execution; capacity planning, opens,
+closes, defibrillation; Boltz management and autocycles; LN+ evaluation,
+lifecycle, opening, withdrawal, rating, reconciliation; and every background
+loop, notification producer, and status surface those features need. Python
+remains the sole mutation authority until one coordinated whole-plugin cutover
+(design §"Non-negotiable invariants" 1-2); no subsystem earns mutation
+authority early merely by being individually complete.
+
+That design also fixes the **honest progress model** this checklist must use
+going forward: `[x]`/`[~]`/`[ ]` alone conflate five different levels of
+evidence. Report against the five explicit states instead — **compiled**
+(module declared + built), **reachable** (RPC registered / notification
+producer connected / loop spawned), **effective** (the reachable caller
+invokes the intended kernel and a revert-discriminating test reds if removed),
+**transport-proven** (exercised against a sandboxed fake external boundary),
+and **promotion-ready** (independent review + required shadow/runway evidence,
+zero unauthorized mutation calls). **A row may not be marked complete, and
+none of the four higher states may be claimed, from source presence or LOC
+alone** — only from the specific test/evidence named for that state.
+
+**Round-2 correction (2026-07-27, P1): this section previously conflated
+TOTAL Rust RPC method registrations with PYTHON-EQUIVALENT RPC coverage,
+and used both 9 and 10 as the pre-Task-49 baseline in different places.
+Corrected counts, used consistently everywhere below:**
+
+- **Total Rust RPC methods registered** (everything in
+  `crates/revops/tests/manifest.rs`'s `assert_eq!(result["rpcmethods"]
+  .as_array().unwrap().len(), 20, ...)` guard): **20**. This INCLUDES
+  `revops-fee-runway-status` (`main.rs:701-705`), a Rust-ONLY operational
+  endpoint with **no Python counterpart at all** — it is not part of the
+  69-method Python RPC surface and must never be counted toward
+  Python-equivalent coverage.
+- **Python-equivalent RPCs registered in Rust:** pre-Task-49 baseline
+  **9** of 69 (not 10 — the design-doc snapshot's "10" below double-counted
+  a Rust-only or since-corrected entry; §3's own headline number for the
+  same pre-Task-49 point already said "9 RPCs" correctly). Post-Task-49:
+  **19** of 69 (9 + Task 49's ten Batch A builders = 19; NOT 20 — Batch A's
+  ten builders are all Python-equivalent, but the pre-existing baseline of
+  9 already excluded `revops-fee-runway-status`, so total-20 minus
+  Python-only-1 = Python-equivalent-19). 19/69 ≈ 28%.
+
+**Baseline (design doc snapshot, `main` @ `0eba911`):** 1,986 passing tests,
+9 of 69 Python-equivalent RPCs registered in Rust, 27 RPC builders compiled.
+
+**Measured at Task 49 (Wave 2 / RPC Batch A), `main` @ `650d832` +1 commit:**
+27 `rpc_*` builder modules compiled (unchanged — all ten Batch A modules were
+already declared in `lib.rs` before this task; see `crates/revops/RPC_BATCH_A.md`),
+**20 total Rust RPC methods** registered in `crates/revops/src/main.rs` — of
+which **19 are Python-equivalent** (up from 9; the remaining one,
+`revops-fee-runway-status`, is Rust-only with no Python counterpart). The
+exact total-20 count is a manifest-test GUARD,
+`crates/revops/tests/manifest.rs`'s `assert_eq!(...len(), 20, ...)`, that
+reds on any unannounced addition/removal.
+See "Task 49 — Wave 2 reachability" under Lens 0 below for the per-RPC detail;
+this task made ten Python-equivalent entry points **reachable**, no more.
+
+The original fee-subsystem section (§1 below) remains accurate as the record of
+what was audited for the *fee cutover specifically* on 2026-07-27 and is kept
+verbatim; treat "cutover scope" language inside it as historical, superseded by
+the whole-plugin scope above.
 
 ---
 
@@ -148,11 +211,23 @@ behaviour is to compute and RECORD the would-be initial fee, never send it.
 Method per §5. Every row was checked by locating the Rust module **and** its
 tests, not by recollection. Lens 1 (fee stack) is §1 above.
 
-**Headline numbers.** Python ~58k LOC / **69 operator RPCs**. Rust ~55k LOC
-across 8 crates / **9 RPCs**. The line counts are close; the RPC surface is
-**13%**. That gap is the honest shape of the port: the *decision kernels* are
-broadly ported, the *operator surface and the capital-deploying subsystems* are
-not.
+**Headline numbers (as audited 2026-07-27, before Task 49).** Python ~58k LOC /
+**69 operator RPCs**. Rust ~55k LOC across 8 crates / **9 RPCs**. The line
+counts are close; the RPC surface was **13%**. That gap is the honest shape of
+the port: the *decision kernels* are broadly ported, the *operator surface and
+the capital-deploying subsystems* are not.
+
+**Updated after Task 49 (Wave 2 / RPC Batch A).** Registered Rust RPC methods:
+**20 total**; of those, **19 of 69 Python-equivalent RPCs (≈28%)** — ten more
+Python-equivalent builders reachable (see "Task 49 — reachability" under Lens
+0 below). The 20th registered method, `revops-fee-runway-status`
+(`main.rs:701-705`), is Rust-only with no Python counterpart and is excluded
+from the 69-method denominator. This is a reachability count only, not a
+completeness claim: several of the ten (profitability, analyze,
+capacity-report, econ-snapshot, most of health) return an explicit
+`not_yet_ported` in-band marker (Task 50's F1-F5 fix) because their live
+evidence pipelines are unported — registering the RPC did not fabricate the
+missing evidence.
 
 ### Lens 0 — CLN plugin entrypoint (10,378 LOC)
 
@@ -163,10 +238,215 @@ not.
 | option-registration-and-config | `options_table.rs`, `config_resolve.rs` (126 options in manifest) | `[x]` |
 | background-scheduler-loops | `fee_scheduler.rs` (fee loop only) | `[~]` fee loop only; flow/rebalance/planner/boltz loops absent |
 | core-cycle-functions | `fee_scheduler.rs`, `revops-fees/cycle.rs` | `[~]` fee cycle only |
-| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` | `[ ]` **9 of 69** |
+| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders | `[~]` **19 of 69 Python-equivalent registered** (was 9/69), **20 total Rust RPC methods** including the Rust-only `revops-fee-runway-status`; measured via `crates/revops/tests/manifest.rs`'s method-count guard |
 | notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[~]` all 4 subscribed; `channel_state_changed` deliberately narrower (closure events only, see A3b) |
-| spend-budget-and-capex-rpcs | — | `[ ]` |
+| spend-budget-and-capex-rpcs | `revenue-r-spend-ledger` (Task 49) | `[~]` spend-ledger reads reachable; capex RPCs not registered |
 | boltz-swap-rpcs-and-auto-cycle | — | `[ ]` |
+
+#### Task 49 (Wave 2 / RPC Batch A) — reachability, 2026-07-27
+
+Ten Python-equivalent read-only response builders (already compiled, per the
+baseline above) were registered as real `.rpcmethod()` handlers in `main.rs`,
+taking the Python-equivalent registered count from 9 to 19 (20 total Rust RPC
+methods, including the Rust-only `revops-fee-runway-status`). Per the honest
+progress model above, this task's claim is **reachable only** — the manifest
+test proves each method name is present in both naming modes and, where a
+real `revops-db` query exists, that the handler calls it (a distinctive-row
+round-trip test, not just a name check). No row here is marked
+effective/transport-proven/promotion-ready; that requires independent review
+this checklist entry does not substitute for.
+
+Evidence: `crates/revops/tests/manifest.rs` (`manifest_batch_a_methods_registered_shadow_mode`,
+`_canonical_mode`, and the `revenue_r_*` caller-tripwire tests below them),
+transcripts in `crates/revops/TASK49-REPORT.md`.
+
+**Round-2 correction (P1): the table below is the CURRENT response contract
+for each of the ten Batch A RPCs** (i.e. it already reflects the Task 50
+correction round's F1-F5/F10/F11 fixes below and this round's mixed-type-tags
+fix) — this checklist reports current contracts directly rather than
+retaining Task 49's original (pre-correction) shapes as if they were still
+current evidence. Task 49's original shapes, which a Python-side adversarial
+audit found collided with or fabricated Python's real vocabulary, are kept
+verbatim as a clearly-labeled HISTORICAL record (not current evidence) in
+"Historical: Task 49's original (pre-Task-50) shapes" immediately after the
+Task 50 section below.
+
+| RPC (canonical name) | Evidence wired | Honest gaps / current contract |
+|---|---|---|
+| `revenue-health` | `queries::pnl_summary` (today/week financials) — real, DB-backed; `db=None` returns the same honest `build_health(now, None, None, None)` shape (round 2, P1), never a top-level error | `annualized_roc_pct` (needs live `listpeerchannels` capacity), channels/rebalancer/budget/planner/top_routes/loops all `null`+`_gaps`-listed; `fees` is `null`+gap-listed too, but a real fee controller (`revops-fees::cycle::ControllerState`) DOES exist and run — the gap is that its live state isn't plumbed into this handler yet (round 2, P2), not that no controller exists; `boltz` is the honest computed `{"enabled": false}` (no Boltz manager wired), not a gap |
+| `revenue-profitability` | none yet | explicit `not_yet_ported` marker on both branches (F3/F4 fix) — no `ChannelProfitability` assembly pipeline exists; never Python's real "No data available" / real fleet-summary shape |
+| `revenue-analyze` | none yet | explicit `not_yet_ported` marker (F5 fix, `MetricsLookup::NotWired`) when the pipeline never ran — no `FlowMetrics` assembly exists; distinguished from Python's genuine unknown-channel `{"channel": id, "analysis": null}` (no marker); no-`channel_id` whole-fleet sweep also returns `not_yet_ported` (mutating background job in Python, out of this read-only batch) |
+| `revenue-policy` (list/get/find/changes) | `queries::all_policies`/`policy_for_peer`/`policies_by_tag`/`policy_changes_since`/`last_policy_change_timestamp` — real, DB-backed | set/delete/tag/untag/batch refused before any DB access (`policy_action_gate`, proven by a test with no db-path configured); `since`/action normalization match Python exactly (F6/F9); an out-of-i64-range `since` is a loud in-band error (round 2, P1), never a wrapped/saturated value |
+| `revenue-list-banned` | `queries::all_policies`, filtered by the `banned` tag — real, DB-backed | none (fully wired); a mixed-type `tags` array (e.g. `["banned", 7]`) no longer drops the peer (round 2, CRITICAL fix) |
+| `revenue-list-ignored` | `queries::all_policies`, filtered by strategy/rebalance-mode — real, DB-backed | none (fully wired); DEPRECATED, ported for parity only; a mixed-type `tags` array no longer silently defaults `reason` to `"manual"` (round 2, CRITICAL fix) |
+| `revenue-hot-channel-protection-peers` (`list` only) | `queries::hot_channel_protection_override_peers` — real, DB-backed | add/remove/clear refused (DB writes, out of scope) |
+| `revenue-capacity-report` | `timestamp` only | Python's EXACT `{"error": "Capacity planner not initialized"}` (1 key, no `timestamp`, F2 fix) — never the success-shaped 6-key stub |
+| `revenue-econ-snapshot` | none yet | in-band `{"error": "econ shadow not_yet_ported", ...}` (F1 fix) — never the hardcoded `enabled=false` that could read as a real (possibly false) answer |
+| `revenue-spend-ledger` | `queries::spend_ledger_aggregates` + `active_spend_reservations` — real, DB-backed | none (fully wired); `_gaps` is always `[]` per the builder's own contract; an out-of-i64-range `window_hours`/`reservation_limit` is a loud in-band error (round 2, P1), never a wrapped/saturated 1-hour-ledger-shaped success |
+
+#### Task 50 (Wave 2 / RPC Batch A) — Python-semantics correction round, 2026-07-27
+
+A Python-side adversarial audit (11 lettered findings F1-F11, plus per-method
+notes) of the exact snippets Task 49 wired verbatim found fabrication-class and
+collision-class defects that would ship a wrong answer if left as-is — a
+success-shaped response where Python errors, or a shape that collides with one
+of Python's own legitimate answers so a caller cannot tell "port not wired" from
+"real data". This round FIXED F1-F9 and F11's in-band error convention, plus two
+items the supervisor upgraded from declare-only to FIX mid-round (F10, and
+Batch-A-scoped positional-parameter rejection). Full per-finding red/green
+transcripts: `crates/revops/TASK49-REPORT.md`'s "Task-50 correction round"
+section.
+
+| Finding | Method | Fix | Evidence |
+|---|---|---|---|
+| F1 | econ-snapshot | No `EconShadow`/`econ_shadow_enabled` config surface exists in Rust — stopped hardcoding `enabled=false` (a possible LIE on a node where Python's real config is `true`). Now returns an in-band `{"error": "econ shadow not_yet_ported", ...}` that cannot be read as either a true or false `enabled` answer. | `rpc_econ_snapshot::build_econ_snapshot_not_wired`, `manifest.rs::revenue_r_gap_only_batch_a_methods_stay_honest` |
+| F2 | capacity-report | Returns Python's EXACT `{"error": "Capacity planner not initialized"}` (1 key, no `timestamp`, cl-revenue-ops.py:4586-4587) instead of the success-shaped 6-key stub. | `rpc_capacity_report::capacity_planner_not_initialized_error`, same manifest test |
+| F3/F4 | profitability | Both branches now carry an in-band `not_yet_ported` marker (`build_profitability_channel_not_wired`/`_summary_not_wired`) instead of reusing Python's real "No data available" / real fleet-summary shape. | `rpc_profitability.rs` unit tests, same manifest test |
+| F5 | analyze | `MetricsLookup::NotWired` vs `Ready(Option<&FlowMetrics>)` distinguishes "pipeline never ran" (now carries `"error": "not_yet_ported"`) from Python's genuine unknown-channel `{"channel": id, "analysis": null}` (no marker). | `rpc_analyze::MetricsLookup`, `rpc_analyze.rs` unit tests, same manifest test |
+| F6 | policy `changes` | `since` now coerced via `rpc_policy::coerce_since` (Python-truthiness gate, then `python_int`, matching `int(since) if since else 0`); garbage returns the (previously dead-code) `invalid_since_error()`. | `manifest.rs::revenue_r_policy_changes_since_coercion_matches_python` |
+| F7 | spend-ledger | `window_hours`/`reservation_limit` coerce via `python_int` (numeric strings, floats truncating, garbage -> in-band error), NO upper clamp on `window_hours` (deliberately unlike `_total_cost_budget_status`'s `[1,168]`); `include_reservations` matches Python truthiness (`bool("false")` is `True`). | `rpc_spend_ledger::parse_window_hours/parse_reservation_limit/parse_include_reservations`, `manifest.rs::revenue_r_spend_ledger_window_hours_and_truthiness_match_python` |
+| F8 + H6 | hot-channel-protection-peers | `normalize_action`: `str(action or "list").lower()`, NO `.strip()` (so `"LIST"` succeeds, `""`/`null` default to `list`, `" list"` is unknown). Split `write_action_refused_error` (real write actions: add/remove/clear) from `unknown_action_error` (garbage strings) — previously one conflated message. | `rpc_hot_channel_protection_peers.rs` unit tests, `manifest.rs::revenue_r_hot_channel_protection_peers_action_normalization_matches_python` |
+| F9 | policy | `normalize_action(Option<&Value>)`: absent key -> `"list"`; explicit `null`/non-string/falsy -> `""` -> the (already-correct) 9-name unknown-action error. Previously collapsed both cases through `Option<&str>`, so an explicit `action: null` silently succeeded as `list`. | `rpc_policy.rs` unit tests, `manifest.rs::revenue_r_policy_explicit_null_action_is_refused_not_treated_as_list` |
+| F11 | health + all ten | Every `?`-propagated DB call across all ten handlers now returns an in-band error instead of a JSON-RPC error envelope. `revenue-health` specifically: a `pnl_summary` failure becomes `financials: {"error": ...}` with the other eight sections intact (previously the WHOLE call failed, losing every section). | `manifest.rs::revenue_r_health_pnl_failure_is_an_in_band_financials_error_not_a_whole_call_failure` |
+| "should NOT stay gap" | health | `boltz` section is now the honest `{"enabled": false}` (Python's own true answer with no Boltz manager) instead of `null` + a `_gaps` entry. `fees` (computable from the live `ControllerState`) was scoped SKIP — needs scheduler plumbing into the handler; declared wireable-now-but-not-wired, not fixed this round. | `rpc_health.rs::boltz_section_is_the_honest_enabled_false_shape_not_a_null_gap` |
+
+**Scope-updated FIXES (were declare-only in the original Task 50 brief, upgraded
+mid-round by the supervisor):**
+
+- **F10 (list-banned/list-ignored/policy row-drop, security-relevant).** Fixed
+  narrowly in `crates/revops-db/src/queries.rs`'s `decode_policy_row`: every
+  scalar column now decodes via a lossy `SqlValue`-based accessor
+  (`sql_text_or`/`sql_opt_i64`/`sql_opt_f64`) that defaults on NULL/mistyped
+  cells instead of `?`-erroring the whole row. A malformed `peer_policies` row
+  can no longer silently vanish from `revenue-r-list-banned` (the audit's
+  "a banned peer can silently vanish" scenario) — the row is always kept, with
+  only the genuinely-malformed COLUMN falling back to a default (`expires_at`
+  defaults to `None`, the fail-safe reading for a security-relevant field: a
+  garbage expiry keeps the row visible rather than reading as
+  already-expired). This is the "Preferred fix: keep-with-defaults" outcome
+  the supervisor named, not the loud-error or unregister fallbacks.
+  **Round-2 correction (P2): this is a DELIBERATE FAIL-SAFE DIVERGENCE from
+  Python, not a "Python-exact" port** — Python's `_row_to_policy`
+  (policy_manager.py:384-439) does NOT generally coerce malformed scalar
+  column types; it returns `row['peer_id']`/`row['fee_ppm_target']`/
+  `row['updated_at']`/the present v2 columns exactly as SQLite stored them,
+  unchecked, wrapping ONLY the tags-JSON decode and the two enum conversions
+  in try/except-with-default. Coercing every scalar column too (and, as of
+  round 2, decoding the `tags` JSON array at the ELEMENT level rather than as
+  one typed `Vec<String>` — see below) is a Rust-side strengthening chosen to
+  guarantee no row and no valid string tag is ever silently dropped, not a
+  claim that Python performs the same coercion.
+  Evidence: `crates/revops-db/tests/queries.rs`'s
+  `corrupt_scalar_column_is_kept_with_defaults_not_dropped` and
+  `corrupt_updated_at_column_defaults_to_zero_row_still_present` (query-level),
+  `crates/revops/tests/manifest.rs`'s
+  `revenue_r_list_banned_does_not_drop_a_banned_peer_with_a_malformed_column`
+  (RPC-level).
+- **Round 2 (2026-07-27) — CRITICAL: mixed-type `tags` array, one layer
+  below F10.** A re-review found F10's row-level fix did not cover a
+  malformed TAGS-ARRAY ELEMENT: valid SQLite JSON like `["banned", 7]` is a
+  legal Python list (`"banned" in tags` is still `True` with the non-string
+  `7` present), but the pre-round-2 Rust decode parsed the whole tags column
+  as `Vec<String>`, which fails on the first non-string element, and
+  `.unwrap_or_default()` wiped the ENTIRE array to `[]` — silently erasing a
+  real `"banned"` tag and vanishing the peer from `revenue-r-list-banned`,
+  recreating F10's exact failure mode one layer down. Fixed in
+  `revops-db/src/queries.rs`'s new `decode_tags_json`: parses the column as
+  a generic `serde_json::Value` and keeps only the elements that ARE JSON
+  strings, dropping non-string elements INDIVIDUALLY rather than wiping the
+  whole array. This is also a deliberate fail-safe divergence (Rust's typed
+  `Vec<String>` has no slot for a raw non-string member the way Python's
+  heterogeneous list does), documented in `decode_tags_json`'s doc comment.
+  Evidence: `crates/revops-db/tests/queries.rs`'s
+  `mixed_type_tags_array_preserves_valid_string_members_not_dropped_wholesale`
+  and `mixed_type_tags_array_preserves_ignored_reason_tag` (query-level, RED
+  captured against unmodified `2b3d356` before the fix);
+  `crates/revops/tests/manifest.rs`'s
+  `revenue_r_list_banned_does_not_drop_a_peer_over_a_mixed_type_tags_array`
+  and `revenue_r_list_ignored_preserves_reason_tag_despite_mixed_type_tags_array`
+  (RPC-level, same RED-first capture). Full transcripts:
+  `crates/revops/TASK49-REPORT.md`'s "Round 2 corrections" section.
+- **Batch-A positional-parameter rejection.** `rpc_params::reject_positional_params`
+  refuses any NON-EMPTY JSON array param on all ten Batch A handlers with an
+  in-band error; an EMPTY array (`lightning-cli`'s own no-argument call shape)
+  still means "no params". This is Batch-A-only, NOT the port-wide positional
+  binder Python's pyln implements everywhere — see the follow-up item below.
+  Evidence: `manifest.rs::revenue_r_batch_a_methods_reject_nonempty_positional_params_empty_array_still_succeeds`.
+
+**Remaining DECLARE-ONLY decisions (per the original Task 50 brief, not
+upgraded, not implemented this round):**
+
+- **Full positional-parameter parity (port-wide, decide-once item for the
+  supervisor).** Every RPC in this plugin — not just the ten Batch A methods —
+  reads named params via `v.get("name")`, which is `None` for a positionally-
+  bound array. pyln binds positionally everywhere. This round closed the
+  Batch-A-specific hole (refuse rather than silently default), but a caller
+  using `lightning-cli <any-other-rust-rpc> <positional-args>` still gets
+  silent defaults port-wide. **Follow-up for the supervisor**: decide once
+  (implement real positional binding vs. extend the refuse-and-error pattern
+  everywhere) rather than each future RPC reinventing its own answer.
+- **Python-side read-RPC mutations (§4 of the Task 50 audit) — copied into the
+  authority record so the parity harness expects Python-side drift, not
+  fixed/changed in Rust:**
+  1. Python `revenue-analyze`'s single-channel path writes `channel_states` +
+     Kalman state; the whole-fleet path additionally decays/deletes
+     `peer_reputation` (destructive UPDATE+DELETE, `database.py:6912-6957`).
+  2. Python `revenue-policy get` on an EXPIRED hit purges ALL expired rows
+     node-wide (`BEGIN IMMEDIATE`, `policy_manager.py:466-498`) — so Python's
+     own `last_change_timestamp` can SHRINK over time; Rust's never does
+     (declared, not "fixed" — Rust staying read-only is correct, not a bug).
+  3. Python `revenue-health` writes (datastore push, reservation cleanup);
+     `revenue-econ-snapshot` takes a writer lock (`BEGIN IMMEDIATE`) and can
+     push datastore; `revenue-capacity-report` runs the full mutating Kalman
+     pipeline (`analyze_all_channels` + `flow.analyze_all_channels`).
+  4. Python's own suppressions, worth knowing but NOT to be replicated as
+     virtues: `top_routes` -> `[]` on error; econ budget/profitability
+     failures -> silent zeros/UNKNOWN roles; policy `changes` -> `[]` silently
+     on one corrupt row (Python's OWN drop-on-corruption behavior for
+     `changes` specifically — contrast the Rust `queries::all_policies`/
+     `list`/`get`/`find` fix above, which keeps the row; `policy_changes_since`
+     reuses `all_policies` under the hood so it inherits the SAME fix, a
+     Rust-side improvement over Python here, not a regression to match).
+- **Other per-method declare-only items from the audit, not touched this
+  round** (unranked, not required for this batch): P3 (policy's tactical-
+  action refusal message says "deprecated", which misattributes WHY an
+  `internal=true` write doesn't happen in Rust — Rust implements no write path
+  to unlock at all); P4 (the policy `get`-purge asymmetry vs. Rust's stable
+  `last_change_timestamp`, folded into item 2 above); H8 (hot-channel-
+  protection-peers' row decode has no per-row `.ok()` isolation, unlike
+  `peer_policies` — one mistyped cell fails the WHOLE call where Python passes
+  it through; the F10 fix above did not extend to this table); the
+  `find tag=""`/`find tag=<number>`/`get peer_id=""`/newline-peer-id edge
+  diffs in §2.6; econ-snapshot's E5-E8 (non-string scid, negative budget sats,
+  NaN ratio); analyze's A4/A5 (no init gate in the builder, Unicode-digit/
+  trailing-newline regex leniency); health's H9 (the four `annualized_roc_pct`
+  capacity semantics, needed before `total_capacity_sats` is ever wired).
+
+#### Historical: Task 49's original (pre-Task-50) response shapes — NOT current evidence
+
+**This subsection is historical record only — do not read any cell below as
+the current contract.** The corrected, CURRENT per-RPC table is above, under
+"Task 49 (Wave 2 / RPC Batch A) — reachability". Kept verbatim here (round-2
+correction, P1: moved out of the current-evidence table rather than left in
+place labeled "superseded", which a reader could still mistake for live
+evidence) so the record of what Task 49 originally shipped, before the Task
+50 audit found it fabrication/collision-prone, is not lost:
+
+- `revenue-health`: `annualized_roc_pct` (needs live `listpeerchannels`
+  capacity), and channels/fees/rebalancer/budget/boltz/planner/top_routes/loops
+  (no Rust daemon-loop state) — all `null` + `_gaps`-listed. (`boltz` was later
+  fixed to the honest `{"enabled": false}`, not a gap — see the Task 50 table.)
+- `revenue-profitability`: no `ChannelProfitability` assembly pipeline exists;
+  single-channel returned `"No data available"`, no-`channel_id` returned an
+  all-zero summary shape, `fee_multiplier` always `null` — these SHAPES
+  collided with Python's own legitimate answers (F3/F4).
+- `revenue-analyze`: single-channel `analysis` always `null` (no `FlowMetrics`
+  assembly) — collided with Python's genuine unknown-channel answer (F5).
+- `revenue-capacity-report`: returned a success-shaped 6-key stub with
+  `timestamp` only, instead of Python's exact 1-key
+  `{"error": "Capacity planner not initialized"}` (F2).
+- `revenue-econ-snapshot`: `enabled` hardcoded `false` with no gap marker — a
+  possible LIE on any node where Python's real config is `true` (F1).
 
 ### Lens 2 — Rebalance stack
 
@@ -329,7 +609,15 @@ fns with **no production feed**; a future porter must include opening-state rows
 `profitability_flow_analysis` (~5300 LOC) → `revops-analytics` (4,599 LOC:
 classification, demand_flow, flow, growth, kalman, policy, profitability,
 protection, telemetry) — all with test files. `[x]` as kernels, `[~]` as wired
-surfaces (no `revenue-profitability` / `revenue-analyze` RPC in Rust).
+surfaces: Task 49 registered `revenue-profitability` / `revenue-analyze` as
+**reachable** RPCs, but neither has a live evidence-assembly pipeline behind
+it yet (no `ChannelProfitability`/`FlowMetrics` fetch from
+`listpeerchannels`/forward-history) — both now return an explicit in-band
+`not_yet_ported` marker (Task 50's F3/F4/F5 fix; round-2 correction, P1:
+this used to say "honest no-data/`_gaps` shape", which described the
+pre-Task-50 shape that collided with Python's own legitimate answers — see
+the historical appendix under §3's Task 49 section), not real per-channel
+analysis and not a shape Python could ever legitimately return itself.
 
 ---
 
@@ -339,16 +627,38 @@ Ranked by size, from this audit:
 
 1. **Capital allocation (~10,400 LOC)** — capacity planner, capex budget, Boltz
    manager + auto-cycle, LN+ swap automation. Nothing exists.
-2. **Operator RPC surface (60 of 69 methods)** — everything except fee/status.
+2. **Operator RPC surface (50 of 69 Python-equivalent methods remaining,
+   post-Task-49)** — everything except the 19 now registered (status/history/
+   report/dashboard/fee-debug/fee-wake plus Task 49's ten Batch A methods).
+   Round-2 correction, P1: this was 60 of 69 before Task 49 registered its
+   ten Python-equivalent builders (9 → 19 registered, so 69 − 19 = 50
+   remaining, not 60).
 3. **Wiring the ported-but-uncalled kernels** — rebalance (8,167 LOC ported, no
    loop, no RPC, no sendpay call site) and the non-fee governed-execution call
    sites. Same shape as A1–A3, at much larger scale and touching real payments.
 4. **Retention/pruning** — forwards pruning and the 8 runway tables.
 5. **Remaining fee-path items** — A3a, A3b, `note_fee_applied`.
 
-**None of 1–4 blocks the fee cutover**, which is scoped to the fee subsystem and
-leaves Python owning everything else. They block "Rust replaces the plugin".
-Those are different programmes and should not be conflated.
+**Round-2 correction (P1): the paragraph below is HISTORICAL, describing the
+fee-only cutover boundary as it stood before the 2026-07-27 operator-approved
+whole-plugin-replacement decision (see the "Scope note" at the top of this
+document).** It is kept for the historical record of what was true when it
+was written, not as the current programme boundary — do not read "does not
+block the fee cutover" as "does not block Rust replacing the plugin", which
+is the now-approved direction:
+
+> ~~None of 1–4 blocks the fee cutover~~, which was scoped to the fee
+> subsystem and left Python owning everything else. They blocked "Rust
+> replaces the plugin". Those were different programmes at the time and were
+> not to be conflated.
+
+**Current conclusion:** under the whole-plugin-replacement scope, items 1-4
+above ARE the remaining program — there is no longer a smaller "fee cutover
+only" scope that lets them stay non-blocking. Capital allocation, the
+50-method remaining RPC surface, the ported-but-uncalled kernels, and
+retention/pruning are all in scope for "Rust replaces the plugin" and must
+each be planned, ported, and independently reviewed before that cutover, per
+`docs/superpowers/specs/2026-07-27-whole-plugin-rust-cutover-design.md`.
 
 ## 4. Cross-cutting invariants (must stay true at every tick)
 

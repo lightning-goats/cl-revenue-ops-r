@@ -529,8 +529,37 @@ async fn policy_changes_are_strict_active_and_last_timestamp_is_raw_max() {
     );
 }
 
+/// Task 50 correction round, F10 (SCOPE-UPDATED to a FIX): a malformed
+/// scalar column (here, `expires_at` holding the TEXT `'not-an-integer'`
+/// in an INTEGER-affinity column -- SQLite's dynamic typing allows this)
+/// must NOT make the whole row vanish. Python's `_row_to_policy`
+/// (policy_manager.py:395-422) never validates/defaults scalar columns at
+/// all -- `row['peer_id']`/`row['updated_at']`/etc. are returned as
+/// whatever's stored, unchecked -- so a "corrupt" row in Python still
+/// shows up in every read, just possibly carrying a garbage value in one
+/// field. The OLD Rust decode (`row.get::<_, T>(i)?` with a strict target
+/// type, `.ok()`-dropped on the FIRST column that failed to convert) threw
+/// the ENTIRE row away instead: security-relevant, because a banned peer
+/// with one malformed cell would silently vanish from
+/// `revenue-r-list-banned`.
+///
+/// This test pins the PREFERRED fix (keep-with-defaults, per the audit's
+/// §2.6): every column decodes leniently (SQLite storage class -> the
+/// target Rust type, defaulting on anything that can't coerce) so the row
+/// is ALWAYS kept. `expires_at` specifically defaults to `None` on
+/// unparseable garbage -- for a policy row, "no expiry" is the fail-safe
+/// reading (a banned/tagged peer stays visible rather than silently reads
+/// as instantly-expired). Round-2 correction, P2: this is a DELIBERATE
+/// FAIL-SAFE DIVERGENCE, not a "Python-exact" port -- Python's own
+/// `_row_to_policy` (policy_manager.py:384-439) does NOT generally coerce
+/// malformed scalar column types; it returns `row['peer_id']`,
+/// `row['updated_at']`, etc. exactly as SQLite stored them, unchecked, and
+/// only wraps the tags-JSON decode and the two enum conversions in
+/// try/except-with-default. Coercing every scalar column too is a
+/// Rust-side strengthening chosen to guarantee no row is ever silently
+/// dropped, not a claim that Python does the same coercion.
 #[tokio::test]
-async fn corrupt_policy_row_is_isolated_instead_of_bricking_all_reads() {
+async fn corrupt_scalar_column_is_kept_with_defaults_not_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("policy-corrupt-row.db");
     std::fs::copy(fixture_path(), &path).unwrap();
@@ -546,7 +575,7 @@ async fn corrupt_policy_row_is_isolated_instead_of_bricking_all_reads() {
         conn.execute(
             "INSERT INTO peer_policies
              (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
-             VALUES ('corrupt', 'static', 'disabled', '[]', 3, 'not-an-integer')",
+             VALUES ('corrupt', 'static', 'disabled', '[\"banned\"]', 3, 'not-an-integer')",
             [],
         )
         .unwrap();
@@ -554,19 +583,184 @@ async fn corrupt_policy_row_is_isolated_instead_of_bricking_all_reads() {
 
     let handle = spawn_read_only(&path).await.unwrap();
     let policies = all_policies(&handle, NOW).await.unwrap();
-    assert_eq!(
-        policies
-            .iter()
-            .map(|p| p.peer_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["valid"],
-        "a corrupt peer row must not poison every policy read"
+    let ids: Vec<&str> = policies.iter().map(|p| p.peer_id.as_str()).collect();
+    assert!(
+        ids.contains(&"corrupt"),
+        "a row with one malformed scalar column must NOT vanish from the read \
+         (fail-open on a security-relevant surface): {ids:?}"
     );
+    assert!(ids.contains(&"valid"), "{ids:?}");
+    assert_eq!(ids.len(), 2, "{ids:?}");
 
+    let corrupt_row = policies
+        .iter()
+        .find(|p| p.peer_id == "corrupt")
+        .expect("the corrupt row must be present");
+    // The GOOD columns on the corrupt row must still decode correctly --
+    // only the genuinely-malformed column falls back to a default.
+    assert_eq!(corrupt_row.strategy.as_value(), "static");
+    assert_eq!(corrupt_row.rebalance_mode.as_value(), "disabled");
+    assert_eq!(corrupt_row.updated_at, 3);
+    assert_eq!(corrupt_row.tags, vec!["banned".to_string()]);
+    // The malformed `expires_at` defaults to `None` (never expires) --
+    // the fail-safe reading for a security-relevant field.
+    assert_eq!(corrupt_row.expires_at, None);
+    assert!(!corrupt_row.is_expired(NOW), "must not read as expired");
+
+    // `policy_for_peer` must return the REAL row (with its real
+    // updated_at/strategy), not the synthetic peer-default fallback the
+    // OLD drop-then-default behavior produced.
     let corrupt = policy_for_peer(&handle, "corrupt", NOW).await.unwrap();
     assert_eq!(corrupt.peer_id, "corrupt");
-    assert_eq!(corrupt.strategy.as_value(), "dynamic");
-    assert_eq!(corrupt.updated_at, 0);
+    assert_eq!(corrupt.strategy.as_value(), "static");
+    assert_eq!(
+        corrupt.updated_at, 3,
+        "must be the REAL row's updated_at, not the synthetic default's 0"
+    );
+}
+
+/// Round-2 correction, CRITICAL (F10 was fixed at the ROW level; a
+/// mixed-type `tags` ARRAY is a different, still-open hole): valid SQLite
+/// JSON like `["banned", 7]` is a legal Python list -- `json.loads` returns
+/// it unchanged, and Python's `"banned" in tags` membership test still
+/// finds `"banned"` even with the non-string `7` sitting next to it. The
+/// OLD decode parsed the WHOLE tags column as `Vec<String>` via serde's
+/// typed array deserializer, which fails the instant ANY element isn't a
+/// JSON string; `.unwrap_or_default()` then replaced the ENTIRE array with
+/// `[]` -- silently erasing the valid `"banned"` tag alongside its one
+/// malformed sibling. Filtered through `queries::all_policies` +
+/// `PeerPolicy::has_tag`/`policies_by_tag`, that means a banned peer with
+/// one stray non-string tag element vanishes from
+/// `revenue-r-list-banned`/`policies_by_tag("banned", ...)` -- recreating
+/// exactly the "banned peer disappears" failure F10 was meant to close, one
+/// layer down (the element level, not the row level).
+///
+/// This is captured RED-first against unmodified `2b3d356`: at the time
+/// this test is added, `decode_policy_row`'s tags decode still parses the
+/// whole array as `Vec<String>`, so this assertion fails.
+#[tokio::test]
+async fn mixed_type_tags_array_preserves_valid_string_members_not_dropped_wholesale() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-mixed-tags.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at)
+             VALUES ('mixed-tag-peer', 'dynamic', 'enabled', '[\"banned\", 7]', 5)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    // `all_policies` must still return the row, carrying the STRING tag
+    // member -- never the whole array wiped to `[]`.
+    let policies = all_policies(&handle, NOW).await.unwrap();
+    let row = policies
+        .iter()
+        .find(|p| p.peer_id == "mixed-tag-peer")
+        .expect("a mixed-type tags array must not drop the row");
+    assert_eq!(
+        row.tags,
+        vec!["banned".to_string()],
+        "the non-string sibling (7) must be dropped INDIVIDUALLY, not the \
+         whole array: {:?}",
+        row.tags
+    );
+    assert!(
+        row.has_tag("banned"),
+        "the valid \"banned\" tag must survive a malformed sibling element \
+         (Python's \"banned\" in [\"banned\", 7] is True): tags={:?}",
+        row.tags
+    );
+
+    // `policies_by_tag` (the query `revenue-r-list-banned` and
+    // `revenue-policy find` both use) must find this peer by its
+    // surviving string tag.
+    let banned = policies_by_tag(&handle, "banned", NOW).await.unwrap();
+    let ids: Vec<&str> = banned.iter().map(|p| p.peer_id.as_str()).collect();
+    assert!(
+        ids.contains(&"mixed-tag-peer"),
+        "the banned peer must not disappear from a tag-filtered read over \
+         one malformed sibling element: {ids:?}"
+    );
+}
+
+/// Round-2 correction, CRITICAL, ignored-path equivalent: `revenue-r-list-
+/// ignored`'s peer MEMBERSHIP does not depend on tags at all (it filters on
+/// `strategy=Passive` + `rebalance_mode=Disabled`), so a mixed-type tags
+/// array can never make an ignored peer disappear the way it can a banned
+/// peer. The equivalent-severity failure on THIS path is in the reported
+/// `reason` field (`rpc_list_ignored::build_list_ignored` picks the first
+/// tag that isn't literally `"ignored"`): the OLD whole-array-wipe behavior
+/// would silently discard a real custom reason tag next to a malformed
+/// sibling and fall back to the generic `"manual"` default, hiding real
+/// operator-recorded context. This test exercises the SAME
+/// `decode_policy_row` fix from the query layer (not `build_list_ignored`
+/// itself, which is a pure function over already-decoded tags -- the
+/// defect and the fix both live one layer down, in the decode).
+#[tokio::test]
+async fn mixed_type_tags_array_preserves_ignored_reason_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-mixed-tags-ignored.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at)
+             VALUES ('mixed-tag-ignored-peer', 'passive', 'disabled', \
+             '[\"low_value\", 42]', 5)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let policies = all_policies(&handle, NOW).await.unwrap();
+    let row = policies
+        .iter()
+        .find(|p| p.peer_id == "mixed-tag-ignored-peer")
+        .expect("a mixed-type tags array must not drop the row");
+    assert_eq!(
+        row.tags,
+        vec!["low_value".to_string()],
+        "the real reason tag must survive the malformed numeric sibling, \
+         not fall back to a wiped-then-defaulted [] / \"manual\": {:?}",
+        row.tags
+    );
+}
+
+/// A malformed `peer_id` (NULL, in a schema that allows it) or `updated_at`
+/// column must default rather than drop the row too -- same convention as
+/// the `expires_at` case above, exercised on the OTHER scalar columns
+/// `_row_to_policy` reads unchecked.
+#[tokio::test]
+async fn corrupt_updated_at_column_defaults_to_zero_row_still_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-corrupt-updated-at.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+             VALUES ('garbage-updated-at', 'dynamic', 'enabled', '[]', 'not-a-number', NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let policies = all_policies(&handle, NOW).await.unwrap();
+    let row = policies
+        .iter()
+        .find(|p| p.peer_id == "garbage-updated-at")
+        .expect("a malformed updated_at must not drop the row");
+    assert_eq!(row.updated_at, 0, "unparseable updated_at defaults to 0");
 }
 
 #[tokio::test]

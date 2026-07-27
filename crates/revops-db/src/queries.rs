@@ -38,26 +38,177 @@ pub async fn config_override(handle: &DbHandle, key: &str) -> Result<Option<Stri
         .await
 }
 
+/// Lossy `SqlValue` -> `String`, defaulting to `default` on `NULL` and
+/// coercing any other storage class via its natural text representation
+/// (SQLite's own dynamic typing already allows a column to hold any class
+/// regardless of declared affinity, so a mistyped cell here is not
+/// exceptional -- just another value to represent as text).
+fn sql_text_or(value: SqlValue, default: &str) -> String {
+    match value {
+        SqlValue::Null => default.to_string(),
+        SqlValue::Text(s) => s,
+        SqlValue::Integer(i) => i.to_string(),
+        SqlValue::Real(f) => f.to_string(),
+        SqlValue::Blob(b) => String::from_utf8_lossy(&b).into_owned(),
+    }
+}
+
+/// Lossy `SqlValue` -> `Option<i64>`: `NULL` and anything that fails to
+/// parse as an integer both become `None` (never an error, never a
+/// dropped row) -- the same "python-int-timestamp-cell" leniency
+/// `spend_ledger_aggregates` already uses for coverage timestamps, reused
+/// here for policy scalar columns.
+fn sql_opt_i64(value: SqlValue) -> Option<i64> {
+    match value {
+        SqlValue::Null => None,
+        SqlValue::Integer(i) => Some(i),
+        SqlValue::Real(f) if f.is_finite() => {
+            let truncated = f.trunc();
+            if truncated >= i64::MIN as f64 && truncated <= i64::MAX as f64 {
+                Some(truncated as i64)
+            } else {
+                None
+            }
+        }
+        SqlValue::Real(_) => None,
+        SqlValue::Text(s) => s.trim().parse::<i64>().ok(),
+        SqlValue::Blob(b) => std::str::from_utf8(&b)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok()),
+    }
+}
+
+/// Lossy `SqlValue` -> `Option<f64>`, same "default rather than drop"
+/// convention as [`sql_opt_i64`].
+fn sql_opt_f64(value: SqlValue) -> Option<f64> {
+    match value {
+        SqlValue::Null => None,
+        SqlValue::Real(f) => Some(f),
+        SqlValue::Integer(i) => Some(i as f64),
+        SqlValue::Text(s) => s.trim().parse::<f64>().ok(),
+        SqlValue::Blob(b) => std::str::from_utf8(&b)
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok()),
+    }
+}
+
+/// Round-2 correction, CRITICAL: decode the `tags` JSON column at the
+/// ELEMENT level, not as a single typed `Vec<String>` parse. Python's
+/// `json.loads('["banned", 7]')` succeeds and returns the list
+/// `["banned", 7]` UNCHANGED -- `"banned" in tags` is still `True` with the
+/// non-string `7` sitting right next to it, because Python lists are
+/// heterogeneous and `in` never cares about a sibling element's type. The
+/// PRE-round-2 decode instead parsed the WHOLE column as `Vec<String>` via
+/// serde's typed array deserializer, which fails outright the moment ANY
+/// element isn't a JSON string; `.unwrap_or_default()` then replaced the
+/// ENTIRE array with `[]` -- silently erasing the valid `"banned"` tag
+/// alongside its one malformed sibling and vanishing the peer from
+/// `revenue-r-list-banned`. That is the F10 defect one layer down: F10's
+/// row-level fix (below) stops a malformed SCALAR column from dropping the
+/// row; this stops a malformed TAGS-ARRAY ELEMENT from dropping the tag.
+///
+/// **This is a DELIBERATE FAIL-SAFE DIVERGENCE from Python, not a
+/// Python-exact port.** Python's `tags` stays a heterogeneous list --
+/// the raw `7` stays IN the list, it just never matches a string tag test.
+/// Rust's `PeerPolicy::tags` is typed `Vec<String>`, so there is no
+/// equivalent slot to keep a non-string member in. Dropping ONLY the
+/// non-string element (never the whole array, never the row) preserves
+/// every membership/reason-lookup result Python's `"tag" in tags`/`next(t
+/// for t in tags if ...)` could ever produce for a STRING tag -- the only
+/// kind any real writer (`revenue-ban`, `-hot-channel-protection-peers`,
+/// operator tooling) ever puts in this column -- while failing SAFE
+/// (a numeric/object/array element is silently invisible to every tag
+/// test, exactly as if it were never recorded) instead of failing OPEN
+/// (the pre-round-2 behavior of erasing the whole tag set, including any
+/// real `"banned"` membership, over one malformed sibling).
+fn decode_tags_json(raw: &str) -> Vec<String> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                serde_json::Value::String(s) => Some(s),
+                // Non-string element (number, bool, null, array, object):
+                // dropped INDIVIDUALLY -- never propagated to `.ok()`/
+                // `unwrap_or_default()` on the whole array. See this
+                // function's doc comment for why this is a fail-safe
+                // divergence from Python's own (heterogeneous-list-
+                // preserving) `json.loads` behavior, not a byte-exact port
+                // of it.
+                _ => None,
+            })
+            .collect(),
+        // Malformed JSON entirely, or valid JSON that isn't an array
+        // (`json.loads` on a non-string Python value raises `TypeError`,
+        // caught the same way as a JSON decode error in Python) -- both
+        // default to empty, never drop the row.
+        _ => Vec::new(),
+    }
+}
+
+/// Task 50 correction round, F10 (fix, per the supervisor's scope
+/// update): port of `PolicyManager._row_to_policy`
+/// (policy_manager.py:395-422). Python NEVER validates or drops a row over
+/// a malformed/NULL scalar column -- `row['peer_id']`/`row['updated_at']`/
+/// etc. are returned exactly as SQLite stored them, unchecked; only the
+/// tags-JSON decode and the two enum conversions have explicit
+/// try/except-with-default handling. The OLD Rust decode used
+/// `row.get::<_, T>(i)?` with a STRICT target type per column and
+/// `.ok()`-dropped the WHOLE row on the first conversion failure --
+/// security-relevant, because a banned peer with one malformed cell
+/// (e.g. `expires_at` holding non-numeric text) would silently vanish
+/// from `revenue-r-list-banned`/`-list-ignored`/`-policy list`.
+///
+/// This version decodes every column via the lossy `SqlValue`-based
+/// helpers above, so it CANNOT fail on a malformed/NULL scalar -- the row
+/// is always kept, with per-column defaults standing in for whatever
+/// didn't parse: `peer_id`/`strategy`/`rebalance_mode` default to `""`
+/// (which then falls through the existing enum-default handling below for
+/// the latter two); `fee_ppm_target`/`fee_multiplier_min/max`/`expires_at`
+/// default to `None`; `updated_at` defaults to `0`; malformed/non-array
+/// tags JSON defaults to `[]` (see [`decode_tags_json`] for the
+/// element-level policy when the JSON parses but individual elements
+/// don't). `expires_at: None` specifically is the FAIL-SAFE reading for a
+/// security-relevant field -- a policy row with a garbage expiry stays
+/// visible (never expires) rather than silently reading as already-expired
+/// and being filtered out. **These per-column scalar defaults are also a
+/// deliberate fail-safe divergence, not a Python-exact port**: Python's
+/// `_row_to_policy` (policy_manager.py:384-439) does NOT generally coerce
+/// malformed scalar column types -- it returns `row['peer_id']`,
+/// `row['fee_ppm_target']`, `row['updated_at']`, and the present v2
+/// columns directly, whatever SQLite handed back, and only wraps the tags
+/// JSON decode and the two enum conversions in try/except-with-default.
+/// Coercing the scalar columns too is a Rust-side strengthening (never
+/// drop the row, never propagate a type panic) chosen to satisfy the
+/// no-silent-drop requirement, not a claim that Python does the same
+/// coercion.
 fn decode_policy_row(row: &Row) -> rusqlite::Result<PeerPolicy> {
-    let strategy: String = row.get(1)?;
-    let rebalance_mode: String = row.get(2)?;
-    let tags_json: Option<String> = row.get(4)?;
-    let tags = tags_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
-        .unwrap_or_default();
+    let peer_id = sql_text_or(row.get::<_, SqlValue>(0)?, "");
+    let strategy = sql_text_or(row.get::<_, SqlValue>(1)?, "");
+    let rebalance_mode = sql_text_or(row.get::<_, SqlValue>(2)?, "");
+    let fee_ppm_target = sql_opt_i64(row.get::<_, SqlValue>(3)?);
+    let tags = match row.get::<_, SqlValue>(4)? {
+        SqlValue::Text(raw) => decode_tags_json(&raw),
+        // NULL, or a non-text storage class (`json.loads` on a non-string
+        // Python value raises `TypeError`, caught the same way as a JSON
+        // decode error) -- both default to empty, never drop the row.
+        _ => Vec::new(),
+    };
+    let updated_at = sql_opt_i64(row.get::<_, SqlValue>(5)?).unwrap_or(0);
+    let fee_multiplier_min = sql_opt_f64(row.get::<_, SqlValue>(6)?);
+    let fee_multiplier_max = sql_opt_f64(row.get::<_, SqlValue>(7)?);
+    let expires_at = sql_opt_i64(row.get::<_, SqlValue>(8)?);
 
     Ok(PeerPolicy {
-        peer_id: row.get(0)?,
+        peer_id,
         strategy: FeeStrategy::from_value(&strategy).unwrap_or(FeeStrategy::Dynamic),
         rebalance_mode: RebalanceMode::from_value(&rebalance_mode)
             .unwrap_or(RebalanceMode::Enabled),
-        fee_ppm_target: row.get(3)?,
+        fee_ppm_target,
         tags,
-        updated_at: row.get(5)?,
-        fee_multiplier_min: row.get(6)?,
-        fee_multiplier_max: row.get(7)?,
-        expires_at: row.get(8)?,
+        updated_at,
+        fee_multiplier_min,
+        fee_multiplier_max,
+        expires_at,
     })
 }
 
@@ -66,10 +217,16 @@ async fn query_policy_rows(
     sql: &'static str,
     params: Vec<SqlValue>,
 ) -> Result<Vec<PeerPolicy>> {
-    let decoded = handle
-        .query_rows(sql, params, |row| Ok(decode_policy_row(row).ok()))
-        .await?;
-    Ok(decoded.into_iter().flatten().collect())
+    // Task 50 correction round, F10: `decode_policy_row` can no longer
+    // fail on a malformed/NULL scalar column (see its doc comment), so
+    // there is no longer a per-row `.ok()`-drop here -- a row is only
+    // ever absent from the result because the SQL genuinely returned
+    // fewer rows, never because one field didn't parse. Should
+    // `decode_policy_row` ever legitimately error (e.g. a future column
+    // added without a lenient accessor), that now propagates as a real
+    // `Err` for the WHOLE call -- a loud in-band failure, never a silent
+    // drop, per the supervisor's fallback ruling.
+    handle.query_rows(sql, params, decode_policy_row).await
 }
 
 /// All active explicit peer policies in newest-first update order. Row decoding

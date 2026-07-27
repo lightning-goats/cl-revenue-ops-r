@@ -13,14 +13,25 @@
 //!
 //! Sections 2-9 (channel classifications, fee-controller convergence,
 //! rebalancer state, unified budget, Boltz auto-cycle, capacity planner,
-//! top routing-fee route pairs, daemon-loop heartbeat liveness) all read
-//! LIVE IN-PROCESS PYTHON STATE with no Rust-side equivalent running in
-//! this plugin yet: no fee controller / rebalancer / Boltz manager /
-//! capacity planner daemon loop executes here, and the `_loop_heartbeats`
+//! top routing-fee route pairs, daemon-loop heartbeat liveness) are
+//! unconditionally `null` and gap-listed here -- not a fabricated
+//! zero/empty value. Round-2 correction, P2 (codex re-review): the "fees"
+//! gap specifically is NOT "no Rust fee controller exists" -- it does:
+//! `revops-fees::cycle`'s `ControllerState` (`cycle.rs:534`) is a real,
+//! running fee-decision kernel driven by `fee_scheduler.rs`'s scheduler
+//! loop (see the fee control stack in `docs/port/PARITY-CHECKLIST.md`
+//! §1, all sixteen components `[x]`). The gap is narrower: this
+//! `revenue-r-health` handler is not GIVEN that live `ControllerState` --
+//! nothing plumbs the scheduler's current state into `build_health`'s
+//! caller in `main.rs` yet, so `fees` stays `null`+gap-listed for lack of
+//! wiring, not for lack of a controller to read from. Rebalancer state,
+//! capacity planner, and top routing-fee route pairs genuinely have no
+//! Rust-side equivalent running in this plugin at all (no rebalance loop,
+//! no capacity-planner daemon, no route-tracking); Boltz auto-cycle
+//! likewise has no Rust manager wired (see `boltz` below, which IS
+//! answered honestly rather than gapped); and the `_loop_heartbeats`
 //! registry (cl-revenue-ops.py:322-323) is a Python-only in-memory
-//! structure this plugin has no counterpart for. Each is therefore
-//! unconditionally `null` and gap-listed -- not a fabricated zero/empty
-//! value.
+//! structure this plugin has no counterpart for.
 
 use revops_db::queries::PnlSummary;
 use revops_econ::pyfloat::py_round;
@@ -90,7 +101,6 @@ pub fn build_health(
         "fees",
         "rebalancer",
         "budget",
-        "boltz",
         "planner",
         "top_routes",
         "loops",
@@ -105,7 +115,11 @@ pub fn build_health(
         "fees": Value::Null,
         "rebalancer": Value::Null,
         "budget": Value::Null,
-        "boltz": Value::Null,
+        // Task 50 correction round ("should NOT stay gaps"): no Boltz
+        // manager is wired here, but that IS Python's own truthful answer
+        // for this exact condition (cl-revenue-ops.py:6312-6313) -- not a
+        // gap, a real (if minimal) computed value.
+        "boltz": json!({"enabled": false}),
         "planner": Value::Null,
         "top_routes": Value::Null,
         "loops": Value::Null,
@@ -207,7 +221,6 @@ mod tests {
             "fees",
             "rebalancer",
             "budget",
-            "boltz",
             "planner",
             "top_routes",
             "loops",
@@ -229,12 +242,32 @@ mod tests {
             "fees",
             "rebalancer",
             "budget",
-            "boltz",
             "planner",
             "top_routes",
             "loops",
         ] {
             assert!(gaps.contains(&field), "{field} must be gap-listed");
         }
+    }
+
+    /// Task 50 correction round ("should NOT stay gaps" item): with no
+    /// Boltz manager wired in this port, Python's OWN answer for `boltz`
+    /// is the definite `{"enabled": false}` (cl-revenue-ops.py:6312-6313)
+    /// -- cheap, true, and shape-faithful. `null` + a `_gaps` entry is
+    /// strictly worse (it hides a field that IS computable today).
+    #[test]
+    fn boltz_section_is_the_honest_enabled_false_shape_not_a_null_gap() {
+        let v = build_health(0, None, None, None);
+        assert_eq!(v["boltz"], json!({"enabled": false}));
+        let gaps: Vec<&str> = v["_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g.as_str().unwrap())
+            .collect();
+        assert!(
+            !gaps.contains(&"boltz"),
+            "boltz is no longer a gap once populated: {gaps:?}"
+        );
     }
 }

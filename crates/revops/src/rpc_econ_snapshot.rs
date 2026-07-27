@@ -262,6 +262,26 @@ pub fn build_econ_snapshot(
     }
 }
 
+/// Task 50 correction round, F1: the wiring layer has NO real
+/// `econ_shadow_enabled` config surface to read yet (no `EconShadow`
+/// equivalent exists in this Rust port at all). Hardcoding `enabled=false`
+/// (what `main.rs` did before this fix) is a FALSE statement about node
+/// state on any node where the Python config actually has
+/// `econ_shadow_enabled=true` -- indistinguishable from the truthful
+/// disabled answer, with no gap marker. This shape is deliberately NOT
+/// [`build_econ_snapshot`]'s `enabled=false` shape (2 keys, `enabled`/
+/// `hint`) and NOT its `enabled=true` shapes either -- an in-band
+/// `not_yet_ported` error so a caller checking `resp["enabled"]` gets
+/// neither a (possibly false) `true` nor a (possibly false) `false`.
+pub fn build_econ_snapshot_not_wired() -> Value {
+    json!({
+        "error": "econ shadow not_yet_ported",
+        "reason": "the econ_shadow_enabled config surface (the same one \
+                   revenue-r-config reads) is not wired into this port yet; \
+                   this is NOT a truthful disabled/enabled answer",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +340,23 @@ mod tests {
             sourced_forward_count_30d: sourced_forward_count,
             window_30d_available: true,
         }
+    }
+
+    #[test]
+    fn not_wired_shape_is_neither_python_disabled_nor_enabled_shape() {
+        let v = build_econ_snapshot_not_wired();
+        // Must NOT be readable as Python's truthful `enabled: false`.
+        assert_ne!(v.get("enabled"), Some(&json!(false)));
+        assert_ne!(v.get("enabled"), Some(&json!(true)));
+        assert_eq!(v["error"], "econ shadow not_yet_ported");
+        assert!(
+            v.get("hint").is_none(),
+            "must not reuse the disabled shape's key"
+        );
+        assert!(
+            v.get("snapshot").is_none(),
+            "must not reuse the enabled shape's key"
+        );
     }
 
     #[test]
