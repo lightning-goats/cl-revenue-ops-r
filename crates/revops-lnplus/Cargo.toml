@@ -1,0 +1,19 @@
+# crates/revops-lnplus/Cargo.toml
+#
+# LN+ (lightningnetwork.plus) liquidity-swap automation, ported from
+# modules/lnplus_swaps.py (~2,099 LOC). Deliberately dependency-light: this
+# crate owns no HTTP client, no SQLite connection, and no CLN RPC socket —
+# every external effect (LN+ API, database, operator policy, capacity
+# planner EV, CLN RPC) is an injected trait in `src/ports.rs`, so every test
+# in `tests/` runs against a fake and never touches the network or a real
+# node. See ENTRYPOINTS.md for what still needs wiring at the plugin layer.
+[package]
+name = "revops-lnplus"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
