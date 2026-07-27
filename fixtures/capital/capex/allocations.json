@@ -1,0 +1,2049 @@
+{
+  "scenarios": [
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {
+          "100x1x0": 10000
+        },
+        "channels": {
+          "100x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 2000000000,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 2000000000,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "proven_tier_basic",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 22189349,
+          "operational": 0,
+          "preservation": 127810650
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 22190,
+          "operational": 0,
+          "preservation": 127811
+        },
+        "channel_budgets": {
+          "100x1x0": {
+            "budget_msat": 127810650,
+            "budget_sats": 127811,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 22189349,
+        "fleet_exploration_budget_sats": 22190,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "101x1x0": {
+            "capacity_sats": 3000000,
+            "channel_role": null,
+            "classification": "break_even",
+            "contribution_30d_msat": 50000,
+            "days_open": 40,
+            "fees_earned_30d_msat": 50000,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": false,
+            "revenue": {
+              "fees_earned_msat": 1000000,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 1000000,
+              "total_forward_count": 10
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "active_tier_low_contribution",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 5000000,
+          "operational": 0,
+          "preservation": 200000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 5000,
+          "operational": 0,
+          "preservation": 200
+        },
+        "channel_budgets": {
+          "101x1x0": {
+            "budget_msat": 200000,
+            "budget_sats": 200,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "active",
+            "tier_ppm": 500
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 5000000,
+        "fleet_exploration_budget_sats": 5000,
+        "global_envelope_msat": 5200000,
+        "global_envelope_sats": 5200,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 50000,
+        "total_fleet_contribution_sats": 50
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "102x1x0": {
+            "capacity_sats": 2000000,
+            "channel_role": null,
+            "classification": "break_even",
+            "contribution_30d_msat": 0,
+            "days_open": 20,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 2
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "bootstrap_tier",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 149970005,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 149971,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "102x1x0": {
+            "budget_msat": 29994,
+            "budget_sats": 30,
+            "priority_class": "growth",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "bootstrap",
+            "tier_ppm": 250
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 149970005,
+        "fleet_exploration_budget_sats": 149971,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "103x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "zombie",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "blocked_zombie",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 150000000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 150000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "103x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "defensive",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "blocked",
+            "tier_ppm": 0
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 150000000,
+        "fleet_exploration_budget_sats": 150000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {
+          "104x1x0": "hard"
+        },
+        "capex_by_channel_sats": {},
+        "channels": {
+          "104x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "underwater",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "blocked_hard_bleeder",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 150000000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 150000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "104x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "defensive",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "blocked",
+            "tier_ppm": 0
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 150000000,
+        "fleet_exploration_budget_sats": 150000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "defensive",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "105x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "break_even",
+            "contribution_30d_msat": 0,
+            "days_open": 3,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "blocked_grace_period",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 150000000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 150000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "105x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "growth",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "blocked",
+            "tier_ppm": 0
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 150000000,
+        "fleet_exploration_budget_sats": 150000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "106x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 5.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "roi_multiplier_clamp_high",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 17647058,
+          "operational": 0,
+          "preservation": 132352941
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 17648,
+          "operational": 0,
+          "preservation": 132353
+        },
+        "channel_budgets": {
+          "106x1x0": {
+            "budget_msat": 132352941,
+            "budget_sats": 132353,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.5,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 17647058,
+        "fleet_exploration_budget_sats": 17648,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "107x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": -5.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "roi_multiplier_clamp_low",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 50000000,
+          "operational": 0,
+          "preservation": 62500000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 50000,
+          "operational": 0,
+          "preservation": 62500
+        },
+        "channel_budgets": {
+          "107x1x0": {
+            "budget_msat": 62500000,
+            "budget_sats": 62500,
+            "priority_class": "preservation",
+            "roi_multiplier": 0.25,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 50000000,
+        "fleet_exploration_budget_sats": 50000,
+        "global_envelope_msat": 112500000,
+        "global_envelope_sats": 112500,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "108x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 1.0,
+            "marginal_roi_reliable": false,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "roi_unreliable_neutral",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 25000000,
+          "operational": 0,
+          "preservation": 125000000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 25000,
+          "operational": 0,
+          "preservation": 125000
+        },
+        "channel_budgets": {
+          "108x1x0": {
+            "budget_msat": 125000000,
+            "budget_sats": 125000,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 25000000,
+        "fleet_exploration_budget_sats": 25000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": null,
+        "channels": {
+          "109x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "db_degraded_capex_read_fails",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 0,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 0,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "109x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": true,
+        "fleet_exploration_budget_msat": 0,
+        "fleet_exploration_budget_sats": 0,
+        "global_envelope_msat": 0,
+        "global_envelope_sats": 0,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "110x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": null,
+        "success_rates": {}
+      },
+      "name": "db_degraded_spend_summary_fails",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 0,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 0,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "110x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": true,
+        "fleet_exploration_budget_msat": 0,
+        "fleet_exploration_budget_sats": 0,
+        "global_envelope_msat": 0,
+        "global_envelope_sats": 0,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "111x1x0": {
+            "capacity_sats": 50000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 50000000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 50000000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 1000,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "envelope_scale_down",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 142857,
+          "operational": 0,
+          "preservation": 857142
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 143,
+          "operational": 0,
+          "preservation": 858
+        },
+        "channel_budgets": {
+          "111x1x0": {
+            "budget_msat": 857142,
+            "budget_sats": 858,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 142857,
+        "fleet_exploration_budget_sats": 143,
+        "global_envelope_msat": 1000000,
+        "global_envelope_sats": 1000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 50000000000,
+        "total_fleet_contribution_sats": 50000000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {
+          "112x1x0": "hard",
+          "113x1x0": "hard"
+        },
+        "capex_by_channel_sats": {},
+        "channels": {
+          "112x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "underwater",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          },
+          "113x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "underwater",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "priority_class_defensive_multi_bleeder",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 150000000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 150000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "112x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "defensive",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "blocked",
+            "tier_ppm": 0
+          },
+          "113x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "defensive",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "blocked",
+            "tier_ppm": 0
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 150000000,
+        "fleet_exploration_budget_sats": 150000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "defensive",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {
+          "114x1x0": "hard"
+        },
+        "capex_by_channel_sats": {},
+        "channels": {
+          "114x1x0": {
+            "capacity_sats": 9000000,
+            "channel_role": null,
+            "classification": "underwater",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          },
+          "115x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "break_even",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 10
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "priority_class_defensive_capacity_threshold",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 149970005,
+          "operational": 0,
+          "preservation": 29994
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 149971,
+          "operational": 0,
+          "preservation": 30
+        },
+        "channel_budgets": {
+          "114x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "defensive",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "blocked",
+            "tier_ppm": 0
+          },
+          "115x1x0": {
+            "budget_msat": 29994,
+            "budget_sats": 30,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "active",
+            "tier_ppm": 500
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 149970005,
+        "fleet_exploration_budget_sats": 149971,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "defensive",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "116x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "underwater",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 200000,
+              "total_forward_count": 0
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "priority_class_preservation",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 149985001,
+          "operational": 0,
+          "preservation": 14998
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 149986,
+          "operational": 0,
+          "preservation": 15
+        },
+        "channel_budgets": {
+          "116x1x0": {
+            "budget_msat": 14998,
+            "budget_sats": 15,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 149985001,
+        "fleet_exploration_budget_sats": 149986,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "preservation",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "117x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "break_even",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 10
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 500000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "priority_class_operational",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 0,
+          "operational": 0,
+          "preservation": 200000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 0,
+          "operational": 0,
+          "preservation": 200
+        },
+        "channel_budgets": {
+          "117x1x0": {
+            "budget_msat": 200000,
+            "budget_sats": 200,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "active",
+            "tier_ppm": 500
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 0,
+        "fleet_exploration_budget_sats": 0,
+        "global_envelope_msat": 200000,
+        "global_envelope_sats": 200,
+        "priority_class": "operational",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "118x1x0": {
+            "capacity_sats": 1000000,
+            "channel_role": null,
+            "classification": "break_even",
+            "contribution_30d_msat": 0,
+            "days_open": 200,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.0,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 10
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 5000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "priority_class_growth",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 149992500,
+          "operational": 0,
+          "preservation": 7499
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 149993,
+          "operational": 0,
+          "preservation": 8
+        },
+        "channel_budgets": {
+          "118x1x0": {
+            "budget_msat": 7499,
+            "budget_sats": 8,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.0,
+            "success_rate_30d": null,
+            "tier": "active",
+            "tier_ppm": 500
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 149992500,
+        "fleet_exploration_budget_sats": 149993,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "119x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": {
+          "channel_efficiencies": {
+            "119x1x0": {
+              "is_dead_capital": true,
+              "rpsd": 0.0
+            }
+          },
+          "median_rpsd": 10.0
+        },
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "efficiency_dead_capital_zero",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 50000000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 50000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {
+          "119x1x0": {
+            "budget_msat": 0,
+            "budget_sats": 0,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 50000000,
+        "fleet_exploration_budget_sats": 50000,
+        "global_envelope_msat": 50000000,
+        "global_envelope_sats": 50000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "120x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": "inbound_gateway",
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": {
+          "channel_efficiencies": {
+            "120x1x0": {
+              "is_dead_capital": true,
+              "rpsd": 0.0
+            }
+          },
+          "median_rpsd": 10.0
+        },
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "efficiency_dead_capital_gateway_floor",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 50000000,
+          "operational": 0,
+          "preservation": 75000000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 50000,
+          "operational": 0,
+          "preservation": 75000
+        },
+        "channel_budgets": {
+          "120x1x0": {
+            "budget_msat": 75000000,
+            "budget_sats": 75000,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 50000000,
+        "fleet_exploration_budget_sats": 50000,
+        "global_envelope_msat": 125000000,
+        "global_envelope_sats": 125000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "121x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": {
+          "channel_efficiencies": {
+            "121x1x0": {
+              "is_dead_capital": false,
+              "rpsd": 1.0
+            }
+          },
+          "median_rpsd": 10.0
+        },
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "efficiency_below_median_rpsd",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 37500000,
+          "operational": 0,
+          "preservation": 112500000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 37500,
+          "operational": 0,
+          "preservation": 112500
+        },
+        "channel_budgets": {
+          "121x1x0": {
+            "budget_msat": 112500000,
+            "budget_sats": 112500,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 37500000,
+        "fleet_exploration_budget_sats": 37500,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "122x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": {
+          "channel_efficiencies": {
+            "122x1x0": {
+              "is_dead_capital": false,
+              "rpsd": 100.0
+            }
+          },
+          "median_rpsd": 10.0
+        },
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "efficiency_above_median_rpsd",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 15000000,
+          "operational": 0,
+          "preservation": 135000000
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 15000,
+          "operational": 0,
+          "preservation": 135000
+        },
+        "channel_budgets": {
+          "122x1x0": {
+            "budget_msat": 135000000,
+            "budget_sats": 135000,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 15000000,
+        "fleet_exploration_budget_sats": 15000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "123x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 0,
+            "days_open": 100,
+            "fees_earned_30d_msat": 0,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 500000000,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 500000000,
+              "total_forward_count": 50
+            },
+            "window_30d_available": false
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "no_window_data_lifetime_fallback",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 21428571,
+          "operational": 0,
+          "preservation": 128571428
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 21429,
+          "operational": 0,
+          "preservation": 128572
+        },
+        "channel_budgets": {
+          "123x1x0": {
+            "budget_msat": 128571428,
+            "budget_sats": 128572,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 21428571,
+        "fleet_exploration_budget_sats": 21429,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {},
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {},
+          "spent_by_category": {}
+        },
+        "success_rates": {}
+      },
+      "name": "empty_fleet",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 150000000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 150000,
+          "operational": 0,
+          "preservation": 0
+        },
+        "channel_budgets": {},
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 150000000,
+        "fleet_exploration_budget_sats": 150000,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 0,
+        "total_fleet_contribution_sats": 0
+      }
+    },
+    {
+      "input": {
+        "bleeders": {},
+        "capex_by_channel_sats": {},
+        "channels": {
+          "124x1x0": {
+            "capacity_sats": 5000000,
+            "channel_role": null,
+            "classification": "profitable",
+            "contribution_30d_msat": 500000000,
+            "days_open": 100,
+            "fees_earned_30d_msat": 500000000,
+            "marginal_roi": 0.2,
+            "marginal_roi_reliable": true,
+            "revenue": {
+              "fees_earned_msat": 0,
+              "sourced_fee_contribution_msat": 0,
+              "total_contribution_msat": 0,
+              "total_forward_count": 50
+            },
+            "window_30d_available": true
+          }
+        },
+        "config": {
+          "capex_bootstrap_bps": 10,
+          "capex_bootstrap_max_sats": 200,
+          "capex_exploration_rate": 0.1,
+          "capex_global_envelope_sats": 0,
+          "capex_grace_days": 14,
+          "capex_reinvestment_rate": 0.5,
+          "capex_tactical_rate": 0.15,
+          "daily_budget_sats": 5000,
+          "estimated_open_cost_sats": 5000,
+          "min_wallet_reserve": 1000000,
+          "weekly_budget_sats": 35000
+        },
+        "fleet_efficiency": null,
+        "onchain_sats": 2000000,
+        "spend_summary": {
+          "reserved_by_category": {
+            "channel_open": 500
+          },
+          "spent_by_category": {
+            "channel_open": 1000
+          }
+        },
+        "success_rates": {}
+      },
+      "name": "spend_depletion_exploration",
+      "output": {
+        "allocated_by_priority_msat": {
+          "defensive": 0,
+          "growth": 20875179,
+          "operational": 0,
+          "preservation": 129124820
+        },
+        "allocated_by_priority_sats": {
+          "defensive": 0,
+          "growth": 20876,
+          "operational": 0,
+          "preservation": 129125
+        },
+        "channel_budgets": {
+          "124x1x0": {
+            "budget_msat": 129124820,
+            "budget_sats": 129125,
+            "priority_class": "preservation",
+            "roi_multiplier": 1.2,
+            "success_rate_30d": null,
+            "tier": "proven",
+            "tier_ppm": 2000
+          }
+        },
+        "db_degraded": false,
+        "fleet_exploration_budget_msat": 20875179,
+        "fleet_exploration_budget_sats": 20876,
+        "global_envelope_msat": 150000000,
+        "global_envelope_sats": 150000,
+        "priority_class": "growth",
+        "tactical_budget_msat": 0,
+        "tactical_budget_sats": 0,
+        "total_fleet_contribution_msat": 500000000,
+        "total_fleet_contribution_sats": 500000
+      }
+    },
+    {
+      "name": "boltz_lifecycle",
+      "output": {
+        "record_negative_swap_id_rejected": false,
+        "record_zero_fee_rejected": false,
+        "release_ok2": true,
+        "reservation2_released": true,
+        "reserve_ok": true,
+        "reserve_ok2": true,
+        "settle_ok": true,
+        "settle_reservation_released": true,
+        "spend_event": {
+          "amount_sats": 5000,
+          "category": "boltz",
+          "channel_id": "200x1x0",
+          "event_id": "boltz:swap-1",
+          "subcategory": "swap_fee"
+        },
+        "split_channel": {
+          "channel": 500,
+          "tactical": 501
+        },
+        "split_treasury": {
+          "channel": 0,
+          "tactical": 1000
+        }
+      }
+    },
+    {
+      "name": "settle_write_failure_keeps_reservation",
+      "output": {
+        "reservation_still_active": true,
+        "settle_ok": false
+      }
+    }
+  ]
+}
