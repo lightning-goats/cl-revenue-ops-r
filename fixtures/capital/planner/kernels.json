@@ -384,7 +384,7 @@
     {
       "input": {
         "actions": [],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "no_actions",
@@ -396,11 +396,11 @@
         "actions": [
           {
             "action_type": "open",
-            "created_at": 1785161350,
+            "created_at": 1785169832,
             "status": "failed"
           }
         ],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "single_recent_failure_blocks",
@@ -412,11 +412,11 @@
         "actions": [
           {
             "action_type": "open",
-            "created_at": 1785152350,
+            "created_at": 1785160832,
             "status": "failed"
           }
         ],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "single_old_failure_clears",
@@ -428,16 +428,16 @@
         "actions": [
           {
             "action_type": "open",
-            "created_at": 1785163050,
+            "created_at": 1785171532,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785162950,
+            "created_at": 1785171432,
             "status": "completed"
           }
         ],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "success_resets_streak",
@@ -449,16 +449,16 @@
         "actions": [
           {
             "action_type": "open",
-            "created_at": 1785163050,
+            "created_at": 1785171532,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785162950,
+            "created_at": 1785171432,
             "status": "dry_run"
           }
         ],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "dry_run_resets_streak",
@@ -470,11 +470,11 @@
         "actions": [
           {
             "action_type": "close",
-            "created_at": 1785163050,
+            "created_at": 1785171532,
             "status": "failed"
           }
         ],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "non_open_actions_ignored",
@@ -486,61 +486,61 @@
         "actions": [
           {
             "action_type": "open",
-            "created_at": 1785159550,
+            "created_at": 1785168032,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785155950,
+            "created_at": 1785164432,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785152350,
+            "created_at": 1785160832,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785148750,
+            "created_at": 1785157232,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785145150,
+            "created_at": 1785153632,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785141550,
+            "created_at": 1785150032,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785137950,
+            "created_at": 1785146432,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785134350,
+            "created_at": 1785142832,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785130750,
+            "created_at": 1785139232,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785127150,
+            "created_at": 1785135632,
             "status": "failed"
           },
           {
             "action_type": "open",
-            "created_at": 1785123550,
+            "created_at": 1785132032,
             "status": "failed"
           }
         ],
-        "now": 1785163150
+        "now": 1785171632
       },
       "kind": "failed_open_backoff_reason",
       "name": "many_failures_capped_at_168h",
@@ -1968,7 +1968,7 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {}
       },
@@ -1984,10 +1984,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785159550,
+          "entered_at": 1785168032,
           "stage": "fee_reduction"
         }
       },
@@ -2003,10 +2003,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785073150,
+          "entered_at": 1785081632,
           "stage": "fee_reduction"
         }
       },
@@ -2022,10 +2022,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "remote",
         "stage_row": {
-          "entered_at": 1785073150,
+          "entered_at": 1785081632,
           "stage": "fee_reduction"
         }
       },
@@ -2041,10 +2041,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "remote",
         "stage_row": {
-          "entered_at": 1784986750,
+          "entered_at": 1784995232,
           "stage": "fee_reduction"
         }
       },
@@ -2060,10 +2060,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": true,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785159550,
+          "entered_at": 1785168032,
           "stage": "defibrillation"
         }
       },
@@ -2079,10 +2079,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": true,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785073150,
+          "entered_at": 1785081632,
           "stage": "defibrillation"
         }
       },
@@ -2098,10 +2098,10 @@
       "input": {
         "close_protection": "inbound_gateway_protected",
         "defib_attempted": true,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785073150,
+          "entered_at": 1785081632,
           "stage": "defibrillation"
         }
       },
@@ -2117,10 +2117,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785073150,
+          "entered_at": 1785081632,
           "stage": "defibrillation"
         }
       },
@@ -2136,10 +2136,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": true,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785163050,
+          "entered_at": 1785171532,
           "stage": "close"
         }
       },
@@ -2155,10 +2155,10 @@
       "input": {
         "close_protection": "route_pair_protected",
         "defib_attempted": true,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785163050,
+          "entered_at": 1785171532,
           "stage": "close"
         }
       },
@@ -2174,10 +2174,10 @@
       "input": {
         "close_protection": null,
         "defib_attempted": false,
-        "now": 1785163150,
+        "now": 1785171632,
         "opener": "local",
         "stage_row": {
-          "entered_at": 1785163050,
+          "entered_at": 1785171532,
           "stage": "close"
         }
       },
@@ -2188,6 +2188,2209 @@
         "close_protection_out": null,
         "stage": "defibrillation"
       }
+    },
+    {
+      "input": {
+        "channels": [],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "empty_channels",
+      "output": []
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "basic_winner",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": null,
+          "congestion_urgent": false,
+          "dts_posterior_mean": null,
+          "flow_ratio": 0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.0,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 0,
+          "turnover": 0.6,
+          "velocity_urgency": false
+        }
+      ]
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 15.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "roi_below_threshold_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 100000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "turnover_below_threshold_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.5,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "flow_ratio_neutral_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": null,
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "no_flow_metrics_skipped",
+      "output": []
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 40.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": {
+          "success_rate": 0.2,
+          "total": 5
+        }
+      },
+      "kind": "identify_winners",
+      "name": "rebal_penalty_applied",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": null,
+          "congestion_urgent": false,
+          "dts_posterior_mean": null,
+          "flow_ratio": 0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.8,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 0,
+          "turnover": 0.6,
+          "velocity_urgency": false
+        }
+      ]
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": {
+          "success_rate": 0.1,
+          "total": 2
+        }
+      },
+      "kind": "identify_winners",
+      "name": "rebal_success_data_insufficient_total_no_penalty",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": null,
+          "congestion_urgent": false,
+          "dts_posterior_mean": null,
+          "flow_ratio": 0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.0,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 0,
+          "turnover": 0.6,
+          "velocity_urgency": false
+        }
+      ]
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": true,
+              "kalman_velocity": 0.5
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "velocity_and_congestion_flags",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": null,
+          "congestion_urgent": true,
+          "dts_posterior_mean": null,
+          "flow_ratio": 0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.0,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 0,
+          "turnover": 0.6,
+          "velocity_urgency": true
+        }
+      ]
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": {
+          "v2_state_json": "{\"fee_state\": {\"thompson_state\": {\"posterior_mean\": 123.456}}}"
+        },
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "dts_posterior_mean_present",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": null,
+          "congestion_urgent": false,
+          "dts_posterior_mean": 123.5,
+          "flow_ratio": 0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.0,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 0,
+          "turnover": 0.6,
+          "velocity_urgency": false
+        }
+      ]
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": -0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW"
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "negative_flow_ratio_winner",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": null,
+          "congestion_urgent": false,
+          "dts_posterior_mean": null,
+          "flow_ratio": -0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.0,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 0,
+          "turnover": 0.6,
+          "velocity_urgency": false
+        }
+      ]
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "flow": {
+              "daily_volume": 600000.0,
+              "flow_ratio": 0.9,
+              "is_congested": false,
+              "kalman_velocity": 0.0
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "channel_role": "inbound_gateway",
+              "marginal_roi_percent": 25.0,
+              "peer_id": "peerW",
+              "sourced_fee_contribution_sats": 500
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "fee_strategy_state": null,
+        "success_data": null
+      },
+      "kind": "identify_winners",
+      "name": "channel_role_present",
+      "output": [
+        {
+          "capacity": 1000000,
+          "channel_role": "inbound_gateway",
+          "congestion_urgent": false,
+          "dts_posterior_mean": null,
+          "flow_ratio": 0.9,
+          "peer_id": "peerW",
+          "rebal_difficulty": 0.0,
+          "roi": 25.0,
+          "scid": "700000x1x0",
+          "sourced_fee_contribution_sats": 500,
+          "turnover": 0.6,
+          "velocity_urgency": false
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": null,
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "empty_channels_losers",
+      "output": []
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "zombie",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -200,
+              "marginal_roi_percent": -60.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": -70.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 2
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "zombie_fire_sale_close",
+      "output": [
+        {
+          "action": "CLOSE",
+          "capacity": 500000,
+          "classification": "zombie",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": true,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": -200,
+          "marginal_roi": -60.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "ZOMBIE",
+          "rebal_difficulty": 0.0,
+          "regime_change": false,
+          "roi": -70.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "underwater",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -200,
+              "marginal_roi_percent": -60.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": -70.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 2
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "underwater_deep_fire_sale",
+      "output": [
+        {
+          "action": "CLOSE",
+          "capacity": 500000,
+          "classification": "underwater",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": true,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": -200,
+          "marginal_roi": -60.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "FIRE SALE",
+          "rebal_difficulty": 0.0,
+          "regime_change": false,
+          "roi": -70.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "underwater",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -50,
+              "marginal_roi_percent": -30.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": -30.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": null,
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "underwater_not_deep_enough_not_fire_sale",
+      "output": []
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "zombie",
+              "days_open": 50,
+              "marginal_profit_30d_sats": -200,
+              "marginal_roi_percent": -60.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": -70.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": null,
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "days_open_too_young_not_fire_sale",
+      "output": []
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 1000000,
+              "daily_volume": 100.0,
+              "flow_ratio": 0.05,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "classification": "break_even",
+              "days_open": 40,
+              "marginal_profit_30d_sats": 10,
+              "marginal_roi_percent": 5.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": 5.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 0
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "stagnant_balanced_low_turnover",
+      "output": [
+        {
+          "action": "DEFIBRILLATE",
+          "capacity": 1000000,
+          "classification": "break_even",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": false,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": 10,
+          "marginal_roi": 5.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "STAGNANT (NEEDS DEFIBRILLATOR)",
+          "rebal_difficulty": 0.0,
+          "regime_change": false,
+          "roi": 5.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 1000000,
+              "daily_volume": 100.0,
+              "flow_ratio": 0.05,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "classification": "break_even",
+              "days_open": 40,
+              "marginal_profit_30d_sats": 10,
+              "marginal_roi_percent": 15.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": 15.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": null,
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "stagnant_high_roi_not_loser",
+      "output": []
+    },
+    {
+      "input": {
+        "bleeders_hard": true,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 1000000,
+              "daily_volume": 100.0,
+              "flow_ratio": 0.05,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "classification": "break_even",
+              "days_open": 40,
+              "marginal_profit_30d_sats": 10,
+              "marginal_roi_percent": 5.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": 5.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 0
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "hard_bleeder_bypasses_defib_gate",
+      "output": [
+        {
+          "action": "CLOSE",
+          "capacity": 1000000,
+          "classification": "break_even",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": false,
+          "is_hard_bleeder": true,
+          "marginal_profit_30d_sats": 10,
+          "marginal_roi": 5.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "STAGNANT",
+          "rebal_difficulty": 0.0,
+          "regime_change": false,
+          "roi": 5.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "zombie",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -200,
+              "marginal_roi_percent": -60.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": -70.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": "inbound_gateway_protected",
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 2
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "close_protection_skips_channel",
+      "output": []
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "underwater",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -200,
+              "marginal_roi_percent": -60.0,
+              "opener": "remote",
+              "peer_id": "peerL",
+              "roi_percent": -70.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 2
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "remote_opener_shallow_underwater_skipped",
+      "output": []
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "underwater",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -500,
+              "marginal_roi_percent": -80.0,
+              "opener": "remote",
+              "peer_id": "peerL",
+              "roi_percent": -90.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 2
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "remote_opener_deeply_underwater_not_skipped",
+      "output": [
+        {
+          "action": "CLOSE",
+          "capacity": 500000,
+          "classification": "underwater",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": true,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": -500,
+          "marginal_roi": -80.0,
+          "opener": "remote",
+          "peer_id": "peerL",
+          "reason": "FIRE SALE",
+          "rebal_difficulty": 0.0,
+          "regime_change": false,
+          "roi": -90.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 500000,
+              "daily_volume": 1000.0,
+              "flow_ratio": 0.0,
+              "kalman_regime_change": true
+            },
+            "prof": {
+              "capacity_sats": 500000,
+              "classification": "zombie",
+              "days_open": 100,
+              "marginal_profit_30d_sats": -200,
+              "marginal_roi_percent": -60.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": -70.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 2
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "regime_change_demotes_close_to_defibrillate",
+      "output": [
+        {
+          "action": "DEFIBRILLATE",
+          "capacity": 500000,
+          "classification": "zombie",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": true,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": -200,
+          "marginal_roi": -60.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "ZOMBIE (REGIME CHANGE)",
+          "rebal_difficulty": 0.0,
+          "regime_change": true,
+          "roi": -70.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 1000000,
+              "daily_volume": 100.0,
+              "flow_ratio": 0.05,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "classification": "break_even",
+              "days_open": 40,
+              "marginal_profit_30d_sats": 10,
+              "marginal_roi_percent": 5.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": 5.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          false,
+          "rebalance_mode=disabled forbids filling \u2014 defib blocked"
+        ],
+        "diag_stats": {
+          "attempt_count": 0
+        },
+        "success_data": null
+      },
+      "kind": "identify_losers",
+      "name": "defib_policy_blocked_forces_close",
+      "output": [
+        {
+          "action": "CLOSE",
+          "capacity": 1000000,
+          "classification": "break_even",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": false,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": 10,
+          "marginal_roi": 5.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "STAGNANT",
+          "rebal_difficulty": 0.0,
+          "regime_change": false,
+          "roi": 5.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "bleeders_hard": false,
+        "channels": [
+          {
+            "flow": {
+              "capacity": 1000000,
+              "daily_volume": 100.0,
+              "flow_ratio": 0.05,
+              "kalman_regime_change": false
+            },
+            "prof": {
+              "capacity_sats": 1000000,
+              "classification": "break_even",
+              "days_open": 40,
+              "marginal_profit_30d_sats": 10,
+              "marginal_roi_percent": 5.0,
+              "opener": "local",
+              "peer_id": "peerL",
+              "roi_percent": 5.0
+            },
+            "scid": "700000x1x0"
+          }
+        ],
+        "close_protection": null,
+        "defib_allowed": [
+          true,
+          "defib allowed"
+        ],
+        "diag_stats": {
+          "attempt_count": 0
+        },
+        "success_data": {
+          "success_rate": 0.1,
+          "total": 5
+        }
+      },
+      "kind": "identify_losers",
+      "name": "rebal_difficulty_hard_promotes_stagnant_to_fire_sale",
+      "output": [
+        {
+          "action": "DEFIBRILLATE",
+          "capacity": 1000000,
+          "classification": "break_even",
+          "estimated_closure_cost_sats": 3000,
+          "is_fire_sale": true,
+          "is_hard_bleeder": false,
+          "marginal_profit_30d_sats": 10,
+          "marginal_roi": 5.0,
+          "opener": "local",
+          "peer_id": "peerL",
+          "reason": "STAGNANT+HARD_REBAL (NEEDS DEFIBRILLATOR)",
+          "rebal_difficulty": 0.9,
+          "regime_change": false,
+          "roi": 5.0,
+          "scid": "700000x1x0",
+          "uptime_pct": null
+        }
+      ]
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "no_signals_unchanged",
+      "output": 0.5
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": {
+          "failures": 1,
+          "successes": 9
+        },
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "reputation_boost",
+      "output": 0.4166666666666667
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": {
+          "failures": 9,
+          "successes": 0
+        },
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "reputation_poor",
+      "output": 0.045454545454545456
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": {
+          "marginal_roi_proxy": 5.0
+        },
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "closed_channel_profit_boost",
+      "output": 0.75
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": 50.0
+      },
+      "kind": "score_candidate",
+      "name": "uptime_penalty",
+      "output": 0.25
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": 95.0
+      },
+      "kind": "score_candidate",
+      "name": "uptime_high_no_penalty",
+      "output": 0.5
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": [
+          {
+            "type": "ipv4"
+          }
+        ],
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "clearnet_boost",
+      "output": 0.625
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": [
+          {
+            "type": "torv3"
+          }
+        ],
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "tor_only_no_boost",
+      "output": 0.5
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": {
+          "median_fee_ppm": 700
+        },
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "inbound_fee_penalty",
+      "output": 0.3
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": {
+          "median_fee_ppm": 150
+        },
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "inbound_fee_below_threshold_no_penalty",
+      "output": 0.5
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": [
+          {
+            "active": true,
+            "amount_msat": 15000000000
+          }
+        ],
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "large_channel_bonus",
+      "output": 0.6
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": [
+          {
+            "active": true,
+            "amount_msat": 6000000000
+          }
+        ],
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "medium_channel_bonus",
+      "output": 0.55
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": null,
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": true,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "sink_adjacent_boost",
+      "output": 0.7
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": "sink",
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "demand_flow_sink_role_boost",
+      "output": 0.65
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": "source",
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "demand_flow_source_role_boost",
+      "output": 0.6
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": null,
+        "demand_flow_role": "unknown",
+        "dest_channels": null,
+        "inbound_fee_data": null,
+        "node_addresses": null,
+        "reputation": null,
+        "sink_adjacent": false,
+        "uptime": null
+      },
+      "kind": "score_candidate",
+      "name": "demand_flow_unknown_role_penalty",
+      "output": 0.45
+    },
+    {
+      "input": {
+        "base_score": 0.5,
+        "closed_summary": {
+          "marginal_roi_proxy": 5.0
+        },
+        "demand_flow_role": null,
+        "dest_channels": [
+          {
+            "active": true,
+            "amount_msat": 15000000000
+          }
+        ],
+        "inbound_fee_data": {
+          "median_fee_ppm": 700
+        },
+        "node_addresses": [
+          {
+            "type": "ipv4"
+          }
+        ],
+        "reputation": {
+          "failures": 1,
+          "successes": 9
+        },
+        "sink_adjacent": true,
+        "uptime": 50.0
+      },
+      "kind": "score_candidate",
+      "name": "all_signals_combined",
+      "output": 0.39375
+    },
+    {
+      "input": {
+        "winners": []
+      },
+      "kind": "discover_from_winners",
+      "name": "empty_winners",
+      "output": []
+    },
+    {
+      "input": {
+        "winners": [
+          {
+            "peer_id": "p1",
+            "roi": 25.0,
+            "scid": "700000x1x0"
+          }
+        ]
+      },
+      "kind": "discover_from_winners",
+      "name": "below_threshold_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "winners": [
+          {
+            "peer_id": "p1",
+            "roi": 45.0,
+            "scid": "700000x1x0"
+          }
+        ]
+      },
+      "kind": "discover_from_winners",
+      "name": "above_threshold_included",
+      "output": [
+        {
+          "peer_id": "p1",
+          "reason": "Existing winner with 45.0% ROI",
+          "scid": "700000x1x0",
+          "score": 0.45,
+          "source": "winner"
+        }
+      ]
+    },
+    {
+      "input": {
+        "winners": [
+          {
+            "peer_id": "p1",
+            "roi": 45.0,
+            "scid": "700000x1x0"
+          },
+          {
+            "peer_id": "p2",
+            "roi": 20.0,
+            "scid": "700000x2x0"
+          },
+          {
+            "peer_id": "p3",
+            "roi": 90.0,
+            "scid": "700000x3x0"
+          }
+        ]
+      },
+      "kind": "discover_from_winners",
+      "name": "mixed_winners",
+      "output": [
+        {
+          "peer_id": "p1",
+          "reason": "Existing winner with 45.0% ROI",
+          "scid": "700000x1x0",
+          "score": 0.45,
+          "source": "winner"
+        },
+        {
+          "peer_id": "p3",
+          "reason": "Existing winner with 90.0% ROI",
+          "scid": "700000x3x0",
+          "score": 0.9,
+          "source": "winner"
+        }
+      ]
+    },
+    {
+      "input": {
+        "cached_source_channels": {},
+        "existing_peer_ids": [],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "empty_cache",
+      "output": []
+    },
+    {
+      "input": {
+        "cached_source_channels": {
+          "hub1": [
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            }
+          ]
+        },
+        "existing_peer_ids": [],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "below_channel_count_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "cached_source_channels": {
+          "hub1": [
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            }
+          ]
+        },
+        "existing_peer_ids": [],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "meets_channel_count_included",
+      "output": [
+        {
+          "channel_count": 6,
+          "peer_id": "hub1",
+          "reason": "Graph centrality: 6 channels, 6,000,000 sat",
+          "score": 1.469693845669907,
+          "source": "graph",
+          "total_capacity": 6000000
+        }
+      ]
+    },
+    {
+      "input": {
+        "cached_source_channels": {
+          "us": [
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            }
+          ]
+        },
+        "existing_peer_ids": [],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "our_node_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "cached_source_channels": {
+          "hub1": [
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 1000000000
+            }
+          ]
+        },
+        "existing_peer_ids": [
+          "hub1"
+        ],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "existing_peer_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "cached_source_channels": {
+          "hub1": [
+            {
+              "active": false,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": false,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": false,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": false,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": false,
+              "amount_msat": 1000000000
+            },
+            {
+              "active": false,
+              "amount_msat": 1000000000
+            }
+          ]
+        },
+        "existing_peer_ids": [],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "inactive_channels_not_counted",
+      "output": []
+    },
+    {
+      "input": {
+        "cached_source_channels": {
+          "big_hub": [
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 5000000000
+            }
+          ],
+          "small_hub": [
+            {
+              "active": true,
+              "amount_msat": 100000000
+            },
+            {
+              "active": true,
+              "amount_msat": 100000000
+            },
+            {
+              "active": true,
+              "amount_msat": 100000000
+            },
+            {
+              "active": true,
+              "amount_msat": 100000000
+            },
+            {
+              "active": true,
+              "amount_msat": 100000000
+            }
+          ]
+        },
+        "existing_peer_ids": [],
+        "our_node_id": "us"
+      },
+      "kind": "discover_from_graph",
+      "name": "ranked_by_score_desc",
+      "output": [
+        {
+          "channel_count": 10,
+          "peer_id": "big_hub",
+          "reason": "Graph centrality: 10 channels, 50,000,000 sat",
+          "score": 7.0710678118654755,
+          "source": "graph",
+          "total_capacity": 50000000
+        },
+        {
+          "channel_count": 5,
+          "peer_id": "small_hub",
+          "reason": "Graph centrality: 5 channels, 500,000 sat",
+          "score": 0.35355339059327373,
+          "source": "graph",
+          "total_capacity": 500000
+        }
+      ]
+    },
+    {
+      "input": {
+        "flows": []
+      },
+      "kind": "classify_peers",
+      "name": "empty_flows",
+      "output": {}
+    },
+    {
+      "input": {
+        "flows": [
+          [
+            "700000x1x0",
+            "peerA",
+            0,
+            0
+          ]
+        ]
+      },
+      "kind": "classify_peers",
+      "name": "zero_flow_unknown",
+      "output": {
+        "peerA": {
+          "confidence": 0.0,
+          "net_flow_ratio": null,
+          "role": "unknown"
+        }
+      }
+    },
+    {
+      "input": {
+        "flows": [
+          [
+            "700000x1x0",
+            "peerA",
+            900000,
+            100000
+          ]
+        ]
+      },
+      "kind": "classify_peers",
+      "name": "source_dominant",
+      "output": {
+        "peerA": {
+          "confidence": 0.3,
+          "net_flow_ratio": 0.8,
+          "role": "source"
+        }
+      }
+    },
+    {
+      "input": {
+        "flows": [
+          [
+            "700000x1x0",
+            "peerA",
+            100000,
+            900000
+          ]
+        ]
+      },
+      "kind": "classify_peers",
+      "name": "sink_dominant",
+      "output": {
+        "peerA": {
+          "confidence": 0.3,
+          "net_flow_ratio": -0.8,
+          "role": "sink"
+        }
+      }
+    },
+    {
+      "input": {
+        "flows": [
+          [
+            "700000x1x0",
+            "peerA",
+            500000,
+            500000
+          ]
+        ]
+      },
+      "kind": "classify_peers",
+      "name": "router_balanced",
+      "output": {
+        "peerA": {
+          "confidence": 0.3,
+          "net_flow_ratio": 0.0,
+          "role": "router"
+        }
+      }
+    },
+    {
+      "input": {
+        "flows": [
+          [
+            "700000x1x0",
+            "peerA",
+            5000000000,
+            0
+          ]
+        ]
+      },
+      "kind": "classify_peers",
+      "name": "high_volume_confidence_capped",
+      "output": {
+        "peerA": {
+          "confidence": 0.485,
+          "net_flow_ratio": 1.0,
+          "role": "source"
+        }
+      }
+    },
+    {
+      "input": {
+        "flows": [
+          [
+            "700000x1x0",
+            "peerA",
+            100000,
+            0
+          ],
+          [
+            "700000x2x0",
+            "peerA",
+            0,
+            900000
+          ]
+        ]
+      },
+      "kind": "classify_peers",
+      "name": "multi_channel_same_peer_aggregated",
+      "output": {
+        "peerA": {
+          "confidence": 0.3,
+          "net_flow_ratio": -0.8,
+          "role": "sink"
+        }
+      }
+    },
+    {
+      "input": {
+        "existing_peers": [],
+        "sink_channels": {},
+        "sink_profiles": []
+      },
+      "kind": "find_sink_adjacent_candidates",
+      "name": "no_sinks",
+      "output": []
+    },
+    {
+      "input": {
+        "existing_peers": [],
+        "sink_channels": {
+          "sinkA": [
+            {
+              "active": true,
+              "destination": "cand1"
+            }
+          ]
+        },
+        "sink_profiles": [
+          [
+            "sinkA",
+            0.5,
+            -0.6
+          ]
+        ]
+      },
+      "kind": "find_sink_adjacent_candidates",
+      "name": "one_sink_one_candidate",
+      "output": [
+        {
+          "is_sink_adjacent": true,
+          "peer_id": "cand1",
+          "reason": "Adjacent to sink sinkA... (conf=0.5)",
+          "score": 0.4,
+          "sink_peer_id": "sinkA",
+          "source": "demand_flow"
+        }
+      ]
+    },
+    {
+      "input": {
+        "existing_peers": [
+          "cand1"
+        ],
+        "sink_channels": {
+          "sinkA": [
+            {
+              "active": true,
+              "destination": "cand1"
+            }
+          ]
+        },
+        "sink_profiles": [
+          [
+            "sinkA",
+            0.5,
+            -0.6
+          ]
+        ]
+      },
+      "kind": "find_sink_adjacent_candidates",
+      "name": "existing_peer_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "existing_peers": [],
+        "sink_channels": {
+          "sinkA": [
+            {
+              "active": false,
+              "destination": "cand1"
+            }
+          ]
+        },
+        "sink_profiles": [
+          [
+            "sinkA",
+            0.5,
+            -0.6
+          ]
+        ]
+      },
+      "kind": "find_sink_adjacent_candidates",
+      "name": "inactive_channel_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "existing_peers": [],
+        "sink_channels": {
+          "sinkA": [
+            {
+              "active": true,
+              "destination": "cand1"
+            }
+          ],
+          "sinkB": [
+            {
+              "active": true,
+              "destination": "cand2"
+            }
+          ]
+        },
+        "sink_profiles": [
+          [
+            "sinkA",
+            0.5,
+            -0.6
+          ],
+          [
+            "sinkB",
+            0.2,
+            -0.4
+          ]
+        ]
+      },
+      "kind": "find_sink_adjacent_candidates",
+      "name": "multiple_candidates_ranked",
+      "output": [
+        {
+          "is_sink_adjacent": true,
+          "peer_id": "cand1",
+          "reason": "Adjacent to sink sinkA... (conf=0.5)",
+          "score": 0.4,
+          "sink_peer_id": "sinkA",
+          "source": "demand_flow"
+        },
+        {
+          "is_sink_adjacent": true,
+          "peer_id": "cand2",
+          "reason": "Adjacent to sink sinkB... (conf=0.2)",
+          "score": 0.12,
+          "sink_peer_id": "sinkB",
+          "source": "demand_flow"
+        }
+      ]
+    },
+    {
+      "input": {
+        "existing_peers": [],
+        "sink_channels": {
+          "sinkA": [
+            {
+              "active": true,
+              "destination": "cand1"
+            }
+          ],
+          "sinkB": [
+            {
+              "active": true,
+              "destination": "cand1"
+            }
+          ]
+        },
+        "sink_profiles": [
+          [
+            "sinkA",
+            0.9,
+            -0.9
+          ],
+          [
+            "sinkB",
+            0.1,
+            -0.1
+          ]
+        ]
+      },
+      "kind": "find_sink_adjacent_candidates",
+      "name": "dedup_first_sink_wins",
+      "output": [
+        {
+          "is_sink_adjacent": true,
+          "peer_id": "cand1",
+          "reason": "Adjacent to sink sinkA... (conf=0.9)",
+          "score": 0.72,
+          "sink_peer_id": "sinkA",
+          "source": "demand_flow"
+        }
+      ]
+    },
+    {
+      "input": {
+        "all_candidates": [],
+        "available_sats": 5000000,
+        "candidate": {
+          "peer_id": "p1",
+          "score": 0.5
+        },
+        "dest_channels": null,
+        "max_ch": 10000000,
+        "min_ch": 500000
+      },
+      "kind": "size_channel",
+      "name": "no_candidates_uses_min",
+      "output": 500000
+    },
+    {
+      "input": {
+        "all_candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.5
+          },
+          {
+            "peer_id": "p2",
+            "score": 0.5
+          }
+        ],
+        "available_sats": 4000000,
+        "candidate": {
+          "peer_id": "p1",
+          "score": 0.5
+        },
+        "dest_channels": null,
+        "max_ch": 10000000,
+        "min_ch": 500000
+      },
+      "kind": "size_channel",
+      "name": "proportional_two_candidates",
+      "output": 2000000
+    },
+    {
+      "input": {
+        "all_candidates": [
+          {
+            "peer_id": "p1",
+            "score": 1.0
+          }
+        ],
+        "available_sats": 4000000,
+        "candidate": {
+          "peer_id": "p1",
+          "score": 1.0
+        },
+        "dest_channels": null,
+        "max_ch": 10000000,
+        "min_ch": 500000
+      },
+      "kind": "size_channel",
+      "name": "never_more_than_half_available",
+      "output": 2000000
+    },
+    {
+      "input": {
+        "all_candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.1
+          },
+          {
+            "peer_id": "p2",
+            "score": 0.9
+          }
+        ],
+        "available_sats": 20000000,
+        "candidate": {
+          "peer_id": "p1",
+          "score": 0.1
+        },
+        "dest_channels": [
+          {
+            "active": true,
+            "amount_msat": 16000000000
+          }
+        ],
+        "max_ch": 10000000,
+        "min_ch": 500000
+      },
+      "kind": "size_channel",
+      "name": "competitive_floor_bump",
+      "output": 8000000
+    },
+    {
+      "input": {
+        "all_candidates": [
+          {
+            "peer_id": "p1",
+            "score": 1.0
+          }
+        ],
+        "available_sats": 100000000,
+        "candidate": {
+          "peer_id": "p1",
+          "score": 1.0
+        },
+        "dest_channels": null,
+        "max_ch": 3000000,
+        "min_ch": 500000
+      },
+      "kind": "size_channel",
+      "name": "clamped_to_max",
+      "output": 3000000
+    },
+    {
+      "input": {
+        "all_candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.01
+          },
+          {
+            "peer_id": "p2",
+            "score": 100.0
+          }
+        ],
+        "available_sats": 2000000,
+        "candidate": {
+          "peer_id": "p1",
+          "score": 0.01
+        },
+        "dest_channels": null,
+        "max_ch": 10000000,
+        "min_ch": 500000
+      },
+      "kind": "size_channel",
+      "name": "clamped_to_min",
+      "output": 500000
     }
   ]
 }
