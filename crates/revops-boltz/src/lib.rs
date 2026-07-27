@@ -24,20 +24,51 @@
 //!   invokes itself;
 //! - wall-clock time -> an explicit `now: i64` parameter everywhere.
 //!
-//! See `ENTRYPOINTS.md` for what still needs to be wired into the plugin
-//! binary (this crate is not called from `crates/revops/src/main.rs` —
-//! per the port brief, that wiring is out of scope for this task and is
-//! itself the #1 failure mode this brief calls out).
+//! See `ENTRYPOINTS.md` for the history of what was NOT wired, and
+//! `REGISTER.md` for the exact `pub mod`/`.rpcmethod(...)` snippets a
+//! maintainer should paste into `crates/revops` to reach the wiring layer
+//! below from a running plugin (this crate still does not modify
+//! `crates/revops/src/main.rs` itself — see `REGISTER.md`).
+//!
+//! ## The wiring layer (`process`/`argv`/`wallet`/`commands`/`driver`/`rpc`/`execution`)
+//!
+//! On top of the pure decision kernels (`address`/`autocycle`/`budget`/
+//! `cli`/`error`/`fee`/`journal`/`parsing`/`state`), this crate also
+//! provides:
+//! - [`execution::ExecutionMode`]: the crate-wide, `Default`-is-safe gate
+//!   every fund-moving entry point requires;
+//! - [`process::ProcessBoltzCli`]: a real [`cli::BoltzCli`] backed by
+//!   `std::process::Command`, honouring the configured binary path,
+//!   datadir, sudo user, and timeout;
+//! - [`argv`]: pure per-command argv construction (quote/create-swap/
+//!   create-reverse-swap/create-chain-swap/refund/claim/wallet-send/
+//!   wallet-receive/wallet-list/swapinfo/listswaps) plus the
+//!   safety-critical `withdraw_gate`;
+//! - [`wallet`]: pure wallet-selection logic over an already-fetched
+//!   `wallet list --json` payload;
+//! - [`commands`]: [`execution::ExecutionMode`]-gated wrappers that are the
+//!   ONLY place in this crate allowed to call `BoltzCli::run` for a
+//!   fund-moving command;
+//! - [`driver::run_balance_cycle_pass`]: one autocycle balance-cycle pass,
+//!   composed purely from this crate's own kernels plus an injected
+//!   [`cli::BoltzCli`];
+//! - [`rpc`]: pure `serde_json::Value` response builders for the
+//!   `status`/`budget`/`history`/`quote` operator RPCs.
+//!
+//! None of this is called from `crates/revops` yet — `REGISTER.md` is the
+//! paste-in for a maintainer to do that outside this task's scope (this
+//! crate does not touch `crates/revops/src/main.rs`).
 //!
 //! ## What this crate does NOT port (see `ENTRYPOINTS.md` for the full,
 //! honest list)
 //!
-//! - The `boltzcli` argv-construction glue for every individual command
-//!   (loop_in/loop_out/chainswap/refund/claim/withdraw/wallet ops) and the
-//!   CLN first-hop-pinning excludes-list logic (py boltz_manager.py:
-//!   604-871). These are orchestration, not decision logic; they belong
-//!   in the live adapter that holds a real [`cli::BoltzCli`] and a real
-//!   CLN RPC client.
+//! - The CLN first-hop-pinning / `--external-pay` routed reverse-swap path
+//!   and its async chanIds-rejection retry dance (py boltz_manager.py:
+//!   587-871, 2140-2365) — depends on a live CLN RPC client
+//!   (`listpeerchannels`/`pay`/`decode`/`decodepay`) this crate does not
+//!   have. [`argv::create_reverse_swap_argv`] covers the plain
+//!   (non-`--external-pay`) `createreverseswap` path only, with a static
+//!   caller-supplied `--chan-id` list (no probe-and-retry).
 //! - `BoltzAutoCycle`'s plan BUILDERS (`_build_boltz_expansion_treasury_plan`,
 //!   `_build_boltz_balance_plan`) and the candidate-scoring heuristics
 //!   inside them — those depend on `CapacityPlanner`/`profitability_analyzer`
@@ -55,11 +86,18 @@
 //!   map) — not part of this task's scope.
 
 pub mod address;
+pub mod argv;
 pub mod autocycle;
 pub mod budget;
 pub mod cli;
+pub mod commands;
+pub mod driver;
 pub mod error;
+pub mod execution;
 pub mod fee;
 pub mod journal;
 pub mod parsing;
+pub mod process;
+pub mod rpc;
 pub mod state;
+pub mod wallet;
