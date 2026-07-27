@@ -68,6 +68,16 @@ called with `ExecutionMode::Armed` — see `exec_mode.rs`'s module doc and
       wire-format question flagged below is answered there too: JSON,
       documented as Rust-only (not Python-compatible), fail-open on a
       foreign/malformed read.
+
+### SQLite ownership boundary
+
+SqliteLnPlusDb is a write-capable store and MUST be opened only on the
+Rust-owned observer database. It must never be pointed at the Python
+production revenue_ops.db while Python is authoritative. The shared
+_lnplus_breaker key has incompatible Python plain-text and Rust structured
+JSON encodings; cross-owner migration requires an explicit one-time format
+conversion and may not occur implicitly at read time.
+
 - [ ] `ports::ChainPort` — still unwritten. Should wrap `revops-rpc`'s
       existing threadsafe CLN RPC proxy (`getinfo`, `listpeerchannels`,
       `feerates`, `listfunds`, `connect`, `fundchannel`) — see

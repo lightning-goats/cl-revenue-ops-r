@@ -12,6 +12,9 @@ use revops_lnplus::ports::{LnPlusDb, PlannerActionRequest, ReserveSpendRequest};
 use revops_lnplus::sqlite_db::{ensure_schema, SqliteLnPlusDb};
 use revops_lnplus::types::Rating;
 use std::collections::BTreeMap;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn open_db() -> (tempfile::TempDir, SqliteLnPlusDb) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -465,4 +468,304 @@ fn release_spend_reservation_smoke() {
     };
     assert!(db.reserve_spend(&req).unwrap());
     assert!(db.release_spend_reservation("resv-3").is_ok());
+}
+
+// ------------------------------------------------ ownership / concurrency
+
+#[test]
+fn boundary_independent_instances_reopen_committed_swap_planner_and_budget_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lnplus.db");
+    let first = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    let second = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+
+    let swap = SwapRow::new("boundary-swap", "applied", 600_000, 6, 1_000)
+        .with_outbound_peer("02aa")
+        .with_planner_action_id(41);
+    first.record_swap(&swap);
+    assert_eq!(
+        second.get_swap("boundary-swap").unwrap().capacity_sats,
+        600_000,
+        "the independently opened LN+ connection must see the committed swap"
+    );
+
+    let action_id = second.record_planner_action(&PlannerActionRequest {
+        action_type: "swap_apply",
+        peer_id: "02aa".to_string(),
+        amount_sats: Some(600_000),
+        estimated_cost_sats: Some(2_500),
+        reason: "boundary reopen".to_string(),
+        metadata: None,
+    });
+    assert!(action_id > 0);
+
+    assert!(first
+        .reserve_spend(&ReserveSpendRequest {
+            reservation_id: "boundary-resv-1".to_string(),
+            amount_sats: 600,
+            category: "channel_open",
+            subcategory: "lnplus_swap",
+            metadata: BTreeMap::new(),
+            effective_budget_sats: Some(1_000),
+            since_timestamp: Some(0),
+        })
+        .unwrap());
+
+    drop(second);
+    drop(first);
+
+    let reopened_first = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    let reopened_second = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    let reopened_swap = reopened_first.get_swap("boundary-swap").unwrap();
+    assert_eq!(reopened_swap.planner_action_id, Some(41));
+    assert_eq!(reopened_swap.outbound_peer.as_deref(), Some("02aa"));
+
+    let second_reservation_granted = reopened_second
+        .reserve_spend(&ReserveSpendRequest {
+            reservation_id: "boundary-resv-2".to_string(),
+            amount_sats: 500,
+            category: "channel_open",
+            subcategory: "lnplus_swap",
+            metadata: BTreeMap::new(),
+            effective_budget_sats: Some(1_000),
+            since_timestamp: Some(0),
+        })
+        .unwrap();
+    assert!(
+        !second_reservation_granted,
+        "the reopened composed BudgetDb connection must count the persisted 600-sat hold"
+    );
+
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let planner_reason: String = raw
+        .query_row(
+            "SELECT reason FROM planner_actions WHERE id = ?1",
+            [action_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(planner_reason, "boundary reopen");
+    let reservations: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM spend_reservations WHERE status = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reservations, 1, "the refused retry must not add a row");
+}
+
+#[test]
+fn boundary_rolled_back_raw_swap_insert_is_absent_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lnplus.db");
+    drop(SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap());
+
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+    raw.execute(
+        "INSERT INTO lnplus_swaps \
+         (swap_id, status, capacity_sats, duration_months, applied_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params!["rolled-back", "applied", 500_000, 6, 1_000],
+    )
+    .unwrap();
+    raw.execute_batch("ROLLBACK").unwrap();
+    drop(raw);
+
+    let reopened = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    assert!(reopened.get_swap("rolled-back").is_none());
+}
+
+#[test]
+fn boundary_write_lock_waits_for_busy_timeout_and_leaves_no_partial_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lnplus.db");
+    let db = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let row =
+        SwapRow::new("busy-timeout", "applied", 700_000, 12, 2_000).with_outbound_peer("02bb");
+    let swap_started = Instant::now();
+    db.record_swap(&row);
+    let swap_elapsed = swap_started.elapsed();
+
+    let action_started = Instant::now();
+    let action_id = db.record_planner_action(&PlannerActionRequest {
+        action_type: "swap_apply",
+        peer_id: "02busy".to_string(),
+        amount_sats: Some(700_000),
+        estimated_cost_sats: Some(2_500),
+        reason: "boundary busy-timeout planner action".to_string(),
+        metadata: None,
+    });
+    let action_elapsed = action_started.elapsed();
+
+    assert!(
+        swap_elapsed >= Duration::from_millis(revops_lnplus::sqlite_db::BUSY_TIMEOUT_MS - 500),
+        "swap write returned before the configured busy period elapsed: {swap_elapsed:?}"
+    );
+    assert!(
+        swap_elapsed <= Duration::from_millis(revops_lnplus::sqlite_db::BUSY_TIMEOUT_MS + 3_000),
+        "swap write exceeded the generous bounded-failure window: {swap_elapsed:?}"
+    );
+    assert!(
+        action_elapsed >= Duration::from_millis(revops_lnplus::sqlite_db::BUSY_TIMEOUT_MS - 500),
+        "planner write returned before the configured busy period elapsed: {action_elapsed:?}"
+    );
+    assert!(
+        action_elapsed <= Duration::from_millis(revops_lnplus::sqlite_db::BUSY_TIMEOUT_MS + 3_000),
+        "planner write exceeded the generous bounded-failure window: {action_elapsed:?}"
+    );
+    assert_eq!(
+        action_id, 0,
+        "the timed-out planner write must report failure"
+    );
+
+    blocker.execute_batch("ROLLBACK").unwrap();
+    drop(blocker);
+    drop(db);
+
+    let reopened = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    assert!(
+        reopened.get_swap("busy-timeout").is_none(),
+        "the timed-out insert must not leave a partial swap row"
+    );
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let actions: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM planner_actions \
+             WHERE action_type = ?1 AND peer_id = ?2 AND reason = ?3",
+            rusqlite::params![
+                "swap_apply",
+                "02busy",
+                "boundary busy-timeout planner action"
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        actions, 0,
+        "the timed-out identifiable planner write must not persist any row"
+    );
+}
+
+#[test]
+fn boundary_write_waits_then_succeeds_when_raw_lock_is_released() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lnplus.db");
+    let db = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let blocker_thread = thread::spawn(move || {
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(250));
+        blocker.execute_batch("ROLLBACK").unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    let row = SwapRow::new("released-lock", "applied", 800_000, 12, 3_000)
+        .with_outbound_peer("02cc")
+        .with_incoming_peer("02dd")
+        .with_our_identifier("A")
+        .with_planner_action_id(88);
+    let started = Instant::now();
+    db.record_swap(&row);
+    let elapsed = started.elapsed();
+    blocker_thread.join().unwrap();
+
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "the queued write did not wait for the held lock: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(revops_lnplus::sqlite_db::BUSY_TIMEOUT_MS),
+        "the released lock should permit success before timeout: {elapsed:?}"
+    );
+    let fetched = db.get_swap("released-lock").unwrap();
+    assert_eq!(fetched.status, "applied");
+    assert_eq!(fetched.capacity_sats, 800_000);
+    assert_eq!(fetched.duration_months, 12);
+    assert_eq!(fetched.outbound_peer.as_deref(), Some("02cc"));
+    assert_eq!(fetched.incoming_peer.as_deref(), Some("02dd"));
+    assert_eq!(fetched.our_identifier.as_deref(), Some("A"));
+    assert_eq!(fetched.planner_action_id, Some(88));
+
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM lnplus_swaps WHERE swap_id = 'released-lock'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn boundary_reopen_preserves_structured_breaker_first_cause_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lnplus.db");
+    let first_cause = BreakerState {
+        tripped_at: 1_234_567,
+        cause: BreakerCause::LocalRowDivergentFromRemote {
+            swap_id: "first-swap".to_string(),
+            detail: "remote completed while local remained applied".to_string(),
+        },
+    };
+    let db = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    db.set_breaker(&first_cause);
+    drop(db);
+
+    let reopened = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+    assert_eq!(reopened.get_breaker(), Some(first_cause));
+}
+
+#[test]
+fn boundary_foreign_breaker_encodings_are_read_only_and_panic_free() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lnplus.db");
+    drop(SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap());
+
+    let foreign_values = [
+        "circuit breaker tripped: swap 42 ghost",
+        r#"{"tripped_at":123,"cause":{"kind":"MissedOpenDeadline""#,
+    ];
+    for (version, raw_value) in foreign_values.into_iter().enumerate() {
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute(
+            "INSERT OR REPLACE INTO config_overrides (key, value, version, updated_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                revops_lnplus::breaker::BREAKER_KEY,
+                raw_value,
+                version as i64 + 1,
+                10_000 + version as i64
+            ],
+        )
+        .unwrap();
+        drop(raw);
+
+        let db = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
+        assert!(
+            db.get_breaker().is_none(),
+            "foreign encoding must not panic or be interpreted as Rust state"
+        );
+        drop(db);
+
+        let check = rusqlite::Connection::open(&path).unwrap();
+        let persisted: String = check
+            .query_row(
+                "SELECT value FROM config_overrides WHERE key = ?1",
+                [revops_lnplus::breaker::BREAKER_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            persisted, raw_value,
+            "reading a foreign breaker encoding must not rewrite it"
+        );
+    }
 }
