@@ -215,8 +215,8 @@ tier-1 project in its own right, not a follow-up.
 |---|---|---|
 | CapexBudgetEngine | none | `[ ]` |
 | CapacityPlanner (~4200 LOC) | none | `[ ]` |
-| BoltzCliManager (~2670 LOC) | none | `[ ]` |
-| BoltzAutoCycle (~1400 LOC) | none | `[ ]` |
+| BoltzCliManager (~2670 LOC) | `revops-boltz` (kernels only) | `[~]` |
+| BoltzAutoCycle (~1400 LOC) | `revops-boltz/autocycle.rs` (kernels only) | `[~]` |
 | LNPlusSwapAutomation (~2099 LOC) | none | `[ ]` |
 
 Verified by search: `boltz` and `lnplus` appear in Rust **only** as arbiter
@@ -224,6 +224,29 @@ policy strings, budget-bucket names, config options, and one
 `lnplus_contract_protection` helper in `revops-analytics/protection.rs`. There
 is no manager, no planner, no automation. ~10,400 Python LOC with no Rust
 counterpart. This is the largest single parity gap in the plugin.
+
+**Boltz update 2026-07-27.** `revops-boltz` landed: 2,698 src LOC, 124 tests,
+clippy clean. Verified independently before merge (LOC, test counts, and the
+absence of any live-call site re-checked — not taken on report).
+
+Ported as PURE kernels: address validation, fee estimation with the E-4.4
+anti-double-count guard, swap-state classification (incl. the "abandoned
+contains done but isn't completed" trap), journal prune/merge/idempotency,
+budget aggregation + atomic pre-create reservation, and the autocycle
+mode/error/cooldown state machine. "Cooldown not burned on dry-run" and "budget
+blocks don't poison stats" are encoded as TYPES with tests that fail if
+reverted. The known ambiguous-outcome sites (subprocess timeout on create, py
+`boltz_manager.py:444`; raw-text refund/claim `:2461`/`:2474`; balance-cycle
+fallthrough `cl-revenue-ops.py:10208`) are explicit `Unknown`/`Unverified`
+variants so they cannot collapse into "definitely succeeded".
+
+NOT ported — which is why this is `[~]` and not `[x]`: per-command `boltzcli`
+argv glue, CLN first-hop pinning / external-pay, the autocycle plan BUILDERS
+(they depend on `CapacityPlanner`, unported), and governor-facade integration.
+
+**It has no caller.** Recorded here explicitly rather than left for a later
+audit. Wiring needs a subprocess `BoltzCli` adapter, `CapexBudgetEngine`, and a
+Boltz loop/RPC surface — none of which exist yet.
 
 Note carried from the fee audit: the `lnplus_obligation` selector exists as pure
 fns with **no production feed**; a future porter must include opening-state rows
