@@ -619,6 +619,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "revops-capital"
+version = "0.1.0"
+dependencies = [
+ "revops-core",
+ "revops-db",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "revops-core"
 version = "0.1.0"
 dependencies = [

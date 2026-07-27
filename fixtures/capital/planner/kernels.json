@@ -1,0 +1,2193 @@
+{
+  "scenarios": [
+    {
+      "input": {
+        "channels": []
+      },
+      "kind": "portfolio_gate",
+      "name": "healthy_no_channels",
+      "output": "healthy"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 600000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "healthy_60pct",
+      "output": "healthy"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 750000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "watch_75pct",
+      "output": "watch"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 850000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "constrained_85pct",
+      "output": "constrained"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 960000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "blocked_96pct",
+      "output": "blocked"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 950000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "blocked_boundary_95pct_exact",
+      "output": "blocked"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_AWAITING_LOCKIN",
+            "to_us_msat": 999000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "non_normal_channels_ignored",
+      "output": "healthy"
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 900000000,
+            "total_msat": 1000000000
+          },
+          {
+            "state": "CHANNELD_NORMAL",
+            "to_us_msat": 100000000,
+            "total_msat": 1000000000
+          }
+        ]
+      },
+      "kind": "portfolio_gate",
+      "name": "mixed_channels",
+      "output": "healthy"
+    },
+    {
+      "input": {
+        "cfg": {},
+        "feerates": {
+          "perkb": {
+            "mutual_close": 2000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "multiplier_default",
+      "output": {
+        "estimated_cost_sats": 400,
+        "fee_cap_sats": 800,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 800,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {
+          "planner_close_fee_reserve_multiplier": 2.5
+        },
+        "feerates": {
+          "perkb": {
+            "mutual_close": 4000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "multiplier_custom_2_5x",
+      "output": {
+        "estimated_cost_sats": 800,
+        "fee_cap_sats": 2000,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 2000,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {
+          "planner_close_fee_cap_sats": 1000
+        },
+        "feerates": {
+          "perkb": {
+            "mutual_close": 1000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "fixed_cap_sufficient",
+      "output": {
+        "estimated_cost_sats": 200,
+        "fee_cap_sats": 1000,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 1000,
+        "source": "fixed_cap"
+      }
+    },
+    {
+      "input": {
+        "cfg": {
+          "planner_close_fee_cap_sats": 100
+        },
+        "feerates": {
+          "perkb": {
+            "mutual_close": 100000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "fixed_cap_insufficient",
+      "output": {
+        "error": "Configured close fee cap 100 sats is below estimated close cost 20000 sats",
+        "estimated_cost_sats": 20000,
+        "fee_cap_sats": 100,
+        "ok": false,
+        "reserve_sats": 100,
+        "source": "fixed_cap"
+      }
+    },
+    {
+      "input": {
+        "cfg": {
+          "planner_close_feerange_enabled": true
+        },
+        "feerates": {
+          "perkb": {
+            "mutual_close": 4000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "feerange_enabled",
+      "output": {
+        "estimated_cost_sats": 800,
+        "fee_cap_sats": 1600,
+        "feerange": [
+          "slow",
+          "8000perkb"
+        ],
+        "ok": true,
+        "reserve_sats": 1600,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {},
+        "feerates": {
+          "perkb": {
+            "unilateral_close": 3000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "feerate_fallback_unilateral",
+      "output": {
+        "estimated_cost_sats": 600,
+        "fee_cap_sats": 1200,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 1200,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {},
+        "feerates": {
+          "perkb": {
+            "opening": 5000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "feerate_fallback_opening",
+      "output": {
+        "estimated_cost_sats": 1000,
+        "fee_cap_sats": 2000,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 2000,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {},
+        "feerates": {}
+      },
+      "kind": "close_fee_plan",
+      "name": "feerate_missing_uses_chaincost_default",
+      "output": {
+        "estimated_cost_sats": 3000,
+        "fee_cap_sats": 6000,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 6000,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {
+          "planner_close_fee_reserve_multiplier": 1.0
+        },
+        "feerates": {
+          "perkb": {
+            "mutual_close": 2000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "multiplier_clamped_to_1_0_floor",
+      "output": {
+        "estimated_cost_sats": 400,
+        "fee_cap_sats": 400,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 400,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "cfg": {
+          "planner_close_fee_reserve_multiplier": 0.1
+        },
+        "feerates": {
+          "perkb": {
+            "mutual_close": 2000
+          }
+        }
+      },
+      "kind": "close_fee_plan",
+      "name": "multiplier_below_1_clamped",
+      "output": {
+        "estimated_cost_sats": 400,
+        "fee_cap_sats": 400,
+        "feerange": null,
+        "ok": true,
+        "reserve_sats": 400,
+        "source": "multiplier"
+      }
+    },
+    {
+      "input": {
+        "result": {
+          "actual_fee_sats": 1500
+        }
+      },
+      "kind": "extract_actual_close_fee_sats",
+      "name": "int_field",
+      "output": 1500
+    },
+    {
+      "input": {
+        "result": {
+          "close_fee_sats": "1200sat"
+        }
+      },
+      "kind": "extract_actual_close_fee_sats",
+      "name": "string_field_with_sat_suffix",
+      "output": 1200
+    },
+    {
+      "input": {
+        "result": {
+          "fee_msat": 1500500
+        }
+      },
+      "kind": "extract_actual_close_fee_sats",
+      "name": "msat_field",
+      "output": 0
+    },
+    {
+      "input": {
+        "result": {
+          "actual_fee_sats": true,
+          "fee_sats": 900
+        }
+      },
+      "kind": "extract_actual_close_fee_sats",
+      "name": "bool_field_skipped",
+      "output": 900
+    },
+    {
+      "input": {
+        "result": {
+          "foo": "bar"
+        }
+      },
+      "kind": "extract_actual_close_fee_sats",
+      "name": "no_matching_fields",
+      "output": 0
+    },
+    {
+      "input": {
+        "result": "not-a-dict"
+      },
+      "kind": "extract_actual_close_fee_sats",
+      "name": "not_a_dict",
+      "output": null
+    },
+    {
+      "input": {
+        "actions": [],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "no_actions",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "actions": [
+          {
+            "action_type": "open",
+            "created_at": 1785161350,
+            "status": "failed"
+          }
+        ],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "single_recent_failure_blocks",
+      "output": "Failed-open backoff for peer_abcdefabcde...: 1 recent failure(s), retry in 1.5h",
+      "output_is_none": false
+    },
+    {
+      "input": {
+        "actions": [
+          {
+            "action_type": "open",
+            "created_at": 1785152350,
+            "status": "failed"
+          }
+        ],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "single_old_failure_clears",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "actions": [
+          {
+            "action_type": "open",
+            "created_at": 1785163050,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785162950,
+            "status": "completed"
+          }
+        ],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "success_resets_streak",
+      "output": "Failed-open backoff for peer_abcdefabcde...: 1 recent failure(s), retry in 2.0h",
+      "output_is_none": false
+    },
+    {
+      "input": {
+        "actions": [
+          {
+            "action_type": "open",
+            "created_at": 1785163050,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785162950,
+            "status": "dry_run"
+          }
+        ],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "dry_run_resets_streak",
+      "output": "Failed-open backoff for peer_abcdefabcde...: 1 recent failure(s), retry in 2.0h",
+      "output_is_none": false
+    },
+    {
+      "input": {
+        "actions": [
+          {
+            "action_type": "close",
+            "created_at": 1785163050,
+            "status": "failed"
+          }
+        ],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "non_open_actions_ignored",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "actions": [
+          {
+            "action_type": "open",
+            "created_at": 1785159550,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785155950,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785152350,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785148750,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785145150,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785141550,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785137950,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785134350,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785130750,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785127150,
+            "status": "failed"
+          },
+          {
+            "action_type": "open",
+            "created_at": 1785123550,
+            "status": "failed"
+          }
+        ],
+        "now": 1785163150
+      },
+      "kind": "failed_open_backoff_reason",
+      "name": "many_failures_capped_at_168h",
+      "output": "Failed-open backoff for peer_abcdefabcde...: 11 recent failure(s), retry in 167.0h",
+      "output_is_none": false
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "peer_id": "peer_abcdefabcdefabcdef",
+            "state": "CHANNELD_NORMAL",
+            "total_msat": 500000000
+          }
+        ],
+        "max_channel_sats": 1000000
+      },
+      "kind": "peer_exposure_cap_reason",
+      "name": "under_cap",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "peer_id": "peer_abcdefabcdefabcdef",
+            "state": "CHANNELD_NORMAL",
+            "total_msat": 2000000000
+          }
+        ],
+        "max_channel_sats": 1000000
+      },
+      "kind": "peer_exposure_cap_reason",
+      "name": "at_cap_blocks",
+      "output": "Peer exposure cap for peer_abcdefabcde...: existing capacity 2000000 sats >= cap 2000000 sats (2x planner_max_channel_sats)",
+      "output_is_none": false
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "peer_id": "peer_abcdefabcdefabcdef",
+            "state": "CHANNELD_NORMAL",
+            "total_msat": 3000000000
+          }
+        ],
+        "max_channel_sats": 1000000
+      },
+      "kind": "peer_exposure_cap_reason",
+      "name": "over_cap_blocks",
+      "output": "Peer exposure cap for peer_abcdefabcde...: existing capacity 3000000 sats >= cap 2000000 sats (2x planner_max_channel_sats)",
+      "output_is_none": false
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "peer_id": "someone_else",
+            "state": "CHANNELD_NORMAL",
+            "total_msat": 5000000000
+          }
+        ],
+        "max_channel_sats": 1000000
+      },
+      "kind": "peer_exposure_cap_reason",
+      "name": "other_peer_ignored",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "peer_id": "peer_abcdefabcdefabcdef",
+            "state": "CHANNELD_AWAITING_LOCKIN",
+            "total_msat": 5000000000
+          }
+        ],
+        "max_channel_sats": 1000000
+      },
+      "kind": "peer_exposure_cap_reason",
+      "name": "non_normal_state_ignored",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "channels": [
+          {
+            "peer_id": "peer_abcdefabcdefabcdef",
+            "state": "CHANNELD_NORMAL",
+            "total_msat": 5000000000
+          }
+        ],
+        "max_channel_sats": 0
+      },
+      "kind": "peer_exposure_cap_reason",
+      "name": "cap_disabled_zero",
+      "output": null,
+      "output_is_none": true
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": null,
+        "feerates": null,
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": null
+      },
+      "kind": "calculate_open_ev",
+      "name": "bootstrap_no_history",
+      "output": 2018.4931506849316
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": null,
+        "feerates": null,
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "observed_ppm_anchor",
+      "output": -3651.5068493150684
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": null,
+        "feerates": null,
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": 1000.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "observed_ppm_ceiling_clamped",
+      "output": 2018.4931506849316
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": {
+          "daily_net_est_sats": 50.0
+        },
+        "feerates": null,
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "closed_channel_profit_inheritance",
+      "output": 2828.4931506849316
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": null,
+        "feerates": null,
+        "inbound_fee_data": {
+          "median_fee_ppm": 300
+        },
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "inbound_fee_history_used",
+      "output": -7071.506849315068
+    },
+    {
+      "input": {
+        "channel_size_sats": 20000000,
+        "closed_summary": null,
+        "feerates": null,
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "large_channel_size",
+      "output": -66570.13698630137
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": null,
+        "feerates": null,
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 50.0,
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "high_roi_hurdle",
+      "output": -245295.3424657534
+    },
+    {
+      "input": {
+        "channel_size_sats": 1000000,
+        "closed_summary": null,
+        "feerates": {
+          "perkb": {
+            "mutual_close": 3000,
+            "opening": 5000
+          }
+        },
+        "inbound_fee_data": null,
+        "min_annual_roi_pct": 1.0,
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_open_ev",
+      "name": "custom_feerates",
+      "output": -4611.506849315068
+    },
+    {
+      "input": {
+        "loser": {
+          "capacity": 1000000,
+          "marginal_profit_30d_sats": -500
+        },
+        "observed_ppm_cache": 20.0,
+        "winners": []
+      },
+      "kind": "calculate_redeployment_ev",
+      "name": "no_winners",
+      "output": {
+        "best_ev": 0,
+        "best_peer": null,
+        "redeployment_ev": 2800
+      }
+    },
+    {
+      "input": {
+        "loser": {
+          "capacity": 1000000,
+          "marginal_profit_30d_sats": -1000
+        },
+        "observed_ppm_cache": 20.0,
+        "winners": [
+          {
+            "peer_id": "winner1"
+          }
+        ]
+      },
+      "kind": "calculate_redeployment_ev",
+      "name": "one_winner_positive_redeployment",
+      "output": {
+        "best_ev": 0,
+        "best_peer": null,
+        "redeployment_ev": 5800
+      }
+    },
+    {
+      "input": {
+        "loser": {
+          "capacity": 1000000,
+          "marginal_profit_30d_sats": -5000
+        },
+        "observed_ppm_cache": 20.0,
+        "winners": [
+          {
+            "peer_id": "winner1"
+          }
+        ]
+      },
+      "kind": "calculate_redeployment_ev",
+      "name": "bleeding_loser_negative_residual_favors_close",
+      "output": {
+        "best_ev": 0,
+        "best_peer": null,
+        "redeployment_ev": 29800
+      }
+    },
+    {
+      "input": {
+        "loser": {
+          "capacity": 1000000,
+          "marginal_profit_30d_sats": 0
+        },
+        "observed_ppm_cache": 20.0,
+        "winners": [
+          {
+            "peer_id": "winner_low"
+          },
+          {
+            "peer_id": "winner_high"
+          }
+        ]
+      },
+      "kind": "calculate_redeployment_ev",
+      "name": "multiple_winners_picks_best",
+      "output": {
+        "best_ev": 0,
+        "best_peer": null,
+        "redeployment_ev": -200
+      }
+    },
+    {
+      "input": {
+        "candidate": {
+          "peer_id": "candidate1"
+        },
+        "loser": {
+          "capacity": 1000000,
+          "marginal_profit_30d_sats": -1000
+        },
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_recycle_ev",
+      "name": "basic_recycle",
+      "output": 2148.4931506849316
+    },
+    {
+      "input": {
+        "candidate": {
+          "peer_id": "candidate1"
+        },
+        "loser": {
+          "capacity": 1000000,
+          "marginal_profit_30d_sats": 500
+        },
+        "observed_ppm_cache": 20.0
+      },
+      "kind": "calculate_recycle_ev",
+      "name": "positive_residual_reduces_ev",
+      "output": -6851.506849315068
+    },
+    {
+      "input": {
+        "block_height": 800000,
+        "loser": {
+          "marginal_roi": -5.0,
+          "peer_id": "peerA",
+          "scid": "700000x1x0"
+        },
+        "protected_peers": [],
+        "route_pair_scids": []
+      },
+      "kind": "is_recycle_eligible",
+      "name": "eligible",
+      "output": {
+        "ok": true,
+        "reason": "Eligible for recycling"
+      }
+    },
+    {
+      "input": {
+        "block_height": 800000,
+        "loser": {
+          "marginal_roi": -5.0,
+          "peer_id": "peerA",
+          "scid": "799999x1x0"
+        },
+        "protected_peers": [],
+        "route_pair_scids": []
+      },
+      "kind": "is_recycle_eligible",
+      "name": "too_young",
+      "output": {
+        "ok": false,
+        "reason": "Channel age 0d < 60d minimum"
+      }
+    },
+    {
+      "input": {
+        "block_height": 800000,
+        "loser": {
+          "marginal_roi": 5.0,
+          "peer_id": "peerA",
+          "scid": "700000x1x0"
+        },
+        "protected_peers": [],
+        "route_pair_scids": []
+      },
+      "kind": "is_recycle_eligible",
+      "name": "positive_roi_ineligible",
+      "output": {
+        "ok": false,
+        "reason": "Marginal ROI 5.0% >= 0"
+      }
+    },
+    {
+      "input": {
+        "block_height": 800000,
+        "loser": {
+          "marginal_roi": -5.0,
+          "peer_id": "peerA",
+          "scid": "700000x1x0"
+        },
+        "protected_peers": [
+          "peerA"
+        ],
+        "route_pair_scids": []
+      },
+      "kind": "is_recycle_eligible",
+      "name": "policy_protected",
+      "output": {
+        "ok": false,
+        "reason": "Policy-protected peer"
+      }
+    },
+    {
+      "input": {
+        "block_height": 800000,
+        "loser": {
+          "marginal_roi": -5.0,
+          "peer_id": "peerA",
+          "scid": "700000x1x0"
+        },
+        "protected_peers": null,
+        "route_pair_scids": []
+      },
+      "kind": "is_recycle_eligible",
+      "name": "policy_unknown_fails_closed",
+      "output": {
+        "ok": false,
+        "reason": "Policy protection unknown (source failed)"
+      }
+    },
+    {
+      "input": {
+        "block_height": 800000,
+        "loser": {
+          "marginal_roi": -5.0,
+          "peer_id": "peerA",
+          "scid": "700000x1x0"
+        },
+        "protected_peers": [],
+        "route_pair_scids": [
+          "700000x1x0"
+        ]
+      },
+      "kind": "is_recycle_eligible",
+      "name": "route_pair_protected",
+      "output": {
+        "ok": false,
+        "reason": "On revenue route pair"
+      }
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.2,
+            "source": "winner"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "winner_at_floor",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 0.2,
+          "source": "winner"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.1,
+            "source": "winner"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "winner_below_floor_dropped",
+      "output": []
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 5.0,
+            "source": "winner"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "winner_clamped_at_2x_anchor",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 2.0,
+          "source": "winner"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 25.0,
+            "source": "graph"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "graph_scaled_by_50x_anchor",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 0.4,
+          "source": "graph"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.2,
+            "source": "route_pair"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "route_pair_scale",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 0.17,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.4,
+            "source": "demand_flow"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "demand_flow_scale",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 0.4,
+          "source": "demand_flow"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.5,
+            "source": "mystery"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "unknown_source_defaults",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 0.5,
+          "source": "mystery"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": "NaN",
+            "source": "winner"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "nan_score_treated_as_zero",
+      "output": []
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "p1",
+            "score": 0.45,
+            "source": "winner"
+          },
+          {
+            "peer_id": "p2",
+            "score": 0.8,
+            "source": "neighbor"
+          },
+          {
+            "peer_id": "p3",
+            "score": 10.0,
+            "source": "graph"
+          }
+        ]
+      },
+      "kind": "normalize_candidate_scores",
+      "name": "mixed_group",
+      "output": [
+        {
+          "peer_id": "p1",
+          "score": 0.45,
+          "source": "winner"
+        },
+        {
+          "peer_id": "p2",
+          "score": 0.7200000000000001,
+          "source": "neighbor"
+        },
+        {
+          "peer_id": "p3",
+          "score": 0.16000000000000003,
+          "source": "graph"
+        }
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "g0",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "g1",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "g2",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "g3",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "g4",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "g5",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "r0",
+            "score": 1.0,
+            "source": "route_pair"
+          },
+          {
+            "peer_id": "r1",
+            "score": 1.0,
+            "source": "route_pair"
+          },
+          {
+            "peer_id": "r2",
+            "score": 1.0,
+            "source": "route_pair"
+          },
+          {
+            "peer_id": "r3",
+            "score": 1.0,
+            "source": "route_pair"
+          },
+          {
+            "peer_id": "r4",
+            "score": 1.0,
+            "source": "route_pair"
+          },
+          {
+            "peer_id": "r5",
+            "score": 1.0,
+            "source": "route_pair"
+          },
+          {
+            "peer_id": "w0",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w1",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w2",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w3",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w4",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w5",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w6",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w7",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w8",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w9",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w10",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w11",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w12",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w13",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w14",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w15",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w16",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w17",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w18",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w19",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w20",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w21",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w22",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w23",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w24",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w25",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w26",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w27",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w28",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w29",
+            "score": 0.9,
+            "source": "winner"
+          }
+        ],
+        "max_pool": 32
+      },
+      "kind": "apply_pool_quotas",
+      "name": "reserved_quota_respected",
+      "output": [
+        "g0",
+        "g1",
+        "g2",
+        "g3",
+        "r0",
+        "r1",
+        "r2",
+        "r3",
+        "g4",
+        "g5",
+        "r4",
+        "r5",
+        "w0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5",
+        "w6",
+        "w7",
+        "w8",
+        "w9",
+        "w10",
+        "w11",
+        "w12",
+        "w13",
+        "w14",
+        "w15",
+        "w16",
+        "w17",
+        "w18",
+        "w19"
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "w1",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "n1",
+            "score": 0.8,
+            "source": "neighbor"
+          }
+        ],
+        "max_pool": 32
+      },
+      "kind": "apply_pool_quotas",
+      "name": "small_pool_no_reserved_candidates",
+      "output": [
+        "w1",
+        "n1"
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "g1",
+            "score": 1.0,
+            "source": "graph"
+          },
+          {
+            "peer_id": "w0",
+            "score": 0.9,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w1",
+            "score": 0.89,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w2",
+            "score": 0.88,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w3",
+            "score": 0.87,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w4",
+            "score": 0.86,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w5",
+            "score": 0.85,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w6",
+            "score": 0.8400000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w7",
+            "score": 0.8300000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w8",
+            "score": 0.8200000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w9",
+            "score": 0.81,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w10",
+            "score": 0.8,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w11",
+            "score": 0.79,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w12",
+            "score": 0.78,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w13",
+            "score": 0.77,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w14",
+            "score": 0.76,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w15",
+            "score": 0.75,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w16",
+            "score": 0.74,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w17",
+            "score": 0.73,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w18",
+            "score": 0.72,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w19",
+            "score": 0.71,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w20",
+            "score": 0.7,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w21",
+            "score": 0.6900000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w22",
+            "score": 0.68,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w23",
+            "score": 0.67,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w24",
+            "score": 0.66,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w25",
+            "score": 0.65,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w26",
+            "score": 0.64,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w27",
+            "score": 0.63,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w28",
+            "score": 0.62,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w29",
+            "score": 0.6100000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w30",
+            "score": 0.6000000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w31",
+            "score": 0.5900000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w32",
+            "score": 0.5800000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w33",
+            "score": 0.5700000000000001,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w34",
+            "score": 0.56,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w35",
+            "score": 0.55,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w36",
+            "score": 0.54,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w37",
+            "score": 0.53,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w38",
+            "score": 0.52,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w39",
+            "score": 0.51,
+            "source": "winner"
+          }
+        ],
+        "max_pool": 10
+      },
+      "kind": "apply_pool_quotas",
+      "name": "unfilled_reserved_slots_go_to_open_pool",
+      "output": [
+        "g1",
+        "w0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5",
+        "w6",
+        "w7",
+        "w8"
+      ]
+    },
+    {
+      "input": {
+        "candidates": [
+          {
+            "peer_id": "w0",
+            "score": 1.0,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w1",
+            "score": 0.999,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w2",
+            "score": 0.998,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w3",
+            "score": 0.997,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w4",
+            "score": 0.996,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w5",
+            "score": 0.995,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w6",
+            "score": 0.994,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w7",
+            "score": 0.993,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w8",
+            "score": 0.992,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w9",
+            "score": 0.991,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w10",
+            "score": 0.99,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w11",
+            "score": 0.989,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w12",
+            "score": 0.988,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w13",
+            "score": 0.987,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w14",
+            "score": 0.986,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w15",
+            "score": 0.985,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w16",
+            "score": 0.984,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w17",
+            "score": 0.983,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w18",
+            "score": 0.982,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w19",
+            "score": 0.981,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w20",
+            "score": 0.98,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w21",
+            "score": 0.979,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w22",
+            "score": 0.978,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w23",
+            "score": 0.977,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w24",
+            "score": 0.976,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w25",
+            "score": 0.975,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w26",
+            "score": 0.974,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w27",
+            "score": 0.973,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w28",
+            "score": 0.972,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w29",
+            "score": 0.971,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w30",
+            "score": 0.97,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w31",
+            "score": 0.969,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w32",
+            "score": 0.968,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w33",
+            "score": 0.967,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w34",
+            "score": 0.966,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w35",
+            "score": 0.965,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w36",
+            "score": 0.964,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w37",
+            "score": 0.963,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w38",
+            "score": 0.962,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w39",
+            "score": 0.961,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w40",
+            "score": 0.96,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w41",
+            "score": 0.959,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w42",
+            "score": 0.958,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w43",
+            "score": 0.957,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w44",
+            "score": 0.956,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w45",
+            "score": 0.955,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w46",
+            "score": 0.954,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w47",
+            "score": 0.953,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w48",
+            "score": 0.952,
+            "source": "winner"
+          },
+          {
+            "peer_id": "w49",
+            "score": 0.951,
+            "source": "winner"
+          }
+        ],
+        "max_pool": 32
+      },
+      "kind": "apply_pool_quotas",
+      "name": "max_pool_cap_enforced",
+      "output": [
+        "w0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5",
+        "w6",
+        "w7",
+        "w8",
+        "w9",
+        "w10",
+        "w11",
+        "w12",
+        "w13",
+        "w14",
+        "w15",
+        "w16",
+        "w17",
+        "w18",
+        "w19",
+        "w20",
+        "w21",
+        "w22",
+        "w23",
+        "w24",
+        "w25",
+        "w26",
+        "w27",
+        "w28",
+        "w29",
+        "w30",
+        "w31"
+      ]
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {}
+      },
+      "kind": "dead_capital_stage",
+      "name": "none_to_fee_reduction",
+      "output": {
+        "action": "FEE_REDUCE",
+        "close_protection_out": null,
+        "stage": "fee_reduction"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785159550,
+          "stage": "fee_reduction"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "fee_reduction_before_timeout_stays",
+      "output": {
+        "action": "FEE_REDUCE",
+        "close_protection_out": null,
+        "stage": "fee_reduction"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785073150,
+          "stage": "fee_reduction"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "fee_reduction_local_timeout_advances",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": null,
+        "stage": "defibrillation"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "remote",
+        "stage_row": {
+          "entered_at": 1785073150,
+          "stage": "fee_reduction"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "fee_reduction_remote_needs_48h",
+      "output": {
+        "action": "FEE_REDUCE",
+        "close_protection_out": null,
+        "stage": "fee_reduction"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "remote",
+        "stage_row": {
+          "entered_at": 1784986750,
+          "stage": "fee_reduction"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "fee_reduction_remote_48h_advances",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": null,
+        "stage": "defibrillation"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": true,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785159550,
+          "stage": "defibrillation"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "defibrillation_before_timeout_stays",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": null,
+        "stage": "defibrillation"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": true,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785073150,
+          "stage": "defibrillation"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "defibrillation_timeout_no_protection_attempted_closes",
+      "output": {
+        "action": "CLOSE",
+        "close_protection_out": null,
+        "stage": "close"
+      }
+    },
+    {
+      "input": {
+        "close_protection": "inbound_gateway_protected",
+        "defib_attempted": true,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785073150,
+          "stage": "defibrillation"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "defibrillation_timeout_protected_holds",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": "inbound_gateway_protected",
+        "stage": "defibrillation"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785073150,
+          "stage": "defibrillation"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "defibrillation_timeout_no_attempt_holds",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": null,
+        "stage": "defibrillation"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": true,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785163050,
+          "stage": "close"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "close_stays_close",
+      "output": {
+        "action": "CLOSE",
+        "close_protection_out": null,
+        "stage": "close"
+      }
+    },
+    {
+      "input": {
+        "close_protection": "route_pair_protected",
+        "defib_attempted": true,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785163050,
+          "stage": "close"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "close_demoted_when_protected",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": "route_pair_protected",
+        "stage": "defibrillation"
+      }
+    },
+    {
+      "input": {
+        "close_protection": null,
+        "defib_attempted": false,
+        "now": 1785163150,
+        "opener": "local",
+        "stage_row": {
+          "entered_at": 1785163050,
+          "stage": "close"
+        }
+      },
+      "kind": "dead_capital_stage",
+      "name": "close_demoted_when_no_attempt",
+      "output": {
+        "action": "DEFIBRILLATE",
+        "close_protection_out": null,
+        "stage": "defibrillation"
+      }
+    }
+  ]
+}
