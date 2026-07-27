@@ -28,6 +28,7 @@
 - `crates/revops-db/Cargo.toml`: internal-only dependency on `revops-analytics`; no new external crate.
 - `crates/revops/src/rpc_hot_channel_protection_peers.rs`: re-export the DB-owned row type.
 - `crates/revops/src/rpc_spend_ledger.rs`: re-export DB-owned ledger types and render measured coverage.
+- `crates/revops/RPC_BATCH_A.md`: replace stale placeholder snippets with the available read queries.
 - `crates/revops-lnplus/tests/sqlite_db.rs`: Rust-owned temp-file concurrency, rollback, restart, and foreign-breaker tests.
 - `crates/revops-lnplus/src/sqlite_db.rs`: documentation or a narrow test-support accessor only if a failing boundary test proves it necessary.
 - `crates/revops-lnplus/ENTRYPOINTS.md`: state the Rust-owned-path restriction and migration boundary.
@@ -227,7 +228,7 @@ git commit -m "feat(db): read peer policies"
 pub struct HotChannelProtectionOverridePeer {
     pub peer_id: String,
     pub added_at: i64,
-    pub note: String,
+    pub note: Option<String>,
     pub min_depletion_trigger_pct: Option<f64>,
 }
 
@@ -270,7 +271,7 @@ pub async fn active_spend_reservations(
 ) -> Result<Vec<ActiveReservation>>;
 ```
 
-The RPC modules `pub use` these DB-owned types so current callers and tests keep their names. `build_spend_ledger` renders `covered_hours` into both `coverage_hours` and `covered_hours`, renders `coverage_status`, and removes those fields from `_gaps` because an evidence-backed `unknown` is a real answer.
+The RPC modules `pub use` these DB-owned types so current callers and tests keep their names. The nullable hot-channel `note` column remains `Option<String>`. `build_spend_ledger` renders `covered_hours` into both `coverage_hours` and `covered_hours`, renders `coverage_status`, and removes those fields from `_gaps` because an evidence-backed `unknown` is a real answer. `SpendLedgerAggregates::default()` is the honest `None`/`unknown` state.
 
 - [ ] **Step 1: Add failing query and builder tests**
 

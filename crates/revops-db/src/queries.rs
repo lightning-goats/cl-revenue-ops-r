@@ -14,10 +14,11 @@
 //! entry.
 
 use crate::actor::DbHandle;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_core::msat::{base_to_sats_ceil, base_to_sats_floor, py_round2};
 use rusqlite::{types::Value as SqlValue, Row};
+use std::collections::BTreeMap;
 
 /// Port of `Database.get_config_override` (modules/database.py:7316-7322):
 /// `SELECT value FROM config_overrides WHERE key = ?`. `key` is the Python
@@ -150,6 +151,281 @@ pub async fn last_policy_change_timestamp(handle: &DbHandle) -> Result<i64> {
         .query_i64(
             "SELECT COALESCE(MAX(updated_at), 0) FROM peer_policies",
             vec![],
+        )
+        .await
+}
+
+/// One row of Python's `hot_channel_protection_overrides` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HotChannelProtectionOverridePeer {
+    pub peer_id: String,
+    pub added_at: i64,
+    pub note: Option<String>,
+    pub min_depletion_trigger_pct: Option<f64>,
+}
+
+/// Port of `Database.list_hot_channel_protection_override_peers`.
+pub async fn hot_channel_protection_override_peers(
+    handle: &DbHandle,
+) -> Result<Vec<HotChannelProtectionOverridePeer>> {
+    handle
+        .query_rows(
+            concat!(
+                "SELECT peer_id, added_at, note, min_depletion_trigger_pct ",
+                "FROM hot_channel_protection_overrides ORDER BY added_at ASC"
+            ),
+            vec![],
+            |row| {
+                Ok(HotChannelProtectionOverridePeer {
+                    peer_id: row.get(0)?,
+                    added_at: row.get(1)?,
+                    note: row.get(2)?,
+                    min_depletion_trigger_pct: row.get(3)?,
+                })
+            },
+        )
+        .await
+}
+
+/// Windowed generic spend-ledger aggregates and measured evidence coverage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpendLedgerAggregates {
+    pub spent_24h_sats: i64,
+    pub reserved_24h_sats: i64,
+    pub spent_by_category: BTreeMap<String, i64>,
+    pub reserved_by_category: BTreeMap<String, i64>,
+    pub event_count_by_category: BTreeMap<String, i64>,
+    pub active_reservation_count_by_category: BTreeMap<String, i64>,
+    pub covered_hours: Option<f64>,
+    pub coverage_status: String,
+}
+
+impl Default for SpendLedgerAggregates {
+    fn default() -> Self {
+        Self {
+            spent_24h_sats: 0,
+            reserved_24h_sats: 0,
+            spent_by_category: BTreeMap::new(),
+            reserved_by_category: BTreeMap::new(),
+            event_count_by_category: BTreeMap::new(),
+            active_reservation_count_by_category: BTreeMap::new(),
+            covered_hours: None,
+            coverage_status: "unknown".to_string(),
+        }
+    }
+}
+
+async fn category_totals(
+    handle: &DbHandle,
+    sql: &'static str,
+    cutoff: i64,
+) -> Result<BTreeMap<String, i64>> {
+    let rows = handle
+        .query_rows(sql, vec![SqlValue::Integer(cutoff)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+fn checked_spend_window(window_hours: i64, now: i64) -> Result<(i64, i64, i64)> {
+    let window_hours = window_hours.max(1);
+    let window_seconds = window_hours
+        .checked_mul(3600)
+        .context("window_hours exceeds the supported timestamp range")?;
+    let cutoff = now
+        .checked_sub(window_seconds)
+        .context("window_hours produces an unsupported cutoff")?;
+    Ok((window_hours, window_seconds, cutoff))
+}
+
+fn python_int_timestamp_cell(row: &Row) -> rusqlite::Result<Option<i64>> {
+    let value = row.get::<_, SqlValue>(0)?;
+    Ok(match value {
+        SqlValue::Null => None,
+        SqlValue::Integer(value) => Some(value),
+        SqlValue::Real(value) if value.is_finite() => {
+            let truncated = value.trunc();
+            if truncated >= i64::MIN as f64 && truncated <= i64::MAX as f64 {
+                Some(truncated as i64)
+            } else {
+                None
+            }
+        }
+        SqlValue::Text(value) => value.trim().parse::<i64>().ok(),
+        SqlValue::Blob(value) => std::str::from_utf8(&value)
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok()),
+        SqlValue::Real(_) => None,
+    })
+}
+
+fn spend_coverage(
+    event_earliest: Option<i64>,
+    reservation_earliest: Option<i64>,
+    now: i64,
+    window_hours: i64,
+    window_seconds: i64,
+) -> (Option<f64>, String) {
+    let earliest = [event_earliest, reservation_earliest]
+        .into_iter()
+        .flatten()
+        .filter(|timestamp| *timestamp > 0)
+        .min();
+    let Some(earliest) = earliest else {
+        return (None, "unknown".to_string());
+    };
+    if earliest > now {
+        return (None, "unknown".to_string());
+    }
+    let span_seconds = now - earliest;
+    if span_seconds >= window_seconds {
+        return (Some(window_hours as f64), "complete".to_string());
+    }
+    (
+        Some(py_round2(span_seconds as f64 / 3600.0)),
+        "partial".to_string(),
+    )
+}
+
+/// Port of `Database.get_spend_ledger_summary`'s aggregate and coverage
+/// reads. `now` is injected so cutoff and coverage share one clock sample.
+pub async fn spend_ledger_aggregates(
+    handle: &DbHandle,
+    window_hours: i64,
+    now: i64,
+) -> Result<SpendLedgerAggregates> {
+    let (window_hours, window_seconds, cutoff) = checked_spend_window(window_hours, now)?;
+    let spent_24h_sats = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(amount_sats), 0) FROM spend_events WHERE timestamp >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    let reserved_24h_sats = handle
+        .query_i64(
+            concat!(
+                "SELECT COALESCE(SUM(reserved_sats), 0) FROM spend_reservations ",
+                "WHERE status = 'active' AND reserved_at >= ?1"
+            ),
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    let spent_by_category = category_totals(
+        handle,
+        concat!(
+            "SELECT category, COALESCE(SUM(amount_sats), 0) FROM spend_events ",
+            "WHERE timestamp >= ?1 GROUP BY category"
+        ),
+        cutoff,
+    )
+    .await?;
+    let reserved_by_category = category_totals(
+        handle,
+        concat!(
+            "SELECT category, COALESCE(SUM(reserved_sats), 0) FROM spend_reservations ",
+            "WHERE status = 'active' AND reserved_at >= ?1 GROUP BY category"
+        ),
+        cutoff,
+    )
+    .await?;
+    let event_count_by_category = category_totals(
+        handle,
+        concat!(
+            "SELECT category, COUNT(*) FROM spend_events ",
+            "WHERE timestamp >= ?1 GROUP BY category"
+        ),
+        cutoff,
+    )
+    .await?;
+    let active_reservation_count_by_category = category_totals(
+        handle,
+        concat!(
+            "SELECT category, COUNT(*) FROM spend_reservations ",
+            "WHERE status = 'active' AND reserved_at >= ?1 GROUP BY category"
+        ),
+        cutoff,
+    )
+    .await?;
+    let event_earliest = handle
+        .query_row(
+            "SELECT MIN(timestamp) FROM spend_events",
+            vec![],
+            python_int_timestamp_cell,
+        )
+        .await?;
+    let reservation_earliest = handle
+        .query_row(
+            "SELECT MIN(reserved_at) FROM spend_reservations",
+            vec![],
+            python_int_timestamp_cell,
+        )
+        .await?;
+    let (covered_hours, coverage_status) = spend_coverage(
+        event_earliest,
+        reservation_earliest,
+        now,
+        window_hours,
+        window_seconds,
+    );
+
+    Ok(SpendLedgerAggregates {
+        spent_24h_sats,
+        reserved_24h_sats,
+        spent_by_category,
+        reserved_by_category,
+        event_count_by_category,
+        active_reservation_count_by_category,
+        covered_hours,
+        coverage_status,
+    })
+}
+
+/// One active row from Python's `spend_reservations` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveReservation {
+    pub reservation_id: String,
+    pub category: String,
+    pub subcategory: Option<String>,
+    pub reserved_sats: i64,
+    pub reserved_at: i64,
+    pub reference_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub status: String,
+    pub metadata_json: Option<String>,
+}
+
+/// Active reservations inside the requested window, oldest first. Both the
+/// window and row limit use Python's minimum-one clamps.
+pub async fn active_spend_reservations(
+    handle: &DbHandle,
+    window_hours: i64,
+    limit: i64,
+    now: i64,
+) -> Result<Vec<ActiveReservation>> {
+    let (_, _, cutoff) = checked_spend_window(window_hours, now)?;
+    handle
+        .query_rows(
+            concat!(
+                "SELECT reservation_id, category, subcategory, reserved_sats, reserved_at, ",
+                "reference_id, channel_id, status, metadata_json FROM spend_reservations ",
+                "WHERE status = 'active' AND reserved_at >= ?1 ",
+                "ORDER BY reserved_at ASC LIMIT ?2"
+            ),
+            vec![SqlValue::Integer(cutoff), SqlValue::Integer(limit.max(1))],
+            |row| {
+                Ok(ActiveReservation {
+                    reservation_id: row.get(0)?,
+                    category: row.get(1)?,
+                    subcategory: row.get(2)?,
+                    reserved_sats: row.get(3)?,
+                    reserved_at: row.get(4)?,
+                    reference_id: row.get(5)?,
+                    channel_id: row.get(6)?,
+                    status: row.get(7)?,
+                    metadata_json: row.get(8)?,
+                })
+            },
         )
         .await
 }

@@ -41,31 +41,29 @@ pub mod rpc_status;
 `rpc_list_ignored`, `rpc_policy`, `rpc_profitability`, `rpc_spend_ledger`
 into the existing alphabetized block.)
 
-## 2. New `revops-db` read queries this batch's wiring needs
+## 2. `revops-db` read queries available for wiring
 
-None of these RPCs can be *fully* wired without new `revops-db` query
-functions this batch was not permitted to add (batch scope: "do not
-modify any other crate"). Every builder still works standalone (see its
-unit tests) — these are the missing DB *fetch* functions a maintainer
-adds under `crates/revops-db/src/queries.rs` (or a new module) before
-`main.rs` can call the corresponding builder with live data:
+The policy, hot-channel, and spend-ledger fetch functions below now exist in
+`crates/revops-db/src/queries.rs`. They execute plain reads through the
+single-owner, read-only `DbHandle`; their row contracts live in `revops-db`
+and the response modules re-export them.
 
-| Needed query | Python source | Consumed by |
+| Available query | Python source | Consumed by |
 |---|---|---|
-| `all_policies(handle) -> Vec<PeerPolicy>` | `PolicyManager.get_all_policies` (modules/policy_manager.py, backed by `Database.get_all_policies`, database.py:7779) | `revenue-policy list`, `revenue-list-banned`, `revenue-list-ignored` |
-| `policy_for_peer(handle, peer_id) -> PeerPolicy` (default row when absent — see `PeerPolicy::default_for`) | `PolicyManager.get_policy` (policy_manager.py:446, `Database.get_policy`, database.py:7786) | `revenue-policy get` |
-| `policies_by_tag(handle, tag) -> Vec<PeerPolicy>` | `PolicyManager.get_peers_by_tag` (policy_manager.py:815) | `revenue-policy find` |
-| `policy_changes_since(handle, since) -> Vec<PeerPolicy>` (pre-filtered: caller must drop `is_expired` rows, mirroring policy_manager.py:521-522) + `last_policy_change_timestamp(handle) -> i64` | `Database.get_policy_changes_since` / `.get_last_policy_change_timestamp` (database.py:7865, 7874) | `revenue-policy changes` |
-| `hot_channel_protection_override_peers(handle) -> Vec<rpc_hot_channel_protection_peers::HotChannelProtectionOverridePeer>` | `Database.list_hot_channel_protection_override_peers` (database.py:7281-7287) | `revenue-hot-channel-protection-peers list` |
-| `spend_ledger_aggregates(handle, window_hours, now) -> rpc_spend_ledger::SpendLedgerAggregates` + optional `active_spend_reservations(handle, window_hours, limit, now) -> Vec<rpc_spend_ledger::ActiveReservation>` | `Database.get_spend_ledger_summary` (database.py:4483-4581) | `revenue-spend-ledger` |
+| `all_policies(handle, now) -> Vec<PeerPolicy>` | `PolicyManager.get_all_policies` (modules/policy_manager.py, backed by `Database.get_all_policies`, database.py:7779) | `revenue-policy list`, `revenue-list-banned`, `revenue-list-ignored` |
+| `policy_for_peer(handle, peer_id, now) -> PeerPolicy` (default row when absent or expired) | `PolicyManager.get_policy` (policy_manager.py:446, `Database.get_policy`, database.py:7786) | `revenue-policy get` |
+| `policies_by_tag(handle, tag, now) -> Vec<PeerPolicy>` | `PolicyManager.get_peers_by_tag` (policy_manager.py:815) | `revenue-policy find` |
+| `policy_changes_since(handle, since, now) -> Vec<PeerPolicy>` + `last_policy_change_timestamp(handle) -> i64` | `Database.get_policy_changes_since` / `.get_last_policy_change_timestamp` (database.py:7865, 7874) | `revenue-policy changes` |
+| `hot_channel_protection_override_peers(handle) -> Vec<HotChannelProtectionOverridePeer>` | `Database.list_hot_channel_protection_override_peers` (database.py:7281-7287) | `revenue-hot-channel-protection-peers list` |
+| `spend_ledger_aggregates(handle, window_hours, now) -> SpendLedgerAggregates` + `active_spend_reservations(handle, window_hours, limit, now) -> Vec<ActiveReservation>` | `Database.get_spend_ledger_summary` (database.py:4483-4581) | `revenue-spend-ledger` |
 
-`revops_db::budget::BudgetDb` (used elsewhere for the plugin's OWN write
-rail) models the same `spend_events`/`spend_reservations` table shapes but
-is a write-capable handle over the plugin's *own* shadow DB, never the
-production read-only `DbHandle` — do not repurpose it for these reads;
-add plain `SELECT`/`GROUP BY` queries against `DbHandle` instead, the same
-way `crates/revops-db/src/queries.rs` already does for `closure_costs_windows`
-etc.
+Malformed policy tag JSON and unknown enum values follow Python's fallbacks;
+expired policy rows are filtered with an injected clock. Spend coverage is
+measured from the oldest positive ledger timestamp, including explicit
+`null`/`unknown` when no evidence exists.
+
+`revops_db::budget::BudgetDb` remains the plugin's own write rail. It must not
+be substituted for these production read-only queries.
 
 `ChannelProfitability`/`FlowMetrics` assembly (for `revenue-profitability`
 and `revenue-analyze`'s per-channel results) is intentionally NOT listed
@@ -180,9 +178,7 @@ let policy_name = rpc_name("policy");
         let now = now_unix();
         match action.as_str() {
             "list" => {
-                // TODO: replace `vec![]` with `queries::all_policies(handle).await?`
-                // once that query exists (RPC_BATCH_A.md section 2).
-                let policies: Vec<revops_analytics::policy::PeerPolicy> = vec![];
+                let policies = queries::all_policies(handle, now).await?;
                 Ok(revops::rpc_policy::build_policy_list(&policies, now))
             }
             "get" => {
@@ -192,24 +188,26 @@ let policy_name = rpc_name("policy");
                 if !revops_analytics::policy::is_valid_peer_id(peer_id) {
                     return Ok(revops::rpc_policy::invalid_peer_id_error());
                 }
-                // TODO: replace with `queries::policy_for_peer(handle, peer_id).await?`.
-                let policy = revops_analytics::policy::PeerPolicy::default_for(peer_id);
+                let policy = queries::policy_for_peer(handle, peer_id, now).await?;
                 Ok(revops::rpc_policy::build_policy_get(&policy, now))
             }
             "find" => {
                 let Some(tag) = v.get("tag").and_then(|t| t.as_str()) else {
                     return Ok(revops::rpc_policy::find_usage_error());
                 };
-                // TODO: replace `vec![]` with `queries::policies_by_tag(handle, tag).await?`.
-                let policies: Vec<revops_analytics::policy::PeerPolicy> = vec![];
+                let policies = queries::policies_by_tag(handle, tag, now).await?;
                 Ok(revops::rpc_policy::build_policy_find(tag, &policies, now))
             }
             "changes" => {
                 let since = v.get("since").and_then(|s| s.as_i64()).unwrap_or(0);
-                // TODO: replace with `queries::policy_changes_since(handle, since).await?`
-                // and `queries::last_policy_change_timestamp(handle).await?`.
-                let changes: Vec<revops_analytics::policy::PeerPolicy> = vec![];
-                Ok(revops::rpc_policy::build_policy_changes(since, &changes, 0, now))
+                let changes = queries::policy_changes_since(handle, since, now).await?;
+                let last_update = queries::last_policy_change_timestamp(handle).await?;
+                Ok(revops::rpc_policy::build_policy_changes(
+                    since,
+                    &changes,
+                    last_update,
+                    now,
+                ))
             }
             _ => unreachable!("policy_action_gate already filtered to the 4 read actions"),
         }
@@ -228,9 +226,10 @@ let list_banned_name = rpc_name("list-banned");
     &list_banned_name,
     "peers with an operator ban (revenue-ban)",
     |p: Plugin<SharedState>, _v| async move {
-        // TODO: replace `vec![]` with `queries::all_policies(handle).await?`
-        // once that query exists (RPC_BATCH_A.md section 2).
-        let policies: Vec<revops_analytics::policy::PeerPolicy> = vec![];
+        let Some(handle) = &p.state().db else {
+            return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+        };
+        let policies = queries::all_policies(handle, now_unix()).await?;
         Ok(revops::rpc_list_banned::build_list_banned(&policies))
     },
 )
@@ -247,8 +246,10 @@ let list_ignored_name = rpc_name("list-ignored");
     &list_ignored_name,
     "DEPRECATED: peers with strategy=passive + rebalance=disabled",
     |p: Plugin<SharedState>, _v| async move {
-        // TODO: replace `vec![]` with `queries::all_policies(handle).await?`.
-        let policies: Vec<revops_analytics::policy::PeerPolicy> = vec![];
+        let Some(handle) = &p.state().db else {
+            return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+        };
+        let policies = queries::all_policies(handle, now_unix()).await?;
         Ok(revops::rpc_list_ignored::build_list_ignored(&policies))
     },
 )
@@ -275,11 +276,14 @@ let hot_channel_protection_peers_name = rpc_name("hot-channel-protection-peers")
                 )
             }));
         }
-        // TODO: replace `vec![]` with
-        // `queries::hot_channel_protection_override_peers(handle).await?`
-        // once that query exists (RPC_BATCH_A.md section 2).
-        let rows: Vec<revops::rpc_hot_channel_protection_peers::HotChannelProtectionOverridePeer> = vec![];
-        Ok(revops::rpc_hot_channel_protection_peers::build_hot_channel_protection_peers_list(&rows))
+        let Some(handle) = &p.state().db else {
+            return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+        };
+        let rows = queries::hot_channel_protection_override_peers(handle).await?;
+        Ok(
+            revops::rpc_hot_channel_protection_peers::
+                build_hot_channel_protection_peers_list(&rows),
+        )
     },
 )
 ```
@@ -354,21 +358,35 @@ let spend_ledger_name = rpc_name("spend-ledger");
     "summary of generic spend-ledger events/reservations (opens/closes/etc.)",
     |p: Plugin<SharedState>, v: serde_json::Value| async move {
         let s = p.state();
-        let Some(_handle) = &s.db else {
+        let Some(handle) = &s.db else {
             return Ok(serde_json::json!({"error": "Database not initialized"}));
         };
-        let window_hours = v.get("window_hours").and_then(|w| w.as_i64()).unwrap_or(24).max(1);
+        let window_hours = v
+            .get("window_hours")
+            .and_then(|w| w.as_i64())
+            .unwrap_or(24)
+            .max(1);
         let include_reservations = v
             .get("include_reservations")
             .and_then(|b| b.as_bool())
             .unwrap_or(false);
+        let reservation_limit = v
+            .get("reservation_limit")
+            .and_then(|limit| limit.as_i64())
+            .unwrap_or(50)
+            .max(1);
         let now = now_unix();
-        // TODO: replace with `queries::spend_ledger_aggregates(handle, window_hours, now).await?`
-        // (RPC_BATCH_A.md section 2).
-        let aggregates = revops::rpc_spend_ledger::SpendLedgerAggregates::default();
+        let aggregates = queries::spend_ledger_aggregates(handle, window_hours, now).await?;
         let reservations = if include_reservations {
-            // TODO: `queries::active_spend_reservations(handle, window_hours, limit, now).await?`.
-            Some(Vec::new())
+            Some(
+                queries::active_spend_reservations(
+                    handle,
+                    window_hours,
+                    reservation_limit,
+                    now,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -390,12 +408,10 @@ separately from the `.rpcmethod()` registration (check for a
 as referenced in `lib.rs`'s module doc comment), add the 10 new names
 there too, or that test will fail once these are wired in.
 
-## 5. Verification performed by this batch
+## 5. Verification status
 
-- `cargo test -p revops` (with the above `pub mod` lines temporarily
-  added): 126 lib tests pass, including every new test below.
-- `cargo clippy -p revops --all-targets -- -D warnings`: clean.
-- `cargo fmt --all -- --check`: clean.
-- `lib.rs` was reverted to its original committed content before this
-  batch's own commit — none of the above is live until a maintainer
-  applies sections 1 and 3 (and, for full data, section 2).
+The response builders are compiled modules and their unit tests run under
+`cargo test -p revops`. The DB reads in section 2 are covered by
+`crates/revops-db/tests/queries.rs`. The handlers in section 3 remain wiring
+instructions until they are registered in `main.rs`; do not advertise these
+RPCs as live before manifest/reachability tests exercise the real handlers.

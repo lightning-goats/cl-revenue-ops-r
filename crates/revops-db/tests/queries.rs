@@ -17,9 +17,10 @@
 
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
-    all_policies, closed_channels_summary, closure_costs_windows, config_override,
-    last_policy_change_timestamp, lifetime_stats, pnl_summary, policies_by_tag,
-    policy_changes_since, policy_for_peer,
+    active_spend_reservations, all_policies, closed_channels_summary, closure_costs_windows,
+    config_override, hot_channel_protection_override_peers, last_policy_change_timestamp,
+    lifetime_stats, pnl_summary, policies_by_tag, policy_changes_since, policy_for_peer,
+    spend_ledger_aggregates,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -566,4 +567,263 @@ async fn corrupt_policy_row_is_isolated_instead_of_bricking_all_reads() {
     assert_eq!(corrupt.peer_id, "corrupt");
     assert_eq!(corrupt.strategy.as_value(), "dynamic");
     assert_eq!(corrupt.updated_at, 0);
+}
+
+#[tokio::test]
+async fn hot_channel_overrides_are_oldest_first_and_preserve_nulls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hot-overrides.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO hot_channel_protection_overrides
+             (peer_id, added_at, note, min_depletion_trigger_pct)
+             VALUES ('later', 200, 'manual', 25.5)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hot_channel_protection_overrides
+             (peer_id, added_at, note, min_depletion_trigger_pct)
+             VALUES ('earlier', 100, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let rows = hot_channel_protection_override_peers(&handle)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.peer_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["earlier", "later"]
+    );
+    assert_eq!(rows[0].note, None);
+    assert_eq!(rows[0].min_depletion_trigger_pct, None);
+    assert_eq!(rows[1].note.as_deref(), Some("manual"));
+    assert_eq!(rows[1].min_depletion_trigger_pct, Some(25.5));
+}
+
+#[tokio::test]
+async fn spend_ledger_aggregates_match_python_windows_groups_and_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spend-ledger.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let cutoff = NOW - 24 * 3600;
+    {
+        let conn = Connection::open(&path).unwrap();
+        let events = [
+            ("e-cutoff", "rebalance", 100i64, cutoff),
+            ("e-recent", "channel_open", 500i64, NOW - 60),
+            ("e-old", "rebalance", 999i64, cutoff - 1),
+        ];
+        for (event_id, category, amount, timestamp) in events {
+            conn.execute(
+                "INSERT INTO spend_events (event_id, category, amount_sats, timestamp)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![event_id, category, amount, timestamp],
+            )
+            .unwrap();
+        }
+        let reservations = [
+            ("r-cutoff", "rebalance", 200i64, cutoff, "active"),
+            ("r-recent", "channel_open", 300i64, NOW - 30, "active"),
+            ("r-spent", "rebalance", 400i64, NOW - 20, "spent"),
+            ("r-old", "channel_open", 888i64, cutoff - 1, "active"),
+        ];
+        for (id, category, amount, reserved_at, status) in reservations {
+            conn.execute(
+                "INSERT INTO spend_reservations
+                 (reservation_id, category, reserved_sats, reserved_at, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, category, amount, reserved_at, status],
+            )
+            .unwrap();
+        }
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let agg = spend_ledger_aggregates(&handle, 24, NOW).await.unwrap();
+    assert_eq!(agg.spent_24h_sats, 600);
+    assert_eq!(agg.reserved_24h_sats, 500);
+    assert_eq!(agg.spent_by_category.get("rebalance"), Some(&100));
+    assert_eq!(agg.spent_by_category.get("channel_open"), Some(&500));
+    assert_eq!(agg.reserved_by_category.get("rebalance"), Some(&200));
+    assert_eq!(agg.reserved_by_category.get("channel_open"), Some(&300));
+    assert_eq!(agg.event_count_by_category.get("rebalance"), Some(&1));
+    assert_eq!(
+        agg.active_reservation_count_by_category.get("channel_open"),
+        Some(&1)
+    );
+    assert_eq!(agg.covered_hours, Some(24.0));
+    assert_eq!(agg.coverage_status, "complete");
+}
+
+#[tokio::test]
+async fn spend_ledger_coverage_is_unknown_empty_and_partial_from_oldest_evidence() {
+    let empty_dir = tempfile::tempdir().unwrap();
+    let empty_path = empty_dir.path().join("spend-empty.db");
+    std::fs::copy(fixture_path(), &empty_path).unwrap();
+    let empty_handle = spawn_read_only(&empty_path).await.unwrap();
+    let empty = spend_ledger_aggregates(&empty_handle, 0, NOW)
+        .await
+        .unwrap();
+    assert_eq!(empty.covered_hours, None);
+    assert_eq!(empty.coverage_status, "unknown");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spend-partial.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO spend_events (event_id, category, amount_sats, timestamp)
+             VALUES ('partial', 'rebalance', 1, ?1)",
+            [NOW - 5_550],
+        )
+        .unwrap();
+    }
+    let handle = spawn_read_only(&path).await.unwrap();
+    let partial = spend_ledger_aggregates(&handle, 24, NOW).await.unwrap();
+    assert_eq!(partial.covered_hours, Some(1.54));
+    assert_eq!(partial.coverage_status, "partial");
+
+    let future_dir = tempfile::tempdir().unwrap();
+    let future_path = future_dir.path().join("spend-future.db");
+    std::fs::copy(fixture_path(), &future_path).unwrap();
+    {
+        let conn = Connection::open(&future_path).unwrap();
+        conn.execute(
+            "INSERT INTO spend_events (event_id, category, amount_sats, timestamp)
+             VALUES ('future', 'rebalance', 1, ?1)",
+            [NOW + 1],
+        )
+        .unwrap();
+    }
+    let future_handle = spawn_read_only(&future_path).await.unwrap();
+    let future = spend_ledger_aggregates(&future_handle, 24, NOW)
+        .await
+        .unwrap();
+    assert_eq!(future.covered_hours, None);
+    assert_eq!(future.coverage_status, "unknown");
+}
+
+#[tokio::test]
+async fn active_spend_reservations_filter_order_limit_and_preserve_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("active-reservations.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let cutoff = NOW - 24 * 3600;
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO spend_reservations
+             (reservation_id, category, subcategory, reserved_sats, reserved_at,
+              reference_id, channel_id, status, metadata_json)
+             VALUES ('first', 'channel_open', 'lnplus_swap', 200, ?1,
+                     NULL, '1x1x0', 'active', '{\"swap\":1}')",
+            [cutoff],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spend_reservations
+             (reservation_id, category, reserved_sats, reserved_at, status)
+             VALUES ('second', 'rebalance', 300, ?1, 'active')",
+            [NOW - 10],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spend_reservations
+             (reservation_id, category, reserved_sats, reserved_at, status)
+             VALUES ('spent', 'rebalance', 400, ?1, 'spent')",
+            [NOW - 20],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spend_reservations
+             (reservation_id, category, reserved_sats, reserved_at, status)
+             VALUES ('old', 'rebalance', 500, ?1, 'active')",
+            [cutoff - 1],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let one = active_spend_reservations(&handle, 24, 0, NOW)
+        .await
+        .unwrap();
+    assert_eq!(one.len(), 1, "limit is clamped to at least one");
+    assert_eq!(one[0].reservation_id, "first");
+    assert_eq!(one[0].subcategory.as_deref(), Some("lnplus_swap"));
+    assert_eq!(one[0].reference_id, None);
+    assert_eq!(one[0].channel_id.as_deref(), Some("1x1x0"));
+    assert_eq!(one[0].metadata_json.as_deref(), Some("{\"swap\":1}"));
+
+    let all = active_spend_reservations(&handle, 24, 50, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|row| row.reservation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+}
+
+#[tokio::test]
+async fn spend_ledger_rejects_an_overflowing_window_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spend-overflow.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    let aggregate_err = spend_ledger_aggregates(&handle, i64::MAX, NOW)
+        .await
+        .unwrap_err();
+    assert!(aggregate_err.to_string().contains("window_hours"));
+}
+
+#[tokio::test]
+async fn active_reservations_reject_an_overflowing_window_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reservation-overflow.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    let reservation_err = active_spend_reservations(&handle, i64::MAX, 50, NOW)
+        .await
+        .unwrap_err();
+    assert!(reservation_err.to_string().contains("window_hours"));
+}
+
+#[tokio::test]
+async fn malformed_coverage_timestamp_is_ignored_as_unknown_like_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spend-malformed-time.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO spend_events (event_id, category, amount_sats, timestamp)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["malformed-time", "rebalance", 1, "not-a-timestamp"],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let aggregate = spend_ledger_aggregates(&handle, 24, NOW).await.unwrap();
+    assert_eq!(aggregate.covered_hours, None);
+    assert_eq!(aggregate.coverage_status, "unknown");
+}
+
+#[test]
+fn spend_ledger_aggregate_default_is_honest_unknown_coverage() {
+    let agg = revops_db::queries::SpendLedgerAggregates::default();
+    assert_eq!(agg.covered_hours, None);
+    assert_eq!(agg.coverage_status, "unknown");
 }

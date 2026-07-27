@@ -11,18 +11,10 @@
 
 use serde_json::{json, Value};
 
-/// One row of `hot_channel_protection_overrides` (modules/database.py:
-/// 855-865's DDL) -- there is no `revops-db` query for this table yet
-/// (see `crates/revops/RPC_BATCH_A.md`), so this small row shape lives
-/// here rather than being imported from `revops_db::queries`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HotChannelProtectionOverridePeer {
-    pub peer_id: String,
-    pub added_at: i64,
-    pub note: String,
-    /// `NULL`-able REAL column (modules/database.py:864).
-    pub min_depletion_trigger_pct: Option<f64>,
-}
+/// Shared DB-owned row contract. Re-exported here to preserve the response
+/// builder's public API while the later plugin wiring fetches rows directly
+/// from `revops_db::queries`.
+pub use revops_db::queries::HotChannelProtectionOverridePeer;
 
 /// Port of the `list` branch. Row order (`ORDER BY added_at ASC`) is the
 /// caller's responsibility -- this builder does not sort, mirroring
@@ -57,13 +49,13 @@ mod tests {
             HotChannelProtectionOverridePeer {
                 peer_id: "peer-a".to_string(),
                 added_at: 100,
-                note: "manual override".to_string(),
+                note: Some("manual override".to_string()),
                 min_depletion_trigger_pct: Some(25.5),
             },
             HotChannelProtectionOverridePeer {
                 peer_id: "peer-b".to_string(),
                 added_at: 200,
-                note: String::new(),
+                note: None,
                 min_depletion_trigger_pct: None,
             },
         ];
@@ -74,6 +66,7 @@ mod tests {
         assert_eq!(peers[0]["peer_id"], "peer-a");
         assert_eq!(peers[0]["min_depletion_trigger_pct"], 25.5);
         assert_eq!(peers[1]["peer_id"], "peer-b");
+        assert_eq!(peers[1]["note"], Value::Null);
         // NULL column must stay null, never a fabricated 0.0.
         assert_eq!(peers[1]["min_depletion_trigger_pct"], Value::Null);
     }

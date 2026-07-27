@@ -6,46 +6,19 @@
 //! aggregates over the `spend_events`/`spend_reservations` tables (the
 //! same tables `revops_db::budget::BudgetDb` models, though that module is
 //! a WRITE rail over the plugin's own shadow DB, not a read query against
-//! the production DB handle -- see `crates/revops/RPC_BATCH_A.md` for the
-//! new read-only `revops-db` query this needs).
+//! the production DB handle). The typed read path lives in
+//! `revops_db::queries`; see `crates/revops/RPC_BATCH_A.md` for wiring.
 //!
-//! `coverage_hours`/`coverage_status` (`Database._coverage_from_earliest`,
-//! called via `_earliest_evidence_timestamp`) are NOT ported: that helper
-//! measures how much of the requested window is actually backed by
-//! ledger evidence, a separate small algorithm this batch does not carry
-//! forward. They are therefore always `null`, gap-listed -- never a fake
-//! "full coverage" claim.
+//! `coverage_hours`/`coverage_status` are measured by the DB-owned query
+//! from the oldest positive spend-event or reservation timestamp. No evidence
+//! is the explicit `null`/`unknown` result; it is not a declared gap and is
+//! never promoted to fabricated full coverage.
 
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 
-/// Already-fetched `spend_events`/`spend_reservations` aggregates for one
-/// window (`Database.get_spend_ledger_summary`'s SQL results,
-/// modules/database.py:4493-4527).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SpendLedgerAggregates {
-    pub spent_24h_sats: i64,
-    pub reserved_24h_sats: i64,
-    pub spent_by_category: BTreeMap<String, i64>,
-    pub reserved_by_category: BTreeMap<String, i64>,
-    pub event_count_by_category: BTreeMap<String, i64>,
-    pub active_reservation_count_by_category: BTreeMap<String, i64>,
-}
-
-/// One row of `spend_reservations` (only included when
-/// `include_reservations=true`, modules/database.py:4557-4580).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActiveReservation {
-    pub reservation_id: String,
-    pub category: String,
-    pub subcategory: Option<String>,
-    pub reserved_sats: i64,
-    pub reserved_at: i64,
-    pub reference_id: Option<String>,
-    pub channel_id: Option<String>,
-    pub status: String,
-    pub metadata_json: Option<String>,
-}
+/// Shared DB-owned ledger contracts. Re-exported to preserve this builder's
+/// public API while plugin wiring fetches the values from `revops_db::queries`.
+pub use revops_db::queries::{ActiveReservation, SpendLedgerAggregates};
 
 /// Port of `Database.get_spend_ledger_summary`. `window_hours` is the
 /// (already-clamped, `max(1, int(window_hours))`) request window;
@@ -57,21 +30,29 @@ pub fn build_spend_ledger(
     aggregates: &SpendLedgerAggregates,
     reservations: Option<&[ActiveReservation]>,
 ) -> Value {
+    let covered_hours = match (
+        aggregates.coverage_status.as_str(),
+        aggregates.covered_hours,
+    ) {
+        ("complete", Some(_)) => json!(window_hours),
+        (_, Some(hours)) => json!(hours),
+        (_, None) => Value::Null,
+    };
     let mut out = json!({
         "timestamp": generated_at,
         "generated_at": generated_at,
         "ttl_seconds": 1800,
         "window_hours": window_hours,
-        "coverage_hours": Value::Null,
-        "covered_hours": Value::Null,
-        "coverage_status": Value::Null,
+        "coverage_hours": covered_hours,
+        "covered_hours": covered_hours,
+        "coverage_status": aggregates.coverage_status,
         "spent_24h_sats": aggregates.spent_24h_sats,
         "reserved_24h_sats": aggregates.reserved_24h_sats,
         "spent_by_category": aggregates.spent_by_category,
         "reserved_by_category": aggregates.reserved_by_category,
         "event_count_by_category": aggregates.event_count_by_category,
         "active_reservation_count_by_category": aggregates.active_reservation_count_by_category,
-        "_gaps": ["coverage_hours", "covered_hours", "coverage_status"],
+        "_gaps": [],
     });
 
     if let Some(rows) = reservations {
@@ -102,6 +83,7 @@ pub fn build_spend_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn sample_aggregates() -> SpendLedgerAggregates {
         let mut spent_by_category = BTreeMap::new();
@@ -116,30 +98,43 @@ mod tests {
             reserved_by_category: BTreeMap::new(),
             event_count_by_category,
             active_reservation_count_by_category: BTreeMap::new(),
+            covered_hours: Some(24.0),
+            coverage_status: "complete".to_string(),
         }
     }
 
     #[test]
-    fn wires_aggregates_and_gaps_coverage_fields() {
+    fn wires_aggregates_and_measured_coverage() {
         let agg = sample_aggregates();
         let v = build_spend_ledger(24, 1_700_000_000, &agg, None);
         assert_eq!(v["spent_24h_sats"], 6500);
         assert_eq!(v["reserved_24h_sats"], 200);
         assert_eq!(v["spent_by_category"]["rebalance"], 1500);
         assert_eq!(v["event_count_by_category"]["rebalance"], 3);
-        assert_eq!(v["coverage_hours"], Value::Null);
-        assert_eq!(v["coverage_status"], Value::Null);
+        assert_eq!(v["coverage_hours"], 24);
+        assert_eq!(v["covered_hours"], 24);
+        assert_eq!(v["coverage_status"], "complete");
         let gaps: Vec<&str> = v["_gaps"]
             .as_array()
             .unwrap()
             .iter()
             .map(|g| g.as_str().unwrap())
             .collect();
-        assert_eq!(
-            gaps,
-            vec!["coverage_hours", "covered_hours", "coverage_status"]
-        );
+        assert!(gaps.is_empty(), "measured coverage has no declared gap");
         assert!(v.get("active_reservations").is_none());
+    }
+
+    #[test]
+    fn unknown_coverage_is_explicit_null_not_a_declared_gap() {
+        let agg = SpendLedgerAggregates {
+            coverage_status: "unknown".to_string(),
+            ..SpendLedgerAggregates::default()
+        };
+        let v = build_spend_ledger(24, 1_700_000_000, &agg, None);
+        assert_eq!(v["coverage_hours"], Value::Null);
+        assert_eq!(v["covered_hours"], Value::Null);
+        assert_eq!(v["coverage_status"], "unknown");
+        assert_eq!(v["_gaps"], json!([]));
     }
 
     #[test]
