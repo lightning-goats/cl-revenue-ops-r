@@ -138,14 +138,14 @@ git commit -m "feat(db): add typed multi-row reads"
 - Produces:
 
 ```rust
-pub async fn all_policies(handle: &DbHandle) -> Result<Vec<PeerPolicy>>;
-pub async fn policy_for_peer(handle: &DbHandle, peer_id: &str) -> Result<PeerPolicy>;
-pub async fn policies_by_tag(handle: &DbHandle, tag: &str) -> Result<Vec<PeerPolicy>>;
-pub async fn policy_changes_since(handle: &DbHandle, since: i64) -> Result<Vec<PeerPolicy>>;
+pub async fn all_policies(handle: &DbHandle, now: i64) -> Result<Vec<PeerPolicy>>;
+pub async fn policy_for_peer(handle: &DbHandle, peer_id: &str, now: i64) -> Result<PeerPolicy>;
+pub async fn policies_by_tag(handle: &DbHandle, tag: &str, now: i64) -> Result<Vec<PeerPolicy>>;
+pub async fn policy_changes_since(handle: &DbHandle, since: i64, now: i64) -> Result<Vec<PeerPolicy>>;
 pub async fn last_policy_change_timestamp(handle: &DbHandle) -> Result<i64>;
 ```
 
-The row mapper treats malformed `tags` JSON or a non-array JSON value as `[]`, invalid strategy as `Dynamic`, and invalid rebalance mode as `Enabled`, matching `_row_to_policy`. SQL ordering is `updated_at DESC`; `policy_for_peer` returns `PeerPolicy::default_for(peer_id)` when absent. Expiry filtering remains in the existing response builders, which receive `now` and already own presentation-time expiry semantics.
+The row mapper treats malformed `tags` JSON or a non-array JSON value as `[]`, invalid strategy as `Dynamic`, and invalid rebalance mode as `Enabled`, matching `_row_to_policy`. A row whose typed columns cannot be decoded is skipped in isolation, matching Python PM-I13, while statement/connection failures still propagate. SQL ordering is `updated_at DESC`. The policy APIs accept an injected `now`, omit rows where `now > expires_at`, and make `policy_for_peer` return `PeerPolicy::default_for(peer_id)` when the row is absent or expired. `last_policy_change_timestamp` remains the raw DB maximum, including expired rows, matching Python.
 
 - [ ] **Step 1: Add failing policy-query tests**
 

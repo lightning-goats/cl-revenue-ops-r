@@ -17,7 +17,9 @@
 
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
-    closed_channels_summary, closure_costs_windows, config_override, lifetime_stats, pnl_summary,
+    all_policies, closed_channels_summary, closure_costs_windows, config_override,
+    last_policy_change_timestamp, lifetime_stats, pnl_summary, policies_by_tag,
+    policy_changes_since, policy_for_peer,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -311,4 +313,257 @@ async fn config_override_does_not_leak_across_keys() {
         config_override(&handle, "daily_budget_sats").await.unwrap(),
         Some("1000".to_string())
     );
+}
+
+#[tokio::test]
+async fn policy_list_orders_rows_and_uses_python_decode_fallbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policies.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        let rows = [
+            (
+                "peer-a",
+                "dynamic",
+                "enabled",
+                "[\"vip\",\"banned\"]",
+                400i64,
+            ),
+            ("peer-b", "static", "source_only", "[\"vip\"]", 300i64),
+            (
+                "peer-c",
+                "invalid-strategy",
+                "invalid-mode",
+                "{\"not\":\"an array\"}",
+                200i64,
+            ),
+            ("peer-d", "passive", "disabled", "not-json", 100i64),
+        ];
+        for (peer_id, strategy, mode, tags, updated_at) in rows {
+            conn.execute(
+                "INSERT INTO peer_policies
+                 (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at,
+                  fee_multiplier_min, fee_multiplier_max, expires_at)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, NULL, NULL, NULL)",
+                rusqlite::params![peer_id, strategy, mode, tags, updated_at],
+            )
+            .unwrap();
+        }
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let policies = all_policies(&handle, NOW).await.unwrap();
+
+    assert_eq!(
+        policies
+            .iter()
+            .map(|p| p.peer_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["peer-a", "peer-b", "peer-c", "peer-d"]
+    );
+    assert_eq!(policies[0].tags, vec!["vip", "banned"]);
+    assert_eq!(policies[1].strategy.as_value(), "static");
+    assert_eq!(policies[1].rebalance_mode.as_value(), "source_only");
+    assert_eq!(policies[2].strategy.as_value(), "dynamic");
+    assert_eq!(policies[2].rebalance_mode.as_value(), "enabled");
+    assert!(policies[2].tags.is_empty(), "non-array JSON defaults empty");
+    assert!(policies[3].tags.is_empty(), "malformed JSON defaults empty");
+}
+
+#[tokio::test]
+async fn policy_for_peer_returns_the_row_or_an_exact_peer_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-get.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at,
+              fee_multiplier_min, fee_multiplier_max, expires_at)
+             VALUES ('configured', 'static', 'disabled', 321, '[\"vip\"]', 77,
+                     0.5, 2.0, 2000000000)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let configured = policy_for_peer(&handle, "configured", NOW).await.unwrap();
+    assert_eq!(configured.strategy.as_value(), "static");
+    assert_eq!(configured.fee_ppm_target, Some(321));
+    assert_eq!(configured.tags, vec!["vip"]);
+    assert_eq!(configured.fee_multiplier_min, Some(0.5));
+    assert_eq!(configured.expires_at, Some(2_000_000_000));
+
+    let missing = policy_for_peer(&handle, "missing-peer", NOW).await.unwrap();
+    assert_eq!(missing.peer_id, "missing-peer");
+    assert_eq!(missing.strategy.as_value(), "dynamic");
+    assert_eq!(missing.rebalance_mode.as_value(), "enabled");
+    assert_eq!(missing.updated_at, 0);
+    assert!(missing.tags.is_empty());
+}
+
+#[tokio::test]
+async fn policy_reads_exclude_expired_rows_using_python_strict_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-expiry.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+             VALUES ('expired', 'static', 'disabled', '[]', 2, ?1)",
+            [NOW - 1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+             VALUES ('boundary', 'static', 'disabled', '[]', 1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let active = all_policies(&handle, NOW).await.unwrap();
+    assert_eq!(
+        active
+            .iter()
+            .map(|p| p.peer_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["boundary"],
+        "now == expires_at is not expired; now > expires_at is expired"
+    );
+
+    let expired = policy_for_peer(&handle, "expired", NOW).await.unwrap();
+    assert_eq!(expired.peer_id, "expired");
+    assert_eq!(expired.strategy.as_value(), "dynamic");
+    assert_eq!(expired.updated_at, 0);
+}
+
+#[tokio::test]
+async fn policy_by_tag_matches_exact_active_tags_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-tags.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        let rows = [
+            ("exact", "[\"vip\"]", None),
+            ("similar", "[\"vip-extra\"]", None),
+            ("expired", "[\"vip\"]", Some(NOW - 1)),
+        ];
+        for (peer_id, tags, expires_at) in rows {
+            conn.execute(
+                "INSERT INTO peer_policies
+                 (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+                 VALUES (?1, 'dynamic', 'enabled', ?2, 1, ?3)",
+                rusqlite::params![peer_id, tags, expires_at],
+            )
+            .unwrap();
+        }
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let tagged = policies_by_tag(&handle, "vip", NOW).await.unwrap();
+    assert_eq!(
+        tagged
+            .iter()
+            .map(|p| p.peer_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["exact"]
+    );
+}
+
+#[tokio::test]
+async fn policy_changes_are_strict_active_and_last_timestamp_is_raw_max() {
+    let empty_dir = tempfile::tempdir().unwrap();
+    let empty_path = empty_dir.path().join("policy-last-empty.db");
+    std::fs::copy(fixture_path(), &empty_path).unwrap();
+    let empty_handle = spawn_read_only(&empty_path).await.unwrap();
+    assert_eq!(
+        last_policy_change_timestamp(&empty_handle).await.unwrap(),
+        0
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-changes.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        let rows = [
+            ("at-boundary", 100i64, None),
+            ("active", 200i64, None),
+            ("expired-newest", 300i64, Some(NOW - 1)),
+        ];
+        for (peer_id, updated_at, expires_at) in rows {
+            conn.execute(
+                "INSERT INTO peer_policies
+                 (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+                 VALUES (?1, 'dynamic', 'enabled', '[]', ?2, ?3)",
+                rusqlite::params![peer_id, updated_at, expires_at],
+            )
+            .unwrap();
+        }
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let changes = policy_changes_since(&handle, 100, NOW).await.unwrap();
+    assert_eq!(
+        changes
+            .iter()
+            .map(|p| p.peer_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["active"],
+        "updated_at is strict greater-than and expired changes are omitted"
+    );
+    assert_eq!(
+        last_policy_change_timestamp(&handle).await.unwrap(),
+        300,
+        "Python MAX includes the newest DB row even when it is expired"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_policy_row_is_isolated_instead_of_bricking_all_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy-corrupt-row.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+             VALUES ('valid', 'dynamic', 'enabled', '[]', 2, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+             VALUES ('corrupt', 'static', 'disabled', '[]', 3, 'not-an-integer')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let policies = all_policies(&handle, NOW).await.unwrap();
+    assert_eq!(
+        policies
+            .iter()
+            .map(|p| p.peer_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["valid"],
+        "a corrupt peer row must not poison every policy read"
+    );
+
+    let corrupt = policy_for_peer(&handle, "corrupt", NOW).await.unwrap();
+    assert_eq!(corrupt.peer_id, "corrupt");
+    assert_eq!(corrupt.strategy.as_value(), "dynamic");
+    assert_eq!(corrupt.updated_at, 0);
 }

@@ -15,8 +15,9 @@
 
 use crate::actor::DbHandle;
 use anyhow::Result;
+use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_core::msat::{base_to_sats_ceil, base_to_sats_floor, py_round2};
-use rusqlite::types::Value as SqlValue;
+use rusqlite::{types::Value as SqlValue, Row};
 
 /// Port of `Database.get_config_override` (modules/database.py:7316-7322):
 /// `SELECT value FROM config_overrides WHERE key = ?`. `key` is the Python
@@ -32,6 +33,123 @@ pub async fn config_override(handle: &DbHandle, key: &str) -> Result<Option<Stri
         .query_optional_string(
             "SELECT value FROM config_overrides WHERE key = ?1",
             vec![SqlValue::Text(key.to_string())],
+        )
+        .await
+}
+
+fn decode_policy_row(row: &Row) -> rusqlite::Result<PeerPolicy> {
+    let strategy: String = row.get(1)?;
+    let rebalance_mode: String = row.get(2)?;
+    let tags_json: Option<String> = row.get(4)?;
+    let tags = tags_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+
+    Ok(PeerPolicy {
+        peer_id: row.get(0)?,
+        strategy: FeeStrategy::from_value(&strategy).unwrap_or(FeeStrategy::Dynamic),
+        rebalance_mode: RebalanceMode::from_value(&rebalance_mode)
+            .unwrap_or(RebalanceMode::Enabled),
+        fee_ppm_target: row.get(3)?,
+        tags,
+        updated_at: row.get(5)?,
+        fee_multiplier_min: row.get(6)?,
+        fee_multiplier_max: row.get(7)?,
+        expires_at: row.get(8)?,
+    })
+}
+
+async fn query_policy_rows(
+    handle: &DbHandle,
+    sql: &'static str,
+    params: Vec<SqlValue>,
+) -> Result<Vec<PeerPolicy>> {
+    let decoded = handle
+        .query_rows(sql, params, |row| Ok(decode_policy_row(row).ok()))
+        .await?;
+    Ok(decoded.into_iter().flatten().collect())
+}
+
+/// All active explicit peer policies in newest-first update order. Row decoding
+/// mirrors `PolicyManager._row_to_policy`: malformed/non-list tags become
+/// empty and unknown enum values degrade to the safe defaults.
+pub async fn all_policies(handle: &DbHandle, now: i64) -> Result<Vec<PeerPolicy>> {
+    let policies = query_policy_rows(
+        handle,
+        concat!(
+            "SELECT peer_id, strategy, rebalance_mode, fee_ppm_target, tags, ",
+            "updated_at, fee_multiplier_min, fee_multiplier_max, expires_at ",
+            "FROM peer_policies ORDER BY updated_at DESC"
+        ),
+        vec![],
+    )
+    .await?;
+    Ok(policies
+        .into_iter()
+        .filter(|policy| !policy.is_expired(now))
+        .collect())
+}
+
+/// One active explicit policy row, or the same default policy Python returns
+/// when no row exists or the row is expired. Database/actor failures still
+/// propagate as errors.
+pub async fn policy_for_peer(handle: &DbHandle, peer_id: &str, now: i64) -> Result<PeerPolicy> {
+    let mut rows = query_policy_rows(
+        handle,
+        concat!(
+            "SELECT peer_id, strategy, rebalance_mode, fee_ppm_target, tags, ",
+            "updated_at, fee_multiplier_min, fee_multiplier_max, expires_at ",
+            "FROM peer_policies WHERE peer_id = ?1"
+        ),
+        vec![SqlValue::Text(peer_id.to_string())],
+    )
+    .await?;
+    Ok(match rows.pop() {
+        Some(policy) if !policy.is_expired(now) => policy,
+        _ => PeerPolicy::default_for(peer_id),
+    })
+}
+
+/// Active policies carrying an exact tag. Filtering decoded tag arrays in
+/// Rust avoids false positives from SQL substring matching of JSON text.
+pub async fn policies_by_tag(handle: &DbHandle, tag: &str, now: i64) -> Result<Vec<PeerPolicy>> {
+    Ok(all_policies(handle, now)
+        .await?
+        .into_iter()
+        .filter(|policy| policy.has_tag(tag))
+        .collect())
+}
+
+/// Active policies changed strictly after `since`, newest first.
+pub async fn policy_changes_since(
+    handle: &DbHandle,
+    since: i64,
+    now: i64,
+) -> Result<Vec<PeerPolicy>> {
+    let policies = query_policy_rows(
+        handle,
+        concat!(
+            "SELECT peer_id, strategy, rebalance_mode, fee_ppm_target, tags, ",
+            "updated_at, fee_multiplier_min, fee_multiplier_max, expires_at ",
+            "FROM peer_policies WHERE updated_at > ?1 ORDER BY updated_at DESC"
+        ),
+        vec![SqlValue::Integer(since)],
+    )
+    .await?;
+    Ok(policies
+        .into_iter()
+        .filter(|policy| !policy.is_expired(now))
+        .collect())
+}
+
+/// Raw maximum `updated_at`, including expired rows, or zero for an empty
+/// table. This matches `Database.get_last_policy_change_timestamp`.
+pub async fn last_policy_change_timestamp(handle: &DbHandle) -> Result<i64> {
+    handle
+        .query_i64(
+            "SELECT COALESCE(MAX(updated_at), 0) FROM peer_policies",
+            vec![],
         )
         .await
 }

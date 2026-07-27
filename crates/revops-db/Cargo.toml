@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+revops-analytics = { path = "../revops-analytics" }
 revops-core = { path = "../revops-core" }
 rusqlite = "0.32"        # NO "bundled" feature — system sqlite by design
 serde_json.workspace = true

@@ -658,6 +658,7 @@ name = "revops-db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "revops-analytics",
  "revops-core",
  "rusqlite",
  "serde_json",
