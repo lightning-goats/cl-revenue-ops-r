@@ -146,6 +146,8 @@
 //! thread).
 
 use std::collections::HashMap;
+
+use revops_fees::thompson::dynamics;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -502,15 +504,18 @@ pub enum CycleMsg {
     /// `revenue-r-fee-wake` RPC's trigger.
     WakeAll,
     /// `record_failed_forward`'s scheduler-facing hook (py
-    /// fee_controller.py:8527-8608): a fee-relevant failed forward on
-    /// `channel_id`. Task 6: recording-only (see
-    /// `CycleOwner::handle_failed_forward`) -- constructed by nothing yet
-    /// (no `forward_event` hook subscription exists in this window),
-    /// same "handler is real, caller is future work" posture
-    /// `PolicyChanged` already carries.
-    FailedForward {
-        channel_id: String,
-    },
+    /// `fee_controller.py:9179`): a fee-relevant failed forward on the
+    /// OUTGOING `channel_id`.
+    ///
+    /// Task 44 (2026-07-27) wired the EFFECT that Task 6 deferred. The
+    /// payload carries everything the nudge needs, including
+    /// `event_ts` -- the notification's OWN timestamp. That matters: the
+    /// effect is applied on the owner thread when this message is
+    /// dispatched, not on the notification thread as Python does under
+    /// `_state_lock`, and both cooldown windows below must still be
+    /// measured from when the forward actually failed. Using the dispatch
+    /// clock instead would silently widen them.
+    FailedForward(Box<FailedForwardSignal>),
     /// Fix round 1 (review finding 2): CLN's own `forward_event`
     /// notification (`main.rs`'s subscription) offering `channel_id` to
     /// the trigger queue -- recording-only, same "handler is real, effect
@@ -618,8 +623,57 @@ fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
 /// The single owner of `ControllerState` + the ONE long-lived `PyRandom`.
 /// Lives on the dedicated cycle thread for the plugin's whole lifetime;
 /// tests drive it synchronously.
+/// One fee-relevant failed forward, as delivered to the owner thread.
+///
+/// `channel_id` is the OUTGOING channel and nothing else (py audit DTS-4a):
+/// per BOLT 7 the fee a sender pays to traverse this node is OUR policy on
+/// the out channel, so an in-channel failure is evidence about the PEER's
+/// fee, not ours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedForwardSignal {
+    pub channel_id: String,
+    /// The INCOMING amount of the failed forward (py `failed_in_msat`),
+    /// which drives the log10 weight boost.
+    pub amount_msat: i64,
+    pub failcode: Option<i64>,
+    pub failreason: Option<String>,
+    /// The notification's own clock read -- see [`CycleMsg::FailedForward`].
+    pub event_ts: i64,
+}
+
+/// What [`CycleOwner::apply_failure_nudge`] actually did, so the trigger
+/// receipt records the truth rather than a hopeful summary. Every skip
+/// names the guard that fired.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NudgeOutcome {
+    Applied { implied_fee: i64, weight: f64 },
+    Skipped(&'static str),
+}
+
+/// py `FeeController.FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS` (2635): after we
+/// apply a fee, gossip needs time to propagate, so failures inside this
+/// window are still being routed against the OLD fee and are not evidence
+/// about the new one (audit SL-2).
+pub const FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS: i64 = 3600;
+
+/// py `FeeController.FAILURE_NUDGE_MIN_INTERVAL_SECONDS` (2636): at most one
+/// nudge per channel per window, so a burst of failures from one payment
+/// attempt cannot stack into a large synthetic signal (audit SL-2).
+pub const FAILURE_NUDGE_MIN_INTERVAL_SECONDS: i64 = 1800;
+
 pub struct CycleOwner {
     state: ControllerState,
+    /// py `_last_fee_apply_ts` (3011, set at 8456): OUR OWN successful fee
+    /// applications, keyed by channel. Deliberately an in-memory map that
+    /// starts empty on restart, exactly as Python's does -- NOT the
+    /// persisted `last_broadcast_at`, which would also count Python's
+    /// applications and silently suppress nudges Python would have taken.
+    /// Parity here beats robustness: diverging is how the decision surface
+    /// drifts.
+    last_fee_apply_ts: HashMap<String, i64>,
+    /// py `_last_failure_nudge_ts` (3011): when this channel last took a
+    /// failure nudge, for the per-window rate limit.
+    last_failure_nudge_ts: HashMap<String, i64>,
     /// Seeded exactly ONCE, in [`CycleOwner::new`] (production: from
     /// `now_unix()` at spawn). Never reseeded -- every cycle continues
     /// this one stream, mirroring Python's module-level `random` instance.
@@ -714,6 +768,8 @@ impl CycleOwner {
             state: ControllerState::new(),
             rng: PyRandom::seed_from_u64(seed_now.max(0) as u64),
             lifecycle: cfg.lifecycle,
+            last_fee_apply_ts: HashMap::new(),
+            last_failure_nudge_ts: HashMap::new(),
             hydrated_once: false,
             seed_refused: false,
             store,
@@ -1516,15 +1572,59 @@ impl CycleOwner {
         woken
     }
 
-    /// [`CycleMsg::FailedForward`]'s handler -- `record_failed_forward`'s
-    /// scheduler-facing hook (py fee_controller.py:8527-8608). Recording-
-    /// only in this task: the per-channel Thompson posterior nudge itself
-    /// is unported scheduler-side work (same "handler is real, caller is
-    /// future work" posture `PolicyChanged` already carried before Task 6
-    /// -- no hook subscription constructs this message yet).
-    pub fn handle_failed_forward(&mut self, channel_id: &str, now: i64) {
+    /// [`CycleMsg::FailedForward`]'s handler -- the port of
+    /// `record_failed_forward` (py `fee_controller.py:9179`).
+    ///
+    /// Task 44 (2026-07-27): this used to record a receipt and stop. The
+    /// kernel was already ported and oracle-tested against Python
+    /// (`is_fee_relevant_failure`, `failed_forward_nudge_weight`,
+    /// `failed_forward_implied_fee`, `record_posterior_nudge`); only the
+    /// wiring was missing, so after cutover -- with Python off -- nothing
+    /// would ever have written a bias nudge again and the DTS posterior
+    /// would have lost its negative-evidence channel silently.
+    ///
+    /// Guard order is Python's, verbatim, because each guard is
+    /// incident-derived and the ORDER decides what gets counted:
+    ///
+    /// 1. empty channel or `current_fee_ppm <= 0` -> nothing to imply;
+    /// 2. `is_fee_relevant_failure` (audit DTS-4b) -- liquidity and
+    ///    downstream failures, and payloads with no usable failcode or
+    ///    failreason, are dropped rather than misread as fee evidence;
+    /// 3. gossip-settle cooldown against our own last apply;
+    /// 4. per-window rate limit against the last nudge;
+    /// 5. the channel must ALREADY have posterior state.
+    ///
+    /// On (5) this deliberately does NOT reproduce Python's E-4.9 lazy
+    /// seed from the persisted row. That patch exists because Python's
+    /// `_channel_fee_states` is a lazily-populated cache that is empty
+    /// after a restart until the fee loop next touches a channel, so every
+    /// nudge in that gap was a silent no-op. Rust's `fee_states` is
+    /// hydrated once (SeedOnce) or per cycle and held for the process
+    /// lifetime -- the gap does not exist. Absence therefore carries the
+    /// same meaning Python's `has_persisted_dts` check enforces: no
+    /// persisted DTS evidence, so return. The invariant both preserve is
+    /// that a failed forward is NEVER a channel's first posterior
+    /// evidence.
+    pub fn handle_failed_forward(&mut self, signal: &FailedForwardSignal) {
+        let channel_id = signal.channel_id.as_str();
+        let now = signal.event_ts;
+
+        let applied = self.apply_failure_nudge(signal);
+
         let trigger = FeeTrigger::FailedForward {
             channel_id: channel_id.to_string(),
+        };
+        let detail = match applied {
+            NudgeOutcome::Applied {
+                implied_fee,
+                weight,
+            } => format!(
+                "failed-forward posterior nudge APPLIED: target {implied_fee} ppm, weight \
+                 {weight:.4} -- did not itself run a cycle"
+            ),
+            NudgeOutcome::Skipped(reason) => {
+                format!("failed-forward nudge NOT applied ({reason}) -- did not itself run a cycle")
+            }
         };
         let outcome = self.trigger_queue.offer(trigger.clone(), now);
         if matches!(outcome, TriggerOutcome::Dropped) {
@@ -1546,9 +1646,69 @@ impl CycleOwner {
             now,
             matches!(outcome, TriggerOutcome::Coalesced),
             None,
-            "failed-forward nudge received; posterior-nudge application is not yet wired to \
-             the scheduler (recording only) -- did not itself run a cycle",
+            &detail,
         );
+    }
+
+    /// The nudge itself. Split out so every guard can be driven directly
+    /// and the receipt text above cannot claim an application that did not
+    /// happen -- the caller consumes this return value, so the effect
+    /// cannot be deleted without the call site failing to compile.
+    fn apply_failure_nudge(&mut self, signal: &FailedForwardSignal) -> NudgeOutcome {
+        let channel_id = signal.channel_id.as_str();
+        let now = signal.event_ts;
+
+        if channel_id.is_empty() {
+            return NudgeOutcome::Skipped("no outgoing channel on the event");
+        }
+        if !dynamics::is_fee_relevant_failure(signal.failcode, signal.failreason.as_deref()) {
+            return NudgeOutcome::Skipped("not a fee-relevant failure (audit DTS-4b)");
+        }
+        if let Some(applied_ts) = self.last_fee_apply_ts.get(channel_id) {
+            if *applied_ts != 0 && now - *applied_ts < FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS {
+                return NudgeOutcome::Skipped(
+                    "inside the gossip-settle window after our own apply",
+                );
+            }
+        }
+        if let Some(last_nudge) = self.last_failure_nudge_ts.get(channel_id) {
+            if *last_nudge != 0 && now - *last_nudge < FAILURE_NUDGE_MIN_INTERVAL_SECONDS {
+                return NudgeOutcome::Skipped("rate limited: already nudged this window");
+            }
+        }
+        let Some(fee_state) = self.state.fee_states.get_mut(channel_id) else {
+            return NudgeOutcome::Skipped(
+                "no persisted DTS evidence for this channel: a failed forward must never be a \
+                 channel's first posterior evidence",
+            );
+        };
+
+        // py reads `cfs.last_fee_ppm` in the PRODUCER under `_state_lock`
+        // (cl-revenue-ops.py:6932) and skips when it is not positive; Rust
+        // owns that state on this thread, so the read happens here instead.
+        // Same guard, same outcome -- only the order relative to the state
+        // lookup differs, and both orders end in "no nudge".
+        let current_fee_ppm = fee_state.last_fee_ppm;
+        if current_fee_ppm <= 0 {
+            return NudgeOutcome::Skipped("channel has no positive current fee to imply from");
+        }
+        let implied_fee = dynamics::failed_forward_implied_fee(current_fee_ppm);
+        // py: amount_sats = amount_msat / 1000, and the weight helper
+        // reproduces the 0.1 base plus the log10 boost exactly.
+        let weight = dynamics::failed_forward_nudge_weight(signal.amount_msat as f64 / 1000.0);
+        dynamics::record_posterior_nudge(&mut fee_state.thompson, implied_fee as f64, weight, now);
+        self.last_failure_nudge_ts
+            .insert(channel_id.to_string(), now);
+        NudgeOutcome::Applied {
+            implied_fee,
+            weight,
+        }
+    }
+
+    /// py `_last_fee_apply_ts[channel] = now` (8456): record that WE
+    /// applied a fee, starting this channel's gossip-settle window.
+    pub fn note_fee_applied(&mut self, channel_id: &str, now: i64) {
+        self.last_fee_apply_ts.insert(channel_id.to_string(), now);
     }
 
     /// [`CycleMsg::ForwardEvent`]'s handler -- fix round 1 (review finding
@@ -1749,8 +1909,8 @@ where
                 CycleMsg::WakeAll => {
                     let _ = owner.handle_wake_all(crate::now_unix());
                 }
-                CycleMsg::FailedForward { channel_id } => {
-                    owner.handle_failed_forward(&channel_id, crate::now_unix());
+                CycleMsg::FailedForward(signal) => {
+                    owner.handle_failed_forward(&signal);
                 }
                 CycleMsg::ForwardEvent { channel_id } => {
                     owner.handle_forward_event(&channel_id, crate::now_unix());

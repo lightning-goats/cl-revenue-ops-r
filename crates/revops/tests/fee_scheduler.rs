@@ -19,9 +19,9 @@
 
 use revops::fee_evidence::{RpcPrefetch, MEMPOOL_MA_WINDOW_SECONDS};
 use revops::fee_scheduler::{
-    read_flush_marker, CycleMsg, CycleOutcome, CycleOwner, FeeDebugQuery, FlushWatcher,
-    PollOutcome, PreparedCycle, SchedulerConfig, StateLifecycle, TriggerMode, WatchParams,
-    DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS, TRIGGER_QUEUE_CAPACITY,
+    read_flush_marker, CycleMsg, CycleOutcome, CycleOwner, FailedForwardSignal, FeeDebugQuery,
+    FlushWatcher, PollOutcome, PreparedCycle, SchedulerConfig, StateLifecycle, TriggerMode,
+    WatchParams, DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS, TRIGGER_QUEUE_CAPACITY,
 };
 use revops::fee_state::STATE_JOURNAL_FILE_NAME;
 use revops_fees::cycle::{ChannelCycleState, ChannelFeeState, ChannelStateRow, FeeCfgSnapshot};
@@ -1000,6 +1000,19 @@ fn policy_changed_msg_wakes_only_the_named_peers_channels() {
 /// `SchedulerHandle::tx` reach the owner thread's actual match arms (not
 /// just the `CycleOwner` methods those arms call) and the `Query` reply
 /// round-trips through its `std::sync::mpsc` channel.
+/// A minimal fee-relevant failed forward. `failcode` 4108 is
+/// WIRE_FEE_INSUFFICIENT (0x1000|12), so `is_fee_relevant_failure` accepts it and the
+/// signal reaches the scheduler's own guards.
+fn failed_forward(channel_id: &str, now: i64) -> FailedForwardSignal {
+    FailedForwardSignal {
+        channel_id: channel_id.to_string(),
+        amount_msat: 0,
+        failcode: Some(4108),
+        failreason: None,
+        event_ts: now,
+    }
+}
+
 #[tokio::test]
 async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     let fx = fixture();
@@ -2272,7 +2285,7 @@ mod seedonce_restart {
         // keys (never coalescing, never drained by a cycle) past its
         // capacity.
         for i in 0..(TRIGGER_QUEUE_CAPACITY + 1) {
-            owner.handle_failed_forward(&format!("chan-{i}"), NOW);
+            owner.handle_failed_forward(&failed_forward(&format!("chan-{i}"), NOW));
         }
         assert_eq!(owner.trigger_queue_dropped_total(), 1);
 

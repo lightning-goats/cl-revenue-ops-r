@@ -736,6 +736,29 @@ async fn main() -> Result<()> {
                     let _ = handle
                         .tx
                         .send(revops::fee_scheduler::CycleMsg::ForwardEvent { channel_id });
+
+                    // Task 44: the fee-relevant FAILURE path (py
+                    // cl-revenue-ops.py:6911-6941). Separate from the
+                    // generic ForwardEvent trigger above, which stays
+                    // recording-only.
+                    //
+                    // CLN carries failcode/failreason ONLY for
+                    // `local_failed` (our node rejected the HTLC); a plain
+                    // `failed` is a downstream error inside an onion we
+                    // cannot decrypt. `is_fee_relevant_failure` drops both
+                    // that and every liquidity failure -- a misdirected
+                    // systematic signal is worse than none.
+                    //
+                    // OUTGOING channel only (audit DTS-4a): per BOLT 7 the
+                    // fee a sender pays to traverse us is our policy on the
+                    // out channel; the in channel's fee belongs to our peer.
+                    if let Some(signal) = notify::failed_forward_signal(&v, revops::now_unix()) {
+                        let _ = handle
+                            .tx
+                            .send(revops::fee_scheduler::CycleMsg::FailedForward(Box::new(
+                                signal,
+                            )));
+                    }
                 }
                 Ok(())
             },

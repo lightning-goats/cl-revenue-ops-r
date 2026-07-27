@@ -296,6 +296,53 @@ async fn try_on_channel_state_changed(
     Ok(())
 }
 
+/// Build a [`FailedForwardSignal`] from a `forward_event`, or `None` when
+/// this event is not fee evidence (py `cl-revenue-ops.py:6911-6941`).
+///
+/// The three drops, in Python's order:
+/// 1. status must be `failed` or `local_failed`;
+/// 2. there must be an OUTGOING channel (audit DTS-4a) -- an in-channel
+///    failure is evidence about the PEER's fee, not ours;
+/// 3. `is_fee_relevant_failure` must accept the failcode/failreason pair.
+///
+/// The remaining guards (current fee, cooldowns, existing posterior state)
+/// need owned state and live on the scheduler's owner thread.
+pub fn failed_forward_signal(
+    event: &Value,
+    now: i64,
+) -> Option<crate::fee_scheduler::FailedForwardSignal> {
+    let event = event.get("forward_event").unwrap_or(event);
+    let status = event.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status != "failed" && status != "local_failed" {
+        return None;
+    }
+    let out_channel = normalize_scid(event.get("out_channel").and_then(|v| v.as_str())?);
+    if out_channel.is_empty() {
+        return None;
+    }
+    let failcode = event.get("failcode").and_then(|v| v.as_i64());
+    let failreason = event
+        .get("failreason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if !revops_fees::thompson::dynamics::is_fee_relevant_failure(failcode, failreason.as_deref()) {
+        return None;
+    }
+    // py `failed_in_msat`: the INCOMING amount drives the weight boost.
+    let amount_msat = event
+        .get("in_msat")
+        .or_else(|| event.get("in_msatoshi"))
+        .map(parse_msat)
+        .unwrap_or(0);
+    Some(crate::fee_scheduler::FailedForwardSignal {
+        channel_id: out_channel,
+        amount_msat,
+        failcode,
+        failreason,
+        event_ts: now,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +644,85 @@ mod tests {
             .query_row("SELECT scid FROM channel_closure_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(scid, "931308x1256x1");
+    }
+
+    // ---- Task 44: the fee-relevant failure producer (py 6911-6941) ----
+
+    /// The positive case, and the OUTGOING-only rule (audit DTS-4a).
+    #[test]
+    fn failed_forward_signal_is_built_from_the_outgoing_channel() {
+        let e = json!({
+            "status": "local_failed",
+            "in_channel": "1:1:0",
+            "out_channel": "2:2:0",
+            "in_msat": 5_000_000,
+            "failcode": 4108
+        });
+        let s = failed_forward_signal(&e, 1_000)
+            .expect("0x1000|12 is WIRE_FEE_INSUFFICIENT, the one fee-relevant family");
+        assert_eq!(
+            s.channel_id, "2x2x0",
+            "must train the OUT channel, never the in"
+        );
+        assert_eq!(s.amount_msat, 5_000_000);
+        assert_eq!(s.failcode, Some(4108));
+        assert_eq!(
+            s.event_ts, 1_000,
+            "the event's own clock must travel with it"
+        );
+    }
+
+    /// A settled forward is not failure evidence. Control for the test
+    /// above: same channels, same amount, only `status` differs.
+    #[test]
+    fn a_settled_forward_is_never_a_failure_signal() {
+        let e = json!({
+            "status": "settled", "out_channel": "2:2:0",
+            "in_msat": 5_000_000, "failcode": 4108
+        });
+        assert!(failed_forward_signal(&e, 1_000).is_none());
+    }
+
+    /// A downstream `failed` with no usable failcode/failreason is dropped
+    /// entirely -- a misdirected systematic signal is worse than none.
+    #[test]
+    fn an_undecryptable_downstream_failure_is_dropped() {
+        let e = json!({"status": "failed", "out_channel": "2:2:0", "in_msat": 5_000_000});
+        assert!(failed_forward_signal(&e, 1_000).is_none());
+    }
+
+    /// A real failure that is not about our fee (liquidity) is dropped.
+    #[test]
+    fn a_non_fee_relevant_failcode_is_dropped() {
+        let e = json!({
+            "status": "local_failed", "out_channel": "2:2:0",
+            "in_msat": 5_000_000, "failcode": 4098
+        });
+        assert!(
+            failed_forward_signal(&e, 1_000).is_none(),
+            "only the WIRE_FEE_INSUFFICIENT family is evidence about our fee (audit DTS-4b)"
+        );
+    }
+
+    /// An in-channel-only failure has no out channel to train.
+    #[test]
+    fn an_in_channel_only_failure_has_nothing_to_train() {
+        let e = json!({"status": "local_failed", "in_channel": "1:1:0", "failcode": 4108});
+        assert!(failed_forward_signal(&e, 1_000).is_none());
+    }
+
+    /// `failreason` is the fallback when no failcode is present.
+    #[test]
+    fn failreason_text_is_accepted_when_no_failcode_is_present() {
+        let e = json!({
+            "status": "local_failed", "out_channel": "2:2:0",
+            "failreason": "WIRE_FEE_INSUFFICIENT"
+        });
+        let s = failed_forward_signal(&e, 7).expect("failreason is usable evidence");
+        assert_eq!(s.channel_id, "2x2x0");
+        assert_eq!(
+            s.amount_msat, 0,
+            "a missing in_msat is a zero boost, not a panic"
+        );
     }
 }
