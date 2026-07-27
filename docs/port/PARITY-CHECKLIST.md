@@ -143,18 +143,157 @@ behaviour is to compute and RECORD the would-be initial fee, never send it.
 
 ---
 
-## 3. Out of cutover scope (Python-owned; listed for boundary clarity)
+## 3. Full-plugin audit — all 9 lenses (2026-07-27)
 
-- **n/a** rebalance stack (candidate selection → askrene → sendpay → budget)
-- **n/a** capital allocation / channel open-close planner
-- **n/a** Boltz swap cycles
-- **n/a** LN+ swap automation — note: `lnplus_obligation` selector exists in
-  Rust as pure fns with **no production feed**; a future porter must include
-  opening-state rows (manual swaps stick in `opening`)
-- **n/a** operator RPC surface (36+ handlers) beyond the fee/status subset
-- **n/a** econ shadow/reconcile beyond the fee ledger slice
+Method per §5. Every row was checked by locating the Rust module **and** its
+tests, not by recollection. Lens 1 (fee stack) is §1 above.
+
+**Headline numbers.** Python ~58k LOC / **69 operator RPCs**. Rust ~55k LOC
+across 8 crates / **9 RPCs**. The line counts are close; the RPC surface is
+**13%**. That gap is the honest shape of the port: the *decision kernels* are
+broadly ported, the *operator surface and the capital-deploying subsystems* are
+not.
+
+### Lens 0 — CLN plugin entrypoint (10,378 LOC)
+
+| Component | Rust | Status |
+|---|---|---|
+| plugin-bootstrap-and-init | `main.rs` | `[x]` |
+| threadsafe-rpc-proxy | `revops-rpc` (timeout guard) + `cln-rpc` | `[x]` |
+| option-registration-and-config | `options_table.rs`, `config_resolve.rs` (126 options in manifest) | `[x]` |
+| background-scheduler-loops | `fee_scheduler.rs` (fee loop only) | `[~]` fee loop only; flow/rebalance/planner/boltz loops absent |
+| core-cycle-functions | `fee_scheduler.rs`, `revops-fees/cycle.rs` | `[~]` fee cycle only |
+| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` | `[ ]` **9 of 69** |
+| notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[~]` all 4 subscribed; `channel_state_changed` deliberately narrower (closure events only, see A3b) |
+| spend-budget-and-capex-rpcs | — | `[ ]` |
+| boltz-swap-rpcs-and-auto-cycle | — | `[ ]` |
+
+### Lens 2 — Rebalance stack
+
+Structurally the most complete non-fee port: `revops-rebalance` is 8,167 LOC and
+maps 1:1 to the Python components.
+
+| Component | Rust | Tests | Status |
+|---|---|---|---|
+| EVRebalancer facade + JobManager | `facade.rs` | `facade` | `[x]` |
+| RebalanceEngineV2 orchestrator | `engine.rs` | `engine` | `[x]` |
+| RebalancePlanner + pair types | `planner.rs`, `types.rs` | `planner` | `[x]` |
+| RebalanceRouterV3 (askrene) | `router.rs` | `router` | `[x]` |
+| NativeRouteExecutor | `executor.rs` | `executor` | `[x]` |
+| Modes + route policy tables | `modes.rs`, `route_policy.rs` | `modes` | `[x]` |
+| SegmentObservationStore | `segstore.rs` | — | `[~]` no dedicated test file |
+| Defibrillator diagnostic | `defib.rs` | — | `[~]` no dedicated test file |
+| — | `cooldowns.rs`, `ev.rs`, `errors.rs` | `cooldowns`, `ev` | `[x]` |
+
+**Not wired to production.** No rebalance RPC, no rebalance loop, and no
+sendpay call site in the plugin — the same "kernel ported, no caller" shape that
+A1–A3 had in the fee stack. Rebalance moves real sats, so wiring it is a
+tier-1 project in its own right, not a follow-up.
+
+### Lens 3 — Governed economics layer
+
+| Component | Rust | Tests | Status |
+|---|---|---|---|
+| econ_types | `types.rs` | via `conformance` | `[x]` |
+| reason_codes | `reason.rs` | `conformance` | `[x]` |
+| econ_snapshot | `snapshot.rs` | `snapshot` | `[x]` |
+| cycle_context | `context.rs` | via `cycle` | `[x]` |
+| econ_intents | `intents.rs` | `intents` | `[x]` |
+| econ_arbiter | `arbiter.rs` | `arbiter` (incl. 21+ scenarios) | `[x]` |
+| governor_facade | `governor.rs` | `governor` | `[x]` |
+| econ_ledger | `ledger.rs` | `ledger` | `[x]` |
+| econ_reconcile | `reconcile.rs` | `reconcile` | `[x]` |
+| econ_ev | `ev.rs` | via `conformance` | `[x]` |
+| econ_cycle | `cycle.rs` | `cycle` | `[x]` |
+| econ_shadow | `shadow.rs` | `shadow` | `[x]` |
+| risk_profiles | `revops-fees/profiles.rs` | via `fee_config` | `[x]` |
+| **governed execution call sites** | fee path only | `[~]` | fee intents wired; rebalance/boltz/planner intents exist as arbiter POLICY STRINGS with no producer |
+
+### Lens 4 — Capital allocation — **essentially unported**
+
+| Component | Rust | Status |
+|---|---|---|
+| CapexBudgetEngine | none | `[ ]` |
+| CapacityPlanner (~4200 LOC) | none | `[ ]` |
+| BoltzCliManager (~2670 LOC) | none | `[ ]` |
+| BoltzAutoCycle (~1400 LOC) | none | `[ ]` |
+| LNPlusSwapAutomation (~2099 LOC) | none | `[ ]` |
+
+Verified by search: `boltz` and `lnplus` appear in Rust **only** as arbiter
+policy strings, budget-bucket names, config options, and one
+`lnplus_contract_protection` helper in `revops-analytics/protection.rs`. There
+is no manager, no planner, no automation. ~10,400 Python LOC with no Rust
+counterpart. This is the largest single parity gap in the plugin.
+
+Note carried from the fee audit: the `lnplus_obligation` selector exists as pure
+fns with **no production feed**; a future porter must include opening-state rows
+(manual swaps stick in `opening`).
+
+### Lens 5 — Database layer
+
+| Component | Rust | Status |
+|---|---|---|
+| connection-and-threading | `revops-db/actor.rs`, `owner.rs`, `lib.rs` | `[x]` |
+| schema-init-and-migrations | `fee_runway.rs`, `notifications.rs` (Rust-owned tables); adopts production DB read-only | `[~]` Rust never migrates the production schema — by design |
+| input-validation-helpers | `revops-core/msat.rs`, `scid.rs` | `[x]` |
+| channel-state-and-kalman-store | `queries.rs` + `revops-analytics/kalman.rs` | `[~]` read-only |
+| fee-strategy-and-audit | `queries.rs`, `fee_runway.rs` | `[x]` |
+| rebalance-history-and-failure-tracking | partial in `queries.rs` | `[~]` |
+| budget-reservations-and-spend-ledger | `budget.rs` (+ concurrency & prod-copy tests) | `[x]` |
+| forwards-ingestion-and-pruning | `notifications.rs`, `hydration.rs` | `[~]` ingestion yes; **pruning/retention not implemented** |
+| revenue-pnl-analytics | `queries.rs`, `revops-analytics/profitability.rs` | `[~]` read paths |
+| costs-closures-and-lifetime-accounting | partial | `[~]` |
+| peer-reputation-and-connection-history | `notifications.rs` events only | `[~]` |
+| config-planner-lnplus-policies | `read_policies` (peer policies only) | `[~]` |
+
+### Lens 6 — Configuration system
+
+| Component | Rust | Tests | Status |
+|---|---|---|---|
+| Config dataclass + validation tables | `config_types.rs`, `fee_config.rs` | `fee_config`, `config` | `[x]` |
+| Startup override loading + risk profiles | `config_resolve.rs`, `profiles.rs` | `config_resolve` | `[x]` |
+| Runtime update path (`revenue-config` RPC) | `rpc` config get/set | `config` | `[~]` fee-relevant keys |
+| ConfigSnapshot (immutable cycle view) | `FeeCfgSnapshot` | `fee_config` | `[x]` |
+| Plugin option registration + setconfig | `options_table.rs`, `main.rs` (126 options) | `manifest` | `[x]` |
+| Chain-cost floor + liquidity buckets | `floors.rs` | `floors` | `[x]` |
+| Econ artifact JSON schemas | `revops-econ` | `conformance` | `[x]` |
+
+### Lens 8 — RPC proxy, data service, utils
+
+| Component | Rust | Tests | Status |
+|---|---|---|---|
+| ThreadSafeRpcProxy + socket-timeout guard | `revops-rpc` | `timeout` | `[x]` |
+| DataService (tiered RPC cache) | `fee_evidence.rs` prefetch | `fee_evidence`, `read_rpcs` | `[x]` |
+| utils (msat/base-unit helpers) | `revops-core/msat.rs` | `rounding_parity` | `[x]` |
+| Daemon loop scheduler + heartbeat | `fee_scheduler.rs` | `fee_scheduler` | `[~]` fee loop only |
+| DB connection layer | `revops-db` | `actor_wal` | `[x]` |
+| Test harness | fixtures + `tempfile` | throughout | `[x]` |
+
+### Lens 7 — architecture/invariants (meta-map, overlaps the above)
+
+`profitability_flow_analysis` (~5300 LOC) → `revops-analytics` (4,599 LOC:
+classification, demand_flow, flow, growth, kalman, policy, profitability,
+protection, telemetry) — all with test files. `[x]` as kernels, `[~]` as wired
+surfaces (no `revenue-profitability` / `revenue-analyze` RPC in Rust).
 
 ---
+
+## 3b. What "full functional parity" actually requires
+
+Ranked by size, from this audit:
+
+1. **Capital allocation (~10,400 LOC)** — capacity planner, capex budget, Boltz
+   manager + auto-cycle, LN+ swap automation. Nothing exists.
+2. **Operator RPC surface (60 of 69 methods)** — everything except fee/status.
+3. **Wiring the ported-but-uncalled kernels** — rebalance (8,167 LOC ported, no
+   loop, no RPC, no sendpay call site) and the non-fee governed-execution call
+   sites. Same shape as A1–A3, at much larger scale and touching real payments.
+4. **Retention/pruning** — forwards pruning and the 8 runway tables.
+5. **Remaining fee-path items** — A3a, A3b, `note_fee_applied`.
+
+**None of 1–4 blocks the fee cutover**, which is scoped to the fee subsystem and
+leaves Python owning everything else. They block "Rust replaces the plugin".
+Those are different programmes and should not be conflated.
 
 ## 4. Cross-cutting invariants (must stay true at every tick)
 
