@@ -19,11 +19,33 @@ pub mod hydration;
 pub mod notify;
 pub mod options_table;
 pub mod python_authority;
+pub mod rpc_analyze;
+pub mod rpc_boltz_budget;
+pub mod rpc_boltz_history;
+pub mod rpc_boltz_status;
+pub mod rpc_capacity_report;
+pub mod rpc_capex_status;
 pub mod rpc_dashboard;
+pub mod rpc_econ_reconcile;
+pub mod rpc_econ_snapshot;
+pub mod rpc_health;
 pub mod rpc_history;
+pub mod rpc_hot_channel_protection_peers;
+pub mod rpc_list_banned;
+pub mod rpc_list_ignored;
+pub mod rpc_lnplus_status;
+pub mod rpc_planner_candidate_sources;
+pub mod rpc_planner_candidates;
+pub mod rpc_planner_history;
+pub mod rpc_planner_status;
+pub mod rpc_policy;
+pub mod rpc_profitability;
 pub mod rpc_rebalance;
+pub mod rpc_rebalance_debug;
 pub mod rpc_report;
+pub mod rpc_spend_ledger;
 pub mod rpc_status;
+pub mod rpc_total_cost_budget;
 
 /// Current Unix time in whole seconds, matching Python's
 /// `int(time.time())` as used throughout `database.py`/
