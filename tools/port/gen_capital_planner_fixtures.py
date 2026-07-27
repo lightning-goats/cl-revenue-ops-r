@@ -1032,5 +1032,403 @@ scenarios.append(size_channel_case(
     min_ch=500_000,
 ))
 
+# --- discover_from_neighbors (Task 47 finding 5: real-Python fixtures for
+# the no-capital-efficiency fallback branch, py 1499-1566) -----------------
+def discover_neighbors_case(name, profitability_rows, patron_channels, our_node_id="us"):
+    """profitability_rows: list of (scid, peer_id, marginal_roi_percent).
+    `_discover_from_neighbors` derives its OWN existing-peers exclusion set
+    from `all_profitability.values()`'s peer_ids (py 1510-1513) -- there is
+    no separate `existing_peers` parameter.
+    """
+    cp = make_planner()
+    cp._capital_efficiency = None
+
+    def get_channels(destination=None, source=None):
+        return {"channels": patron_channels.get(source, [])}
+
+    ds = types.SimpleNamespace(get_node_id=lambda: our_node_id, get_channels=get_channels)
+    cp.data_service = ds
+    all_profitability = {
+        scid: types.SimpleNamespace(peer_id=peer_id, marginal_roi_percent=roi)
+        for scid, peer_id, roi in profitability_rows
+    }
+    out = cp._discover_from_neighbors(all_profitability)
+    return {"name": name, "kind": "discover_from_neighbors",
+            "input": {"profitability_rows": profitability_rows,
+                       "patron_channels": patron_channels, "our_node_id": our_node_id},
+            "output": out}
+
+
+scenarios.append(discover_neighbors_case("no_profitability_rows", [], {}))
+# Correction round 3: cross-patron duplicate destination in the FALLBACK
+# branch — its dedup semantics differ from the capital-efficiency branch's.
+scenarios.append(discover_neighbors_case(
+    "fallback_duplicate_destination_across_two_patrons",
+    [("700000x1x0", "fb_patronA", 60.0), ("700000x2x0", "fb_patronB", 40.0)],
+    {"fb_patronA": [{"destination": "fb_dup_n", "amount_msat": 1_000_000_000,
+                      "fee_per_millionth": 40}],
+     "fb_patronB": [{"destination": "fb_dup_n", "amount_msat": 1_000_000_000,
+                      "fee_per_millionth": 45}]},
+))
+scenarios.append(discover_neighbors_case(
+    "basic_top3_patrons_4th_excluded",
+    [("700000x1x0", "low", 1.0), ("700000x2x0", "mid", 50.0),
+     ("700000x3x0", "high", 90.0), ("700000x4x0", "excluded", 0.5)],
+    {
+        "excluded": [{"destination": "should_not_appear", "amount_msat": 1_000_000_000,
+                       "fee_per_millionth": 10}],
+        "high": [{"destination": "neighbor1", "amount_msat": 1_000_000_000,
+                   "fee_per_millionth": 10}],
+    },
+))
+scenarios.append(discover_neighbors_case(
+    "fee_and_capacity_filters",
+    [("700000x1x0", "patron", 50.0)],
+    {"patron": [
+        {"destination": "expensive", "amount_msat": 1_000_000_000, "fee_per_millionth": 2000},
+        {"destination": "tiny", "amount_msat": 100_000_000, "fee_per_millionth": 10},
+        {"destination": "good", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+    ]},
+))
+scenarios.append(discover_neighbors_case(
+    "existing_peer_excluded",
+    # "already_peer" is itself a profitability-channel peer_id -> excluded
+    # as a neighbor destination even though it's also reachable from "patron".
+    [("700000x1x0", "patron", 50.0), ("700000x2x0", "already_peer", 10.0)],
+    {"patron": [
+        {"destination": "already_peer", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+        {"destination": "new_peer", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+    ]},
+))
+scenarios.append(discover_neighbors_case(
+    "top5_per_patron_cap",
+    [("700000x1x0", "patron", 50.0)],
+    {"patron": [
+        {"destination": f"n{i}", "amount_msat": 1_000_000_000, "fee_per_millionth": 10 + i}
+        for i in range(8)
+    ]},
+))
+scenarios.append(discover_neighbors_case(
+    "equal_score_tie_preserves_channel_list_order",
+    [("700000x1x0", "patron", 50.0)],
+    {"patron": [
+        # Identical amount/fee -> identical score; discovery (list) order is
+        # zzz_tie then aaa_tie, the OPPOSITE of peer-id sort order.
+        {"destination": "zzz_tie", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+        {"destination": "aaa_tie", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+    ]},
+))
+scenarios.append(discover_neighbors_case(
+    "missing_patron_cache_yields_no_candidates",
+    [("700000x1x0", "patron_no_cache", 50.0)],
+    {},
+))
+
+
+# --- discover_from_route_pairs (Task 47 finding 5) -------------------------
+def discover_route_pairs_case(name, rows, route_pairs_channels, profitability_rows,
+                               our_node_id="us"):
+    """profitability_rows: list of (scid, peer_id) -- populates
+    channel_to_peer (py 1828-1835) and the existing-peer exclusion set.
+    route_pairs_channels: dict route_peer_id -> list of channel dicts.
+    """
+    db = StubDatabase(route_pairs=rows)
+    cp = make_planner(db=db)
+
+    def get_channels(destination=None, source=None):
+        return {"channels": route_pairs_channels.get(source, [])}
+
+    ds = types.SimpleNamespace(get_node_id=lambda: our_node_id, get_channels=get_channels)
+    cp.data_service = ds
+    all_profitability = {
+        scid: types.SimpleNamespace(peer_id=peer_id, channel_id=scid)
+        for scid, peer_id in profitability_rows
+    }
+    out = cp._discover_from_route_pairs(all_profitability)
+    return {"name": name, "kind": "discover_from_route_pairs",
+            "input": {"rows": rows, "route_pairs_channels": route_pairs_channels,
+                       "profitability_rows": profitability_rows, "our_node_id": our_node_id},
+            "output": out}
+
+
+scenarios.append(discover_route_pairs_case("no_rows", [], {}, []))
+scenarios.append(discover_route_pairs_case(
+    "basic_fee_weighted_ranking",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 5_000_000}],
+    {"peerA": [{"destination": "cand1", "amount_msat": 6_000_000_000, "fee_per_millionth": 100}]},
+    [("700000x1x0", "peerA"), ("700000x2x0", "peerB")],
+))
+# Correction round 2 (P2 coverage): route-pair EXACT boundaries — 1000 ppm
+# and 500_000 sats (=500_000_000 msat) at the filter edge, one-over/
+# one-under alongside.
+scenarios.append(discover_route_pairs_case(
+    "route_pair_exact_1000ppm_and_500000sat_boundaries",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 2_000_000}],
+    {"peerA": [
+        {"destination": "at_fee_1000", "amount_msat": 1_000_000_000, "fee_per_millionth": 1000},
+        {"destination": "over_fee_1001", "amount_msat": 1_000_000_000, "fee_per_millionth": 1001},
+        {"destination": "at_size_500000", "amount_msat": 500_000_000, "fee_per_millionth": 10},
+        {"destination": "under_size", "amount_msat": 499_999_000, "fee_per_millionth": 10},
+    ]},
+    [("700000x1x0", "peerA")],
+))
+scenarios.append(discover_route_pairs_case(
+    "expensive_and_tiny_filtered",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 1_000_000}],
+    {"peerA": [
+        {"destination": "expensive", "amount_msat": 1_000_000_000, "fee_per_millionth": 1500},
+        {"destination": "tiny", "amount_msat": 100_000_000, "fee_per_millionth": 10},
+        {"destination": "good", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+    ]},
+    [("700000x1x0", "peerA")],
+))
+scenarios.append(discover_route_pairs_case(
+    "capacity_and_fee_bonuses_stack",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 1_000_000}],
+    {"peerA": [
+        {"destination": "big_cheap", "amount_msat": 6_000_000_000, "fee_per_millionth": 50},
+    ]},
+    [("700000x1x0", "peerA")],
+))
+scenarios.append(discover_route_pairs_case(
+    "duplicate_candidate_across_route_peers_keeps_higher_score",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 9_000_000},
+     {"in_channel": "700000:3:0", "out_channel": "700000:4:0", "total_fee_msat": 1_000_000}],
+    {
+        # peerA (higher fee-weighted score, ranked first) reaches "dup_cand"
+        # at the boosted score; peerC (lower score) reaches the SAME
+        # "dup_cand" at the base score -- Python keeps whichever is higher.
+        "peerA": [{"destination": "dup_cand", "amount_msat": 6_000_000_000,
+                    "fee_per_millionth": 50}],
+        "peerC": [{"destination": "dup_cand", "amount_msat": 500_000, "fee_per_millionth": 999}],
+    },
+    [("700000x1x0", "peerA"), ("700000x2x0", "peerB"),
+     ("700000x3x0", "peerC"), ("700000x4x0", "peerD")],
+))
+scenarios.append(discover_route_pairs_case(
+    "equal_score_tie_preserves_channel_list_order",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 5_000_000}],
+    {"peerA": [
+        # Identical amount/fee -> identical score; discovery (list) order is
+        # zzz_tie then aaa_tie, the OPPOSITE of peer-id sort order.
+        {"destination": "zzz_tie", "amount_msat": 6_000_000_000, "fee_per_millionth": 100},
+        {"destination": "aaa_tie", "amount_msat": 6_000_000_000, "fee_per_millionth": 100},
+    ]},
+    [("700000x1x0", "peerA"), ("700000x2x0", "peerB")],
+))
+scenarios.append(discover_route_pairs_case(
+    "our_node_excluded",
+    [{"in_channel": "700000:1:0", "out_channel": "700000:2:0", "total_fee_msat": 5_000_000}],
+    {"peerA": [{"destination": "us", "amount_msat": 6_000_000_000, "fee_per_millionth": 100}]},
+    [("700000x1x0", "peerA")],
+    our_node_id="us",
+))
+
+
+# --- discover_from_neighbors, capital-efficiency-aware branch (Task 47
+# finding 2: the previously-unported py 1568-1622/1624-1663/1665-1707/
+# 1709-1760 patron-pool + second-degree-traversal path) -------------------
+def discover_neighbors_capital_efficiency_case(
+        name, profitability_rows, channel_efficiencies, source_channels, our_node_id="us"):
+    """profitability_rows: list of (scid, peer_id, marginal_roi_percent,
+    volume_routed_sats). channel_efficiencies: dict scid -> efficiency_rank
+    (or None to omit the channel_eff entry entirely, exercising the 0.1
+    default). source_channels: dict peer_id -> list of channel dicts, reused
+    for BOTH the first-hop patron lookup and any second-hop lookup (mirrors
+    Python's single `_get_cached_channels` cache).
+    """
+    cp = make_planner()
+    channel_eff_objs = {
+        scid: types.SimpleNamespace(efficiency_rank=rank)
+        for scid, rank in channel_efficiencies.items()
+        if rank is not None
+    }
+    fleet_eff = types.SimpleNamespace(channel_efficiencies=channel_eff_objs)
+    cp._capital_efficiency = types.SimpleNamespace(analyze=lambda: fleet_eff)
+
+    def get_channels(destination=None, source=None):
+        return {"channels": source_channels.get(source, [])}
+
+    ds = types.SimpleNamespace(get_node_id=lambda: our_node_id, get_channels=get_channels)
+    cp.data_service = ds
+    all_profitability = {
+        scid: types.SimpleNamespace(
+            peer_id=peer_id, marginal_roi_percent=roi,
+            revenue=types.SimpleNamespace(volume_routed_sats=vol))
+        for scid, peer_id, roi, vol in profitability_rows
+    }
+    out = cp._discover_from_neighbors(all_profitability)
+    return {"name": name, "kind": "discover_from_neighbors_capital_efficiency",
+            "input": {"profitability_rows": profitability_rows,
+                       "channel_efficiencies": channel_efficiencies,
+                       "source_channels": source_channels, "our_node_id": our_node_id},
+            "output": out}
+
+
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "first_degree_only_no_second_hop_channels",
+    [("700000x1x0", "patronA", 50.0, 1000)],
+    {"700000x1x0": 0.9},
+    {"patronA": [{"destination": "fd_neighbor1", "amount_msat": 1_000_000_000,
+                   "fee_per_millionth": 50}]},
+))
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "second_degree_traversal_from_top_first_degree",
+    [("700000x1x0", "patronA", 50.0, 1000)],
+    {"700000x1x0": 0.9},
+    {
+        "patronA": [{"destination": "fd_neighbor1", "amount_msat": 1_000_000_000,
+                      "fee_per_millionth": 50}],
+        "fd_neighbor1": [
+            {"destination": "sd_neighbor1", "amount_msat": 2_000_000_000,
+             "fee_per_millionth": 100},
+            {"destination": "sd_neighbor2", "amount_msat": 500_000_000,
+             "fee_per_millionth": 600},
+        ],
+    },
+))
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "missing_efficiency_rank_defaults_to_point_one",
+    [("700000x1x0", "patronA", 50.0, 1000)],
+    {"700000x1x0": None},
+    {"patronA": [{"destination": "fd_neighbor1", "amount_msat": 1_000_000_000,
+                   "fee_per_millionth": 50}]},
+))
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "patron_pool_selects_by_volume_when_efficiency_ties",
+    [("700000x1x0", "lowvol_patron", 10.0, 100),
+     ("700000x2x0", "highvol_patron", 10.0, 999_999)],
+    {"700000x1x0": 0.1, "700000x2x0": 0.1},
+    {
+        "lowvol_patron": [{"destination": "lv_neighbor", "amount_msat": 1_000_000_000,
+                             "fee_per_millionth": 50}],
+        "highvol_patron": [{"destination": "hv_neighbor", "amount_msat": 1_000_000_000,
+                              "fee_per_millionth": 50}],
+    },
+))
+# Correction round 2 (sort-reuse P1): 8 patrons where efficiency reorders
+# (p7,p6 lead) while volume and ROI FULLY TIE. Python ranks volume and ROI
+# over the ORIGINAL insertion order (independent stable sorts of `entries`),
+# so its pool is p7,p6,p0..p2 (eff top5) + p0..p4 (vol top5) + p0..p2 (roi
+# top3) = 7 patrons. An implementation that re-sorts one list in place
+# inherits the efficiency order into the tied rankings and selects only 5.
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "tied_volume_and_roi_rank_over_original_order_seven_patrons",
+    [(f"700000x{i}x0", f"p{i}", 1.0, 1000) for i in range(8)],
+    {"700000x7x0": 0.9, "700000x6x0": 0.8,
+     **{f"700000x{i}x0": 0.5 for i in range(6)}},
+    {f"p{i}": [{"destination": f"n{i}", "amount_msat": 1_000_000_000,
+                "fee_per_millionth": 50}] for i in range(8)},
+))
+# Correction round 2 (P2 coverage): duplicate destination across patrons.
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "duplicate_destination_across_three_patrons",
+    [("700000x1x0", "pa", 2.0, 500), ("700000x2x0", "pb", 1.5, 400),
+     ("700000x3x0", "pc", 1.0, 300)],
+    {"700000x1x0": 0.7, "700000x2x0": 0.6, "700000x3x0": 0.5},
+    {"pa": [{"destination": "dup_n", "amount_msat": 1_000_000_000, "fee_per_millionth": 40}],
+     "pb": [{"destination": "dup_n", "amount_msat": 1_000_000_000, "fee_per_millionth": 45}],
+     "pc": [{"destination": "dup_n", "amount_msat": 1_000_000_000, "fee_per_millionth": 50}]},
+))
+# Correction round 2 (P2 coverage): exact fee/size boundaries. 1500 ppm and
+# 200_000 sats (=200_000_000 msat) sit ON the neighbor filter boundary;
+# one-over is excluded.
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "neighbor_exact_1500ppm_and_200000sat_boundaries",
+    [("700000x1x0", "pa", 2.0, 500)],
+    {"700000x1x0": 0.7},
+    {"pa": [
+        {"destination": "at_fee_boundary", "amount_msat": 1_000_000_000, "fee_per_millionth": 1500},
+        {"destination": "over_fee_boundary", "amount_msat": 1_000_000_000, "fee_per_millionth": 1501},
+        {"destination": "at_size_boundary", "amount_msat": 200_000_000, "fee_per_millionth": 50},
+        {"destination": "under_size_boundary", "amount_msat": 199_999_000, "fee_per_millionth": 50},
+    ]},
+))
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "same_neighbor_from_two_patrons_keeps_higher_score_and_patron_count_bonus",
+    [("700000x1x0", "patronA", 90.0, 1000), ("700000x2x0", "patronB", 10.0, 1000)],
+    {"700000x1x0": 0.9, "700000x2x0": 0.2},
+    {
+        "patronA": [{"destination": "shared_neighbor", "amount_msat": 1_000_000_000,
+                      "fee_per_millionth": 50}],
+        "patronB": [{"destination": "shared_neighbor", "amount_msat": 1_000_000_000,
+                      "fee_per_millionth": 50}],
+    },
+))
+scenarios.append(discover_neighbors_capital_efficiency_case(
+    "fee_and_capacity_filters_still_apply",
+    [("700000x1x0", "patronA", 50.0, 1000)],
+    {"700000x1x0": 0.9},
+    {"patronA": [
+        {"destination": "expensive", "amount_msat": 1_000_000_000, "fee_per_millionth": 2000},
+        {"destination": "tiny", "amount_msat": 100_000_000, "fee_per_millionth": 10},
+        {"destination": "good", "amount_msat": 1_000_000_000, "fee_per_millionth": 10},
+    ]},
+))
+
+
+# --- discover_peers: cross-strategy merge + tie-order (Task 47 finding 4's
+# Python-oracle fixture requirement — the top-level `_discover_peers` merge,
+# capacity_planner.py 2714-2755) ---------------------------------------------
+def discover_peers_case(name, *, winners=None, profitability_rows=None, flow_rows=None,
+                         graph_cache=None, route_pairs=None, source_channels=None,
+                         our_node_id="us"):
+    winners = winners or []
+    profitability_rows = profitability_rows or []
+    flow_rows = flow_rows or []
+    source_channels = source_channels or {}
+    db = StubDatabase(route_pairs=route_pairs or [])
+    cp = make_planner(db=db)
+    cp._capital_efficiency = None
+    cp._cycle_channels_source = graph_cache or {}
+
+    def get_channels(destination=None, source=None):
+        if source is not None:
+            return {"channels": source_channels.get(source, [])}
+        return {"channels": []}
+
+    ds = types.SimpleNamespace(get_node_id=lambda: our_node_id, get_channels=get_channels)
+    cp.data_service = ds
+
+    all_profitability = {
+        scid: types.SimpleNamespace(peer_id=peer_id, marginal_roi_percent=roi, channel_id=scid)
+        for scid, peer_id, roi in profitability_rows
+    }
+    all_flow = {
+        scid: types.SimpleNamespace(peer_id=peer_id, sats_in=sats_in, sats_out=sats_out)
+        for scid, peer_id, sats_in, sats_out in flow_rows
+    }
+
+    out = cp._discover_peers(winners, all_profitability, all_flow)
+    return {"name": name, "kind": "discover_peers",
+            "input": {"winners": winners, "profitability_rows": profitability_rows,
+                       "flow_rows": flow_rows, "graph_cache": graph_cache,
+                       "route_pairs": route_pairs, "source_channels": source_channels,
+                       "our_node_id": our_node_id},
+            "output": [{"peer_id": c["peer_id"], "source": c["source"], "score": c["score"]}
+                       for c in out]}
+
+
+scenarios.append(discover_peers_case(
+    "equal_score_winners_preserve_discovery_order_over_peer_id_sort",
+    winners=[{"peer_id": "zzz_peer", "roi": 45.0, "scid": "700000x1x0"},
+             {"peer_id": "aaa_peer", "roi": 45.0, "scid": "700000x2x0"}],
+))
+scenarios.append(discover_peers_case(
+    "duplicate_peer_across_strategies_keeps_higher_score_at_first_position",
+    # "dup_peer" is discovered FIRST via the winner strategy (score 0.31,
+    # position 0) then AGAIN via graph centrality (a later strategy) with a
+    # much higher normalized score (~0.358) -- the merge must replace the
+    # VALUE (final score reflects graph's higher score) without moving the
+    # peer out of its first-discovery position.
+    winners=[{"peer_id": "dup_peer", "roi": 31.0, "scid": "700000x1x0"},
+             {"peer_id": "other_winner", "roi": 20.0, "scid": "700000x2x0"}],
+    graph_cache={
+        "dup_peer": [{"active": True, "amount_msat": 50_000_000_000}] * 10,
+    },
+))
+scenarios.append(discover_peers_case("empty_everything"))
+
+
 out = {"scenarios": scenarios}
 print(json.dumps(out, indent=2, sort_keys=True, default=lambda o: None if isinstance(o, float) and o != o else o))

@@ -58,15 +58,36 @@ use super::scoring::{apply_pool_quotas, normalize_candidate_scores, Candidate};
 use super::sizing::{size_channel, SizingCandidate, SizingConfig};
 use super::winners::{identify_winners, Winner, WinnerCandidateEvidence};
 
+/// Task 47 correction round 1, finding 1: the maximum age (inclusive,
+/// seconds) a defib/close/open gate evidence entry's `observed_at` may be
+/// relative to [`CycleEvidence::now`] before it is treated as stale and the
+/// action DENIED — mirroring the fail-closed freshness contract already
+/// established by `crates/revops/src/python_authority.rs`'s
+/// `validate_status` (`age_seconds < 0 || age_seconds > max_age_seconds` ->
+/// deny). Present-but-stale safety-gate evidence must be indistinguishable
+/// from missing evidence, never treated as "still allowed".
+///
+/// 900s (15 minutes) is sized to comfortably cover one planner cycle's
+/// evidence-gathering pass (which fans out per-peer over potentially dozens
+/// of peers' RPC/DB reads) while still catching evidence that was cached or
+/// reused across cycles instead of freshly fetched for the cycle actually
+/// being planned — the concrete risk the review flagged. Callers assembling
+/// [`CycleEvidence`] must stamp each gate's `observed_at` with the
+/// wall-clock time its underlying DB/RPC read actually happened, not a
+/// cycle-start constant reused for every peer.
+pub const GATE_EVIDENCE_MAX_AGE_SECS: i64 = 900;
+
 /// Per-peer gate evidence for the defibrillation-selection loop (py's
 /// `_check_cooldown` / `_defib_recently_attempted` / `_check_defib_allowed`,
 /// each hoisted as `Some(reason)` when the gate BLOCKS, `None` when it
-/// allows — matching this crate's fail-closed contract, missing evidence
-/// for a peer with no entry is treated as "no reason on file", i.e.
-/// allowed, since Python's default path is "check passes unless a reason
-/// is returned").
+/// allows). Finding 1 (Task 47 correction round 1): a peer with NO entry in
+/// [`CycleEvidence::defib_gates`], or an entry whose `observed_at` is more
+/// than [`GATE_EVIDENCE_MAX_AGE_SECS`] from [`CycleEvidence::now`] (or in
+/// the future), is DENIED with an actionable reason — never defaulted to
+/// "no reason on file, therefore allowed".
 #[derive(Debug, Clone, Default)]
 pub struct DefibGate {
+    pub observed_at: i64,
     pub cooldown_blocked: Option<String>,
     pub recently_attempted_blocked: Option<String>,
     pub policy_blocked: Option<String>,
@@ -74,18 +95,53 @@ pub struct DefibGate {
 
 /// Per-peer gate evidence for the close-selection loop (py's
 /// `_check_close_allowed` / `_check_safety_guards` / `_check_cooldown`).
+/// Same missing/stale-deny contract as [`DefibGate`] (finding 1).
 #[derive(Debug, Clone, Default)]
 pub struct CloseGate {
+    pub observed_at: i64,
     pub close_allowed_blocked: Option<String>,
     pub safety_guard_blocked: Option<String>,
     pub cooldown_blocked: Option<String>,
 }
 
 /// Per-peer gate evidence for the open-execution loop (py's
-/// `_check_safety_guards(cfg, "open", ...)`).
+/// `_check_safety_guards(cfg, "open", ...)`). Same missing/stale-deny
+/// contract as [`DefibGate`] (finding 1).
 #[derive(Debug, Clone, Default)]
 pub struct OpenGuard {
+    pub observed_at: i64,
     pub blocked: Option<String>,
+}
+
+/// `true` when `observed_at` is within `[now - GATE_EVIDENCE_MAX_AGE_SECS,
+/// now]` inclusive — i.e. neither stale nor from-the-future (clock skew is
+/// exactly as untrusted as staleness: neither is proof the evidence
+/// reflects the peer's CURRENT state).
+fn gate_evidence_is_fresh(observed_at: i64, now: i64) -> bool {
+    matches!(gate_evidence_age(observed_at, now),
+             Some(age) if (0..=GATE_EVIDENCE_MAX_AGE_SECS).contains(&age))
+}
+
+/// Overflow-safe age (correction round 2): `now.checked_sub(observed_at)`.
+/// `None` means the subtraction itself overflowed — evidence so malformed
+/// that its age cannot even be computed. That is DENIED like staleness,
+/// never defaulted: unchecked `now - observed_at` panicked in debug on
+/// `observed_at = i64::MIN`, and under wrapping arithmetic
+/// `(now = i64::MIN + 900, observed_at = i64::MAX)` wrapped to 899 —
+/// INSIDE the accepted window — turning untrusted evidence into fresh
+/// evidence. The skip-reason paths format from THIS value so the
+/// subtraction is never repeated unchecked.
+fn gate_evidence_age(observed_at: i64, now: i64) -> Option<i64> {
+    now.checked_sub(observed_at)
+}
+
+/// Human text for a denied gate age (correction round 2): shared by all
+/// three action families so no reason branch repeats raw subtraction.
+fn gate_age_denial_text(observed_at: i64, now: i64) -> String {
+    match gate_evidence_age(observed_at, now) {
+        Some(age) => format!("observed {age}s ago (max {GATE_EVIDENCE_MAX_AGE_SECS}s)"),
+        None => "timestamp arithmetic overflow (malformed evidence)".to_string(),
+    }
 }
 
 /// Evidence for one open-candidate's EV evaluation (py 608-646, 674-698):
@@ -107,7 +163,21 @@ pub struct OpenCandidateEvidence {
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveryEvidence {
     pub all_channels: Vec<discovery::PatronCandidate>,
+    /// Shared "cached `listchannels(source=peer_id)`" evidence, keyed by
+    /// peer_id — used by [`discovery::discover_from_neighbors`]'s patrons
+    /// AND, when [`Self::neighbor_capital_efficiency`] is present, by
+    /// [`discovery::discover_from_neighbors_capital_efficiency`]'s patron
+    /// pool AND its second-hop lookups (py's single `_get_cached_channels`
+    /// cache serves every caller).
     pub neighbor_patron_source_channels: BTreeMap<String, Vec<NeighborEdge>>,
+    /// Present <=> py's `self._capital_efficiency is not None` (Task 47
+    /// correction round 1, finding 2): when supplied, neighbor discovery
+    /// (Strategy 2) runs [`discovery::discover_from_neighbors_capital_efficiency`]
+    /// instead of the no-capital-efficiency fallback
+    /// [`discovery::discover_from_neighbors`] — mirroring Python's branch
+    /// selection, decided by whoever assembles this evidence (they know
+    /// whether a capital-efficiency analyzer was injected).
+    pub neighbor_capital_efficiency: Option<Vec<discovery::PatronPoolInput>>,
     pub graph_cached_source_channels: BTreeMap<String, Vec<discovery::GraphChannelEdge>>,
     pub route_pair_rows: Vec<discovery::RoutePairRow>,
     pub channel_to_peer: BTreeMap<String, String>,
@@ -350,12 +420,28 @@ pub fn discover_peers(
             )
         })
         .collect();
-    raw.extend(discovery::discover_from_neighbors(
-        &evidence.all_channels,
-        &patron_map,
-        &existing_peers,
-        &evidence.our_node_id,
-    ));
+    // Finding 2: evidence-driven branch selection, mirroring Python's
+    // `self._capital_efficiency is None` check — the caller assembling
+    // `DiscoveryEvidence` knows whether a capital-efficiency analyzer was
+    // injected and supplies (or omits) `neighbor_capital_efficiency`.
+    match &evidence.neighbor_capital_efficiency {
+        Some(patron_pool_inputs) => {
+            raw.extend(discovery::discover_from_neighbors_capital_efficiency(
+                patron_pool_inputs,
+                &patron_map,
+                &existing_peers,
+                &evidence.our_node_id,
+            ));
+        }
+        None => {
+            raw.extend(discovery::discover_from_neighbors(
+                &evidence.all_channels,
+                &patron_map,
+                &existing_peers,
+                &evidence.our_node_id,
+            ));
+        }
+    }
 
     raw.extend(discovery::discover_from_graph(
         &evidence.graph_cached_source_channels,
@@ -398,17 +484,16 @@ pub fn discover_peers(
     let normalized =
         normalize_candidate_scores(raw.iter().map(|c| c.to_scoring_candidate()).collect());
 
-    // py 2738-2743: dedup by peer_id, keep highest score.
-    let mut best: BTreeMap<String, Candidate> = BTreeMap::new();
+    // py 2738-2743: dedup by peer_id, keep highest score, first-discovery
+    // order preserved (see `super::dedup`'s doc comment; Task 47 finding 4
+    // -- a `BTreeMap`-keyed dedup would reorder every candidate into
+    // peer-id sort order, not just colliding ones).
+    let mut order: Vec<String> = Vec::new();
+    let mut best: std::collections::HashMap<String, Candidate> = std::collections::HashMap::new();
     for c in normalized {
-        match best.get(&c.peer_id) {
-            Some(existing) if existing.score >= c.score => {}
-            _ => {
-                best.insert(c.peer_id.clone(), c);
-            }
-        }
+        super::dedup::upsert_best(&mut order, &mut best, c.peer_id.clone(), c, |c| c.score);
     }
-    let mut merged: Vec<Candidate> = best.into_values().collect();
+    let mut merged: Vec<Candidate> = super::dedup::into_ordered_vec(order, best);
 
     for c in merged.iter_mut() {
         let empty = CandidateEnrichmentEvidence::default();
@@ -475,26 +560,36 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
         if defibrillations_this_cycle >= evidence.defibrillation_limit {
             break;
         }
-        let gate = evidence
-            .defib_gates
-            .get(&loser.peer_id)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(reason) = gate.cooldown_blocked {
+        let Some(gate) = evidence.defib_gates.get(&loser.peer_id) else {
+            plan.skipped_reasons.push(format!(
+                "Defibrillation evidence missing for {}...: cannot evaluate safety gates (fail-closed)",
+                short(&loser.peer_id)
+            ));
+            continue;
+        };
+        if !gate_evidence_is_fresh(gate.observed_at, evidence.now) {
+            plan.skipped_reasons.push(format!(
+                "Defibrillation evidence stale for {}...: {} — fail-closed",
+                short(&loser.peer_id),
+                gate_age_denial_text(gate.observed_at, evidence.now)
+            ));
+            continue;
+        }
+        if let Some(reason) = &gate.cooldown_blocked {
             plan.skipped_reasons.push(format!(
                 "Defibrillation cooldown for {}: {reason}",
                 loser.scid
             ));
             continue;
         }
-        if let Some(reason) = gate.recently_attempted_blocked {
+        if let Some(reason) = &gate.recently_attempted_blocked {
             plan.skipped_reasons.push(format!(
                 "Defibrillation skipped for {}: {reason}",
                 loser.scid
             ));
             continue;
         }
-        if let Some(reason) = gate.policy_blocked {
+        if let Some(reason) = &gate.policy_blocked {
             plan.skipped_reasons.push(format!(
                 "Defibrillation policy-blocked for {}: {reason}",
                 loser.scid
@@ -527,23 +622,33 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
                 break;
             }
         }
-        let gate = evidence
-            .close_gates
-            .get(&loser.peer_id)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(reason) = gate.close_allowed_blocked {
+        let Some(gate) = evidence.close_gates.get(&loser.peer_id) else {
+            plan.skipped_reasons.push(format!(
+                "Close evidence missing for {}...: cannot evaluate safety gates (fail-closed)",
+                short(&loser.peer_id)
+            ));
+            continue;
+        };
+        if !gate_evidence_is_fresh(gate.observed_at, evidence.now) {
+            plan.skipped_reasons.push(format!(
+                "Close evidence stale for {}...: {} — fail-closed",
+                short(&loser.peer_id),
+                gate_age_denial_text(gate.observed_at, evidence.now)
+            ));
+            continue;
+        }
+        if let Some(reason) = &gate.close_allowed_blocked {
             plan.skipped_reasons
                 .push(format!("Close blocked for {}: {reason}", loser.scid));
             continue;
         }
         if evidence.close_execution_enabled {
-            if let Some(reason) = gate.safety_guard_blocked {
+            if let Some(reason) = &gate.safety_guard_blocked {
                 plan.skipped_reasons
                     .push(format!("Close guard failed for {}: {reason}", loser.scid));
                 continue;
             }
-        } else if let Some(reason) = gate.cooldown_blocked {
+        } else if let Some(reason) = &gate.cooldown_blocked {
             plan.skipped_reasons
                 .push(format!("Close cooldown for {}: {reason}", loser.scid));
             continue;
@@ -717,7 +822,16 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
 
         let mut opens_this_cycle: i64 = 0;
         let mut remaining_budget = evidence.exploration_budget_sats;
-        for (candidate, channel_size, ev) in evaluated {
+        // Task 47 correction round 1, finding 3: the CAPITAL balance opens
+        // are sized/EV'd against, tracked separately from the exploration
+        // FEE budget (`remaining_budget`, unchanged). Python recomputes
+        // later candidates' size/EV against the balance remaining after
+        // each prior accepted open's debit (capacity_planner.py 687-693)
+        // and debits the channel amount only at the successful-open commit
+        // point (737-744) — never at evaluation time and never conflated
+        // with the exploration-fee accounting.
+        let mut running_available_sats = evidence.available_sats;
+        for (candidate, precomputed_channel_size, precomputed_ev) in evaluated {
             if opens_this_cycle >= evidence.max_opens_per_cycle {
                 break;
             }
@@ -727,6 +841,51 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
                     evidence.estimated_open_cost_sats
                 ));
                 break;
+            }
+
+            // py 687-690: the first accepted open reuses the size/EV
+            // computed in the earlier evaluation pass (against the
+            // ORIGINAL available balance); every open after it is
+            // recomputed against `running_available_sats`, which already
+            // reflects every prior ACCEPTED open's debit.
+            let (channel_size, ev) = if opens_this_cycle > 0 {
+                let Some(oc_evidence) = evidence.open_candidate_evidence.get(&candidate.peer_id)
+                else {
+                    // Evaluated once already (it had evidence then — see the
+                    // first pass above); fail closed defensively rather than
+                    // panic if this invariant is ever violated.
+                    plan.skipped_reasons.push(format!(
+                        "No sizing/EV evidence for {}...: cannot re-evaluate after prior open",
+                        short(&candidate.peer_id)
+                    ));
+                    continue;
+                };
+                let sizing_pool = sizing_pool_for(&candidate.peer_id);
+                let sizing_candidate = SizingCandidate {
+                    peer_id: &candidate.peer_id,
+                    score: candidate.score,
+                };
+                let recomputed_size = size_channel(
+                    &sizing_candidate,
+                    &sizing_pool,
+                    running_available_sats,
+                    &sizing_cfg,
+                    &oc_evidence.peer_dest_channel_capacities_sats,
+                );
+                let mut inputs = oc_evidence.open_ev_template;
+                inputs.channel_size_sats = recomputed_size;
+                let recomputed_ev = calculate_open_ev(&inputs);
+                (recomputed_size, recomputed_ev)
+            } else {
+                (precomputed_channel_size, precomputed_ev)
+            };
+
+            if ev <= 0.0 {
+                plan.skipped_reasons.push(format!(
+                    "Negative EV ({ev:.0}) for {}...",
+                    short(&candidate.peer_id)
+                ));
+                continue;
             }
 
             if matches!(
@@ -749,11 +908,22 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
                 }
             }
 
-            let guard = evidence.open_guards.get(&candidate.peer_id);
-            if let Some(OpenGuard {
-                blocked: Some(reason),
-            }) = guard
-            {
+            let Some(guard) = evidence.open_guards.get(&candidate.peer_id) else {
+                plan.skipped_reasons.push(format!(
+                    "Open guard evidence missing for {}...: cannot evaluate safety gates (fail-closed)",
+                    short(&candidate.peer_id)
+                ));
+                continue;
+            };
+            if !gate_evidence_is_fresh(guard.observed_at, evidence.now) {
+                plan.skipped_reasons.push(format!(
+                    "Open guard evidence stale for {}...: {} — fail-closed",
+                    short(&candidate.peer_id),
+                    gate_age_denial_text(guard.observed_at, evidence.now)
+                ));
+                continue;
+            }
+            if let Some(reason) = &guard.blocked {
                 plan.skipped_reasons.push(format!(
                     "Guard failed for {}...: {reason}",
                     short(&candidate.peer_id)
@@ -767,6 +937,10 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
                 ev,
             });
             opens_this_cycle += 1;
+            // py 737-744: debit the planned CHANNEL AMOUNT from the capital
+            // balance at the commit point (finding 3) — kept separate from
+            // the exploration FEE budget debited just below.
+            running_available_sats = (running_available_sats - channel_size).max(0);
             remaining_budget = (remaining_budget - evidence.estimated_open_cost_sats).max(0);
         }
     }
@@ -849,4 +1023,42 @@ fn discover_peers_sink_adjacent(evidence: &CycleEvidence, peer_id: &str) -> bool
         &existing_peers,
     );
     result.sink_adjacent_peer_ids.contains(peer_id)
+}
+
+#[cfg(test)]
+mod freshness_overflow_tests {
+    use super::*;
+
+    /// Correction round 2: the wrap-into-fresh pair. True age of
+    /// `(now = i64::MIN + 900, observed_at = i64::MAX)` is ~-2^64+899 —
+    /// future evidence — but two's-complement WRAPPING subtraction yields
+    /// 899, inside the accepted 0..=900 window. Checked/debug arithmetic
+    /// panics instead. Either behaviour turns malformed evidence into a
+    /// planned action; the predicate must simply deny.
+    #[test]
+    fn wrap_pair_is_denied_not_accepted_as_fresh() {
+        assert!(!gate_evidence_is_fresh(i64::MAX, i64::MIN + 900));
+    }
+
+    /// Debug-panic pair straight at the predicate.
+    #[test]
+    fn extreme_min_observed_at_is_denied_not_panicking() {
+        assert!(!gate_evidence_is_fresh(i64::MIN, 0));
+        assert!(!gate_evidence_is_fresh(i64::MIN, i64::MAX));
+    }
+
+    /// The round-1 contract survives: 900s inclusive stays fresh, 901s is
+    /// stale, 1s future is denied.
+    #[test]
+    fn inclusive_boundary_and_future_denial_preserved() {
+        assert!(gate_evidence_is_fresh(
+            1_000,
+            1_000 + GATE_EVIDENCE_MAX_AGE_SECS
+        ));
+        assert!(!gate_evidence_is_fresh(
+            1_000,
+            1_001 + GATE_EVIDENCE_MAX_AGE_SECS
+        ));
+        assert!(!gate_evidence_is_fresh(1_001, 1_000));
+    }
 }

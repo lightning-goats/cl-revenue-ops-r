@@ -46,23 +46,28 @@ root and the total absence of an RPC client dependency anywhere in
 | `planner::sizing::size_channel` | `_size_channel` (py 2757-2806) | Pure, evidence-in |
 | `planner::demand_flow::{classify_peers, find_sink_adjacent_candidates}` | `DemandFlowClassifier` (py `modules/demand_flow.py` 56-95, 193-233) | Pure |
 | `planner::discovery::discover_from_winners` | Strategy 1 (py 1485-1497) | Pure, evidence-in. **Fixture-verified.** |
-| `planner::discovery::discover_from_neighbors` | Strategy 2's no-capital-efficiency FALLBACK branch only (py 1516-1566) | Pure, evidence-in. **NOT fixture-verified** (hand-derived controls) — see "Declared gaps". |
+| `planner::discovery::discover_from_neighbors` | Strategy 2's no-capital-efficiency FALLBACK branch (py 1516-1566) | Pure, evidence-in. **Fixture-verified** (Task 47 correction round 1, finding 5). |
+| `planner::discovery::discover_from_neighbors_capital_efficiency` | Strategy 2's capital-efficiency-aware branch: `_build_neighbor_patron_pool`, `_build_neighbor_candidate`, `_discover_second_degree_neighbors` (py 1568-1760) | Pure, evidence-in. **Fixture-verified** (Task 47 correction round 1, finding 2 — covers fallback/first-degree/second-degree cases). |
 | `planner::discovery::discover_from_graph` | Strategy 3 (py 1762-1806) | Pure, evidence-in. **Fixture-verified.** |
-| `planner::discovery::discover_from_route_pairs` | Strategy 5 (py 1808-1904) | Pure, evidence-in. **NOT fixture-verified** (hand-derived controls) — see "Declared gaps". |
+| `planner::discovery::discover_from_route_pairs` | Strategy 5 (py 1808-1904) | Pure, evidence-in. **Fixture-verified** (Task 47 correction round 1, finding 5). |
 | `planner::discovery::discover_from_demand_flow` | Strategy 6 (py 1917-1947) | Pure, evidence-in. **Fixture-verified** (via `demand_flow`'s two functions). |
-| `planner::cycle::discover_peers` | `_discover_peers` (py 2714-2755): runs all five strategies, normalizes, dedups, enriches, applies pool quotas | Pure, evidence-in |
+| `planner::cycle::discover_peers` | `_discover_peers` (py 2714-2755): runs all five strategies (branch-selecting Strategy 2's variant per `DiscoveryEvidence::neighbor_capital_efficiency`), normalizes, dedups (first-discovery order preserved — Task 47 correction round 1, finding 4), enriches, applies pool quotas | Pure, evidence-in. **Fixture-verified** for the cross-strategy merge/tie-order behavior. |
 | `planner::recycle::apply_redeployment_ev_demotion` | `_apply_redeployment_ev_demotion` (py 1454-1483) | Pure, composes `ev::calculate_redeployment_ev` |
 | `planner::recycle::find_best_recycle_pair` | the selection core of `_evaluate_recycle_opportunities` (py 2084-2108) | Pure, composes `ev::calculate_open_ev`/`calculate_recycle_ev` |
 | `planner::cycle::plan_cycle` | `execute_cycle` (py 363-786), **minus every `_execute_*` RPC call** | Pure, evidence-in/plan-out. See "plan_cycle: what's real and what's hoisted" below. |
 
-Every public item has a `py <file>:<line>` doc comment. **80 tests** (up
-from 39), covering the full pure-kernel and orchestration surface. Fixture
-counts: `fixtures/capital/capex/allocations.json` (26 scenarios, unchanged)
-and `fixtures/capital/planner/kernels.json` (**155 scenarios**, up from 82,
-across 19 function kinds — see `tools/port/gen_capital_planner_fixtures.py`
-for the full list). `crates/revops-capital/TASK47-REPORT.md` has the
-per-area fixture/test breakdown and the captured RED output for every
-revert tripwire.
+Every public item has a `py <file>:<line>` doc comment. **98 tests** (up
+from 80 at the reviewed `d13dabf` checkpoint, up from 39 before the
+original orchestration pass), covering the full pure-kernel and
+orchestration surface. Fixture counts: `fixtures/capital/capex/allocations.json`
+(26 scenarios, unchanged) and `fixtures/capital/planner/kernels.json`
+(**178 scenarios**, up from 155, across 24 function kinds — see
+`tools/port/gen_capital_planner_fixtures.py` for the full list; the four
+new kinds are `discover_from_neighbors`, `discover_from_route_pairs`,
+`discover_from_neighbors_capital_efficiency`, and `discover_peers`).
+`crates/revops-capital/TASK47-REPORT.md` has the per-area fixture/test
+breakdown and the captured RED output for every revert tripwire AND every
+Task 47 correction-round-1 finding.
 
 ## `plan_cycle`: what's real and what's hoisted
 
@@ -85,8 +90,13 @@ caller rather than the logic being re-derived):
 - **Cooldown / recently-attempted / defib-policy / close-allowed / safety-guard
   checks** (`_check_cooldown`, `_defib_recently_attempted`,
   `_check_defib_allowed`, `_check_close_allowed`, `_check_safety_guards`):
-  policy-manager/DB dependent; caller supplies a per-peer `Option<String>`
-  reason (`None` = allowed) via `DefibGate`/`CloseGate`/`OpenGuard`.
+  policy-manager/DB dependent; caller supplies a per-peer `DefibGate`/
+  `CloseGate`/`OpenGuard` entry with an `observed_at` timestamp and an
+  `Option<String>` reason per sub-gate (`None` = allowed). Task 47
+  correction round 1, finding 1: a peer with NO entry in the evidence map,
+  or an entry whose `observed_at` is more than `GATE_EVIDENCE_MAX_AGE_SECS`
+  (900s) from `CycleEvidence::now` (or in the future), is DENIED with an
+  actionable reason — missing/stale evidence never defaults to "allowed".
 - **`_arbitrate_close_list`** (py 3379+): a DB-registry-backed batch
   dedup/conflict-arming pass. NOT re-implemented — `plan_cycle` uses the
   worst-marginal-ROI-first order directly, which is what
@@ -115,24 +125,24 @@ shape and which sub-evidence gathers map to which Python RPC/DB call.
 
 ## Declared gaps (honest, not swept under "future work")
 
-- **`discover_from_neighbors`'s capital-efficiency-aware branch** (py
-  1568-1760: `_build_neighbor_patron_pool`, `_build_neighbor_candidate`,
-  `_discover_second_degree_neighbors`) is NOT ported. Only the
-  `self._capital_efficiency is None` fallback branch (py 1516-1566) is
-  ported. Every production node that injects a capital-efficiency analyzer
-  (the common case) takes the UNPORTED branch in Python. See
-  `discovery.rs`'s module doc comment.
-- **`discover_from_neighbors` and `discover_from_route_pairs` are not
-  fixture-verified against real Python** — both are cache-coupled to
-  `_get_cached_channels` (an instance-method side-effecting cache) in a way
-  that made a clean stub harness impractical under this session's budget.
-  They ARE ported (mechanical translation of the scoring/filter formulas)
-  and covered by hand-derived Rust-native tests, matching this crate's
-  existing precedent (`ENTRYPOINTS.md`'s "Fixture generation" section) for
-  functions without a Python-driven fixture — but "ported and tested" here
-  means less rigor than the fixture-verified functions.
+Resolved in Task 47 correction round 1 (see `TASK47-REPORT.md`'s
+"Correction round 1" section for red/green evidence): the fail-open safety
+gates (finding 1), `discover_from_neighbors`'s capital-efficiency-aware
+branch (finding 2), multi-open capital accounting reusing the initial
+balance (finding 3), tie-ordering in candidate dedup (finding 4), and the
+missing Python-oracle fixtures for `discover_from_neighbors`/
+`discover_from_route_pairs` (finding 5) are no longer gaps.
+
+Remaining gaps:
+
 - **`_arbitrate_close_list`'s DB-registry conflict-arming is not
   implemented** (see "plan_cycle: what's real and what's hoisted" above).
+  This is a hard release boundary, confirmed by the Task 47 review: the
+  planner must not become action-capable until close-list dedup/conflict
+  arbitration is supplied and independently reviewed. `plan_cycle`'s close
+  selection uses worst-marginal-ROI-first order directly; it does NOT dedup
+  against concurrent in-flight closes from other subsystems the way
+  `_arbitrate_close_list` does.
 - **LN+ swap evaluation, `BoltzCliManager`, `BoltzAutoCycle`,
   `LNPlusSwapAutomation`** — unchanged from the prior pass, still entirely
   unported (own porting projects).
@@ -143,9 +153,13 @@ shape and which sub-evidence gathers map to which Python RPC/DB call.
   `execute_cycle` was not attempted** — Python's orchestration is
   RPC/DB-heavy end to end in ways outside this crate's evidence contract
   (arbitration registry, policy manager, LN+ evaluator, capex engine).
-  Every sub-decision `plan_cycle` calls IS fixture-verified in isolation;
-  the orchestration wiring itself is proven by the revert-tripwire tests
-  in `tests/planner_cycle.rs`, not by byte-for-byte Python parity.
+  Every sub-decision `plan_cycle` calls IS fixture-verified in isolation
+  (including, as of this correction round, the cross-strategy merge order
+  in `discover_peers` — see `discover_peers_matches_python_oracle_for_tie_order_and_dedup`);
+  the orchestration wiring itself is proven by the revert-tripwire tests in
+  `tests/planner_cycle.rs`, not by byte-for-byte Python parity on the full
+  cycle. Unit and kernel parity may support this checkpoint; it is not
+  evidence that a later live adapter is safe.
 
 ## Fixture generation
 
@@ -157,6 +171,22 @@ from `/home/sat/bin/cl_revenue_ops` (unmodified) and drive the REAL Python
 methods against constructed stub `profitability`/`database`/`config`
 objects (plain `types.SimpleNamespace` duck-typing — no CLN, no real DB).
 Output is committed at `fixtures/capital/capex/allocations.json` (26
-scenarios) and `fixtures/capital/planner/kernels.json` (155 scenarios
-across 19 function kinds). Re-run either script and diff against the
+scenarios) and `fixtures/capital/planner/kernels.json` (178 scenarios
+across 24 function kinds). Re-run either script and diff against the
 committed fixture to re-verify parity if the Python source changes.
+
+Regeneration commands (Task 47 correction round 1):
+
+```
+python3 tools/port/gen_capital_planner_fixtures.py > /tmp/kernels_new.json
+```
+
+then merge the new `discover_from_neighbors` /
+`discover_from_route_pairs` / `discover_from_neighbors_capital_efficiency`
+/ `discover_peers` scenarios into the committed file (this correction round
+merged rather than wholesale-replaced, to avoid perturbing the pre-existing
+`failed_open_backoff_reason`/`dead_capital_stage` scenarios' wall-clock-relative
+`created_at`/`entered_at` values, which are regenerated at whatever moment
+the script runs — a pre-existing, out-of-scope non-determinism in those two
+kinds, not introduced by this round; every scenario ADDED by this round is
+fully deterministic, no wall-clock values).

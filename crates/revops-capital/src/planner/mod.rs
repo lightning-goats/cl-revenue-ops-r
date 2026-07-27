@@ -12,6 +12,7 @@ pub mod candidate_score;
 pub mod close_fee;
 pub mod cycle;
 pub mod dead_capital;
+pub mod dedup;
 pub mod demand_flow;
 pub mod discovery;
 pub mod ev;

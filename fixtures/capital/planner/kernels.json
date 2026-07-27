@@ -4391,6 +4391,1433 @@
       "kind": "size_channel",
       "name": "clamped_to_min",
       "output": 500000
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {},
+        "profitability_rows": []
+      },
+      "kind": "discover_from_neighbors",
+      "name": "no_profitability_rows",
+      "output": []
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {
+          "excluded": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "should_not_appear",
+              "fee_per_millionth": 10
+            }
+          ],
+          "high": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "neighbor1",
+              "fee_per_millionth": 10
+            }
+          ]
+        },
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "low",
+            1.0
+          ],
+          [
+            "700000x2x0",
+            "mid",
+            50.0
+          ],
+          [
+            "700000x3x0",
+            "high",
+            90.0
+          ],
+          [
+            "700000x4x0",
+            "excluded",
+            0.5
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "basic_top3_patrons_4th_excluded",
+      "output": [
+        {
+          "patron_peer_id": "high",
+          "peer_id": "neighbor1",
+          "reason": "Neighbor of top earner high...",
+          "score": 0.49500000000000005,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {
+          "patron": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "expensive",
+              "fee_per_millionth": 2000
+            },
+            {
+              "amount_msat": 100000000,
+              "destination": "tiny",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "good",
+              "fee_per_millionth": 10
+            }
+          ]
+        },
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patron",
+            50.0
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "fee_and_capacity_filters",
+      "output": [
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "good",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {
+          "patron": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "already_peer",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "new_peer",
+              "fee_per_millionth": 10
+            }
+          ]
+        },
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patron",
+            50.0
+          ],
+          [
+            "700000x2x0",
+            "already_peer",
+            10.0
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "existing_peer_excluded",
+      "output": [
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "new_peer",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {
+          "patron": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n0",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n1",
+              "fee_per_millionth": 11
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n2",
+              "fee_per_millionth": 12
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n3",
+              "fee_per_millionth": 13
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n4",
+              "fee_per_millionth": 14
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n5",
+              "fee_per_millionth": 15
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n6",
+              "fee_per_millionth": 16
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "n7",
+              "fee_per_millionth": 17
+            }
+          ]
+        },
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patron",
+            50.0
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "top5_per_patron_cap",
+      "output": [
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "n0",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        },
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "n1",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        },
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "n2",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        },
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "n3",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        },
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "n4",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {
+          "patron": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "zzz_tie",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "aaa_tie",
+              "fee_per_millionth": 10
+            }
+          ]
+        },
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patron",
+            50.0
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "equal_score_tie_preserves_channel_list_order",
+      "output": [
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "zzz_tie",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        },
+        {
+          "patron_peer_id": "patron",
+          "peer_id": "aaa_tie",
+          "reason": "Neighbor of top earner patron...",
+          "score": 0.275,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {},
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patron_no_cache",
+            50.0
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "missing_patron_cache_yields_no_candidates",
+      "output": []
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [],
+        "route_pairs_channels": {},
+        "rows": []
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "no_rows",
+      "output": []
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ],
+          [
+            "700000x2x0",
+            "peerB"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 6000000000,
+              "destination": "cand1",
+              "fee_per_millionth": 100
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 5000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "basic_fee_weighted_ranking",
+      "output": [
+        {
+          "peer_id": "cand1",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.396,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "expensive",
+              "fee_per_millionth": 1500
+            },
+            {
+              "amount_msat": 100000000,
+              "destination": "tiny",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "good",
+              "fee_per_millionth": 10
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 1000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "expensive_and_tiny_filtered",
+      "output": [
+        {
+          "peer_id": "good",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.33,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 6000000000,
+              "destination": "big_cheap",
+              "fee_per_millionth": 50
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 1000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "capacity_and_fee_bonuses_stack",
+      "output": [
+        {
+          "peer_id": "big_cheap",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.396,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ],
+          [
+            "700000x2x0",
+            "peerB"
+          ],
+          [
+            "700000x3x0",
+            "peerC"
+          ],
+          [
+            "700000x4x0",
+            "peerD"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 6000000000,
+              "destination": "dup_cand",
+              "fee_per_millionth": 50
+            }
+          ],
+          "peerC": [
+            {
+              "amount_msat": 500000,
+              "destination": "dup_cand",
+              "fee_per_millionth": 999
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 9000000
+          },
+          {
+            "in_channel": "700000:3:0",
+            "out_channel": "700000:4:0",
+            "total_fee_msat": 1000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "duplicate_candidate_across_route_peers_keeps_higher_score",
+      "output": [
+        {
+          "peer_id": "dup_cand",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.396,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ],
+          [
+            "700000x2x0",
+            "peerB"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 6000000000,
+              "destination": "zzz_tie",
+              "fee_per_millionth": 100
+            },
+            {
+              "amount_msat": 6000000000,
+              "destination": "aaa_tie",
+              "fee_per_millionth": 100
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 5000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "equal_score_tie_preserves_channel_list_order",
+      "output": [
+        {
+          "peer_id": "zzz_tie",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.396,
+          "source": "route_pair"
+        },
+        {
+          "peer_id": "aaa_tie",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.396,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 6000000000,
+              "destination": "us",
+              "fee_per_millionth": 100
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 5000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "our_node_excluded",
+      "output": []
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.9
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patronA",
+            50.0,
+            1000
+          ]
+        ],
+        "source_channels": {
+          "patronA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "fd_neighbor1",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "first_degree_only_no_second_hop_channels",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "patronA",
+          "peer_id": "fd_neighbor1",
+          "reason": "Neighbor of capital-efficient patron patronA...",
+          "score": 1.3299999999999998,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.9
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patronA",
+            50.0,
+            1000
+          ]
+        ],
+        "source_channels": {
+          "fd_neighbor1": [
+            {
+              "amount_msat": 2000000000,
+              "destination": "sd_neighbor1",
+              "fee_per_millionth": 100
+            },
+            {
+              "amount_msat": 500000000,
+              "destination": "sd_neighbor2",
+              "fee_per_millionth": 600
+            }
+          ],
+          "patronA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "fd_neighbor1",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "second_degree_traversal_from_top_first_degree",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "patronA",
+          "peer_id": "fd_neighbor1",
+          "reason": "Neighbor of capital-efficient patron patronA...",
+          "score": 1.5599999999999998,
+          "source": "neighbor"
+        },
+        {
+          "degree": 2,
+          "patron_peer_id": "fd_neighbor1",
+          "peer_id": "sd_neighbor1",
+          "reason": "Neighbor of capital-efficient patron fd_neighbor1...",
+          "score": 0.57,
+          "source": "neighbor"
+        },
+        {
+          "degree": 2,
+          "patron_peer_id": "fd_neighbor1",
+          "peer_id": "sd_neighbor2",
+          "reason": "Neighbor of capital-efficient patron fd_neighbor1...",
+          "score": 0.41,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": null
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patronA",
+            50.0,
+            1000
+          ]
+        ],
+        "source_channels": {
+          "patronA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "fd_neighbor1",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "missing_efficiency_rank_defaults_to_point_one",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "patronA",
+          "peer_id": "fd_neighbor1",
+          "reason": "Neighbor of capital-efficient patron patronA...",
+          "score": 0.53,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.1,
+          "700000x2x0": 0.1
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "lowvol_patron",
+            10.0,
+            100
+          ],
+          [
+            "700000x2x0",
+            "highvol_patron",
+            10.0,
+            999999
+          ]
+        ],
+        "source_channels": {
+          "highvol_patron": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "hv_neighbor",
+              "fee_per_millionth": 50
+            }
+          ],
+          "lowvol_patron": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "lv_neighbor",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "patron_pool_selects_by_volume_when_efficiency_ties",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "lowvol_patron",
+          "peer_id": "lv_neighbor",
+          "reason": "Neighbor of capital-efficient patron lowvol_patro...",
+          "score": 0.53,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "highvol_patron",
+          "peer_id": "hv_neighbor",
+          "reason": "Neighbor of capital-efficient patron highvol_patr...",
+          "score": 0.53,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.9,
+          "700000x2x0": 0.2
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patronA",
+            90.0,
+            1000
+          ],
+          [
+            "700000x2x0",
+            "patronB",
+            10.0,
+            1000
+          ]
+        ],
+        "source_channels": {
+          "patronA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "shared_neighbor",
+              "fee_per_millionth": 50
+            }
+          ],
+          "patronB": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "shared_neighbor",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "same_neighbor_from_two_patrons_keeps_higher_score_and_patron_count_bonus",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "patronA",
+          "peer_id": "shared_neighbor",
+          "reason": "Neighbor of capital-efficient patron patronA...",
+          "score": 1.48,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.9
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "patronA",
+            50.0,
+            1000
+          ]
+        ],
+        "source_channels": {
+          "patronA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "expensive",
+              "fee_per_millionth": 2000
+            },
+            {
+              "amount_msat": 100000000,
+              "destination": "tiny",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "good",
+              "fee_per_millionth": 10
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "fee_and_capacity_filters_still_apply",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "patronA",
+          "peer_id": "good",
+          "reason": "Neighbor of capital-efficient patron patronA...",
+          "score": 1.3299999999999998,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "flow_rows": [],
+        "graph_cache": null,
+        "our_node_id": "us",
+        "profitability_rows": [],
+        "route_pairs": null,
+        "source_channels": {},
+        "winners": [
+          {
+            "peer_id": "zzz_peer",
+            "roi": 45.0,
+            "scid": "700000x1x0"
+          },
+          {
+            "peer_id": "aaa_peer",
+            "roi": 45.0,
+            "scid": "700000x2x0"
+          }
+        ]
+      },
+      "kind": "discover_peers",
+      "name": "equal_score_winners_preserve_discovery_order_over_peer_id_sort",
+      "output": [
+        {
+          "peer_id": "zzz_peer",
+          "score": 0.45,
+          "source": "winner"
+        },
+        {
+          "peer_id": "aaa_peer",
+          "score": 0.45,
+          "source": "winner"
+        }
+      ]
+    },
+    {
+      "input": {
+        "flow_rows": [],
+        "graph_cache": {
+          "dup_peer": [
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            },
+            {
+              "active": true,
+              "amount_msat": 50000000000
+            }
+          ]
+        },
+        "our_node_id": "us",
+        "profitability_rows": [],
+        "route_pairs": null,
+        "source_channels": {},
+        "winners": [
+          {
+            "peer_id": "dup_peer",
+            "roi": 31.0,
+            "scid": "700000x1x0"
+          },
+          {
+            "peer_id": "other_winner",
+            "roi": 20.0,
+            "scid": "700000x2x0"
+          }
+        ]
+      },
+      "kind": "discover_peers",
+      "name": "duplicate_peer_across_strategies_keeps_higher_score_at_first_position",
+      "output": [
+        {
+          "peer_id": "dup_peer",
+          "score": 0.3577708763999664,
+          "source": "graph"
+        }
+      ]
+    },
+    {
+      "input": {
+        "flow_rows": [],
+        "graph_cache": null,
+        "our_node_id": "us",
+        "profitability_rows": [],
+        "route_pairs": null,
+        "source_channels": {},
+        "winners": []
+      },
+      "kind": "discover_peers",
+      "name": "empty_everything",
+      "output": []
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "peerA"
+          ]
+        ],
+        "route_pairs_channels": {
+          "peerA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "at_fee_1000",
+              "fee_per_millionth": 1000
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "over_fee_1001",
+              "fee_per_millionth": 1001
+            },
+            {
+              "amount_msat": 500000000,
+              "destination": "at_size_500000",
+              "fee_per_millionth": 10
+            },
+            {
+              "amount_msat": 499999000,
+              "destination": "under_size",
+              "fee_per_millionth": 10
+            }
+          ]
+        },
+        "rows": [
+          {
+            "in_channel": "700000:1:0",
+            "out_channel": "700000:2:0",
+            "total_fee_msat": 2000000
+          }
+        ]
+      },
+      "kind": "discover_from_route_pairs",
+      "name": "route_pair_exact_1000ppm_and_500000sat_boundaries",
+      "output": [
+        {
+          "peer_id": "at_size_500000",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.33,
+          "source": "route_pair"
+        },
+        {
+          "peer_id": "at_fee_1000",
+          "reason": "Neighbor of route-pair peer peerA...",
+          "route_peer_id": "peerA",
+          "score": 0.3,
+          "source": "route_pair"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x0x0": 0.5,
+          "700000x1x0": 0.5,
+          "700000x2x0": 0.5,
+          "700000x3x0": 0.5,
+          "700000x4x0": 0.5,
+          "700000x5x0": 0.5,
+          "700000x6x0": 0.8,
+          "700000x7x0": 0.9
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x0x0",
+            "p0",
+            1.0,
+            1000
+          ],
+          [
+            "700000x1x0",
+            "p1",
+            1.0,
+            1000
+          ],
+          [
+            "700000x2x0",
+            "p2",
+            1.0,
+            1000
+          ],
+          [
+            "700000x3x0",
+            "p3",
+            1.0,
+            1000
+          ],
+          [
+            "700000x4x0",
+            "p4",
+            1.0,
+            1000
+          ],
+          [
+            "700000x5x0",
+            "p5",
+            1.0,
+            1000
+          ],
+          [
+            "700000x6x0",
+            "p6",
+            1.0,
+            1000
+          ],
+          [
+            "700000x7x0",
+            "p7",
+            1.0,
+            1000
+          ]
+        ],
+        "source_channels": {
+          "p0": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n0",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p1": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n1",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p2": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n2",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p3": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n3",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p4": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n4",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p5": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n5",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p6": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n6",
+              "fee_per_millionth": 50
+            }
+          ],
+          "p7": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "n7",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "tied_volume_and_roi_rank_over_original_order_seven_patrons",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "p7",
+          "peer_id": "n7",
+          "reason": "Neighbor of capital-efficient patron p7...",
+          "score": 1.3299999999999998,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "p6",
+          "peer_id": "n6",
+          "reason": "Neighbor of capital-efficient patron p6...",
+          "score": 1.23,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "p0",
+          "peer_id": "n0",
+          "reason": "Neighbor of capital-efficient patron p0...",
+          "score": 0.93,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "p1",
+          "peer_id": "n1",
+          "reason": "Neighbor of capital-efficient patron p1...",
+          "score": 0.93,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "p2",
+          "peer_id": "n2",
+          "reason": "Neighbor of capital-efficient patron p2...",
+          "score": 0.93,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "p3",
+          "peer_id": "n3",
+          "reason": "Neighbor of capital-efficient patron p3...",
+          "score": 0.93,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "p4",
+          "peer_id": "n4",
+          "reason": "Neighbor of capital-efficient patron p4...",
+          "score": 0.93,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.7,
+          "700000x2x0": 0.6,
+          "700000x3x0": 0.5
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "pa",
+            2.0,
+            500
+          ],
+          [
+            "700000x2x0",
+            "pb",
+            1.5,
+            400
+          ],
+          [
+            "700000x3x0",
+            "pc",
+            1.0,
+            300
+          ]
+        ],
+        "source_channels": {
+          "pa": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "dup_n",
+              "fee_per_millionth": 40
+            }
+          ],
+          "pb": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "dup_n",
+              "fee_per_millionth": 45
+            }
+          ],
+          "pc": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "dup_n",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "duplicate_destination_across_three_patrons",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "pa",
+          "peer_id": "dup_n",
+          "reason": "Neighbor of capital-efficient patron pa...",
+          "score": 1.43,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "channel_efficiencies": {
+          "700000x1x0": 0.7
+        },
+        "our_node_id": "us",
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "pa",
+            2.0,
+            500
+          ]
+        ],
+        "source_channels": {
+          "pa": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "at_fee_boundary",
+              "fee_per_millionth": 1500
+            },
+            {
+              "amount_msat": 1000000000,
+              "destination": "over_fee_boundary",
+              "fee_per_millionth": 1501
+            },
+            {
+              "amount_msat": 200000000,
+              "destination": "at_size_boundary",
+              "fee_per_millionth": 50
+            },
+            {
+              "amount_msat": 199999000,
+              "destination": "under_size_boundary",
+              "fee_per_millionth": 50
+            }
+          ]
+        }
+      },
+      "kind": "discover_from_neighbors_capital_efficiency",
+      "name": "neighbor_exact_1500ppm_and_200000sat_boundaries",
+      "output": [
+        {
+          "degree": 1,
+          "patron_peer_id": "pa",
+          "peer_id": "at_size_boundary",
+          "reason": "Neighbor of capital-efficient patron pa...",
+          "score": 1.0659999999999998,
+          "source": "neighbor"
+        },
+        {
+          "degree": 1,
+          "patron_peer_id": "pa",
+          "peer_id": "at_fee_boundary",
+          "reason": "Neighbor of capital-efficient patron pa...",
+          "score": 0.93,
+          "source": "neighbor"
+        }
+      ]
+    },
+    {
+      "input": {
+        "our_node_id": "us",
+        "patron_channels": {
+          "fb_patronA": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "fb_dup_n",
+              "fee_per_millionth": 40
+            }
+          ],
+          "fb_patronB": [
+            {
+              "amount_msat": 1000000000,
+              "destination": "fb_dup_n",
+              "fee_per_millionth": 45
+            }
+          ]
+        },
+        "profitability_rows": [
+          [
+            "700000x1x0",
+            "fb_patronA",
+            60.0
+          ],
+          [
+            "700000x2x0",
+            "fb_patronB",
+            40.0
+          ]
+        ]
+      },
+      "kind": "discover_from_neighbors",
+      "name": "fallback_duplicate_destination_across_two_patrons",
+      "output": [
+        {
+          "patron_peer_id": "fb_patronA",
+          "peer_id": "fb_dup_n",
+          "reason": "Neighbor of top earner fb_patronA...",
+          "score": 0.33,
+          "source": "neighbor"
+        },
+        {
+          "patron_peer_id": "fb_patronB",
+          "peer_id": "fb_dup_n",
+          "reason": "Neighbor of top earner fb_patronB...",
+          "score": 0.22000000000000003,
+          "source": "neighbor"
+        }
+      ]
     }
   ]
 }
