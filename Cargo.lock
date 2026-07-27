@@ -703,8 +703,11 @@ dependencies = [
 name = "revops-lnplus"
 version = "0.1.0"
 dependencies = [
+ "revops-db",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

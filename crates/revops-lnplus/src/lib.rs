@@ -16,13 +16,26 @@
 //! after only executes obligations safely — this crate mirrors that
 //! ordering module-by-module.
 //!
-//! ## HARD RULE 1/2 compliance
+//! ## HARD RULE 1/2 compliance (kernel modules) + the wiring layer
 //!
-//! No HTTP client, no SQL connection, and no CLN RPC socket live in this
-//! crate. Every external effect is an injected trait in [`ports`]; every
-//! test in `tests/` runs against an in-memory fake. See
-//! `ENTRYPOINTS.md` for what a plugin needs to wire up before any of this
-//! runs live.
+//! The KERNEL — [`activate`], [`backfill`], [`breaker`], [`config`],
+//! [`db_types`], [`error`], [`evaluator`], [`finalize`], [`open`],
+//! [`ports`], [`reconcile`], [`telemetry`], [`types`], [`validation`],
+//! [`watcher`], [`withdrawal`] — holds no HTTP client, no SQL connection,
+//! and no CLN RPC socket. Every external effect is an injected trait in
+//! [`ports`]; every kernel test runs against an in-memory fake.
+//!
+//! [`exec_mode`], [`gated`], [`http`], [`loop_drivers`], and [`sqlite_db`]
+//! are the WIRING LAYER (added after the kernel was ported and reviewed —
+//! see `ENTRYPOINTS.md`'s 2026-07-27 update). [`sqlite_db`] DOES hold a
+//! real `rusqlite::Connection` (a production [`ports::LnPlusDb`]); [`http`]
+//! holds no live transport (a production [`ports::LnPlusApi`] generic over
+//! an [`http::HttpTransport`] with no concrete implementation shipped —
+//! see `REGISTER.md` §2). Every test anywhere in this crate, kernel or
+//! wiring, still runs against a fake or a throwaway temp-file sqlite db —
+//! never a live network call, never the production database. See
+//! `ENTRYPOINTS.md` / `REGISTER.md` for what a plugin still needs to wire
+//! up before any of this runs live.
 //!
 //! ## The five known defects this port fixes (not reproduces)
 //!
@@ -49,10 +62,15 @@ pub mod config;
 pub mod db_types;
 pub mod error;
 pub mod evaluator;
+pub mod exec_mode;
 pub mod finalize;
+pub mod gated;
+pub mod http;
+pub mod loop_drivers;
 pub mod open;
 pub mod ports;
 pub mod reconcile;
+pub mod sqlite_db;
 pub mod telemetry;
 pub mod types;
 pub mod validation;

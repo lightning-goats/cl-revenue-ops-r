@@ -17,3 +17,12 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Wiring layer only (src/sqlite_db.rs): the pure kernel above still owns no
+# SQL connection. `revops-db` is USED (its already-reviewed budget rail,
+# `revops_db::budget::BudgetDb`), never modified — see sqlite_db.rs's module
+# doc for why `reserve_spend`/etc. delegate there instead of duplicating it.
+revops-db = { path = "../revops-db" }
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -268,6 +268,11 @@ pub struct FakeApi {
     pub complete_application_calls: RefCell<Vec<String>>,
     pub create_rating_calls: RefCell<Vec<(String, Rating)>>,
     pub create_application_calls: RefCell<Vec<String>>,
+    /// Call counters for [`crate::loop_drivers`] short-circuit-ordering
+    /// tests: a disabled/blocked pass must not issue these LIVE, signed
+    /// calls at all.
+    pub get_applicable_swaps_calls: RefCell<u32>,
+    pub get_my_swaps_calls: RefCell<u32>,
 }
 
 impl Default for FakeApi {
@@ -285,6 +290,8 @@ impl Default for FakeApi {
             complete_application_calls: RefCell::new(Vec::new()),
             create_rating_calls: RefCell::new(Vec::new()),
             create_application_calls: RefCell::new(Vec::new()),
+            get_applicable_swaps_calls: RefCell::new(0),
+            get_my_swaps_calls: RefCell::new(0),
         }
     }
 }
@@ -297,6 +304,7 @@ impl FakeApi {
 
 impl LnPlusApi for FakeApi {
     fn get_applicable_swaps(&self) -> Result<Vec<SwapListing>, LnPlusError> {
+        *self.get_applicable_swaps_calls.borrow_mut() += 1;
         self.applicable_swaps.borrow().clone()
     }
 
@@ -313,6 +321,7 @@ impl LnPlusApi for FakeApi {
     }
 
     fn get_my_swaps(&self) -> Result<MySwaps, LnPlusError> {
+        *self.get_my_swaps_calls.borrow_mut() += 1;
         self.my_swaps.borrow().clone()
     }
 
@@ -522,6 +531,10 @@ pub struct FakeChain {
     pub connect_result: RefCell<PortResult<()>>,
     pub fund_channel_result: RefCell<PortResult<FundChannelResult>>,
     pub fund_channel_calls: RefCell<Vec<(String, i64, Feerate)>>,
+    /// Call counters for [`crate::loop_drivers`] short-circuit-ordering
+    /// tests.
+    pub opening_feerate_calls: RefCell<u32>,
+    pub confirmed_sats_calls: RefCell<u32>,
 }
 
 impl Default for FakeChain {
@@ -538,6 +551,8 @@ impl Default for FakeChain {
                 txid: Some("txid1".to_string()),
             })),
             fund_channel_calls: RefCell::new(Vec::new()),
+            opening_feerate_calls: RefCell::new(0),
+            confirmed_sats_calls: RefCell::new(0),
         }
     }
 }
@@ -567,9 +582,11 @@ impl ChainPort for FakeChain {
         })
     }
     fn opening_feerate_perkw(&self) -> PortResult<i64> {
+        *self.opening_feerate_calls.borrow_mut() += 1;
         self.opening_feerate.borrow().clone()
     }
     fn confirmed_unreserved_sats(&self) -> PortResult<i64> {
+        *self.confirmed_sats_calls.borrow_mut() += 1;
         self.confirmed_sats.borrow().clone()
     }
     fn connect(&self, target: &str) -> PortResult<()> {
@@ -640,5 +657,116 @@ pub fn listing(id: &str, participants: Vec<revops_lnplus::types::Participant>) -
         participant_max_count: max,
         platform: Some("cln".to_string()),
         participants,
+    }
+}
+
+// ============================ HTTP transport / signer =======================
+// Fakes for `revops_lnplus::http` — HARD RULE: no test anywhere in this
+// crate ever performs a real network call. `FakeHttpTransport` is an
+// in-memory queue of canned responses; nothing here ever opens a socket.
+
+use std::collections::VecDeque;
+
+use revops_lnplus::http::{
+    HttpMethod, HttpResponse, HttpTransport, SignError, Signer, TransportError,
+};
+
+#[derive(Debug, Clone)]
+pub struct RecordedRequest {
+    pub method: HttpMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+pub struct FakeHttpTransport {
+    pub responses: RefCell<VecDeque<Result<HttpResponse, TransportError>>>,
+    pub calls: RefCell<Vec<RecordedRequest>>,
+}
+
+impl FakeHttpTransport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a 200 OK JSON response.
+    pub fn push_json(&self, body: serde_json::Value) {
+        self.responses.borrow_mut().push_back(Ok(HttpResponse {
+            status: 200,
+            body: serde_json::to_vec(&body).unwrap(),
+        }));
+    }
+
+    pub fn push_status(&self, status: u16, body: serde_json::Value) {
+        self.responses.borrow_mut().push_back(Ok(HttpResponse {
+            status,
+            body: serde_json::to_vec(&body).unwrap(),
+        }));
+    }
+
+    pub fn push_raw_status(&self, status: u16, body: &[u8]) {
+        self.responses.borrow_mut().push_back(Ok(HttpResponse {
+            status,
+            body: body.to_vec(),
+        }));
+    }
+
+    pub fn push_transport_err(&self, msg: &str) {
+        self.responses
+            .borrow_mut()
+            .push_back(Err(TransportError(msg.to_string())));
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.calls.borrow().len()
+    }
+}
+
+impl HttpTransport for FakeHttpTransport {
+    fn request(
+        &self,
+        method: HttpMethod,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<HttpResponse, TransportError> {
+        self.calls.borrow_mut().push(RecordedRequest {
+            method,
+            url: url.to_string(),
+            headers: headers.to_vec(),
+            body: body.clone(),
+        });
+        self.responses
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Err(TransportError("no fixture queued".to_string())))
+    }
+}
+
+pub struct FakeSigner {
+    pub result: RefCell<Result<String, SignError>>,
+    pub calls: RefCell<Vec<String>>,
+}
+
+impl Default for FakeSigner {
+    fn default() -> Self {
+        Self {
+            result: RefCell::new(Ok("zbase-signature".to_string())),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl FakeSigner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Signer for FakeSigner {
+    fn signmessage(&self, message: &str) -> Result<String, SignError> {
+        self.calls.borrow_mut().push(message.to_string());
+        self.result.borrow().clone()
     }
 }
