@@ -123,3 +123,59 @@ async fn reader_sees_only_committed_data_while_writer_holds_open_transaction() {
         .unwrap();
     assert_eq!(count_after, 1, "reader didn't pick up the committed write");
 }
+
+#[tokio::test]
+async fn query_rows_maps_every_row_in_sql_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rows.db");
+    init_wal_db(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO t (id, v) VALUES (1, 'one');
+             INSERT INTO t (id, v) VALUES (2, 'two');
+             INSERT INTO t (id, v) VALUES (3, 'three');",
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let rows = handle
+        .query_rows(
+            "SELECT v FROM t WHERE id >= ?1 ORDER BY id ASC",
+            vec![rusqlite::types::Value::Integer(2)],
+            |row| row.get::<_, String>(0),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows, vec!["two".to_string(), "three".to_string()]);
+}
+
+#[tokio::test]
+async fn query_rows_propagates_a_row_decode_error_instead_of_returning_a_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("decode-error.db");
+    init_wal_db(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO t (id, v) VALUES (1, '1');
+             INSERT INTO t (id, v) VALUES (2, 'not-an-integer');",
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let err = handle
+        .query_rows("SELECT v FROM t ORDER BY id ASC", vec![], |row| {
+            row.get::<_, i64>(0)
+        })
+        .await
+        .expect_err("the second row's invalid type must fail the whole query");
+
+    assert!(
+        err.to_string().contains("query_rows"),
+        "missing query_rows context: {err}"
+    );
+}

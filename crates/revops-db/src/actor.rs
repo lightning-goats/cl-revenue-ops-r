@@ -150,6 +150,43 @@ impl DbHandle {
             .context("actor gone")?;
         rx.await.context("actor dropped reply")?
     }
+
+    /// Multi-row query with a caller-supplied row mapper. The statement,
+    /// cursor, and `rusqlite::Connection` remain on the actor's owning
+    /// thread; only the fully decoded `Vec<T>` crosses the task boundary.
+    /// Any row decode failure fails the whole request rather than returning
+    /// a misleading successful prefix.
+    pub async fn query_rows<T, F>(
+        &self,
+        sql: &'static str,
+        params: Vec<SqlValue>,
+        map: F,
+    ) -> Result<Vec<T>>
+    where
+        T: Send + 'static,
+        F: Fn(&Row) -> rusqlite::Result<T> + Send + Sync + 'static,
+    {
+        let (reply, rx) = oneshot::channel::<Result<Vec<T>>>();
+        let job: Box<dyn FnOnce(&Connection) + Send + Sync> = Box::new(move |conn| {
+            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            let result = (|| -> Result<Vec<T>> {
+                let mut stmt = conn.prepare(sql).context("query_rows prepare")?;
+                let mapped = stmt
+                    .query_map(param_refs.as_slice(), |row| map(row))
+                    .context("query_rows execute")?;
+                mapped
+                    .collect::<rusqlite::Result<Vec<T>>>()
+                    .context("query_rows decode")
+            })();
+            let _ = reply.send(result);
+        });
+        self.tx
+            .send(Command::Exec(job))
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
 }
 
 /// Open the database read-only and spawn the single-owner actor task that
