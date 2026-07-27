@@ -323,13 +323,26 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revops-fee-runway-status"),
         "methods: {methods:?}"
     );
-    // Exactly 9 rpc methods total (no leftover revenue-r-* names bleeding
+    // 2026-07-27: the first production surface over the revops-rebalance
+    // crate, which until then was not even linked into this binary.
+    // READ-ONLY -- it plans, it never sends.
+    assert!(
+        methods.contains(&"revenue-rebalance-plan"),
+        "methods: {methods:?}"
+    );
+    // Exactly 10 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
-    // fee-debug/fee-wake, plus Task 10's runway status RPC.
+    // fee-debug/fee-wake, Task 10's runway status RPC, and the read-only
+    // rebalance planner.
+    //
+    // This count is a GUARD, not bookkeeping: it is what forces a new RPC
+    // to be named here deliberately rather than appearing unannounced.
+    // Python exposes 69; every increment to this number should be a
+    // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        9,
+        10,
         "methods: {methods:?}"
     );
 

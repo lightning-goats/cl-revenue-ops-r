@@ -16,6 +16,7 @@ revops-core = { path = "../revops-core" }
 revops-db = { path = "../revops-db" }
 revops-econ = { path = "../revops-econ" }
 revops-fees = { path = "../revops-fees" }
+revops-rebalance = { path = "../revops-rebalance" }
 revops-rpc = { path = "../revops-rpc" }
 rusqlite.workspace = true
 # "process" (beyond the workspace default fs+std): Task 10's cutover-arm

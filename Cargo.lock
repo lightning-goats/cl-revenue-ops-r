@@ -596,6 +596,7 @@ dependencies = [
  "revops-db",
  "revops-econ",
  "revops-fees",
+ "revops-rebalance",
  "revops-rpc",
  "rusqlite",
  "rustix",

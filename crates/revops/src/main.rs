@@ -689,6 +689,7 @@ async fn main() -> Result<()> {
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
+    let rebalance_plan_name = rpc_name("rebalance-plan");
     let history_name = rpc_name("history");
     let report_name = rpc_name("report");
     let dashboard_name = rpc_name("dashboard");
@@ -874,6 +875,48 @@ async fn main() -> Result<()> {
                     db_tables,
                     fee_runway,
                 }))
+            },
+        )
+        .rpcmethod(
+            &rebalance_plan_name,
+            "read-only rebalance plan: what the ported planner WOULD pair (sends nothing)",
+            |p: Plugin<SharedState>, _v: serde_json::Value| async move {
+                // First production caller of the revops-rebalance crate,
+                // which until 2026-07-27 was not even linked into this
+                // binary. READ-ONLY: one listpeerchannels call, then the
+                // pure planner. No sendpay, no reservation, no spend.
+                let cfg = p.configuration();
+                let socket = PathBuf::from(&cfg.lightning_dir).join(&cfg.rpc_file);
+                let mut rpc = match cln_rpc::ClnRpc::new(&socket).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(serde_json::json!({"error": format!("connect {}: {e}", socket.display())}))
+                    }
+                };
+                let resp: serde_json::Value = match rpc
+                    .call_raw("listpeerchannels", &serde_json::json!({}))
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return Ok(serde_json::json!({"error": format!("listpeerchannels: {e}")})),
+                };
+                let channels: Vec<_> = resp
+                    .get("channels")
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|c| {
+                        revops::rpc_rebalance::planner_channel_from_rpc(
+                            c,
+                            revops::rpc_rebalance::DEFAULT_BAND_LOW,
+                            revops::rpc_rebalance::DEFAULT_BAND_HIGH,
+                        )
+                    })
+                    .collect();
+                Ok(revops::rpc_rebalance::build_rebalance_plan(
+                    &channels, 200_000, 8, 1_000,
+                ))
             },
         )
         .rpcmethod(

@@ -21,6 +21,7 @@ pub mod options_table;
 pub mod python_authority;
 pub mod rpc_dashboard;
 pub mod rpc_history;
+pub mod rpc_rebalance;
 pub mod rpc_report;
 pub mod rpc_status;
 
