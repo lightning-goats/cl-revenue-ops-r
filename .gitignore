@@ -1,4 +1,9 @@
 .superpowers/
+# Agent scratch space, same class as .superpowers/. Untracked content here
+# makes `git status --porcelain` non-empty, which makes build.rs stamp every
+# release binary `<commit>-dirty` -- and a dirty stamp is REFUSED by the
+# cutover-arm validator for live mode (and is a red provenance gate).
+.agents/
 /target
 # WAL side-files: the fixture db is production-schema (journal_mode=WAL),
 # so read-only opens regenerate these transiently. Never the fixture itself.
