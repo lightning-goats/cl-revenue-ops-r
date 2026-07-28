@@ -2117,7 +2117,12 @@ fn normalize_nondeterministic_fields(v: &serde_json::Value) -> serde_json::Value
         serde_json::Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, val) in map {
-                if DOCUMENTED_NONDETERMINISTIC_FIELDS.contains(&k.as_str()) {
+                let is_runtime_loop_timestamp = k == "updated_at"
+                    && map.contains_key("loop_name")
+                    && map.contains_key("wiring_status");
+                if DOCUMENTED_NONDETERMINISTIC_FIELDS.contains(&k.as_str())
+                    || is_runtime_loop_timestamp
+                {
                     out.insert(k.clone(), serde_json::json!("<normalized>"));
                 } else {
                     out.insert(k.clone(), normalize_nondeterministic_fields(val));
@@ -2133,6 +2138,22 @@ fn normalize_nondeterministic_fields(v: &serde_json::Value) -> serde_json::Value
         ),
         other => other.clone(),
     }
+}
+
+#[test]
+fn nondeterminism_normalizer_only_masks_runtime_loop_updated_at() {
+    let input = serde_json::json!({
+        "policy": {"updated_at": 1234},
+        "loop": {
+            "loop_name": "fee",
+            "wiring_status": "ready",
+            "updated_at": 5678
+        }
+    });
+
+    let normalized = normalize_nondeterministic_fields(&input);
+    assert_eq!(normalized["policy"]["updated_at"], 1234);
+    assert_eq!(normalized["loop"]["updated_at"], "<normalized>");
 }
 
 /// Round-2 correction, P3 (codex re-review): the positional-params test
