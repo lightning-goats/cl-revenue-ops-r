@@ -342,3 +342,39 @@ fn control_already_funded_row_never_trips_deadline_miss() {
     );
     assert_eq!(db.get_swap("1").unwrap().status, "opening");
 }
+
+// -------------------------------------------- F4C-2 fail-closed channel read
+
+#[test]
+fn unreadable_peer_channel_state_blocks_the_open_with_zero_live_calls() {
+    // F4C-2: if listpeerchannels itself fails, the I5(b)/B7 existing-
+    // channel check CANNOT run — proceeding to connect/fundchannel could
+    // double-fund a channel we simply could not see. Fail closed: no
+    // connect, no fundchannel, retry next pass.
+    let db = FakeDb::new();
+    let api = FakeApi::new();
+    let chain = FakeChain::new();
+    *chain.list_peer_channels_fails.borrow_mut() = true;
+    let logger = FakeLogger::new();
+    let peer = pubkey(1);
+    let row = SwapRow::new("1", "opening", 1_000_000, 6, 0)
+        .with_outbound_peer(peer)
+        .with_deadline_at(200_000);
+    db.insert(row.clone());
+
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
+    assert!(!opened);
+    assert!(
+        chain.connect_calls.borrow().is_empty(),
+        "no connect while the channel state is unreadable"
+    );
+    assert!(
+        chain.fund_channel_calls.borrow().is_empty(),
+        "no fundchannel while the channel state is unreadable"
+    );
+    assert!(
+        db.reservations.borrow().is_empty(),
+        "no budget hold for an open that was refused pre-flight"
+    );
+}

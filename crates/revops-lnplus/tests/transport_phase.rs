@@ -130,3 +130,19 @@ fn phase_constructors_roundtrip() {
         TransportPhase::AfterRequestSent
     );
 }
+
+#[test]
+fn exact_at_cap_2xx_response_is_accepted() {
+    // Boundary pin (4C correction gate): exactly MAX_RESPONSE_BYTES is
+    // fine; the unknown-typed rejection starts at cap+1 (previous test).
+    let t = FakeHttpTransport::new();
+    let s = FakeSigner::new();
+    queue_challenge(&t);
+    let mut body = b"{}".to_vec();
+    body.resize(revops_lnplus::http::MAX_RESPONSE_BYTES, b' ');
+    assert_eq!(body.len(), revops_lnplus::http::MAX_RESPONSE_BYTES);
+    t.push_raw_status(200, &body);
+    client(&t, &s)
+        .create_application("s1")
+        .expect("an exactly-at-cap valid response must be accepted");
+}

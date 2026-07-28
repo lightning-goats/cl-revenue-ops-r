@@ -87,13 +87,23 @@ pub fn execute_swap_open(
         return Ok(false);
     };
 
-    let channels = chain.list_peer_channels(None).unwrap_or_else(|e| {
-        logger.log(
-            LogLevel::Error,
-            &format!("LNPLUS: listpeerchannels failed for swap {sid}: {e}"),
-        );
-        Vec::new()
-    });
+    // Task 61 4C correction F4C-2: an unreadable peer-channel state must
+    // FAIL CLOSED. Proceeding on an empty default would skip the
+    // I5(b)/B7 existing-channel check and could double-fund a channel we
+    // simply could not see. No connect, no fundchannel; retry next pass.
+    let channels = match chain.list_peer_channels(None) {
+        Ok(channels) => channels,
+        Err(e) => {
+            logger.log(
+                LogLevel::Error,
+                &format!(
+                    "LNPLUS: listpeerchannels failed for swap {sid}: {e} — refusing to open \
+                     against unreadable channel state; retrying next pass"
+                ),
+            );
+            return Ok(false);
+        }
+    };
     let capacity_sats = row.capacity_sats;
     // I5(b) / B7: only trust a match by capacity (this row's committed
     // swap terms, via total_msat OR to_us_msat for dual-fund) or an

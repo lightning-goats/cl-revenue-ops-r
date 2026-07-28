@@ -184,6 +184,14 @@ impl ChainPort for ClnChainAdapter {
             .ok_or_else(|| PortError::new("getinfo response carried no id"))
     }
 
+    /// Task 61 4C correction F4C-1: channel-row decoding is STRICT on the
+    /// four critical fields (peer_id, state, total_msat, to_us_msat). A
+    /// well-formed EMPTY `channels` array is authoritative absence; a
+    /// missing container or an undecodable row is an ERROR — defaulted
+    /// empty/zero rows would let reconciliation misread malformed
+    /// evidence as absence and release a quarantined reservation.
+    /// `funding_txid` alone stays optional (legitimately absent
+    /// pre-lockin).
     fn list_peer_channels(&self, peer: Option<&str>) -> PortResult<Vec<ChannelInfo>> {
         let params = match peer {
             Some(p) => json!({"id": p}),
@@ -194,27 +202,39 @@ impl ChainPort for ClnChainAdapter {
             .get("channels")
             .and_then(Value::as_array)
             .ok_or_else(|| PortError::new("listpeerchannels response carried no channels"))?;
-        Ok(channels
-            .iter()
-            .map(|ch| ChannelInfo {
-                peer_id: ch
-                    .get("peer_id")
+        let mut out = Vec::with_capacity(channels.len());
+        for ch in channels {
+            let critical_str = |key: &str| -> PortResult<String> {
+                ch.get(key)
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                state: ch
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                total_msat: ch.get("total_msat").and_then(Value::as_i64).unwrap_or(0),
-                to_us_msat: ch.get("to_us_msat").and_then(Value::as_i64).unwrap_or(0),
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        PortError::new(format!(
+                            "listpeerchannels row missing/mistyped critical field {key:?} — \
+                             refusing to decode malformed channel evidence"
+                        ))
+                    })
+            };
+            let critical_i64 = |key: &str| -> PortResult<i64> {
+                ch.get(key).and_then(Value::as_i64).ok_or_else(|| {
+                    PortError::new(format!(
+                        "listpeerchannels row missing/mistyped critical field {key:?} — \
+                         refusing to decode malformed channel evidence"
+                    ))
+                })
+            };
+            out.push(ChannelInfo {
+                peer_id: critical_str("peer_id")?,
+                state: critical_str("state")?,
+                total_msat: critical_i64("total_msat")?,
+                to_us_msat: critical_i64("to_us_msat")?,
                 funding_txid: ch
                     .get("funding_txid")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-            })
-            .collect())
+            });
+        }
+        Ok(out)
     }
 
     fn opening_feerate_perkw(&self) -> PortResult<i64> {

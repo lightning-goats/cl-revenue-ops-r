@@ -330,3 +330,70 @@ fn unreachable_socket_is_a_clean_pre_submit_failure() {
     let signer = ClnSigner::new(missing, Duration::from_millis(400)).unwrap();
     assert!(signer.signmessage("m").is_err());
 }
+
+// ------------------------------------------------ F4C-1 strict row decode
+
+#[test]
+fn empty_channels_array_is_authoritative_absence() {
+    // CONTROL: a well-formed empty answer is a genuine "no channels" —
+    // reconciliation may act on it (release). Strictness must not break
+    // this.
+    let (_rt, server) = with_server(vec![FakeBehavior::Success(json!({"channels": []}))]);
+    let chain = ClnChainAdapter::new(server.path.clone(), timeout()).unwrap();
+    let channels = chain.list_peer_channels(Some("02aa")).unwrap();
+    assert!(channels.is_empty());
+}
+
+#[test]
+fn missing_channels_container_is_an_error_not_absence() {
+    let (_rt, server) = with_server(vec![FakeBehavior::Success(json!({"unexpected": true}))]);
+    let chain = ClnChainAdapter::new(server.path.clone(), timeout()).unwrap();
+    assert!(
+        chain.list_peer_channels(Some("02aa")).is_err(),
+        "malformed evidence must never read as authoritative absence"
+    );
+}
+
+#[test]
+fn channel_row_missing_any_critical_field_is_an_error_not_a_defaulted_row() {
+    // F4C-1: a row with peer_id/state/total_msat/to_us_msat missing or
+    // mistyped must be Err — defaulting to empty/zero would let
+    // reconciliation misread malformed evidence as absence (capacity 0
+    // matches nothing) and release a quarantined reservation.
+    let complete = json!({"peer_id": "02aa", "state": "CHANNELD_NORMAL",
+                          "total_msat": 1_000_000_000i64, "to_us_msat": 0});
+    let mut broken_rows = Vec::new();
+    for field in ["peer_id", "state", "total_msat", "to_us_msat"] {
+        let mut row = complete.clone();
+        row.as_object_mut().unwrap().remove(field);
+        broken_rows.push(row);
+    }
+    // Mistyped (string where a number belongs) is equally undecodable.
+    let mut mistyped = complete.clone();
+    mistyped["total_msat"] = json!("1000sat");
+    broken_rows.push(mistyped);
+
+    for broken in broken_rows {
+        let (_rt, server) = with_server(vec![FakeBehavior::Success(
+            json!({"channels": [broken.clone()]}),
+        )]);
+        let chain = ClnChainAdapter::new(server.path.clone(), timeout()).unwrap();
+        assert!(
+            chain.list_peer_channels(Some("02aa")).is_err(),
+            "row {broken} must be an error, not a defaulted ChannelInfo"
+        );
+    }
+}
+
+#[test]
+fn control_complete_row_with_absent_funding_txid_still_decodes() {
+    // funding_txid is legitimately absent pre-lockin — strictness applies
+    // to the four critical fields only.
+    let (_rt, server) = with_server(vec![FakeBehavior::Success(json!({"channels": [
+        {"peer_id": "02aa", "state": "OPENINGD", "total_msat": 7_000i64, "to_us_msat": 0}
+    ]}))]);
+    let chain = ClnChainAdapter::new(server.path.clone(), timeout()).unwrap();
+    let channels = chain.list_peer_channels(Some("02aa")).unwrap();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].funding_txid, None);
+}
