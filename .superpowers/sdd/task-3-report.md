@@ -1,95 +1,132 @@
 # Task 3 Report: Observer Runtime Framework and Persistent Loop Health
 
-Hexmem Task 57 was implemented on `codex/precutover-completion` in implementation commit
-`d7f227c7b87dc7cecfe3495f8dbbf90946d29153`.
+Task 57 was first implemented in `d7f227c` and reported in `d66779d`.
+The review correction contract was then completed on
+`codex/precutover-completion` in these committed checkpoints:
+
+- `1f6ab3b` — amend the approved design for the correction contract.
+- `e115d1d` — record the RED-first correction plan.
+- `e02ac7b` — make suspension durable and correct F1, F6, and F8.
+- `18ab9af` — bound every scheduler ingress path and correct F2.
+- `3f8cb7e` — seal observer construction and post-start activation for F3/F5.
+- `471d24f` — complete the deferred/superseded acknowledgement proof for F4.
 
 ## Scope and safety posture
 
 - Python remains the sole mutation authority.
-- No live CLN call, deployment, arming, authority transition, or soak reset was performed.
-- `AuthorityRuntime::Observer` cannot hold or construct an action adapter. Only
-  `AuthorityRuntime::Live` contains `ClnFeeBroadcaster`.
-- The production observer path spawns only the real fee pass. Rebalance, planner,
-  LN+, and Boltz are durably registered as `not_wired`; there are no success-shaped
-  no-op owners.
-- Loop-health state is persisted only in the Rust-owned observer database.
+- No live CLN call, deployment, arming, authority transition, shadow restart,
+  merge, or push was performed.
+- Observer construction cannot receive an action adapter. A private
+  `ObserverMode` is derived only from a validated passive or autonomous-shadow
+  mode, and the production `ObserverPassSet` has private fields and accepts only
+  concrete vetted observer passes.
+- Only the fee observer pass is wired. Rebalance, planner, LN+, and Boltz remain
+  durably `not_wired`; no success-shaped no-op owner was introduced.
+- No Hexmem implementation or review criterion was marked. Independent
+  owner/supervisor verification remains required before `impl`; Python alone
+  owns the later `review` criterion.
 
-## Implementation
+## Review findings F1-F8
 
-- Added a migration-safe `rust_loop_health` store with the exact five loop
-  identities, current-boot wiring registration, generation-CAS begin/terminal
-  writes, bounded error history, durable backpressure counters, and restart
-  reconciliation based on generation rather than timestamp ordering.
-- Added a bounded single-flight runtime: one active request, eight distinct pending
-  request keys, duplicate coalescing, ninth-key dropping, fail-closed persistence,
-  panic capture, and suspension after unrecordable lifecycle writes.
-- Added structural `AuthorityRuntime::{Observer, Live}` separation. Observer runtime
-  stores loop handles only; the live runtime alone stores the broadcaster.
-- Added a real fee completion acknowledgement. `RunPrepared` now acknowledges only
-  an actual `CycleOutcome::Ran`; disconnected, skipped, deferred/superseded, and
-  error outcomes fail the pass.
-- Routed the production autonomous fee cadence through the bounded loop owner with
-  the legacy fee owner in external-trigger-only mode. No other subsystem pass is
-  inserted in this checkpoint.
-- Added health RPC loop inventory with wiring, generation, terminal generation and
-  status, timestamps/history, error, coalesced, and dropped fields. A loop-store
-  read failure is section-local and does not fabricate healthy rows.
-- Updated the port checklist to record the real fee-only checkpoint and four
-  intentionally deferred loop owners.
+### F1 — durable suspension
 
-## RED evidence
+`rust_loop_health` now persists `active`/`suspended`, suspension time, and a
+bounded reason. Suspension retries until durable or until the store actor is
+provably closed, takes precedence in the health RPC, and cannot be masked by a
+late terminal pass. Current-boot ready registration explicitly reactivates a
+wired loop while retaining suspension/error history.
 
-The tests were written and observed failing before implementation.
+Tests cover transient backpressure failure with an in-flight pass, suspension
+without a running pass, retry/recovery, actor loss, restart persistence, and
+late terminal completion.
 
-1. `cargo test -p revops-db --test loop_health`
-   - RED: unresolved `revops_db::loop_health` and missing observer actor methods.
-2. `cargo test -p revops --test runtime`
-   - RED: unresolved `revops::{loop_health, runtime}` and DB loop-health module.
-3. `cargo test -p revops --test fee_scheduler run_prepared_acknowledges_only_after_real_owner_outcome --no-run`
-   - RED: missing `spawn_owner_for_runtime`; `CycleMsg::RunPrepared` had no
-     completion acknowledgement.
-4. `cargo test -p revops --lib rpc_health::tests::durable_loop_rows_replace_only_the_loops_gap --no-run`
-   - RED: missing `build_health_with_loops`.
-5. Supervisor regressions were also observed RED before correction:
-   - same-second restart reconciliation missed an unmatched generation;
-   - current-boot registration retained stale `ready` instead of `not_wired`;
-   - begin-persistence failure did not account for the abandoned request;
-   - same-second active health was incorrectly reported as passed;
-   - terminal kind was not represented independently from timestamps.
+### F2 — bounded scheduler ingress
 
-## Mutation safety proofs
+The fee owner uses a fixed-capacity Tokio MPSC. Async producers await
+`send`, the plain owner thread uses `blocking_recv`, and dedicated A3 callback
+threads use `blocking_send`. The wake channel is bounded and coalescing; no
+public sender bypasses the bounded surface. RPC closure is explicit, while
+notifications and A3 callbacks backpressure and A3 delivery remains FIFO and
+exactly once.
 
-Each mutation was temporary, its focused test was observed RED, and the source was
-restored before the final green run.
+Tests saturate notification, RPC, cycle-ACK, wake, and A3 producer classes,
+exercise owner loss, and structurally reject unbounded owner/wake ingress.
 
-- Removed the begin write; `owner_is_single_flight_coalesces_duplicates_and_drops_ninth_pending_key`
-  failed because generation remained `0` instead of `1`.
-- Removed the finish write; the same test failed because finish-write count was `0`
-  instead of `9`.
-- Removed the fail write; `error_panic_and_later_generation_are_distinguished`
-  failed because `last_error` was absent.
-- Removed the coalesced-counter write; the single-flight test failed with
-  coalesced total `0` instead of `1`.
-- Removed the dropped-counter write; the single-flight test failed with dropped
-  total `0` instead of `1`.
-- Restoration proof: `cargo test -p revops --test runtime -- --nocapture` passed all
-  6 runtime tests.
+### F3 — structural observer/action isolation
 
-These mutations demonstrate that required lifecycle and backpressure writes are
-asserted behavior, not incidental code coverage.
+`ObserverMode` is non-forgeable outside the validated mode conversion.
+`ObserverPassSet` exposes only concrete vetted constructors; the generic fake
+seam and `ObserverPass` trait are crate-private. `AuthorityPlan` invokes the
+action factory only for live mode.
+
+Compile-fail doctests reject forged observer tokens and arbitrary pass-set
+construction. Panic-factory tests prove both observer modes leave the action
+factory untouched, with a live exact-once positive control. Source scans remain
+as defense in depth. These guarantees do not claim that the four deferred
+subsystems are wired or vetted.
+
+### F4 — completion acknowledgement matrix
+
+Tests prove that an older deferred cycle receives an explicit superseded
+`Err`, the newest receiver stays pending and then receives the real terminal
+result, skipped and persistence-failed cycles never report success, and owner
+loss closes a still-outstanding receiver.
+
+### F5 — post-start cadence activation
+
+Fee cadence construction is inert. `main` retains an activation handle and
+activates only after `configured.start(state).await` succeeds. A paused-time
+test observes generation zero before activation and generation one afterward.
+
+### F6 — honest schema handling
+
+Because the table has not shipped, the fabricated partial-schema ALTER path was
+removed. Startup requires the exact canonical 15-column schema and rejects an
+unsupported partial legacy table rather than manufacturing interrupted
+generations.
+
+### F7 — current-boot wiring design amendment
+
+The approved design now distinguishes current-boot wiring from historical
+terminal/error evidence. Exact current registration may change stale
+`ready` to `not_wired`; historical completion and error state is retained.
+This supersedes the earlier sticky-ready rule and preserves the stale-ready
+regression test.
+
+### F8 — single-terminal CAS
+
+Terminal updates require `terminal_generation < generation`; a generation can
+accept exactly one terminal result. Tests reject same-generation pass-to-error
+and error-to-pass flips.
+
+## RED and mutation evidence
+
+Every mutation below was temporary, observed RED, and restored before the final
+green runs.
+
+- F1: removing the suspension write timed out the recovery test; removing RPC
+  suspension precedence returned `passed` where `suspended` was required.
+- F2: changing async owner admission to `try_send` broke saturation
+  backpressure; changing A3 `blocking_send` to `try_send` broke FIFO/exactly-once
+  delivery.
+- F3/F5: eagerly requesting before activation advanced generation from 0 to 1;
+  suppressing the live action-factory call tripped the live exact-once control.
+- F4: dropping the old superseded handoff, newest deferred terminal handoff, or
+  immediate terminal handoff produced `Closed` instead of the contracted
+  result; mapping every terminal outcome to `Ok` made the skip/error test fail.
+- Original lifecycle mutations remain covered: removing begin, finish, fail,
+  coalesced, or dropped persistence writes fails the corresponding focused
+  runtime assertion.
 
 ## Focused GREEN evidence
 
-- `cargo test -p revops-db --test loop_health` — 3 passed.
-- `cargo test -p revops --test runtime` — 6 passed.
-- `cargo test -p revops --test fee_scheduler run_prepared_acknowledges_only_after_real_owner_outcome` — 1 passed.
-- `cargo test -p revops --test action_surface` — 5 passed.
-- `cargo test -p revops --lib rpc_health::tests` — 10 passed.
+- `cargo test -p revops-db --test loop_health` — 5 passed.
+- `cargo test -p revops --lib runtime_tests` — 9 passed.
+- `cargo test -p revops --test fee_scheduler` — 90 passed.
+- `cargo test -p revops --test action_surface` — 8 passed.
+- `cargo test -p revops --lib rpc_health::tests` — 11 passed.
 - `cargo test -p revops --test manifest health` — 3 passed.
-
-The action-surface tests prove that the observer-side source region contains none
-of `ClnFeeBroadcaster`, `PaymentMode::Live`, or `ExecutionMode::Armed`, and that the
-production pass registry contains exactly one insertion: fee.
+- `cargo test -p revops --doc` — 7 passed, including the compile-fail proofs.
 
 ## Full verification gates
 
@@ -97,15 +134,14 @@ production pass registry contains exactly one insertion: fee.
 - `cargo fmt --all -- --check` — exit 0.
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0.
 - `git diff --check` — exit 0.
-- `git diff --cached --check` before the implementation commit — exit 0.
+- The isolated correction worktree was clean before this report update.
 
-## Remaining limits and concerns
+## Remaining limits
 
-- Rebalance, planner, LN+, and Boltz are intentionally `not_wired` until Tasks 4–7.
-  This is an explicit checkpoint boundary, not a hidden healthy state.
-- If the loop-health persistence service itself is unavailable, the owner cannot
-  guarantee a durable abandoned/backpressure counter. It returns an error, suspends
-  the loop, and logs the secondary persistence failure rather than reporting clean
-  admission or success. An already persisted unmatched begin remains available for
-  restart reconciliation.
-- This work has not been deployed or exercised against a live node.
+- Rebalance, planner, LN+, and Boltz are intentionally `not_wired` until Tasks
+  4-7 add concrete vetted observer types.
+- If loop-health persistence is unavailable, the runtime cannot promise a new
+  durable marker; it retries until the actor is provably unavailable, returns
+  failure, and never reports clean admission or healthy status.
+- This correction checkpoint has not been deployed or exercised against a live
+  node.
