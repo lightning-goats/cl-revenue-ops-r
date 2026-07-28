@@ -145,8 +145,104 @@ def test_external_adapter_registry_has_exact_classes_and_never_claims_missing_tr
         "source_line": 332,
     }
     assert by_id["datastore"]["python_evidence"] == [
-        {"source_file": "modules/data_service.py", "source_line": 473}
+        {"source_file": "modules/data_service.py", "source_line": 473},
+        {"source_file": "modules/rebalance_engine_v2.py", "source_line": 3186},
     ]
+
+
+def test_external_evidence_is_the_exact_pinned_production_callsite_set():
+    inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
+    actual = {
+        (entry["id"], ref["source_file"], ref["source_line"])
+        for entry in inventory["external_boundaries"]
+        for ref in entry["python_evidence"]
+    }
+    expected = {
+        ("askrene_age", "modules/data_service.py", 419),
+        ("askrene_bias_channel", "modules/data_service.py", 408),
+        ("askrene_bias_node", "modules/data_service.py", 401),
+        ("askrene_create_layer", "modules/data_service.py", 379),
+        ("askrene_create_layer", "modules/rebalance_router_v3.py", 615),
+        ("askrene_disable_node", "modules/data_service.py", 412),
+        ("askrene_inform_channel", "modules/data_service.py", 429),
+        ("askrene_remove_layer", "modules/data_service.py", 385),
+        ("askrene_remove_layer", "modules/rebalance_engine_v2.py", 319),
+        ("askrene_remove_layer", "modules/rebalance_router_v3.py", 668),
+        ("askrene_reserve", "modules/data_service.py", 433),
+        ("askrene_unreserve", "modules/data_service.py", 437),
+        ("askrene_update_channel", "modules/data_service.py", 394),
+        ("askrene_update_channel", "modules/rebalance_router_v3.py", 631),
+        ("askrene_update_channel", "modules/rebalance_router_v3.py", 649),
+        ("boltzcli", "cl-revenue-ops.py", 2801),
+        ("boltzcli", "modules/boltz_manager.py", 449),
+        ("close", "modules/capacity_planner.py", 3977),
+        ("close", "modules/data_service.py", 288),
+        ("connect", "modules/data_service.py", 296),
+        ("connect", "modules/lnplus_swaps.py", 1604),
+        ("datastore", "modules/data_service.py", 473),
+        ("datastore", "modules/rebalance_engine_v2.py", 3186),
+        ("delinvoice", "modules/data_service.py", 344),
+        ("delinvoice", "modules/rebalance_native_executor_v2.py", 391),
+        ("delpay", "modules/data_service.py", 340),
+        ("delpay", "modules/rebalance_engine_v2.py", 3109),
+        ("delpay", "modules/rebalance_native_executor_v2.py", 386),
+        ("dynamic_config", "cl-revenue-ops.py", 6723),
+        ("fundchannel", "modules/capacity_planner.py", 3060),
+        ("fundchannel", "modules/data_service.py", 281),
+        ("fundchannel", "modules/lnplus_swaps.py", 1672),
+        ("invoice", "modules/data_service.py", 328),
+        ("invoice", "modules/rebalance_native_executor_v2.py", 431),
+        ("lnplus_https", "modules/lnplus_swaps.py", 93),
+        ("pay", "modules/boltz_manager.py", 844),
+        ("pay", "modules/data_service.py", 349),
+        ("sendpay_waitsendpay", "modules/data_service.py", 332),
+        ("sendpay_waitsendpay", "modules/data_service.py", 336),
+        ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 461),
+        ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 462),
+        ("setchannel", "modules/data_service.py", 275),
+        ("signmessage", "modules/data_service.py", 303),
+        ("signmessage", "modules/lnplus_swaps.py", 130),
+    }
+    assert actual == expected
+    assert ("boltzcli", "modules/fee_cycle_capture.py", 418) not in actual
+
+
+def test_production_scan_provenance_hashes_every_inspected_python_file():
+    module = load_generator()
+    production_files = module.production_python_files(PYTHON_REPO, PYTHON_COMMIT)
+    inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
+    assert len(production_files) == 51
+    assert set(inventory["provenance"]["source_sha256"]) == set(production_files)
+
+
+def test_new_direct_production_bypass_fails_closed():
+    module = load_generator()
+    files = module.production_python_files(PYTHON_REPO, PYTHON_COMMIT)
+    sources = {
+        path: module.git_show(PYTHON_REPO, PYTHON_COMMIT, path) for path in files
+    }
+    sources["modules/__init__.py"] += b'\nplugin.rpc.call("pay", {})\n'
+    with pytest.raises(ValueError, match="unexpected=.*modules/__init__.py"):
+        module.scan_external_calls(sources)
+
+
+def test_observational_git_subprocess_exclusion_is_exact_and_documented():
+    module = load_generator()
+    assert module.OBSERVATIONAL_SUBPROCESS_EXCLUSIONS == {
+        ("modules/fee_cycle_capture.py", 418): "git rev-parse source identity"
+    }
+    inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
+    boltz_refs = next(
+        entry["python_evidence"]
+        for entry in inventory["external_boundaries"]
+        if entry["id"] == "boltzcli"
+    )
+    assert {
+        (ref["source_file"], ref["source_line"]) for ref in boltz_refs
+    } == {
+        ("cl-revenue-ops.py", 2801),
+        ("modules/boltz_manager.py", 449),
+    }
 
 
 def test_reachability_never_implies_independent_review():
@@ -273,7 +369,7 @@ def test_provenance_hashes_are_exact_and_generator_is_byte_deterministic():
     inventory = first["fixtures/port/plugin_inventory.json"]
     assert inventory["provenance"]["python_source_commit"] == PYTHON_COMMIT
     assert inventory["provenance"]["generator"] == "tools/port/gen_plugin_inventory.py"
-    assert inventory["provenance"]["generator_version"] == 2
+    assert inventory["provenance"]["generator_version"] == 3
     assert "rust_audit_base_commit" not in inventory["provenance"]
     source_commit = subprocess.run(
         [
@@ -299,14 +395,9 @@ def test_provenance_hashes_are_exact_and_generator_is_byte_deterministic():
     assert inventory["provenance"]["rust_source_commit"] == source_commit
     assert inventory["provenance"]["rust_source_tree"] == source_tree
     assert inventory["provenance"]["rust_main_blob_oid"] == source_blob
-    assert set(inventory["provenance"]["source_sha256"]) == {
-        "cl-revenue-ops.py",
-        "modules/boltz_manager.py",
-        "modules/capacity_planner.py",
-        "modules/data_service.py",
-        "modules/lnplus_swaps.py",
-        "modules/rebalance_native_executor_v2.py",
-    }
+    assert set(inventory["provenance"]["source_sha256"]) == set(
+        load_generator().production_python_files(PYTHON_REPO, PYTHON_COMMIT)
+    )
     assert all(
         len(digest) == 64
         for digest in inventory["provenance"]["source_sha256"].values()

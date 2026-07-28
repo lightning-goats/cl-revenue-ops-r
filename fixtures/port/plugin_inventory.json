@@ -43,6 +43,10 @@
         {
           "source_file": "modules/data_service.py",
           "source_line": 379
+        },
+        {
+          "source_file": "modules/rebalance_router_v3.py",
+          "source_line": 615
         }
       ],
       "rust_adapter": null,
@@ -79,6 +83,14 @@
         {
           "source_file": "modules/data_service.py",
           "source_line": 385
+        },
+        {
+          "source_file": "modules/rebalance_engine_v2.py",
+          "source_line": 319
+        },
+        {
+          "source_file": "modules/rebalance_router_v3.py",
+          "source_line": 668
         }
       ],
       "rust_adapter": null,
@@ -115,6 +127,14 @@
         {
           "source_file": "modules/data_service.py",
           "source_line": 394
+        },
+        {
+          "source_file": "modules/rebalance_router_v3.py",
+          "source_line": 631
+        },
+        {
+          "source_file": "modules/rebalance_router_v3.py",
+          "source_line": 649
         }
       ],
       "rust_adapter": null,
@@ -124,6 +144,10 @@
       "id": "boltzcli",
       "owner_task": "hexmem-63",
       "python_evidence": [
+        {
+          "source_file": "cl-revenue-ops.py",
+          "source_line": 2801
+        },
         {
           "source_file": "modules/boltz_manager.py",
           "source_line": 449
@@ -137,12 +161,12 @@
       "owner_task": "hexmem-62",
       "python_evidence": [
         {
-          "source_file": "modules/data_service.py",
-          "source_line": 288
-        },
-        {
           "source_file": "modules/capacity_planner.py",
           "source_line": 3977
+        },
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 288
         }
       ],
       "rust_adapter": null,
@@ -155,6 +179,10 @@
         {
           "source_file": "modules/data_service.py",
           "source_line": 296
+        },
+        {
+          "source_file": "modules/lnplus_swaps.py",
+          "source_line": 1604
         }
       ],
       "rust_adapter": null,
@@ -167,6 +195,10 @@
         {
           "source_file": "modules/data_service.py",
           "source_line": 473
+        },
+        {
+          "source_file": "modules/rebalance_engine_v2.py",
+          "source_line": 3186
         }
       ],
       "rust_adapter": null,
@@ -197,6 +229,10 @@
           "source_line": 340
         },
         {
+          "source_file": "modules/rebalance_engine_v2.py",
+          "source_line": 3109
+        },
+        {
           "source_file": "modules/rebalance_native_executor_v2.py",
           "source_line": 386
         }
@@ -221,16 +257,16 @@
       "owner_task": "hexmem-61-and-62",
       "python_evidence": [
         {
+          "source_file": "modules/capacity_planner.py",
+          "source_line": 3060
+        },
+        {
           "source_file": "modules/data_service.py",
           "source_line": 281
         },
         {
           "source_file": "modules/lnplus_swaps.py",
           "source_line": 1672
-        },
-        {
-          "source_file": "modules/capacity_planner.py",
-          "source_line": 3060
         }
       ],
       "rust_adapter": null,
@@ -266,8 +302,12 @@
     },
     {
       "id": "pay",
-      "owner_task": "task-8-core-parity",
+      "owner_task": "hexmem-60-and-63",
       "python_evidence": [
+        {
+          "source_file": "modules/boltz_manager.py",
+          "source_line": 844
+        },
         {
           "source_file": "modules/data_service.py",
           "source_line": 349
@@ -319,6 +359,10 @@
         {
           "source_file": "modules/data_service.py",
           "source_line": 303
+        },
+        {
+          "source_file": "modules/lnplus_swaps.py",
+          "source_line": 130
         }
       ],
       "rust_adapter": "revops_lnplus::Signer trait only",
@@ -449,7 +493,7 @@
   ],
   "provenance": {
     "generator": "tools/port/gen_plugin_inventory.py",
-    "generator_version": 2,
+    "generator_version": 3,
     "python_source_commit": "e579de8df523f174283fc2aa21f395c8ef006ac6",
     "rust_main_blob_oid": "edf0ebe0c70617fd201beb06939377c04711eee9",
     "rust_main_sha256": "b84cf5075553c2bf8918a97e1537414c7ddb0ab8ce9708e520b497fadc916e3f",
@@ -457,11 +501,56 @@
     "rust_source_tree": "ddfaf0ed11f06afe340880f25a8fadab74a08356",
     "source_sha256": {
       "cl-revenue-ops.py": "ec4abe1cd1887767f1d9680abb9065474f387ad9b1fa0b784dd3c01314f949e1",
+      "modules/__init__.py": "ec7a334d6b2bbd3e45d97708518dc162c2dfaf7cda5fcc32408d268a7adadb71",
+      "modules/admission_policy.py": "ea066b24f69b4e624cc2010a7658745cd101beb96258c19f00ad1472b5ed2d78",
       "modules/boltz_manager.py": "f419993948c4500cb5ae7f84d45659d6ddfbf9b354b068835e28e0f06565199a",
       "modules/capacity_planner.py": "be50ee8fbeb967ce0bc6a35c61f2095bd3053e46abe4b4b8a19eee8d6a99c359",
+      "modules/capex_budget.py": "1e0d0fc6fd0b60a6bb624bc60dcb901e46c6997e6059203134e04fc3812e8cec",
+      "modules/capital_efficiency.py": "7409de72a8573613004f1e4891c2ad6235512ea843fc5a4406c9e452bb0d0696",
+      "modules/classification.py": "1cc944c993d45ce04d29a2ae9a7a59ae1a54ff40e60b4c912dfe74d0f5ddb0d2",
+      "modules/config.py": "15ec3adb68f9837b46e5db2c2b0fbe94690a557c0ce4eb009f308a04bb757299",
+      "modules/cycle_context.py": "d47e101c882f539b6947b5aef7511a6b3c17aca194ca2dc6636ebd657f3034fa",
       "modules/data_service.py": "6e43902e8ea87af146fde77d9d28dc5b591908798445c4093d6020a3e08e38e1",
+      "modules/database.py": "e5e6626da661e2342b803a1a5af3a0c69727c124be40c4b954af2cfd4f63b906",
+      "modules/demand_flow.py": "3cee1260eaf9d901ebca5d5e3c9d9230e373e42cd41fa821d2a693f3194484ae",
+      "modules/econ_arbiter.py": "dd43373bf452081ad6e64106599db2a91dedbc59864ef5d80d4cceb044dc01a8",
+      "modules/econ_cycle.py": "ecc3202bd7342aadbc2be909c7ad638a9e33a5cf7111e836cfa7bf9f5bdb5795",
+      "modules/econ_ev.py": "7e6b8d5c90f00556c47c2b4ae0b44e8456364fe7081575da5f28550b5b659e7c",
+      "modules/econ_intents.py": "e526c03c490a47c55a63d2ac00f87efabd834ba3fa77b72194f6592eed083b25",
+      "modules/econ_ledger.py": "2b5f2bda7ae3cd5798cd7c17e06cd94b07b5e276c053b4576473cef7fee803b6",
+      "modules/econ_reconcile.py": "46644a9a3623ddc8e7242435f93aa6264546c9c100da4e1f6768a42c02030d56",
+      "modules/econ_shadow.py": "42f1bae308d45efb7b6db0a430d64a8907572c066a06cb33d3283d6f32ce259b",
+      "modules/econ_snapshot.py": "dbfcd14089f20339d6b5ba40479b05a23fac434ca2135f5abda3497aec3c23db",
+      "modules/econ_types.py": "c667fb0cf317fcec9e33005632cf44d5253b7abe8fcc91184648c3dcb3d579c0",
+      "modules/fee_authority.py": "53a8ae71697409f26fcc534e5f0153e28c4925d90cfdf94b24edbbf60ffff7f3",
+      "modules/fee_controller.py": "33ced2470c562b92b2d564a8c6286eaffa2d6328199161902818fc497541a1c0",
+      "modules/fee_cycle_capture.py": "3ce7370a1a8109fc41fa685ae3409d6ae2476829286f9a67738a6fcaca917f9e",
+      "modules/fee_cycle_replay_wire.py": "18748a46b55274ec55d2f449963c819f25df07a530148a6bd8f911c02a1dad7b",
+      "modules/flow_analysis.py": "f9d336f04ddf930e0a3c77ba16302dfd557a1e87981531e0ed658ad110c04bba",
+      "modules/governor_facade.py": "3302ce0c7c3711c3bb0224ed921d78e8692f9c3a64be4177f2273a80d325652e",
+      "modules/growth_budget.py": "1ee38314eb1fb3b46884ba6b6beb47e954c8910ccfbf296053164d431635190c",
       "modules/lnplus_swaps.py": "7ab98e8089702127ca1ed357890afa106a9699569644c04923dc07b3f2a9504b",
-      "modules/rebalance_native_executor_v2.py": "d11c69c3480b1a5f547501186ad5a2d0050b7a936be15f356deb1d1220f467e3"
+      "modules/policy_manager.py": "b929cdaf2f00a5de2e1c160cc5634493a4c8d19205b448666f2a82ad6a217483",
+      "modules/profitability_analyzer.py": "29b490f5a90ba349cf2b978e4587302466382cc212dbafed2b9fbbf356141912",
+      "modules/protection_service.py": "0334a9dad6fc31c01ed7708f1421590601ee39cf715ad4551c62e1b1a36f11bc",
+      "modules/reason_codes.py": "6cf84aec837fb6b97ee0397a84e546217f4fa4b4447ebceafbf52bd4a5721647",
+      "modules/rebalance_audit_v2.py": "28808830838480571c0e98d3f9b44363f895c6a1120c4a1080ff29579dd6450a",
+      "modules/rebalance_engine_v2.py": "77f41be616c889d19d1de4e2153deae7e91a9ec91063b014a96644ce21702dab",
+      "modules/rebalance_execution.py": "60bd7b6125f21b092c7bd022f4d38cad061c1fd777a3f104028231e2417ced6f",
+      "modules/rebalance_executor_v2.py": "23e6434169fbcce2b2a04c14d304912c3698dc46206abec2f0d73389cb63c0c0",
+      "modules/rebalance_flow_facts.py": "ab1ef853280c2fa701f0c5de6fcddb1f0cfefc1efbd5ef68b7eb833491164b3d",
+      "modules/rebalance_modes.py": "d3653d581fdcd5a8c91a973556857ab31692d8f36645addb36bcaf98d15dc0c0",
+      "modules/rebalance_native_executor_v2.py": "d11c69c3480b1a5f547501186ad5a2d0050b7a936be15f356deb1d1220f467e3",
+      "modules/rebalance_planner_v2.py": "13d4261e2aa1aeef2ea4aee307a2fc03d40acc3f14a520ce85e2a2772ddfa88a",
+      "modules/rebalance_route_policy.py": "87481dc882a5cc712acfb757fcecd9fd12129652a4d27fd5f5c603ab0efb5c72",
+      "modules/rebalance_router_v2.py": "95e06515b9051613a73719d70d7695ce3cf2c794e751533d4ad775d0b66aceb0",
+      "modules/rebalance_router_v3.py": "bf6fefb520722c5b2618fe6a6fb1227d79cdf48a84527e74b836341a2878aea1",
+      "modules/rebalance_state_v2.py": "b7e6ee6a3f01709fce0a256c89739305d8a712699e231a7fdac26f56e96ffc47",
+      "modules/rebalance_types_v2.py": "5a671efc8a4af5ab2791975bd44bf221f589bb10643e0c0cd598ee21c5657150",
+      "modules/rebalancer.py": "a96022ebd68a5ed4297482eb8f2a9098a065b581a1d600d3d57e7e89588324f1",
+      "modules/risk_profiles.py": "7a594b9f0aae2ab4d7c2e492e9ed52fa8bbe035fa4613a46bec08308c7fdeccd",
+      "modules/segment_observations.py": "72b00731bf2c908991924dbbc8abefdc97db09843b64bed05a2194e5fd057bd4",
+      "modules/utils.py": "4b25f2b1487cbcca83a308441d8aebe17fb5672f3438abc57465e550c10c1a21"
     }
   },
   "python_options": [

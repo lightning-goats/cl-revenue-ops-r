@@ -22,16 +22,120 @@ from typing import Any
 
 
 DEFAULT_PYTHON_COMMIT = "e579de8df523f174283fc2aa21f395c8ef006ac6"
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
-PYTHON_FILES = (
-    "cl-revenue-ops.py",
-    "modules/boltz_manager.py",
-    "modules/capacity_planner.py",
-    "modules/data_service.py",
-    "modules/lnplus_swaps.py",
-    "modules/rebalance_native_executor_v2.py",
-)
+RPC_BOUNDARY_BY_METHOD = {
+    "askrene-age": "askrene_age",
+    "askrene-bias-channel": "askrene_bias_channel",
+    "askrene-bias-node": "askrene_bias_node",
+    "askrene-create-layer": "askrene_create_layer",
+    "askrene-disable-node": "askrene_disable_node",
+    "askrene-inform-channel": "askrene_inform_channel",
+    "askrene-remove-layer": "askrene_remove_layer",
+    "askrene-reserve": "askrene_reserve",
+    "askrene-unreserve": "askrene_unreserve",
+    "askrene-update-channel": "askrene_update_channel",
+    "close": "close",
+    "connect": "connect",
+    "datastore": "datastore",
+    "delinvoice": "delinvoice",
+    "delpay": "delpay",
+    "fundchannel": "fundchannel",
+    "invoice": "invoice",
+    "pay": "pay",
+    "sendpay": "sendpay_waitsendpay",
+    "setchannel": "setchannel",
+    "signmessage": "signmessage",
+    "waitsendpay": "sendpay_waitsendpay",
+}
+
+READ_ONLY_RPC_METHODS = {
+    "askrene-listlayers",
+    "bkpr-inspect",
+    "bkpr-listaccountevents",
+    "bkpr-listbalances",
+    "decode",
+    "feerates",
+    "getinfo",
+    "getroute",
+    "getroutes",
+    "listchannels",
+    "listclosedchannels",
+    "listconfigs",
+    "listforwards",
+    "listfunds",
+    "listnodes",
+    "listpays",
+    "listpeerchannels",
+    "listpeers",
+    "listplugins",
+    "listsendpays",
+    "plugin",
+}
+
+# The capture writer asks git for observational source identity. It neither
+# mutates CLN nor invokes an action adapter, so it is an explicit audited
+# subprocess exclusion rather than a boltzcli boundary.
+OBSERVATIONAL_SUBPROCESS_EXCLUSIONS = {
+    ("modules/fee_cycle_capture.py", 418): "git rev-parse source identity",
+}
+
+# The native executor's one dynamic proxy is represented by its literal
+# _rpc_call call sites. These three forwarding calls are not independent
+# operation evidence.
+DYNAMIC_RPC_PROXY_EXCLUSIONS = {
+    ("modules/rebalance_native_executor_v2.py", 45),
+    ("modules/rebalance_native_executor_v2.py", 47),
+    ("modules/rebalance_native_executor_v2.py", 48),
+}
+
+EXPECTED_EXTERNAL_CALLS = {
+    ("askrene_age", "modules/data_service.py", 419),
+    ("askrene_bias_channel", "modules/data_service.py", 408),
+    ("askrene_bias_node", "modules/data_service.py", 401),
+    ("askrene_create_layer", "modules/data_service.py", 379),
+    ("askrene_create_layer", "modules/rebalance_router_v3.py", 615),
+    ("askrene_disable_node", "modules/data_service.py", 412),
+    ("askrene_inform_channel", "modules/data_service.py", 429),
+    ("askrene_remove_layer", "modules/data_service.py", 385),
+    ("askrene_remove_layer", "modules/rebalance_engine_v2.py", 319),
+    ("askrene_remove_layer", "modules/rebalance_router_v3.py", 668),
+    ("askrene_reserve", "modules/data_service.py", 433),
+    ("askrene_unreserve", "modules/data_service.py", 437),
+    ("askrene_update_channel", "modules/data_service.py", 394),
+    ("askrene_update_channel", "modules/rebalance_router_v3.py", 631),
+    ("askrene_update_channel", "modules/rebalance_router_v3.py", 649),
+    ("boltzcli", "cl-revenue-ops.py", 2801),
+    ("boltzcli", "modules/boltz_manager.py", 449),
+    ("close", "modules/capacity_planner.py", 3977),
+    ("close", "modules/data_service.py", 288),
+    ("connect", "modules/data_service.py", 296),
+    ("connect", "modules/lnplus_swaps.py", 1604),
+    ("datastore", "modules/data_service.py", 473),
+    ("datastore", "modules/rebalance_engine_v2.py", 3186),
+    ("delinvoice", "modules/data_service.py", 344),
+    ("delinvoice", "modules/rebalance_native_executor_v2.py", 391),
+    ("delpay", "modules/data_service.py", 340),
+    ("delpay", "modules/rebalance_engine_v2.py", 3109),
+    ("delpay", "modules/rebalance_native_executor_v2.py", 386),
+    ("dynamic_config", "cl-revenue-ops.py", 6723),
+    ("fundchannel", "modules/capacity_planner.py", 3060),
+    ("fundchannel", "modules/data_service.py", 281),
+    ("fundchannel", "modules/lnplus_swaps.py", 1672),
+    ("invoice", "modules/data_service.py", 328),
+    ("invoice", "modules/rebalance_native_executor_v2.py", 431),
+    ("lnplus_https", "modules/lnplus_swaps.py", 93),
+    ("pay", "modules/boltz_manager.py", 844),
+    ("pay", "modules/data_service.py", 349),
+    ("sendpay_waitsendpay", "modules/data_service.py", 332),
+    ("sendpay_waitsendpay", "modules/data_service.py", 336),
+    ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 461),
+    ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 462),
+    ("setchannel", "modules/data_service.py", 275),
+    ("signmessage", "modules/data_service.py", 303),
+    ("signmessage", "modules/lnplus_swaps.py", 130),
+}
+
 
 EXPECTED_LOOPS = {
     "flow-analysis",
@@ -124,6 +228,30 @@ def git_show(repo: Path, commit: str, path: str) -> bytes:
             f"{result.stderr.decode(errors='replace').strip()}"
         )
     return result.stdout
+
+
+def production_python_files(repo: Path, commit: str) -> tuple[str, ...]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", commit],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"cannot list pinned production tree at {commit}: {result.stderr.strip()}"
+        )
+    files = tuple(
+        sorted(
+            path
+            for path in result.stdout.splitlines()
+            if path == "cl-revenue-ops.py"
+            or (path.startswith("modules/") and path.endswith(".py"))
+        )
+    )
+    if len(files) != 51 or len(set(files)) != 51:
+        raise ValueError(f"expected 51 pinned production Python files, got {len(files)}")
+    return files
 
 
 def sha256(data: bytes) -> str:
@@ -459,68 +587,6 @@ def dotted_name(node: ast.AST) -> str | None:
     return None
 
 
-def rpc_call_refs(
-    sources: dict[str, bytes], path: str, method: str
-) -> list[dict[str, Any]]:
-    tree = ast.parse(sources[path].decode("utf-8"))
-    lines = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        function = dotted_name(node.func) or ""
-        called = None
-        if function.endswith("._rpc_call"):
-            if node.args and isinstance(node.args[0], ast.Constant):
-                called = node.args[0].value
-        elif function.endswith(".rpc.call"):
-            if node.args and isinstance(node.args[0], ast.Constant):
-                called = node.args[0].value
-        elif ".rpc." in function:
-            called = function.rsplit(".", 1)[-1]
-        if called == method:
-            lines.append(node.lineno)
-    if not lines:
-        raise ValueError(f"cannot find structural RPC call {method!r} in pinned {path}")
-    return [
-        {"source_file": path, "source_line": line} for line in sorted(set(lines))
-    ]
-
-
-def dotted_call_refs(
-    sources: dict[str, bytes], path: str, function_name: str
-) -> list[dict[str, Any]]:
-    tree = ast.parse(sources[path].decode("utf-8"))
-    lines = sorted(
-        {
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and dotted_name(node.func) == function_name
-        }
-    )
-    if not lines:
-        raise ValueError(
-            f"cannot find structural call {function_name!r} in pinned {path}"
-        )
-    return [{"source_file": path, "source_line": line} for line in lines]
-
-
-def function_ref(
-    sources: dict[str, bytes], path: str, function_name: str
-) -> dict[str, Any]:
-    tree = ast.parse(sources[path].decode("utf-8"))
-    lines = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == function_name
-    ]
-    if len(lines) != 1:
-        raise ValueError(
-            f"expected one function {function_name!r} in pinned {path}, got {lines}"
-        )
-    return {"source_file": path, "source_line": lines[0]}
-
-
 def boundary(
     boundary_id: str,
     evidence: list[dict[str, Any]],
@@ -537,108 +603,131 @@ def boundary(
     }
 
 
+def function_ref(
+    sources: dict[str, bytes], path: str, function_name: str
+) -> tuple[str, str, int]:
+    tree = ast.parse(sources[path].decode("utf-8"))
+    lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+    ]
+    if len(lines) != 1:
+        raise ValueError(
+            f"expected one function {function_name!r} in pinned {path}, got {lines}"
+        )
+    return ("dynamic_config", path, lines[0])
+
+
+def scan_external_calls(sources: dict[str, bytes]) -> set[tuple[str, str, int]]:
+    found: set[tuple[str, str, int]] = set()
+    for path in sorted(sources):
+        tree = ast.parse(sources[path].decode("utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = dotted_name(node.func) or ""
+            location = (path, node.lineno)
+            method = None
+            if function.endswith("._rpc_call"):
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    method = node.args[0].value
+            elif function.endswith(".rpc.call"):
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    method = node.args[0].value
+                elif location not in DYNAMIC_RPC_PROXY_EXCLUSIONS:
+                    raise ValueError(f"unclassified dynamic RPC proxy call at {path}:{node.lineno}")
+            elif ".rpc." in function:
+                method = function.rsplit(".", 1)[-1]
+
+            if isinstance(method, str):
+                boundary_id = RPC_BOUNDARY_BY_METHOD.get(method)
+                if boundary_id:
+                    found.add((boundary_id, path, node.lineno))
+                elif method not in READ_ONLY_RPC_METHODS:
+                    raise ValueError(
+                        f"unclassified direct RPC method {method!r} at {path}:{node.lineno}"
+                    )
+
+            if function in {"subprocess.run", "subprocess.Popen"}:
+                if location in OBSERVATIONAL_SUBPROCESS_EXCLUSIONS:
+                    continue
+                found.add(("boltzcli", path, node.lineno))
+            elif function == "urllib.request.urlopen":
+                found.add(("lnplus_https", path, node.lineno))
+
+    found.add(function_ref(sources, "cl-revenue-ops.py", "_refresh_dynamic_config"))
+    missing = sorted(EXPECTED_EXTERNAL_CALLS - found)
+    unexpected = sorted(found - EXPECTED_EXTERNAL_CALLS)
+    if missing or unexpected:
+        raise ValueError(
+            "pinned production external-call drift: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return found
+
+
 def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
-    data = "modules/data_service.py"
-    rebalance = "modules/rebalance_native_executor_v2.py"
-    rows = [
-        boundary(
-            "setchannel",
-            rpc_call_refs(sources, data, "setchannel"),
-            "fee-port-reviewed",
-            "fee_execution::ClnFeeBroadcaster",
-            "local_fake_proven",
-        ),
-        boundary(
-            "sendpay_waitsendpay",
-            rpc_call_refs(sources, data, "sendpay")
-            + rpc_call_refs(sources, data, "waitsendpay")
-            + rpc_call_refs(sources, rebalance, "sendpay")
-            + rpc_call_refs(sources, rebalance, "waitsendpay"),
-            "hexmem-60",
-        ),
-        boundary(
-            "fundchannel",
-            rpc_call_refs(sources, data, "fundchannel")
-            + rpc_call_refs(sources, "modules/lnplus_swaps.py", "fundchannel")
-            + rpc_call_refs(sources, "modules/capacity_planner.py", "fundchannel"),
-            "hexmem-61-and-62",
-        ),
-        boundary(
-            "close",
-            rpc_call_refs(sources, data, "close")
-            + rpc_call_refs(sources, "modules/capacity_planner.py", "close"),
-            "hexmem-62",
-        ),
-        boundary("connect", rpc_call_refs(sources, data, "connect"), "hexmem-61"),
-        boundary(
-            "signmessage",
-            rpc_call_refs(sources, data, "signmessage"),
-            "hexmem-61",
-            "revops_lnplus::Signer trait only",
-            "trait_fake_only",
-        ),
-        boundary(
-            "invoice",
-            rpc_call_refs(sources, data, "invoice")
-            + rpc_call_refs(sources, rebalance, "invoice"),
-            "hexmem-60",
-        ),
-        boundary(
-            "delpay",
-            rpc_call_refs(sources, data, "delpay")
-            + rpc_call_refs(sources, rebalance, "delpay"),
-            "hexmem-60",
-        ),
-        boundary(
-            "delinvoice",
-            rpc_call_refs(sources, data, "delinvoice")
-            + rpc_call_refs(sources, rebalance, "delinvoice"),
-            "hexmem-60",
-        ),
-        boundary("pay", rpc_call_refs(sources, data, "pay"), "task-8-core-parity"),
-        boundary(
-            "datastore",
-            rpc_call_refs(sources, data, "datastore"),
-            "task-8-core-parity",
-        ),
-        boundary(
-            "boltzcli",
-            dotted_call_refs(sources, "modules/boltz_manager.py", "subprocess.run"),
+    calls = scan_external_calls(sources)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for boundary_id, path, line in sorted(calls):
+        grouped.setdefault(boundary_id, []).append(
+            {"source_file": path, "source_line": line}
+        )
+    metadata = {
+        "boltzcli": (
             "hexmem-63",
             "revops_boltz::ProcessBoltzCli",
             "local_fake_proven_unreachable",
         ),
-        boundary(
-            "lnplus_https",
-            dotted_call_refs(sources, "modules/lnplus_swaps.py", "urllib.request.urlopen"),
-            "hexmem-61",
-            "revops_lnplus::HttpTransport trait only",
-        ),
-        boundary(
-            "dynamic_config",
-            [function_ref(sources, "cl-revenue-ops.py", "_refresh_dynamic_config")],
+        "dynamic_config": (
             "completed",
             "PythonOptionCache::refresh",
             "local_fake_proven",
         ),
-    ]
-    askrene = {
-        "askrene_age": "askrene-age",
-        "askrene_bias_channel": "askrene-bias-channel",
-        "askrene_bias_node": "askrene-bias-node",
-        "askrene_create_layer": "askrene-create-layer",
-        "askrene_disable_node": "askrene-disable-node",
-        "askrene_inform_channel": "askrene-inform-channel",
-        "askrene_remove_layer": "askrene-remove-layer",
-        "askrene_reserve": "askrene-reserve",
-        "askrene_unreserve": "askrene-unreserve",
-        "askrene_update_channel": "askrene-update-channel",
+        "lnplus_https": (
+            "hexmem-61",
+            "revops_lnplus::HttpTransport trait only",
+            "missing",
+        ),
+        "setchannel": (
+            "fee-port-reviewed",
+            "fee_execution::ClnFeeBroadcaster",
+            "local_fake_proven",
+        ),
+        "signmessage": (
+            "hexmem-61",
+            "revops_lnplus::Signer trait only",
+            "trait_fake_only",
+        ),
     }
-    rows.extend(
-        boundary(boundary_id, rpc_call_refs(sources, data, method), "hexmem-60")
-        for boundary_id, method in askrene.items()
-    )
-    return sorted(rows, key=lambda row: row["id"])
+    owners = {
+        "close": "hexmem-62",
+        "connect": "hexmem-61",
+        "datastore": "task-8-core-parity",
+        "delinvoice": "hexmem-60",
+        "delpay": "hexmem-60",
+        "fundchannel": "hexmem-61-and-62",
+        "invoice": "hexmem-60",
+        "pay": "hexmem-60-and-63",
+        "sendpay_waitsendpay": "hexmem-60",
+    }
+    for boundary_id in grouped:
+        if boundary_id.startswith("askrene_"):
+            owners[boundary_id] = "hexmem-60"
+    rows = []
+    for boundary_id in sorted(grouped):
+        if boundary_id in metadata:
+            owner, adapter, transport = metadata[boundary_id]
+        else:
+            owner, adapter, transport = owners[boundary_id], None, "missing"
+        rows.append(
+            boundary(boundary_id, grouped[boundary_id], owner, adapter, transport)
+        )
+    if len(rows) != 24:
+        raise ValueError(f"expected 24 exact external boundary classes, got {len(rows)}")
+    return rows
 
 
 def git_text(repo: Path, *args: str) -> str:
@@ -673,8 +762,9 @@ def rust_source_identity(repo_root: Path) -> dict[str, str]:
 def generate(
     python_repo: Path, python_commit: str, repo_root: Path
 ) -> dict[str, Any]:
+    production_files = production_python_files(python_repo, python_commit)
     sources = {
-        path: git_show(python_repo, python_commit, path) for path in PYTHON_FILES
+        path: git_show(python_repo, python_commit, path) for path in production_files
     }
     tree = ast.parse(sources["cl-revenue-ops.py"].decode("utf-8"))
     rpcs, parameter_methods = extract_rpcs(tree)

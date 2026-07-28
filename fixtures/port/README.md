@@ -33,9 +33,12 @@ path. The generator also refreshes `fixtures/options.json`; this is what restore
 the two fee-authority/replay-capture options that the prior 119-entry fixture
 omitted.
 
-External-boundary evidence is derived from structural AST call sites, never a
-first text match. New Rust RPC registrations fail closed until explicitly
-classified. Reachability does not imply review: only methods named in the
+External-boundary evidence is derived by structurally scanning every pinned
+production file (`cl-revenue-ops.py` plus `modules/**/*.py`), never a first text
+match. The scan is compared with an exact expected callsite set, and provenance
+hashes every inspected file. The capture writer's `git rev-parse` subprocess is
+explicitly excluded as observational source identity, not an external mutation.
+New Rust RPC registrations fail closed until explicitly classified. Reachability does not imply review: only methods named in the
 review-evidence registry are marked passed; all others remain pending. Rust
 provenance records the committed source commit, tree, and blob that supplied the
 inspected `main.rs`, and generation refuses a dirty replacement.
