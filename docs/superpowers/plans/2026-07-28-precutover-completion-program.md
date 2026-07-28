@@ -163,9 +163,9 @@ Owner marks only Task 56 `impl`; Python verifier owns `review`.
 
 **Files:** `crates/revops/build.rs`, `crates/revops/tests/manifest.rs`, `crates/revops/src/fee_scheduler.rs`, `crates/revops/src/fee_runway.rs`, `crates/revops/tests/fee_scheduler.rs`.
 
-- [ ] Implement Task 41's Git-ref/index rerun tracking with a docs-only HEAD-advance regression.
+- [x] Implement Task 41's Git-ref/index rerun tracking with a docs-only HEAD-advance regression (reviewed and merged at `7688e40`).
 - [ ] Implement Task 42's first-cycle Rust mempool evidence and commit-coupled seed provenance semantics.
-- [ ] Independently mutation-test both corrections and merge only after their existing Hexmem review criteria pass.
+- [ ] Independently mutation-test Task 42 and merge only after its existing Hexmem review criterion passes (Task 41 is already independently closed).
 
 ### Task 3: Observer Runtime Framework and Persistent Loop Health — Hexmem Task 57
 
@@ -177,14 +177,17 @@ Owner marks only Task 56 `impl`; Python verifier owns `review`.
 `crates/revops/src/main.rs`, `fee_scheduler.rs`, `rpc_health.rs`, and their
 integration/action-surface tests.
 
-- [ ] RED-test that removing any required subsystem spawn or health write fails.
-- [ ] Add the bounded single-flight framework for all five loop identities and
+- [x] RED-test that removing any required subsystem spawn or health write fails.
+- [x] Add the bounded single-flight framework for all five loop identities and
       production-spawn only real passes. Do not use success-shaped no-op owners;
       rebalance/planner/LN+/Boltz remain `not_wired` until Tasks 4–7.
-- [ ] Persist last-start, last-pass, last-error, dropped/coalesced work, and generation per loop.
-- [ ] Make fee health depend on a real owner completion acknowledgement, not dispatch.
-- [ ] Split `AuthorityRuntime::Observer` from `AuthorityRuntime::Live` and prove
+- [x] Persist last-start, last-pass, last-error, dropped/coalesced work, and generation per loop.
+- [x] Make fee health depend on a real owner completion acknowledgement, not dispatch.
+- [x] Split `AuthorityRuntime::Observer` from `AuthorityRuntime::Live` and prove
       observer mode cannot accept, hold, or construct any action adapter.
+
+Task 57 passed all three Hexmem criteria at reviewed `49a940a` and is merged
+into canonical main through `a598239`.
 
 ### Task 4: LN+ Runtime, Operator Surface, and Fake Boundaries
 
@@ -226,14 +229,32 @@ integration/action-surface tests.
 - [ ] Implement one port-wide positional-parameter policy and test every method against the 69-name source inventory.
 - [ ] Replace every `not_yet_ported` response with real evidence or a deliberate cutover-time refusal whose contract cannot collide with a Python success.
 
-### Task 9: Retention, Store Budget, and Authority-Fetch Hardening
+### Task 9: Retention, Store Budget, and Authority-Fetch Hardening — Hexmem Tasks 58 and 59
 
-**Files:** modify `crates/revops/src/fee_runway.rs`, `crates/revops-db`, `crates/revops/src/python_authority.rs`, and their tests.
+**Reviewed design:** Task 58 revision 3 at `ddeb14c` (design branch; review
+passed 2/2). **Implementation:** Hexmem Task 59, blocked on Task 42 because
+both touch scheduler/startup surfaces.
 
-- [ ] Add bounded pruning for all eight runway tables with transaction and restart tests.
-- [ ] Reconcile store-operation timeout floors with SQLite busy timeout.
-- [ ] Prove authorization performs two genuinely independent authority fetches.
-- [ ] Close arm re-mint/reuse paths without making a restart reacquire authority.
+**Files:** add `crates/revops-db/src/retention.rs`; modify
+`crates/revops-db/src/{fee_runway,owner}.rs`,
+`crates/revops/src/{fee_state,fee_scheduler,fee_execution,python_authority,cutover_arm,main}.rs`,
+the rehearsal binary, runbook, and tests.
+
+- [x] Complete and independently review the fail-closed design checkpoint.
+- [ ] Sweep only Class-W evidence with a fair global batch cap; preserve
+      append-only identity/audit rows, current state, quarantine, A3 replay
+      identity, and deferred notification/hydration cursors exactly.
+- [ ] Reconcile store-operation timeout floors with SQLite busy timeout and
+      distinguish not-admitted, admitted-outcome-unknown, query-saturated, and
+      query-response-timeout states without treating backlog as owner death.
+- [ ] Prove authorization performs two endpoint-bound, genuinely independent
+      authority fetches; consume one bracket into one fresh authorization and
+      one batch, refusing stale open brackets and stale dispatch.
+- [ ] Close arm re-mint/reuse paths with async DB-first nonce consumption and a
+      non-resettable one-resolution production guard, without making restart
+      reacquire authority.
+- [ ] Execute the reviewed RED/mutation matrix and merge/push Task 59 only
+      after its independent review passes; no live contact or deployment.
 
 ### Task 10: Staged Fail-Closed Restart Controller — Hexmem Task 51
 
