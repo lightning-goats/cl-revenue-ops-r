@@ -141,6 +141,15 @@ fn manifest_advertises_shadow_names() {
         methods.contains(&"revops-fee-runway-status"),
         "methods: {methods:?}"
     );
+    // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs.
+    for lnplus in [
+        "revenue-r-lnplus-status",
+        "revenue-r-lnplus-breaker-clear",
+        "revenue-r-lnplus-abandon",
+        "revenue-r-lnplus-backfill",
+    ] {
+        assert!(methods.contains(&lnplus), "missing {lnplus}: {methods:?}");
+    }
 }
 
 #[test]
@@ -324,6 +333,16 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revops-fee-runway-status"),
         "methods: {methods:?}"
     );
+    // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs
+    // under their canonical Python names.
+    for lnplus in [
+        "revenue-lnplus-status",
+        "revenue-lnplus-breaker-clear",
+        "revenue-lnplus-abandon",
+        "revenue-lnplus-backfill",
+    ] {
+        assert!(methods.contains(&lnplus), "missing {lnplus}: {methods:?}");
+    }
     // 2026-07-27: the first production surface over the revops-rebalance
     // crate, which until then was not even linked into this binary.
     // READ-ONLY -- it plans, it never sends.
@@ -340,12 +359,13 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     for name in BATCH_A_CANONICAL_METHODS {
         assert!(methods.contains(name), "methods: {methods:?}");
     }
-    // Exactly 24 rpc methods total (no leftover revenue-r-* names bleeding
+    // Exactly 28 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
-    // rebalance planner, Task 49's ten Batch A builders, and Task 56's four
-    // DB-backed planner read RPCs.
+    // rebalance planner, Task 49's ten Batch A builders, Task 56's four
+    // DB-backed planner read RPCs, and Task 61 4E's four LN+ operator
+    // RPCs (status/breaker-clear/abandon/backfill through the LN+ owner).
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -353,7 +373,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        24,
+        28,
         "methods: {methods:?}"
     );
 

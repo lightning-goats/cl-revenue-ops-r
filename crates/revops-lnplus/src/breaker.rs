@@ -57,6 +57,10 @@ pub enum BreakerCause {
     /// auto-clear" contract; callers are not required to trip on outage
     /// alone, matching Python).
     LnPlusOutage { detail: String },
+    /// Task 61 4E: `revenue-lnplus-abandon` — abandoning a commitment is
+    /// a defection on our side and must never be silent (py 4627-4661).
+    /// NEVER auto-clear: only the operator who abandoned can clear.
+    OperatorAbandonedSwap { swap_id: String },
 }
 
 impl BreakerCause {
@@ -76,7 +80,8 @@ impl BreakerCause {
             | BreakerCause::PendingGhostNoLocalRecord { swap_id }
             | BreakerCause::LocalRowDivergentFromRemote { swap_id, .. }
             | BreakerCause::MissedOpenDeadline { swap_id }
-            | BreakerCause::AmbiguousFundedChannelDivergence { swap_id, .. } => Some(swap_id),
+            | BreakerCause::AmbiguousFundedChannelDivergence { swap_id, .. }
+            | BreakerCause::OperatorAbandonedSwap { swap_id } => Some(swap_id),
             BreakerCause::LnPlusOutage { .. } => None,
         }
     }
@@ -97,6 +102,9 @@ impl BreakerCause {
                 format!("swap {swap_id}: ambiguous funded-channel divergence — {detail}")
             }
             BreakerCause::LnPlusOutage { detail } => format!("LN+ outage during reconcile: {detail}"),
+            BreakerCause::OperatorAbandonedSwap { swap_id } => {
+                format!("operator abandoned swap {swap_id}")
+            }
         }
     }
 }

@@ -120,6 +120,14 @@ struct Inner {
     chain: ObserverClnChain,
     watcher: WatcherLoop,
     logger: StderrLogger,
+    /// Task 61 4E: ONE serialization point for the owner — the scheduled
+    /// watcher pass and every operator RPC take this lock, so an operator
+    /// mutation never interleaves with a running pass and every RPC
+    /// response is a COMPLETION acknowledgement (the store writes are
+    /// acked before the lock is released).
+    serial: std::sync::Mutex<()>,
+    /// Python's in-memory `_last_watcher_pass` equivalent (py 2129).
+    last_watcher_pass: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 impl Inner {
@@ -136,6 +144,7 @@ impl Inner {
     /// failure via the owner task.
     fn run_pass(&self) -> Result<()> {
         use revops_lnplus::ports::LnPlusDb;
+        let _serial = self.serial.lock().expect("owner serialization poisoned");
         if !self.enabled() {
             self.logger.log(
                 LogLevel::Info,
@@ -178,21 +187,55 @@ impl Inner {
                 LogLevel::Warn,
                 "watcher pass skipped: previous pass still running (reentry guard)",
             ),
-            Some(summary) => self.logger.log(
-                LogLevel::Info,
-                &format!(
-                    "watcher pass complete: opened={} activated={} finalized={} withdrawn={} \
-                     skipped={:?}",
-                    summary.opened.len(),
-                    summary.activated.len(),
-                    summary.finalized.len(),
-                    summary.withdrawn.len(),
-                    summary.skipped
-                ),
-            ),
+            Some(summary) => {
+                self.logger.log(
+                    LogLevel::Info,
+                    &format!(
+                        "watcher pass complete: opened={} activated={} finalized={} withdrawn={} \
+                         skipped={:?}",
+                        summary.opened.len(),
+                        summary.activated.len(),
+                        summary.finalized.len(),
+                        summary.withdrawn.len(),
+                        summary.skipped
+                    ),
+                );
+                *self.last_watcher_pass.lock().expect("last pass poisoned") =
+                    Some(serde_json::json!({
+                        "at": now,
+                        "opened": summary.opened,
+                        "activated": summary.activated,
+                        "finalized": summary.finalized,
+                        "withdrawn": summary.withdrawn,
+                        "skipped": summary.skipped,
+                    }));
+            }
         }
         Ok(())
     }
+}
+
+/// A `SwapRow` as the JSON dict Python's `_lnplus_row_to_dict` produces
+/// for the status surfaces.
+fn row_json(row: &revops_lnplus::db_types::SwapRow) -> serde_json::Value {
+    serde_json::json!({
+        "swap_id": row.swap_id,
+        "status": row.status,
+        "capacity_sats": row.capacity_sats,
+        "duration_months": row.duration_months,
+        "outbound_peer": row.outbound_peer,
+        "incoming_peer": row.incoming_peer,
+        "our_identifier": row.our_identifier,
+        "applied_at": row.applied_at,
+        "opened_at": row.opened_at,
+        "ends_at": row.ends_at,
+        "deadline_at": row.deadline_at,
+        "channel_funding_txid": row.channel_funding_txid,
+        "outcome": row.outcome,
+        "tag_added": row.tag_added,
+        "incoming_tag_added": row.incoming_tag_added,
+        "planner_action_id": row.planner_action_id,
+    })
 }
 
 /// The concrete LN+ observer pass `ObserverPassSet::with_lnplus` accepts.
@@ -226,6 +269,8 @@ impl LnPlusObserverPass {
                 chain,
                 watcher: WatcherLoop::new(),
                 logger: StderrLogger,
+                serial: std::sync::Mutex::new(()),
+                last_watcher_pass: std::sync::Mutex::new(None),
             }),
             interval_secs: DEFAULT_WATCHER_INTERVAL_SECS,
         }))
@@ -249,6 +294,172 @@ impl LnPlusObserverPass {
     /// adapters.
     pub fn run_once_blocking(&self) -> Result<()> {
         self.inner.run_pass()
+    }
+
+    // -- Task 61 4E: the exact four Python-equivalent operator RPCs, each
+    // -- a blocking call through the owner's serialization lock whose
+    // -- return IS the completion acknowledgement (store writes acked
+    // -- before the response). Response shapes mirror
+    // -- cl-revenue-ops.py:4604-4676.
+
+    /// `revenue-lnplus-status` (py 4604-4612 + get_status 2114-2131).
+    pub fn operator_status(&self) -> serde_json::Value {
+        use revops_lnplus::ports::LnPlusDb;
+        let inner = &self.inner;
+        let _serial = inner.serial.lock().expect("owner serialization poisoned");
+        let snapshot = match revops_lnplus::watcher::get_status(inner.store.as_ref()) {
+            Ok(snapshot) => snapshot,
+            Err(e) => return serde_json::json!({"error": format!("LN+ store unreadable: {e}")}),
+        };
+        let inputs = crate::rpc_lnplus_status::LnPlusStatusInputs {
+            breaker: snapshot.breaker,
+            inflight: snapshot.inflight.iter().map(row_json).collect(),
+            active: snapshot.active.iter().map(row_json).collect(),
+            recent_ended: snapshot.recent_ended.iter().map(row_json).collect(),
+            recent_failed: snapshot.recent_failed.iter().map(row_json).collect(),
+            backfill_done: snapshot.backfill_done,
+            last_watcher_pass: inner
+                .last_watcher_pass
+                .lock()
+                .expect("last pass poisoned")
+                .clone(),
+            // The observer pass does not poll LN+ notifications (that is
+            // a live-mode nicety); an empty list is the honest value.
+            recent_notifications: Vec::new(),
+            swaps_enabled: inner.enabled(),
+            // Observer composition can NEVER execute applications — this
+            // reports the structural truth, not a config knob.
+            execute_applications: false,
+        };
+        let _ = &inner.store; // keep borrow explicit for the lock scope
+        crate::rpc_lnplus_status::build_lnplus_status(Some(&inputs))
+    }
+
+    /// `revenue-lnplus-breaker-clear` (py 4615-4624): the operator path is
+    /// the documented UNCONDITIONAL clear — clearing whatever is latched
+    /// IS the operator's intent (automation must use the exact-cause CAS).
+    pub fn operator_breaker_clear(&self) -> serde_json::Value {
+        use revops_lnplus::ports::LnPlusDb;
+        let inner = &self.inner;
+        let _serial = inner.serial.lock().expect("owner serialization poisoned");
+        let state = match inner.store.get_breaker() {
+            Ok(state) => state,
+            Err(e) => {
+                return serde_json::json!({
+                    "error": format!("breaker state unreadable (fail closed, NOT cleared): {e}")
+                })
+            }
+        };
+        let Some(state) = state else {
+            return serde_json::json!({"status": "not_tripped"});
+        };
+        let was = state.cause.message();
+        match revops_lnplus::breaker::clear_and_persist(inner.store.as_ref(), &inner.logger) {
+            Ok(()) => serde_json::json!({"status": "cleared", "was": was}),
+            Err(e) => serde_json::json!({"error": format!("breaker clear failed: {e}")}),
+        }
+    }
+
+    /// `revenue-lnplus-abandon <swap_id>` (py 4627-4661): terminalize the
+    /// row AND trip the breaker in ONE transaction (the 4A compound —
+    /// Python did these as two separate writes), then best-effort
+    /// `delete_application` for a still-`applied` row. In observer
+    /// composition that deletion is structurally refused — logged loudly;
+    /// the reconcile pending-ghost path owns the cleanup once live, which
+    /// is Python's own fallback for a failed best-effort delete.
+    pub fn operator_abandon(&self, swap_id: &str) -> serde_json::Value {
+        use revops_lnplus::db_types::{SwapPatch, INFLIGHT_STATUSES};
+        use revops_lnplus::ports::{CompoundOutcome, LnPlusApi, LnPlusDb, TerminalizeSpec};
+        let inner = &self.inner;
+        let _serial = inner.serial.lock().expect("owner serialization poisoned");
+        let Some(row) = inner.store.get_swap(swap_id) else {
+            return serde_json::json!({"error": format!("Unknown swap {swap_id}")});
+        };
+        if !INFLIGHT_STATUSES.contains(&row.status.as_str()) {
+            return serde_json::json!({
+                "error": format!("Swap {swap_id} is not in flight (status {})", row.status)
+            });
+        }
+        let was_applied = row.status == "applied";
+        let outcome = match inner.store.terminalize_and_trip(
+            &TerminalizeSpec {
+                swap_id,
+                expected_statuses: &INFLIGHT_STATUSES,
+                require_null_funding_txid: false,
+            },
+            &SwapPatch::default()
+                .status("failed")
+                .outcome("abandoned by operator"),
+            revops_lnplus::breaker::BreakerCause::OperatorAbandonedSwap {
+                swap_id: swap_id.to_string(),
+            },
+            crate::now_unix(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                return serde_json::json!({
+                    "error": format!("abandon failed (nothing changed): {e}")
+                })
+            }
+        };
+        if let CompoundOutcome::Conflict { actual } = outcome {
+            return serde_json::json!({
+                "error": format!("Swap {swap_id} moved (now {actual:?}) during abandon — nothing changed")
+            });
+        }
+        if was_applied {
+            // B5(a): best-effort; a failure here is fine (the reconcile
+            // pending-ghost path retries it). Observer composition
+            // refuses it structurally.
+            if let Err(e) = inner.api.delete_application(swap_id) {
+                inner.logger.log(
+                    LogLevel::Warn,
+                    &format!("delete_application for abandoned swap {swap_id} (best-effort): {e}"),
+                );
+            }
+        }
+        serde_json::json!({
+            "status": "abandoned",
+            "swap_id": swap_id,
+            "warning": "This defects on an LN+ commitment; expect a negative rating.",
+        })
+    }
+
+    /// `revenue-lnplus-backfill` (py 4663-4676): adopt pre-existing LN+
+    /// swaps into the local ledger via a fresh SIGNED read. Safe to run
+    /// repeatedly — existing rows are never touched (typed-insert rail).
+    pub fn operator_backfill(&self) -> serde_json::Value {
+        use revops_lnplus::ports::LnPlusApi;
+        let inner = &self.inner;
+        let _serial = inner.serial.lock().expect("owner serialization poisoned");
+        let my = match inner.api.get_my_swaps() {
+            Ok(my) => my,
+            Err(e) => {
+                return serde_json::json!({"error": format!("LN+ fetch failed: {e}")});
+            }
+        };
+        match revops_lnplus::backfill::backfill_from_lnplus(
+            &my,
+            inner.store.as_ref(),
+            &inner.api,
+            &inner.chain,
+            &inner.logger,
+            crate::now_unix(),
+        ) {
+            Ok(result) => serde_json::json!({
+                "imported": {
+                    "pending": result.imported.pending,
+                    "opening": result.imported.opening,
+                    "active": result.imported.active,
+                    "ended": result.imported.ended,
+                },
+                "skipped": result.skipped,
+                "warnings": result.warnings,
+            }),
+            Err(e) => serde_json::json!({
+                "error": format!("backfill aborted (store persistence failure): {e}")
+            }),
+        }
     }
 }
 

@@ -85,6 +85,11 @@ struct State {
     /// async preparation half's out-of-cycle policy read. `None` under
     /// the exact same conditions the scheduler itself would not start.
     production_db_path: Option<PathBuf>,
+    /// Task 61 4E: the LN+ observer owner, when this process spawned one
+    /// (autonomous shadow with an observer DB). The four operator RPCs go
+    /// through its serialization lock for completion acknowledgements;
+    /// `None` yields the Python-equivalent "not initialized" responses.
+    lnplus: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>>,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
@@ -802,6 +807,14 @@ async fn main() -> Result<()> {
     let planner_candidates_name = rpc_name("planner-candidates");
     let planner_history_name = rpc_name("planner-history");
     let planner_status_name = rpc_name("planner-status");
+
+    // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs
+    // (cl-revenue-ops.py:4604-4676), each a completion acknowledgement
+    // through the LN+ owner's serialization lock.
+    let lnplus_status_name = rpc_name("lnplus-status");
+    let lnplus_breaker_clear_name = rpc_name("lnplus-breaker-clear");
+    let lnplus_abandon_name = rpc_name("lnplus-abandon");
+    let lnplus_backfill_name = rpc_name("lnplus-backfill");
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
@@ -1616,6 +1629,81 @@ async fn main() -> Result<()> {
             },
         )
         .rpcmethod(
+            &lnplus_status_name,
+            "LN+ swap automation status: breaker, in-flight, active contracts",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(pass) = p.state().lnplus.clone() else {
+                    // py 4607-4608: automation never initialized.
+                    return Ok(serde_json::json!({"enabled": false}));
+                };
+                match tokio::task::spawn_blocking(move || pass.operator_status()).await {
+                    Ok(value) => Ok(value),
+                    Err(join) => Ok(serde_json::json!({"error": format!("status task failed: {join}")})),
+                }
+            },
+        )
+        .rpcmethod(
+            &lnplus_breaker_clear_name,
+            "clear the LN+ circuit breaker (operator acknowledgment of the failure)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(pass) = p.state().lnplus.clone() else {
+                    return Ok(serde_json::json!({"error": "LN+ automation not initialized"}));
+                };
+                match tokio::task::spawn_blocking(move || pass.operator_breaker_clear()).await {
+                    Ok(value) => Ok(value),
+                    Err(join) => Ok(serde_json::json!({"error": format!("breaker-clear task failed: {join}")})),
+                }
+            },
+        )
+        .rpcmethod(
+            &lnplus_abandon_name,
+            "EMERGENCY: abandon an in-flight LN+ swap obligation (defects on a commitment)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let swap_id = match v.get("swap_id").and_then(serde_json::Value::as_str) {
+                    Some(swap_id) if !swap_id.is_empty() => swap_id.to_string(),
+                    // py 4636-4637: exact usage error for a missing or
+                    // non-string swap_id.
+                    _ => {
+                        return Ok(serde_json::json!({
+                            "error": "Usage: revenue-lnplus-abandon <swap_id>"
+                        }))
+                    }
+                };
+                let Some(pass) = p.state().lnplus.clone() else {
+                    return Ok(serde_json::json!({"error": "LN+ automation not initialized"}));
+                };
+                match tokio::task::spawn_blocking(move || pass.operator_abandon(&swap_id)).await {
+                    Ok(value) => Ok(value),
+                    Err(join) => Ok(serde_json::json!({"error": format!("abandon task failed: {join}")})),
+                }
+            },
+        )
+        .rpcmethod(
+            &lnplus_backfill_name,
+            "adopt pre-existing LN+ swaps into the local ledger (safe to repeat)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(pass) = p.state().lnplus.clone() else {
+                    return Ok(serde_json::json!({"error": "LN+ automation not initialized"}));
+                };
+                match tokio::task::spawn_blocking(move || pass.operator_backfill()).await {
+                    Ok(value) => Ok(value),
+                    Err(join) => Ok(serde_json::json!({"error": format!("backfill task failed: {join}")})),
+                }
+            },
+        )
+        .rpcmethod(
             &health_name,
             "consolidated operator health check (Phase: financials.today/.week are \
              DB-backed; annualized_roc_pct and sections 2-9 are gap-marked, see _gaps)",
@@ -2342,6 +2430,8 @@ async fn main() -> Result<()> {
     });
     let mut fee_cadence = None;
     let mut lnplus_cadence = None;
+    let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
+        None;
     let authority_runtime = match authority_plan {
         revops::fee_mode::AuthorityPlan::Live(broadcaster) => {
             if let Some(handle) = observer_db.clone() {
@@ -2396,6 +2486,7 @@ async fn main() -> Result<()> {
                                 ) {
                                     Ok(pass) => {
                                         passes = passes.with_lnplus(pass.clone());
+                                        lnplus_rpc_pass = Some(pass.clone());
                                         lnplus_pass = Some(pass);
                                     }
                                     Err(error) => eprintln!(
@@ -2489,6 +2580,7 @@ async fn main() -> Result<()> {
         authority_runtime,
         socket_path: init_socket_path.clone(),
         production_db_path: production_db_path_expanded.clone(),
+        lnplus: lnplus_rpc_pass,
     });
 
     let plugin = configured.start(state).await?;

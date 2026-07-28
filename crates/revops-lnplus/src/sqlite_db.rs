@@ -1185,6 +1185,9 @@ fn encode_breaker(state: &BreakerState) -> String {
         BreakerCause::LnPlusOutage { detail } => {
             serde_json::json!({"kind": "LnPlusOutage", "detail": detail})
         }
+        BreakerCause::OperatorAbandonedSwap { swap_id } => {
+            serde_json::json!({"kind": "OperatorAbandonedSwap", "swap_id": swap_id})
+        }
     };
     serde_json::json!({"tripped_at": state.tripped_at, "cause": cause}).to_string()
 }
@@ -1225,6 +1228,9 @@ fn decode_breaker(raw: &str) -> Option<BreakerState> {
             detail: detail()?,
         },
         "LnPlusOutage" => BreakerCause::LnPlusOutage { detail: detail()? },
+        "OperatorAbandonedSwap" => BreakerCause::OperatorAbandonedSwap {
+            swap_id: swap_id()?,
+        },
         _ => return None,
     };
     Some(BreakerState { tripped_at, cause })

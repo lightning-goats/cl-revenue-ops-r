@@ -345,3 +345,172 @@ fn observer_api_refuses_mutations_with_zero_wire_activity() {
     assert!(my.pending.is_empty());
     assert!(server.hits_for("/api/2/get_my_swaps") == 1);
 }
+
+// ================= Task 61 4E: the four operator RPCs (owner acks) =======
+
+use revops_lnplus::breaker::{BreakerCause, BreakerState};
+use revops_lnplus::db_types::SwapRow;
+
+#[test]
+fn operator_status_is_python_shaped_and_reflects_the_store() {
+    let server = RoutedHttpServer::spawn(lnplus_routes());
+    let cln = FakeCln::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let pass = pass_for(&server, &cln, &dir);
+
+    let v = pass.operator_status();
+    for key in [
+        "breaker",
+        "inflight",
+        "active",
+        "recent_ended",
+        "recent_failed",
+        "backfill_done",
+        "last_watcher_pass",
+        "recent_notifications",
+        "enabled",
+        "execute_applications",
+    ] {
+        assert!(v.get(key).is_some(), "missing Python key {key}: {v}");
+    }
+    assert_eq!(v["enabled"], false);
+    assert_eq!(
+        v["execute_applications"], false,
+        "observer composition can never execute — structural truth"
+    );
+
+    // Breaker passthrough after a trip.
+    pass.store()
+        .set_breaker(&BreakerState {
+            tripped_at: 100,
+            cause: BreakerCause::MissedOpenDeadline {
+                swap_id: "s9".to_string(),
+            },
+        })
+        .unwrap();
+    let v = pass.operator_status();
+    assert_eq!(v["breaker"], "missed 48h deadline for swap s9");
+    assert_eq!(server.total_hits(), 0, "status is store-only — no network");
+}
+
+#[test]
+fn operator_breaker_clear_acks_completion_against_the_store() {
+    let server = RoutedHttpServer::spawn(lnplus_routes());
+    let cln = FakeCln::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let pass = pass_for(&server, &cln, &dir);
+
+    assert_eq!(pass.operator_breaker_clear()["status"], "not_tripped");
+
+    pass.store()
+        .set_breaker(&BreakerState {
+            tripped_at: 100,
+            cause: BreakerCause::LnPlusOutage {
+                detail: "x".to_string(),
+            },
+        })
+        .unwrap();
+    let v = pass.operator_breaker_clear();
+    assert_eq!(v["status"], "cleared");
+    assert_eq!(v["was"], "LN+ outage during reconcile: x");
+    assert_eq!(
+        pass.store().get_breaker().unwrap(),
+        None,
+        "the ack means the clear LANDED — completion, not queue admission"
+    );
+    assert_eq!(pass.operator_breaker_clear()["status"], "not_tripped");
+}
+
+#[test]
+fn operator_abandon_terminalizes_and_trips_in_one_compound() {
+    let server = RoutedHttpServer::spawn(lnplus_routes());
+    let cln = FakeCln::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let pass = pass_for(&server, &cln, &dir);
+
+    // Python-equivalent errors first.
+    assert_eq!(
+        pass.operator_abandon("ghost")["error"],
+        "Unknown swap ghost"
+    );
+    pass.store()
+        .insert_swap_new(&SwapRow::new("done", "ended", 1, 1, 1))
+        .unwrap();
+    assert_eq!(
+        pass.operator_abandon("done")["error"],
+        "Swap done is not in flight (status ended)"
+    );
+
+    // The real abandon: applied row → failed + breaker, atomically.
+    pass.store()
+        .insert_swap_new(&SwapRow::new("s1", "applied", 1_000_000, 6, 500))
+        .unwrap();
+    let v = pass.operator_abandon("s1");
+    assert_eq!(v["status"], "abandoned");
+    assert_eq!(v["swap_id"], "s1");
+    assert!(v["warning"]
+        .as_str()
+        .unwrap()
+        .contains("defects on an LN+ commitment"));
+    let row = pass.store().get_swap("s1").unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.outcome.as_deref(), Some("abandoned by operator"));
+    let state = pass.store().get_breaker().unwrap().expect("tripped");
+    assert_eq!(state.cause.message(), "operator abandoned swap s1");
+    assert!(
+        !state.cause.is_reverifiable(),
+        "an operator abandon must never auto-clear"
+    );
+    // Best-effort delete_application is structurally REFUSED in observer
+    // composition — no wire write may have happened.
+    assert_eq!(server.hits_for("/api/2/delete_application"), 0);
+    assert_eq!(server.total_hits(), 0);
+}
+
+#[test]
+fn operator_backfill_adopts_from_a_signed_read_and_is_idempotent() {
+    let mut routes = lnplus_routes();
+    routes.insert(
+        "/api/2/get_my_swaps",
+        json!({"pending": [
+            {"id": "manual-1", "capacity_sats": 2_000_000, "duration_months": 6}
+        ], "opening": [], "completed": []}),
+    );
+    let server = RoutedHttpServer::spawn(routes);
+    let cln = FakeCln::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let pass = pass_for(&server, &cln, &dir);
+
+    let v = pass.operator_backfill();
+    assert_eq!(v["imported"]["pending"], 1, "adopted: {v}");
+    let row = pass.store().get_swap("manual-1").expect("adopted row");
+    assert_eq!(row.status, "applied");
+    assert_eq!(row.capacity_sats, 2_000_000);
+
+    // Idempotent second run: never touches the existing row.
+    let v = pass.operator_backfill();
+    assert_eq!(v["imported"]["pending"], 0);
+    assert_eq!(v["skipped"][0], "manual-1");
+}
+
+#[test]
+fn operator_backfill_surfaces_a_fetch_failure_instead_of_fabricating_empty() {
+    // No get_my_swaps route: the signed read fails loudly (500) — the RPC
+    // must return an error, never a success-shaped zero-import result.
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "/api/2/get_message",
+        json!({"message": "lnplus login 4242"}),
+    );
+    let server = RoutedHttpServer::spawn(routes);
+    let cln = FakeCln::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let pass = pass_for(&server, &cln, &dir);
+
+    let v = pass.operator_backfill();
+    assert!(
+        v.get("error").is_some(),
+        "a failed fetch must be an error, not an empty import: {v}"
+    );
+    assert!(v.get("imported").is_none());
+}
