@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,9 +27,7 @@ use revops_lnplus::http::LnPlusApiClient;
 use revops_lnplus::http_ureq::UreqTransport;
 use revops_lnplus::loop_drivers::watcher_pass;
 use revops_lnplus::open::OpenExecParams;
-use revops_lnplus::ports::{
-    AttemptState, LnPlusDb, PeerPolicy, PolicyPort, PortResult, ReserveSpendRequest,
-};
+use revops_lnplus::ports::{AttemptState, LnPlusDb, PeerPolicy, PolicyPort, PortResult};
 use revops_lnplus::sqlite_db::SqliteLnPlusDb;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
