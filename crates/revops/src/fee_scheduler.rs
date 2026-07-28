@@ -909,6 +909,25 @@ pub async fn prepare_new_channel(
     }))
 }
 
+/// Task 42 correction F2: where the SeedOnce bootstrap stands. No
+/// out-of-cycle generation-advancing commit (A3 new-channel,
+/// failed-forward nudge) may run unless `Ready` — anything else could
+/// make a virgin store nonvirgin with partial state (before hydration)
+/// or take the generation the pending seed provenance is bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedOnceBootstrapState {
+    /// SeedOnce, first hydration has not happened this process lifetime.
+    NotStarted,
+    /// Hydration seeded from Python; provenance awaits its atomic
+    /// generation-1 commit.
+    PendingSeedCommit,
+    /// The one-time seed was refused; the owner stays passive.
+    Refused,
+    /// Bootstrap complete (or lifecycle is strict-replay, which has no
+    /// bootstrap).
+    Ready,
+}
+
 /// What one `run_cycle` call did -- the loud-logging skip taxonomy the
 /// per-cycle sequence requires (skips log, never panic: the hub
 /// precedent).
@@ -2003,6 +2022,32 @@ impl CycleOwner {
     /// failure here is logged loudly and never fails the cycle -- this
     /// recorder is bookkeeping, not decision-relevant evidence, in
     /// `RehydratePerCycle` mode.
+    /// Task 42 correction F2: the EXPLICIT SeedOnce bootstrap state the
+    /// out-of-cycle commit guards consume — `pending_seed` alone is not
+    /// the state machine (before the first hydration it is `None` while
+    /// the store is still virgin and unproven).
+    ///
+    /// Derived, not duplicated: computed from the owner's authoritative
+    /// fields so it can never drift from reality.
+    pub fn bootstrap_state(&self) -> SeedOnceBootstrapState {
+        match self.lifecycle {
+            // Strict-replay mode has no bootstrap: Python remains the
+            // state authority and generation semantics don't apply.
+            StateLifecycle::RehydratePerCycle => SeedOnceBootstrapState::Ready,
+            StateLifecycle::SeedOnce => {
+                if self.seed_refused {
+                    SeedOnceBootstrapState::Refused
+                } else if !self.hydrated_once {
+                    SeedOnceBootstrapState::NotStarted
+                } else if self.pending_seed.is_some() {
+                    SeedOnceBootstrapState::PendingSeedCommit
+                } else {
+                    SeedOnceBootstrapState::Ready
+                }
+            }
+        }
+    }
+
     /// Task 42: the autonomous (`SeedOnce`) mempool-evidence refresh,
     /// run BEFORE the evidence snapshot freezes. Mirrors the Python
     /// recorder gate (`record_mempool_fee`'s call site: Vegas Reflex
@@ -2164,6 +2209,24 @@ impl CycleOwner {
             .load_latest_state()
             .map_err(|e| format!("Rust-owned state load failed: {e:#}"))?;
         let source = if stored.generation > 0 {
+            // Task 42 correction F2.3/F1: EVERY nonvirgin store must carry
+            // verified bound seed provenance. A generation without it (an
+            // out-of-cycle-first store, a legacy unbound row, a refusal-
+            // only store, duplicates, a dangling binding) is refused
+            // outright — fail-closed, never reseeded, never trusted.
+            match store.verified_seed_binding() {
+                Ok(revops_db::fee_runway::SeedBindingState::VerifiedBound { .. }) => {}
+                Ok(other) => {
+                    return Err(format!(
+                        "generation {} store failed seed-binding verification: {other:?}; \
+                         refusing to hydrate (fail-closed, no reseed)",
+                        stored.generation
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!("seed-binding verification read failed: {e:#}"));
+                }
+            }
             if stored.rows.is_empty() {
                 return Err(format!(
                     "generation {} is recorded but no state rows exist: corrupt Rust-owned \
@@ -2602,23 +2665,26 @@ impl CycleOwner {
 
         let coalesced = matches!(queue_outcome, TriggerOutcome::Coalesced);
 
-        // Task 42 (fail-closed): a nudge commit while seed provenance is
-        // pending its atomic generation-1 commit would take that
-        // generation without the seed row and orphan the provenance
-        // permanently -- same hazard, same refusal as the A3
-        // new-channel guard.
-        if self.pending_seed.is_some() {
+        // Task 42 correction F2 (fail-closed): same admissibility rule as
+        // the A3 new-channel guard — out-of-cycle commits only once the
+        // SeedOnce bootstrap is complete (see `bootstrap_state`).
+        let bootstrap = self.bootstrap_state();
+        if bootstrap != SeedOnceBootstrapState::Ready {
             eprintln!(
-                "revops: FAILED-FORWARD NUDGE REFUSED (fail-closed): seed provenance is \
-                 pending its atomic generation-1 commit (channel {channel_id} at {now})"
+                "revops: FAILED-FORWARD NUDGE REFUSED (fail-closed): SeedOnce bootstrap \
+                 is {bootstrap:?} (channel {channel_id} at {now})"
             );
             self.record_trigger_receipt(
                 &trigger,
                 now,
                 coalesced,
                 None,
-                "REFUSED (no decision, no state, no action): seed provenance pending its \
-                 atomic generation-1 commit",
+                format!(
+                    "REFUSED (no decision, no state, no action): SeedOnce bootstrap is \
+                     {bootstrap:?}; out-of-cycle commits require a complete committed \
+                     bootstrap"
+                )
+                .as_str(),
             );
             return;
         }
@@ -3041,26 +3107,31 @@ impl CycleOwner {
             return;
         }
 
-        // Task 42 (fail-closed): while seed provenance is pending its
-        // atomic generation-1 commit, an out-of-cycle A3 commit would
-        // take generation 1 WITHOUT the seed row -- permanently orphaning
-        // the provenance (the DB's virgin-store gate would then reject
-        // every scheduled retry). Refuse; the event replays later.
-        if self.pending_seed.is_some() {
+        // Task 42 correction F2 (fail-closed): out-of-cycle commits are
+        // admissible ONLY once the SeedOnce bootstrap is complete. Before
+        // the first hydration an A3 commit would make the virgin store
+        // nonvirgin with a single channel's partial state (hydration then
+        // skips the complete Python import FOREVER); while provenance is
+        // pending it would take the generation the seed is bound to and
+        // orphan it permanently. Refuse; the event replays later.
+        let bootstrap = self.bootstrap_state();
+        if bootstrap != SeedOnceBootstrapState::Ready {
             eprintln!(
-                "revops: A3 NEW-CHANNEL REFUSED (fail-closed): seed provenance is pending \
-                 its atomic generation-1 commit; no out-of-cycle commit may take that \
-                 generation (channel {channel_id} at {now})"
+                "revops: A3 NEW-CHANNEL REFUSED (fail-closed): SeedOnce bootstrap is \
+                 {bootstrap:?}; no out-of-cycle commit may run before a complete, \
+                 committed bootstrap (channel {channel_id} at {now})"
             );
             self.dispatch_a3_receipt(
                 &trigger,
                 now,
                 false,
                 None,
-                "REFUSED (no decision, no state, no action): seed provenance pending its \
-                 atomic generation-1 commit"
-                    .to_string(),
-                "new_channel pending-seed refusal receipt",
+                format!(
+                    "REFUSED (no decision, no state, no action): SeedOnce bootstrap is \
+                     {bootstrap:?}; out-of-cycle commits require a complete committed \
+                     bootstrap"
+                ),
+                "new_channel bootstrap-incomplete refusal receipt",
             );
             return;
         }
@@ -3856,6 +3927,7 @@ impl CycleOwner {
                 "hydrated_once": self.hydrated_once,
                 "seed_refused": self.seed_refused,
                 "pending_seed": self.pending_seed.is_some(),
+                "bootstrap_state": format!("{:?}", self.bootstrap_state()),
                 "persistence_failures": self.persistence_failures,
                 "trigger_queue": {
                     "pending": self.trigger_queue.pending_len(),

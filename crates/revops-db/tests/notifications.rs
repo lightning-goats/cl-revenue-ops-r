@@ -784,8 +784,7 @@ fn refresh_mempool_window_inserts_prunes_and_aggregates_in_one_transaction() {
 #[test]
 fn pending_seed_against_advanced_store_rolls_back_the_whole_commit() {
     use revops_db::fee_runway::{
-        commit_fee_cycle, current_state_generation, latest_seed_event, FeeCycleCommit,
-        FeeSeedEventRow,
+        commit_fee_cycle, current_state_generation, FeeCycleCommit, FeeSeedEventRow,
     };
 
     let conn = Connection::open_in_memory().unwrap();
@@ -804,8 +803,10 @@ fn pending_seed_against_advanced_store_rolls_back_the_whole_commit() {
         detail: None,
     };
 
-    // Advance the store to generation 1 WITHOUT a seed (e.g. an A3-first
-    // virgin store — a consistent no-seed-claim state).
+    // Advance the store legitimately: a complete bound bootstrap commit.
+    // (Task 42 correction F2 removed the old "A3-first generation-1
+    // store is consistent" premise -- such a store is now Invalid by the
+    // derived binding verification and unreachable through the owner.)
     commit_fee_cycle(
         &conn,
         &FeeCycleCommit {
@@ -814,6 +815,18 @@ fn pending_seed_against_advanced_store_rolls_back_the_whole_commit() {
             completed_at: 1_800_000_000,
             source_commit: "649c320".to_string(),
             binary_sha256: "0".repeat(64),
+            pending_seed: Some(FeeSeedEventRow {
+                seeded_at: 1_799_999_999,
+                outcome: "seeded".to_string(),
+                source_db_path: "/prod/revenue_ops.db".to_string(),
+                source_max_last_update: 1_799_999_000,
+                row_count: 1,
+                payload_sha256: "cd".repeat(32),
+                source_commit: "649c320".to_string(),
+                refused_channel: None,
+                refused_field: None,
+                detail: None,
+            }),
             ..Default::default()
         },
     )
@@ -838,7 +851,17 @@ fn pending_seed_against_advanced_store_rolls_back_the_whole_commit() {
     );
 
     assert_eq!(current_state_generation(&conn).unwrap(), 1);
-    assert!(latest_seed_event(&conn).unwrap().is_none());
+    let seeded_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rust_fee_seed_events WHERE outcome = 'seeded'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        seeded_count, 1,
+        "exactly the original bound seed row survives"
+    );
     let cycle2: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM rust_fee_cycles WHERE cycle_id = 'cycle-2'",
@@ -907,4 +930,293 @@ fn rust_fee_schema_restart_marker_round_trip() {
 
     let read = latest_restart_marker(&conn).unwrap().expect("marker");
     assert_eq!(read, second, "latest marker wins (newest restart)");
+}
+
+// ---------------------------------------------------------------------------
+// Task 42 correction F3: transaction-boundary failure semantics. The seam
+// is REAL: in rollback-journal mode a concurrent reader's SHARED lock makes
+// the writer's COMMIT fail with SQLITE_BUSY while the transaction stays
+// open -- exactly the state the guarded-result contract must clean up.
+// ---------------------------------------------------------------------------
+
+/// Open two plain connections (no busy_timeout, default rollback journal)
+/// on one on-disk db, with the schema initialized.
+fn commit_seam_pair() -> (tempfile::TempDir, Connection, Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seam.db");
+    let writer = Connection::open(&path).unwrap();
+    init_schema(&writer).unwrap();
+    // init_schema switches the file to WAL, where a reader can never make
+    // COMMIT fail -- flip back to the rollback journal so the reader's
+    // SHARED lock genuinely blocks the commit (the boundary under test).
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode.to_lowercase(), "delete");
+    let reader = Connection::open(&path).unwrap();
+    (dir, writer, reader)
+}
+
+/// Acquire and HOLD a SHARED lock on `reader` (rollback-journal read
+/// transaction), so the writer's COMMIT gets SQLITE_BUSY.
+fn hold_shared_lock(reader: &Connection) {
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM rust_mempool_fee_history", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+}
+
+#[test]
+fn refresh_commit_failure_rolls_back_and_leaves_the_connection_reusable() {
+    use revops_db::fee_runway::refresh_mempool_window;
+
+    let (_dir, writer, reader) = commit_seam_pair();
+    hold_shared_lock(&reader);
+
+    let err = refresh_mempool_window(&writer, 1_800_000_000, 3.0, 1_800_000_000 - 86_400)
+        .expect_err("COMMIT must fail while a rollback-journal reader holds SHARED");
+    assert!(
+        err.to_string().to_lowercase().contains("commit")
+            || err.to_string().to_lowercase().contains("locked")
+            || err.to_string().to_lowercase().contains("busy"),
+        "the error names the boundary: {err:#}"
+    );
+    reader.execute_batch("ROLLBACK").unwrap();
+
+    // The failed refresh left NOTHING: no row, no open transaction.
+    let count: i64 = writer
+        .query_row("SELECT COUNT(*) FROM rust_mempool_fee_history", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0, "the COMMIT-failed sample must be rolled back");
+    let window = refresh_mempool_window(&writer, 1_800_000_100, 5.0, 1_800_000_100 - 86_400)
+        .expect("the connection must be reusable after a COMMIT failure (no open txn)");
+    assert_eq!(window.count, 1, "exactly the post-failure sample");
+}
+
+#[test]
+fn cycle_commit_busy_at_boundary_rolls_back_seed_and_state_together() {
+    use revops_db::fee_runway::{
+        commit_fee_cycle, current_state_generation, latest_seed_event, FeeCycleCommit,
+        FeeSeedEventRow, FeeStateRow,
+    };
+
+    let (_dir, writer, reader) = commit_seam_pair();
+    let commit = FeeCycleCommit {
+        cycle_id: "boundary-cycle".to_string(),
+        started_at: 1_800_000_000,
+        completed_at: 1_800_000_000,
+        source_commit: "649c320".to_string(),
+        binary_sha256: "0".repeat(64),
+        state_rows: vec![FeeStateRow {
+            channel_id: "700x1x0".to_string(),
+            v2_state_json: "{}".to_string(),
+            last_update: 1_800_000_000,
+        }],
+        pending_seed: Some(FeeSeedEventRow {
+            seeded_at: 1_800_000_000,
+            outcome: "seeded".to_string(),
+            source_db_path: "/prod/revenue_ops.db".to_string(),
+            source_max_last_update: 1_799_999_000,
+            row_count: 1,
+            payload_sha256: "ab".repeat(32),
+            source_commit: "649c320".to_string(),
+            refused_channel: None,
+            refused_field: None,
+            detail: None,
+        }),
+        ..Default::default()
+    };
+
+    hold_shared_lock(&reader);
+    commit_fee_cycle(&writer, &commit)
+        .expect_err("COMMIT must fail at the boundary, AFTER the seed insertion succeeded");
+    reader.execute_batch("ROLLBACK").unwrap();
+
+    // EVERYTHING rolls back together: generation, cycle, state, seed.
+    assert_eq!(current_state_generation(&writer).unwrap(), 0);
+    assert!(latest_seed_event(&writer).unwrap().is_none());
+    for (table, expect) in [("rust_fee_cycles", 0i64), ("rust_fee_state", 0)] {
+        let count: i64 = writer
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, expect,
+            "{table} must be untouched after boundary failure"
+        );
+    }
+
+    // And the connection is reusable: the SAME commit then succeeds whole.
+    assert_eq!(commit_fee_cycle(&writer, &commit).unwrap(), 1);
+    assert_eq!(
+        latest_seed_event(&writer).unwrap().unwrap().outcome,
+        "seeded"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 42 correction F1: the derived seed-binding verification matrix.
+// Every row class the correction contract names, against REAL rows.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verified_seed_binding_matrix_rejects_every_invalid_row_class() {
+    use revops_db::fee_runway::{
+        commit_fee_cycle, record_seed_refusal, verified_seed_binding, FeeCycleCommit,
+        FeeSeedEventRow, SeedBindingState,
+    };
+
+    fn seed_row() -> FeeSeedEventRow {
+        FeeSeedEventRow {
+            seeded_at: 1_800_000_000,
+            outcome: "seeded".to_string(),
+            source_db_path: "/prod/revenue_ops.db".to_string(),
+            source_max_last_update: 1_799_999_000,
+            row_count: 1,
+            payload_sha256: "ab".repeat(32),
+            source_commit: "649c320".to_string(),
+            refused_channel: None,
+            refused_field: None,
+            detail: None,
+        }
+    }
+    fn plain_commit(cycle_id: &str) -> FeeCycleCommit {
+        FeeCycleCommit {
+            cycle_id: cycle_id.to_string(),
+            started_at: 1_800_000_000,
+            completed_at: 1_800_000_000,
+            source_commit: "649c320".to_string(),
+            binary_sha256: "0".repeat(64),
+            ..Default::default()
+        }
+    }
+    fn fresh() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+    fn assert_invalid(conn: &Connection, what: &str, needle: &str) {
+        match verified_seed_binding(conn).unwrap() {
+            SeedBindingState::Invalid { reason } => assert!(
+                reason.contains(needle),
+                "{what}: reason must name the defect (wanted '{needle}'): {reason}"
+            ),
+            other => panic!("{what}: must be Invalid, got {other:?}"),
+        }
+    }
+
+    // Control: virgin store.
+    let conn = fresh();
+    assert_eq!(
+        verified_seed_binding(&conn).unwrap(),
+        SeedBindingState::VirginStore
+    );
+
+    // Control: the exact valid bound state.
+    let commit = FeeCycleCommit {
+        pending_seed: Some(seed_row()),
+        ..plain_commit("bound-cycle")
+    };
+    commit_fee_cycle(&conn, &commit).unwrap();
+    assert_eq!(
+        verified_seed_binding(&conn).unwrap(),
+        SeedBindingState::VerifiedBound {
+            cycle_id: "bound-cycle".to_string()
+        }
+    );
+
+    // Refusal-only nonvirgin store (generation advanced without success).
+    let conn = fresh();
+    record_seed_refusal(
+        &conn,
+        &FeeSeedEventRow {
+            outcome: "seed_refused".to_string(),
+            ..seed_row()
+        },
+    )
+    .unwrap();
+    commit_fee_cycle(&conn, &plain_commit("no-seed-cycle")).unwrap();
+    assert_invalid(&conn, "refusal-only nonvirgin", "NO successful seed row");
+
+    // Missing row entirely (out-of-cycle-first store).
+    let conn = fresh();
+    commit_fee_cycle(&conn, &plain_commit("a3-first-cycle")).unwrap();
+    assert_invalid(&conn, "missing seed row", "NO successful seed row");
+
+    // Legacy UNBOUND successful row (pre-Task-42 standalone insert).
+    let conn = fresh();
+    commit_fee_cycle(&conn, &plain_commit("legacy-cycle")).unwrap();
+    conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit)
+         VALUES (1, 'seeded', '/prod', 0, 1, 'ab', 'c')",
+        [],
+    )
+    .unwrap();
+    assert_invalid(&conn, "legacy unbound", "UNBOUND");
+
+    // Duplicate/conflicting successful rows are IMPOSSIBLE to create
+    // through any path (partial unique index) -- prove the constraint.
+    let conn = fresh();
+    commit_fee_cycle(
+        &conn,
+        &FeeCycleCommit {
+            pending_seed: Some(seed_row()),
+            ..plain_commit("dup-cycle-1")
+        },
+    )
+    .unwrap();
+    let second = conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit, bound_cycle_id, bound_generation)
+         VALUES (2, 'seeded', '/prod', 0, 1, 'cd', 'c', 'dup-cycle-2', 1)",
+        [],
+    );
+    assert!(
+        second.is_err(),
+        "the successful-seed singleton index must reject a second 'seeded' row"
+    );
+
+    // Corrupt binding: bound generation is not 1.
+    let conn = fresh();
+    commit_fee_cycle(&conn, &plain_commit("gen1-cycle")).unwrap();
+    conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit, bound_cycle_id, bound_generation)
+         VALUES (1, 'seeded', '/prod', 0, 1, 'ab', 'c', 'gen1-cycle', 2)",
+        [],
+    )
+    .unwrap();
+    assert_invalid(&conn, "wrong bound generation", "binds generation 2");
+
+    // Corrupt binding: bound cycle does not exist.
+    let conn = fresh();
+    commit_fee_cycle(&conn, &plain_commit("real-cycle")).unwrap();
+    conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit, bound_cycle_id, bound_generation)
+         VALUES (1, 'seeded', '/prod', 0, 1, 'ab', 'c', 'ghost-cycle', 1)",
+        [],
+    )
+    .unwrap();
+    assert_invalid(&conn, "dangling bound cycle", "does not exist");
+
+    // Seeded row on a generation-0 store.
+    let conn = fresh();
+    conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit, bound_cycle_id, bound_generation)
+         VALUES (1, 'seeded', '/prod', 0, 1, 'ab', 'c', 'x', 1)",
+        [],
+    )
+    .unwrap();
+    assert_invalid(&conn, "seeded row at generation 0", "generation-0");
 }

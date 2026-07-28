@@ -1450,6 +1450,10 @@ mod seedonce_restart {
             fee_runway::record_seed_refusal(&self.conn(), &event)
         }
 
+        fn verified_seed_binding(&self) -> anyhow::Result<fee_runway::SeedBindingState> {
+            fee_runway::verified_seed_binding(&self.conn())
+        }
+
         fn refresh_mempool_window(
             &self,
             sampled_at: i64,
@@ -2097,6 +2101,65 @@ mod seedonce_restart {
         assert_eq!(h.generation(), 1);
         assert_eq!(h.seeded_event_count(), 1);
         h.assert_seed_indivisible("after retry with guard released");
+    }
+
+    /// Task 42 correction F2: an A3 new-channel event arriving BEFORE the
+    /// first scheduled SeedOnce hydration must not make the virgin store
+    /// nonvirgin -- an A3-first generation 1 with only one channel's
+    /// partial state would make later hydration skip the complete Python
+    /// import forever (and compose with unvalidated provenance into
+    /// autonomous/live readiness).
+    #[test]
+    fn a3_before_first_hydration_cannot_consume_generation_one() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+
+        h.owner.handle_new_channel(new_channel_prepared(
+            "900x1x0",
+            &peer_a(),
+            150,
+            FeeStrategy::Static,
+            Some(200),
+            None,
+            NOW,
+        ));
+        pump_store_results(&mut h.owner, &rx);
+        assert_eq!(
+            h.generation(),
+            0,
+            "a pre-hydration A3 event must not advance a virgin store's generation"
+        );
+        assert_eq!(h.state_row_count(), 0, "no partial A3-only state row");
+        assert_eq!(h.seeded_event_count(), 0);
+
+        // Same across a restart (fresh owner, same virgin store).
+        h.restart();
+        let rx = self_channel(&mut h.owner);
+        h.owner.handle_new_channel(new_channel_prepared(
+            "900x1x0",
+            &peer_a(),
+            150,
+            FeeStrategy::Static,
+            Some(200),
+            None,
+            NOW + 10,
+        ));
+        pump_store_results(&mut h.owner, &rx);
+        assert_eq!(h.generation(), 0);
+        assert_eq!(h.state_row_count(), 0);
+
+        // The scheduled bootstrap then performs the COMPLETE seed exactly
+        // once: generation 1, one bound seed event, and the Python
+        // snapshot's channel hydrated (not an A3-only partial set).
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(h.generation(), 1);
+        assert_eq!(h.seeded_event_count(), 1);
+        assert!(
+            h.state().fee_states.contains_key(CHANNEL),
+            "the complete Python import happened (snapshot channel present)"
+        );
+        h.assert_seed_indivisible("after bootstrap following refused A3-first events");
     }
 
     /// Audit test 7: the autonomous decision consumes ONLY Rust-owned
@@ -4274,6 +4337,10 @@ mod seedonce_restart {
             self.inner.record_seed_refusal(event)
         }
 
+        fn verified_seed_binding(&self) -> anyhow::Result<fee_runway::SeedBindingState> {
+            self.inner.verified_seed_binding()
+        }
+
         fn refresh_mempool_window(
             &self,
             sampled_at: i64,
@@ -4856,6 +4923,20 @@ mod seedonce_restart {
         );
     }
 
+    /// Task 42 correction F2: A3 direct-drive fixtures must reach a READY
+    /// bootstrap first — out-of-cycle commits are refused on an
+    /// unbootstrapped owner. One scheduled no-vegas cycle hydrates (an
+    /// empty Python snapshot seeds zero rows) and commits generation 1
+    /// with its bound provenance.
+    fn bootstrap_to_ready(owner: &mut CycleOwner) {
+        let mut clock = || NOW;
+        let outcome = owner.run_cycle(super::prepared_no_vegas(json!(3), false), &mut clock);
+        assert!(
+            matches!(outcome, CycleOutcome::Ran { .. }),
+            "bootstrap cycle must run: {outcome:?}"
+        );
+    }
+
     #[test]
     fn commit_dispatch_launch_failure_is_terminal_inline_without_a_pending_leak() {
         let fx = fixture();
@@ -4867,6 +4948,7 @@ mod seedonce_restart {
             fail_launch.clone(),
         );
         let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        bootstrap_to_ready(&mut owner);
         let rx = self_channel(&mut owner);
         let prepared = new_channel_prepared(
             CHANNEL,
@@ -4927,6 +5009,7 @@ mod seedonce_restart {
             launch_failures,
         );
         let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        bootstrap_to_ready(&mut owner);
         let rx = self_channel(&mut owner);
 
         owner.handle_new_channel(new_channel_prepared(
@@ -5326,6 +5409,10 @@ mod seedonce_restart {
             _sat_per_vbyte: f64,
             _retain_since: i64,
         ) -> anyhow::Result<fee_runway::MempoolWindow> {
+            self.wedge()
+        }
+
+        fn verified_seed_binding(&self) -> anyhow::Result<fee_runway::SeedBindingState> {
             self.wedge()
         }
 

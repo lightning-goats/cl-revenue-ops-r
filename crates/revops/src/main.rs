@@ -18,7 +18,7 @@ use revops::rpc_report::build_report;
 use revops::rpc_status::{build_config_response, build_status, StatusInputs};
 use revops::{as_bool_default, as_int_default, as_string_default, now_unix};
 use revops::{hydration, notify};
-use revops_db::fee_runway::{FeeSeedEventRow, FeeStateSnapshot};
+use revops_db::fee_runway::FeeStateSnapshot;
 use revops_db::queries;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -449,7 +449,9 @@ pub struct StartupModeInputs<'a> {
     /// case is refused by the mandatory-writable-state gate below before
     /// this default value is ever consulted.
     pub state: &'a FeeStateSnapshot,
-    pub seed_event: Option<&'a FeeSeedEventRow>,
+    /// Task 42 correction F1: the DERIVED verified seed-binding state
+    /// (`fee_runway::verified_seed_binding`), never a raw latest event.
+    pub seed_binding: &'a revops_db::fee_runway::SeedBindingState,
     /// Whether the Rust-owned observer db (`revops-r-observer-db-path`) is
     /// configured and successfully opened THIS process lifetime.
     pub rust_state_store_configured: bool,
@@ -490,6 +492,29 @@ impl std::fmt::Display for StartupModeDenyReason {
 }
 
 impl std::error::Error for StartupModeDenyReason {}
+
+/// Task 42 correction F1: render the DERIVED verified seed-binding state
+/// for the status surfaces -- raw generation/seed fields remain for
+/// diagnostics, but THIS field is the one that means anything.
+fn seed_binding_json(
+    binding: anyhow::Result<revops_db::fee_runway::SeedBindingState>,
+) -> serde_json::Value {
+    use revops_db::fee_runway::SeedBindingState;
+    match binding {
+        Ok(SeedBindingState::VirginStore) => serde_json::json!({
+            "verified": false, "state": "virgin_store"
+        }),
+        Ok(SeedBindingState::VerifiedBound { cycle_id }) => serde_json::json!({
+            "verified": true, "state": "verified_bound", "cycle_id": cycle_id
+        }),
+        Ok(SeedBindingState::Invalid { reason }) => serde_json::json!({
+            "verified": false, "state": "invalid", "reason": reason
+        }),
+        Err(e) => serde_json::json!({
+            "verified": false, "state": "read_failed", "reason": format!("{e:#}")
+        }),
+    }
+}
 
 /// Resolve which operating mode this process may run in (Task 10 Step 1/2
 /// wiring around Task 8's [`fee_mode::validate_fee_mode`] and Task 7's
@@ -535,7 +560,7 @@ pub fn resolve_startup_mode(
         None => None,
     };
 
-    fee_mode::validate_fee_mode(inputs.flags, arm, inputs.state, inputs.seed_event)
+    fee_mode::validate_fee_mode(inputs.flags, arm, inputs.state, inputs.seed_binding)
         .map_err(StartupModeDenyReason::Mode)
 }
 
@@ -955,6 +980,10 @@ async fn main() -> Result<()> {
                             .ok()
                             .map(|snap| snap.generation);
                         let seed = handle.latest_fee_seed_event().await.ok().flatten();
+                        let seed_binding = seed_binding_json(
+                            handle
+                                .verified_seed_binding().await,
+                        );
                         let restart = handle.latest_fee_restart_marker().await.ok().flatten();
                         // Task 6: Rust-owned mempool recorder freshness --
                         // resolved live from the observer db, same as
@@ -974,6 +1003,7 @@ async fn main() -> Result<()> {
                         });
                         Some(serde_json::json!({
                             "generation": generation,
+                            "seed_binding": seed_binding,
                             "mempool": mempool,
                             "seed": seed.map(|e| serde_json::json!({
                                 "outcome": e.outcome,
@@ -1354,6 +1384,7 @@ async fn main() -> Result<()> {
                 let (
                     state_generation,
                     seed_provenance,
+                    seed_binding,
                     quarantine,
                     prepared_request_count,
                     mutation_call_count,
@@ -1367,6 +1398,10 @@ async fn main() -> Result<()> {
                         // the full `FeeSeedEventRow` shape `revenue-r-status`
                         // already reports (see that RPC's `fee_runway.seed`
                         // field) for consistency across both.
+                        let seed_binding = seed_binding_json(
+                            handle
+                                .verified_seed_binding().await,
+                        );
                         let seed_provenance = handle
                             .latest_fee_seed_event()
                             .await
@@ -1416,13 +1451,14 @@ async fn main() -> Result<()> {
                         (
                             generation,
                             seed_provenance,
+                            Some(seed_binding),
                             quarantine,
                             prepared_request_count,
                             mutation_call_count,
                             mempool,
                         )
                     }
-                    None => (None, None, None, None, None, None),
+                    None => (None, None, None, None, None, None, None),
                 };
 
                 Ok(serde_json::json!({
@@ -1435,6 +1471,7 @@ async fn main() -> Result<()> {
                     },
                     "state_generation": state_generation,
                     "seed_provenance": seed_provenance,
+                    "seed_binding": seed_binding,
                     "counters": counters,
                     "mempool": mempool,
                     "quarantine": quarantine,
@@ -2148,7 +2185,7 @@ async fn main() -> Result<()> {
     // FAILURE must fail closed -- it must never be treated as "virgin
     // store" (that would let a broken store slip through as
     // `PendingFirstCycle`).
-    let (fee_state_snapshot, fee_seed_event) = match &observer_db {
+    let (fee_state_snapshot, fee_seed_binding) = match &observer_db {
         Some(handle) => {
             let snap = match handle.load_latest_fee_state().await {
                 Ok(snap) => snap,
@@ -2162,13 +2199,16 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             };
-            let seed = match handle.latest_fee_seed_event().await {
-                Ok(seed) => seed,
+            // Task 42 correction F1: derive the VERIFIED binding state; a
+            // read/decode failure fails closed exactly like a state-read
+            // failure (never treated as virgin).
+            let seed = match handle.verified_seed_binding().await {
+                Ok(binding) => binding,
                 Err(e) => {
                     configured
                         .disable(&format!(
-                            "stateful-shadow mode gate: failed to read Rust-owned seed \
-                             provenance: {e:#}"
+                            "stateful-shadow mode gate: failed to derive Rust-owned seed \
+                             binding: {e:#}"
                         ))
                         .await?;
                     return Ok(());
@@ -2176,7 +2216,10 @@ async fn main() -> Result<()> {
             };
             (snap, seed)
         }
-        None => (FeeStateSnapshot::default(), None),
+        None => (
+            FeeStateSnapshot::default(),
+            revops_db::fee_runway::SeedBindingState::VirginStore,
+        ),
     };
 
     // Mirrors `resolve_startup_mode`'s OWN check order (mandatory writable
@@ -2272,7 +2315,7 @@ async fn main() -> Result<()> {
         cutover_arm: cutover_arm_path_expanded.as_deref().zip(cutover_identity),
         consumed_arm_dir: &consumed_arm_dir,
         state: &fee_state_snapshot,
-        seed_event: fee_seed_event.as_ref(),
+        seed_binding: &fee_seed_binding,
         rust_state_store_configured,
     }) {
         Ok(mode) => mode,
@@ -2803,21 +2846,6 @@ mod tests {
     /// Coordinator ruling I-6: live authority requires a SEEDED store
     /// (generation > 0 AND a recorded seed event) -- this pairs with
     /// [`some_seed_event`] wherever a test needs a valid live row.
-    fn some_seed_event() -> revops_db::fee_runway::FeeSeedEventRow {
-        revops_db::fee_runway::FeeSeedEventRow {
-            seeded_at: 1_000,
-            outcome: "seeded".to_string(),
-            source_db_path: "/var/lib/lightning/revops.db".to_string(),
-            source_max_last_update: 999,
-            row_count: 3,
-            payload_sha256: "0".repeat(64),
-            source_commit: TEST_SOURCE_COMMIT.to_string(),
-            refused_channel: None,
-            refused_field: None,
-            detail: None,
-        }
-    }
-
     fn passive_flags() -> ModeFlags {
         ModeFlags {
             observer: true,
@@ -2855,7 +2883,7 @@ mod tests {
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: false,
         })
         .expect("passive observer needs no Rust state");
@@ -2876,7 +2904,7 @@ mod tests {
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: false,
         })
         .unwrap_err();
@@ -2908,7 +2936,7 @@ mod tests {
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: false,
         })
         .unwrap_err();
@@ -2936,7 +2964,7 @@ mod tests {
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
         })
         .expect("shadow row with a configured store and no arm is valid");
@@ -2962,14 +2990,16 @@ mod tests {
             &valid_arm_json("live-nonce-consumed"),
         );
         let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
-        let seed_event = some_seed_event();
+        let seed_binding = revops_db::fee_runway::SeedBindingState::VerifiedBound {
+            cycle_id: "live-startup-seed-cycle".to_string(),
+        };
 
         let result = resolve_startup_mode(StartupModeInputs {
             flags: live_flags(),
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &non_virgin_state(),
-            seed_event: Some(&seed_event),
+            seed_binding: &seed_binding,
             rust_state_store_configured: true,
         })
         .expect("live row with a valid arm, a configured store, and seeded state is valid");
@@ -3005,7 +3035,7 @@ mod tests {
             cutover_arm: Some((&arm_path, identity)),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
         })
         .unwrap_err();
@@ -3032,7 +3062,7 @@ mod tests {
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
         })
         .unwrap_err();
@@ -3059,7 +3089,7 @@ mod tests {
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &non_virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
         })
         .unwrap_err();
@@ -3094,7 +3124,7 @@ mod tests {
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured,
         })
         .unwrap_err();
@@ -3126,7 +3156,7 @@ mod tests {
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
-            seed_event: None,
+            seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
         })
         .unwrap_err();
@@ -3150,18 +3180,29 @@ mod tests {
             cutover_arm::validate_and_consume(&arm_path, &consumed_dir, &test_identity(owner_uid))
                 .expect("valid arm consumes");
 
-        let passive = fee_mode::validate_fee_mode(passive_flags(), None, &virgin_state(), None)
-            .expect("passive row valid");
+        let passive = fee_mode::validate_fee_mode(
+            passive_flags(),
+            None,
+            &virgin_state(),
+            &revops_db::fee_runway::SeedBindingState::VirginStore,
+        )
+        .expect("passive row valid");
         assert_eq!(mode_label(&passive), "passive_observer");
-        let shadow = fee_mode::validate_fee_mode(shadow_flags(), None, &virgin_state(), None)
-            .expect("shadow row valid");
+        let shadow = fee_mode::validate_fee_mode(
+            shadow_flags(),
+            None,
+            &virgin_state(),
+            &revops_db::fee_runway::SeedBindingState::VirginStore,
+        )
+        .expect("shadow row valid");
         assert_eq!(mode_label(&shadow), "autonomous_shadow");
-        let seed_event = some_seed_event();
         let live = fee_mode::validate_fee_mode(
             live_flags(),
             Some(arm),
             &non_virgin_state(),
-            Some(&seed_event),
+            &revops_db::fee_runway::SeedBindingState::VerifiedBound {
+                cycle_id: "label-seed-cycle".to_string(),
+            },
         )
         .expect("live row valid");
         assert_eq!(mode_label(&live), "live_authority");

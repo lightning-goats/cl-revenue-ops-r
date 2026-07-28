@@ -83,6 +83,38 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// already has these tables.
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(DDL).context("init fee runway schema")?;
+    migrate_seed_binding_columns(conn)?;
+    Ok(())
+}
+
+/// Task 42 correction F1: durable binding from successful seed provenance
+/// to the exact generation-1 cycle. Idempotent additive migration: two
+/// nullable columns (legacy rows keep NULL = UNBOUND, which validation
+/// rejects for authority) plus a partial unique index enforcing AT MOST
+/// ONE successful seed row per store, ever (SeedOnce means once — a
+/// second success is a conflict by construction).
+fn migrate_seed_binding_columns(conn: &Connection) -> Result<()> {
+    let mut columns = conn
+        .prepare("PRAGMA table_info(rust_fee_seed_events)")
+        .context("inspect rust_fee_seed_events schema")?;
+    let names: Vec<String> = columns
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("read rust_fee_seed_events columns")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect rust_fee_seed_events columns")?;
+    drop(columns);
+    if !names.iter().any(|n| n == "bound_cycle_id") {
+        conn.execute_batch(
+            "ALTER TABLE rust_fee_seed_events ADD COLUMN bound_cycle_id TEXT;
+             ALTER TABLE rust_fee_seed_events ADD COLUMN bound_generation INTEGER;",
+        )
+        .context("add seed binding columns")?;
+    }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_rust_fee_seed_success_singleton
+             ON rust_fee_seed_events(outcome) WHERE outcome = 'seeded';",
+    )
+    .context("create successful-seed singleton index")?;
     Ok(())
 }
 
@@ -705,7 +737,13 @@ fn commit_fee_cycle_locked(conn: &Connection, commit: &FeeCycleCommit) -> Result
     // `FeeCycleCommit::pending_seed` and `insert_successful_seed_locked`
     // (which enforces the virgin-store / generation-1 gate).
     if let Some(seed) = &commit.pending_seed {
-        insert_successful_seed_locked(conn, seed, current_generation)?;
+        insert_successful_seed_locked(
+            conn,
+            seed,
+            current_generation,
+            &commit.cycle_id,
+            next_generation,
+        )?;
     }
 
     conn.execute_batch("COMMIT")
@@ -923,25 +961,31 @@ pub fn refresh_mempool_window(
     let result = (|| -> Result<MempoolWindow> {
         record_mempool_sample(conn, sampled_at, sat_per_vbyte)?;
         prune_mempool_samples_before(conn, retain_since)?;
-        conn.query_row(
-            "SELECT COUNT(*), MAX(sampled_at), AVG(sat_per_vbyte)
-             FROM rust_mempool_fee_history",
-            [],
-            |r| {
-                Ok(MempoolWindow {
-                    count: r.get::<_, i64>(0)? as u64,
-                    latest_sampled_at: r.get(1)?,
-                    average: r.get(2)?,
-                })
-            },
-        )
-        .context("read refreshed mempool window aggregate")
+        let window = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(sampled_at), AVG(sat_per_vbyte)
+                 FROM rust_mempool_fee_history",
+                [],
+                |r| {
+                    Ok(MempoolWindow {
+                        count: r.get::<_, i64>(0)? as u64,
+                        latest_sampled_at: r.get(1)?,
+                        average: r.get(2)?,
+                    })
+                },
+            )
+            .context("read refreshed mempool window aggregate")?;
+        // COMMIT is INSIDE the guarded result (Task 42 correction F3): a
+        // COMMIT error (e.g. SQLITE_BUSY from a rollback-journal reader)
+        // can leave the transaction OPEN with the inserted sample visible
+        // to later commands on this connection -- it must hit the same
+        // ROLLBACK path as any other failure.
+        conn.execute_batch("COMMIT")
+            .context("commit mempool window refresh transaction")?;
+        Ok(window)
     })();
     if result.is_err() {
         let _ = conn.execute_batch("ROLLBACK");
-    } else {
-        conn.execute_batch("COMMIT")
-            .context("commit mempool window refresh transaction")?;
     }
     result
 }
@@ -957,13 +1001,13 @@ pub fn record_mempool_sample_pruned(
     let result = (|| -> Result<()> {
         record_mempool_sample(conn, sampled_at, sat_per_vbyte)?;
         prune_mempool_samples_before(conn, retain_since)?;
-        Ok(())
+        // COMMIT inside the guarded result -- Task 42 correction F3's
+        // defect class (a failed COMMIT must reach ROLLBACK too).
+        conn.execute_batch("COMMIT")
+            .context("commit mempool sample transaction")
     })();
     if result.is_err() {
         let _ = conn.execute_batch("ROLLBACK");
-    } else {
-        conn.execute_batch("COMMIT")
-            .context("commit mempool sample transaction")?;
     }
     result
 }
@@ -1233,6 +1277,8 @@ fn insert_successful_seed_locked(
     conn: &Connection,
     ev: &FeeSeedEventRow,
     prior_generation: i64,
+    bound_cycle_id: &str,
+    bound_generation: i64,
 ) -> Result<()> {
     anyhow::ensure!(
         ev.outcome == "seeded",
@@ -1246,7 +1292,32 @@ fn insert_successful_seed_locked(
          rolling the commit back",
         prior_generation
     );
-    insert_seed_event_row(conn, ev).context("insert successful seed provenance row")?;
+    anyhow::ensure!(
+        bound_generation == 1,
+        "successful seed provenance binds to generation 1 exactly (got {bound_generation})"
+    );
+    conn.execute(
+        "INSERT INTO rust_fee_seed_events
+             (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
+              payload_sha256, source_commit, refused_channel, refused_field, detail,
+              bound_cycle_id, bound_generation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            ev.seeded_at,
+            ev.outcome,
+            ev.source_db_path,
+            ev.source_max_last_update,
+            ev.row_count,
+            ev.payload_sha256,
+            ev.source_commit,
+            ev.refused_channel,
+            ev.refused_field,
+            ev.detail,
+            bound_cycle_id,
+            bound_generation,
+        ],
+    )
+    .context("insert bound successful seed provenance row")?;
     Ok(())
 }
 
@@ -1276,6 +1347,101 @@ pub fn latest_seed_event(conn: &Connection) -> Result<Option<FeeSeedEventRow>> {
     )
     .optional()
     .context("read latest fee seed event")
+}
+
+/// Task 42 correction F1: the DERIVED, verified seed-provenance state —
+/// the ONLY representation authority decisions may consume (raw
+/// generation/event fields can be misread as proof).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedBindingState {
+    /// Generation 0, no state rows, no successful seed row: seeding is
+    /// legitimately still pending on the first cycle.
+    VirginStore,
+    /// Generation >= 1 and EXACTLY ONE `outcome='seeded'` row, bound to
+    /// generation 1 and to a `rust_fee_cycles` row that exists at
+    /// generation 1. Carries the bound cycle id.
+    VerifiedBound { cycle_id: String },
+    /// Everything else: refusal-only nonvirgin stores, legacy UNBOUND
+    /// successful rows, duplicate/conflicting rows, a bound cycle that
+    /// does not exist, generation >= 1 with no successful row (e.g. an
+    /// out-of-cycle-first store), or rows on a virgin store. Fail-closed
+    /// for autonomous-nonvirgin and live readiness; the reason is
+    /// diagnostic, never authorizing.
+    Invalid { reason: String },
+}
+
+/// Derive [`SeedBindingState`] from the store (Task 42 correction F1).
+/// Read-only; every check is over durable rows, never in-memory state.
+pub fn verified_seed_binding(conn: &Connection) -> Result<SeedBindingState> {
+    let generation = current_state_generation(conn)?;
+    let seeded: Vec<(i64, Option<String>, Option<i64>)> = conn
+        .prepare(
+            "SELECT id, bound_cycle_id, bound_generation FROM rust_fee_seed_events
+             WHERE outcome = 'seeded' ORDER BY id",
+        )
+        .context("prepare successful-seed rows read")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .context("read successful-seed rows")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect successful-seed rows")?;
+
+    if generation == 0 {
+        return if seeded.is_empty() {
+            Ok(SeedBindingState::VirginStore)
+        } else {
+            Ok(SeedBindingState::Invalid {
+                reason: "successful seed row exists on a generation-0 store".to_string(),
+            })
+        };
+    }
+    let (bound_cycle_id, bound_generation) = match seeded.as_slice() {
+        [] => {
+            return Ok(SeedBindingState::Invalid {
+                reason: format!(
+                    "generation {generation} store has NO successful seed row (an \
+                     out-of-cycle-first or corrupt store; never authority-eligible)"
+                ),
+            })
+        }
+        [(_, cycle, generation)] => (cycle.clone(), *generation),
+        more => {
+            return Ok(SeedBindingState::Invalid {
+                reason: format!(
+                    "{} successful seed rows exist; SeedOnce permits exactly one",
+                    more.len()
+                ),
+            })
+        }
+    };
+    let (Some(cycle_id), Some(bound_generation)) = (bound_cycle_id, bound_generation) else {
+        return Ok(SeedBindingState::Invalid {
+            reason: "successful seed row is UNBOUND (legacy standalone row; requires \
+                     explicit verified reconciliation, never silent acceptance)"
+                .to_string(),
+        });
+    };
+    if bound_generation != 1 {
+        return Ok(SeedBindingState::Invalid {
+            reason: format!("successful seed row binds generation {bound_generation}, not 1"),
+        });
+    }
+    let cycle_generation: Option<i64> = conn
+        .query_row(
+            "SELECT generation FROM rust_fee_cycles WHERE cycle_id = ?1",
+            params![cycle_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("read bound seed cycle row")?;
+    match cycle_generation {
+        Some(1) => Ok(SeedBindingState::VerifiedBound { cycle_id }),
+        Some(other) => Ok(SeedBindingState::Invalid {
+            reason: format!("seed-bound cycle {cycle_id} exists at generation {other}, not 1"),
+        }),
+        None => Ok(SeedBindingState::Invalid {
+            reason: format!("seed-bound cycle {cycle_id} does not exist"),
+        }),
+    }
 }
 
 /// Record one restart marker. Returns the new row's id.
@@ -1534,12 +1700,15 @@ pub fn unresolved_broadcast_attempts(conn: &Connection) -> Result<Vec<BroadcastA
 pub fn reconcile_quarantine_on_restart(conn: &Connection, now: i64) -> Result<usize> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("begin quarantine reconciliation transaction")?;
-    let result = reconcile_quarantine_on_restart_locked(conn, now);
-    if result.is_err() {
-        let _ = conn.execute_batch("ROLLBACK");
-    } else {
+    let result = reconcile_quarantine_on_restart_locked(conn, now).and_then(|n| {
+        // COMMIT inside the guarded result -- Task 42 correction F3's
+        // defect class (a failed COMMIT must reach ROLLBACK too).
         conn.execute_batch("COMMIT")
             .context("commit quarantine reconciliation transaction")?;
+        Ok(n)
+    });
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
     }
     result
 }

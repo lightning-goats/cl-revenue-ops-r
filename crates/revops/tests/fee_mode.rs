@@ -9,7 +9,7 @@ use revops::fee_mode::{
     validate_fee_mode, AuthorityPlan, FeeModeDenyReason, ModeFlags, ShadowSeedStatus,
     ValidatedFeeMode,
 };
-use revops_db::fee_runway::{FeeSeedEventRow, FeeStateSnapshot};
+use revops_db::fee_runway::{FeeStateSnapshot, SeedBindingState};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -88,18 +88,15 @@ fn non_virgin_state() -> FeeStateSnapshot {
     }
 }
 
-fn some_seed_event() -> FeeSeedEventRow {
-    FeeSeedEventRow {
-        seeded_at: 1_000,
-        outcome: "seeded".to_string(),
-        source_db_path: "/var/lib/lightning/revops.db".to_string(),
-        source_max_last_update: 999,
-        row_count: 12,
-        payload_sha256: "0".repeat(64),
-        source_commit: SOURCE_COMMIT.to_string(),
-        refused_channel: None,
-        refused_field: None,
-        detail: None,
+fn bound() -> SeedBindingState {
+    SeedBindingState::VerifiedBound {
+        cycle_id: "seed-cycle-1".to_string(),
+    }
+}
+
+fn invalid(reason: &str) -> SeedBindingState {
+    SeedBindingState::Invalid {
+        reason: reason.to_string(),
     }
 }
 
@@ -115,7 +112,8 @@ fn passive_observer_row_accepted_without_arm() {
         fee_broadcast: false,
         fee_stateful_shadow: false,
     };
-    let result = validate_fee_mode(flags, None, &virgin_state(), None).expect("passive is valid");
+    let result = validate_fee_mode(flags, None, &virgin_state(), &SeedBindingState::VirginStore)
+        .expect("passive is valid");
     assert!(matches!(result, ValidatedFeeMode::PassiveObserver(_)));
 }
 
@@ -127,8 +125,8 @@ fn autonomous_shadow_row_accepted_without_arm_when_store_virgin() {
         fee_broadcast: false,
         fee_stateful_shadow: true,
     };
-    let result =
-        validate_fee_mode(flags, None, &virgin_state(), None).expect("shadow row is valid");
+    let result = validate_fee_mode(flags, None, &virgin_state(), &SeedBindingState::VirginStore)
+        .expect("shadow row is valid");
     match result {
         ValidatedFeeMode::AutonomousShadow(shadow) => {
             assert_eq!(shadow.seed_status(), ShadowSeedStatus::PendingFirstCycle);
@@ -147,8 +145,7 @@ fn live_authority_row_accepted_with_valid_consumed_arm_and_seeded_state() {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let seed_event = some_seed_event();
-    let result = validate_fee_mode(flags, Some(arm), &non_virgin_state(), Some(&seed_event))
+    let result = validate_fee_mode(flags, Some(arm), &non_virgin_state(), &bound())
         .expect("live row with a real consumed arm and seeded state is valid");
     match result {
         ValidatedFeeMode::LiveAuthority(live) => {
@@ -162,7 +159,6 @@ fn live_authority_row_accepted_with_valid_consumed_arm_and_seeded_state() {
 fn validated_live_mode_invokes_action_factory_exactly_once_with_the_real_capability() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let arm = real_consumed_arm(tmp.path(), "live-action-factory-control");
-    let seed_event = some_seed_event();
     let mode = validate_fee_mode(
         ModeFlags {
             observer: false,
@@ -172,7 +168,7 @@ fn validated_live_mode_invokes_action_factory_exactly_once_with_the_real_capabil
         },
         Some(arm),
         &non_virgin_state(),
-        Some(&seed_event),
+        &bound(),
     )
     .unwrap();
     let calls = std::cell::Cell::new(0);
@@ -195,7 +191,8 @@ fn live_authority_row_denied_without_arm() {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let err = validate_fee_mode(flags, None, &virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(flags, None, &virgin_state(), &SeedBindingState::VirginStore)
+        .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::LiveModeRequiresArm);
     assert_eq!(err.code(), "live_mode_requires_arm");
 }
@@ -220,7 +217,13 @@ fn live_authority_row_denied_when_store_is_virgin() {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let err = validate_fee_mode(flags, Some(arm), &virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(
+        flags,
+        Some(arm),
+        &virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::LiveModeRequiresSeededState);
     assert_eq!(err.code(), "live_mode_requires_seeded_state");
 }
@@ -239,7 +242,13 @@ fn live_authority_row_denied_when_non_virgin_store_has_no_seed_event() {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let err = validate_fee_mode(flags, Some(arm), &non_virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(
+        flags,
+        Some(arm),
+        &non_virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::LiveModeRequiresSeededState);
 }
 
@@ -254,7 +263,13 @@ fn live_authority_row_without_arm_reports_arm_reason_even_when_store_is_unseeded
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let err = validate_fee_mode(flags, None, &non_virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(
+        flags,
+        None,
+        &non_virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::LiveModeRequiresArm);
 }
 
@@ -268,7 +283,13 @@ fn arm_present_in_passive_row_is_denied() {
         fee_broadcast: false,
         fee_stateful_shadow: false,
     };
-    let err = validate_fee_mode(flags, Some(arm), &virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(
+        flags,
+        Some(arm),
+        &virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::ArmPresentInNonLiveMode);
 }
 
@@ -282,7 +303,13 @@ fn arm_present_in_shadow_row_is_denied() {
         fee_broadcast: false,
         fee_stateful_shadow: true,
     };
-    let err = validate_fee_mode(flags, Some(arm), &virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(
+        flags,
+        Some(arm),
+        &virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::ArmPresentInNonLiveMode);
 }
 
@@ -309,7 +336,13 @@ fn every_other_combination_is_a_stable_invalid_combination_error() {
                         fee_broadcast,
                         fee_stateful_shadow,
                     };
-                    let err = validate_fee_mode(flags, None, &virgin_state(), None).unwrap_err();
+                    let err = validate_fee_mode(
+                        flags,
+                        None,
+                        &virgin_state(),
+                        &SeedBindingState::VirginStore,
+                    )
+                    .unwrap_err();
                     assert_eq!(err, FeeModeDenyReason::InvalidCombination(flags));
                     assert_eq!(err.code(), "invalid_mode_combination");
                 }
@@ -333,8 +366,13 @@ fn shadow_flags() -> ModeFlags {
 
 #[test]
 fn shadow_row_virgin_store_no_seed_event_is_pending_first_cycle() {
-    let result = validate_fee_mode(shadow_flags(), None, &virgin_state(), None)
-        .expect("virgin store defers seeding to the first cycle");
+    let result = validate_fee_mode(
+        shadow_flags(),
+        None,
+        &virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .expect("virgin store defers seeding to the first cycle");
     match result {
         ValidatedFeeMode::AutonomousShadow(shadow) => {
             assert_eq!(shadow.seed_status(), ShadowSeedStatus::PendingFirstCycle);
@@ -345,8 +383,7 @@ fn shadow_row_virgin_store_no_seed_event_is_pending_first_cycle() {
 
 #[test]
 fn shadow_row_non_virgin_store_with_seed_event_is_already_seeded() {
-    let seed_event = some_seed_event();
-    let result = validate_fee_mode(shadow_flags(), None, &non_virgin_state(), Some(&seed_event))
+    let result = validate_fee_mode(shadow_flags(), None, &non_virgin_state(), &bound())
         .expect("a recorded seed event satisfies provenance");
     match result {
         ValidatedFeeMode::AutonomousShadow(shadow) => {
@@ -358,7 +395,13 @@ fn shadow_row_non_virgin_store_with_seed_event_is_already_seeded() {
 
 #[test]
 fn shadow_row_non_virgin_store_without_seed_event_is_never_seeded_misconfiguration() {
-    let err = validate_fee_mode(shadow_flags(), None, &non_virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(
+        shadow_flags(),
+        None,
+        &non_virgin_state(),
+        &SeedBindingState::VirginStore,
+    )
+    .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::NeverSeeded);
     assert_eq!(err.code(), "stateful_shadow_never_seeded");
 }
@@ -381,7 +424,8 @@ fn invalid_combination_display_names_option_flags_and_every_accepted_row() {
         fee_broadcast: false,
         fee_stateful_shadow: false,
     };
-    let err = validate_fee_mode(flags, None, &virgin_state(), None).unwrap_err();
+    let err = validate_fee_mode(flags, None, &virgin_state(), &SeedBindingState::VirginStore)
+        .unwrap_err();
     assert_eq!(err, FeeModeDenyReason::InvalidCombination(flags));
     // The stable code() must be untouched by this fix.
     assert_eq!(err.code(), "invalid_mode_combination");
@@ -415,5 +459,77 @@ fn invalid_combination_display_names_option_flags_and_every_accepted_row() {
     assert!(
         message.contains("arm valid and consumed") || message.contains("valid and consumed"),
         "message: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 42 correction round F1: seed provenance must be VALIDATED and BOUND,
+// never merely present.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shadow_row_refused_seed_event_must_not_authorize_nonvirgin_state() {
+    let flags = ModeFlags {
+        observer: true,
+        fee_dryrun: true,
+        fee_broadcast: false,
+        fee_stateful_shadow: true,
+    };
+    let result = validate_fee_mode(
+        flags,
+        None,
+        &non_virgin_state(),
+        &invalid("generation 3 store has NO successful seed row (refusal-only store)"),
+    );
+    assert!(
+        result.is_err(),
+        "a REFUSAL row must never satisfy nonvirgin autonomous-shadow readiness: {result:?}"
+    );
+}
+
+#[test]
+fn live_row_refused_seed_event_must_not_authorize() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm = real_consumed_arm(tmp.path(), "f1-refused-nonce");
+    let flags = ModeFlags {
+        observer: false,
+        fee_dryrun: false,
+        fee_broadcast: true,
+        fee_stateful_shadow: false,
+    };
+    let result = validate_fee_mode(
+        flags,
+        Some(arm),
+        &non_virgin_state(),
+        &invalid("generation 3 store has NO successful seed row (refusal-only store)"),
+    );
+    assert!(
+        result.is_err(),
+        "a refusal row must never mint LIVE authority: {result:?}"
+    );
+}
+
+#[test]
+fn live_row_legacy_unbound_seeded_event_must_not_authorize() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm = real_consumed_arm(tmp.path(), "f1-unbound-nonce");
+    let flags = ModeFlags {
+        observer: false,
+        fee_dryrun: false,
+        fee_broadcast: true,
+        fee_stateful_shadow: false,
+    };
+    // A legacy standalone 'seeded' row with NO generation-1 binding: under
+    // the correction contract it must deny (explicit verified
+    // reconciliation or fail-closed -- never silent acceptance).
+    let result = validate_fee_mode(
+        flags,
+        Some(arm),
+        &non_virgin_state(),
+        &invalid("successful seed row is UNBOUND (legacy standalone row)"),
+    );
+    assert!(
+        result.is_err(),
+        "a legacy UNBOUND 'seeded' row must never mint live authority: {result:?}"
     );
 }

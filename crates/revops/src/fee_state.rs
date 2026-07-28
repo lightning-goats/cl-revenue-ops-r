@@ -332,6 +332,10 @@ pub trait RunwayStateStore: Send {
         &self,
         event: revops_db::fee_runway::FeeSeedEventRow,
     ) -> anyhow::Result<i64>;
+    /// Task 42 correction F1: the derived, verified seed-binding state
+    /// (`fee_runway::verified_seed_binding`) — the only provenance
+    /// representation hydration/mode decisions may consume.
+    fn verified_seed_binding(&self) -> anyhow::Result<revops_db::fee_runway::SeedBindingState>;
     fn record_restart_marker(
         &self,
         marker: revops_db::fee_runway::FeeRestartMarkerRow,
@@ -528,6 +532,10 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         event: revops_db::fee_runway::FeeSeedEventRow,
     ) -> anyhow::Result<i64> {
         self.blocking_record_seed_refusal(event)
+    }
+
+    fn verified_seed_binding(&self) -> anyhow::Result<revops_db::fee_runway::SeedBindingState> {
+        self.blocking_verified_seed_binding()
     }
 
     fn record_restart_marker(

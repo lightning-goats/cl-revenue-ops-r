@@ -1,5 +1,5 @@
 use revops::fee_mode::{validate_fee_mode, AuthorityPlan, ModeFlags, ValidatedFeeMode};
-use revops_db::fee_runway::FeeStateSnapshot;
+use revops_db::fee_runway::{FeeStateSnapshot, SeedBindingState};
 
 fn passive_mode() -> ValidatedFeeMode {
     validate_fee_mode(
@@ -11,7 +11,7 @@ fn passive_mode() -> ValidatedFeeMode {
         },
         None,
         &FeeStateSnapshot::default(),
-        None,
+        &SeedBindingState::VirginStore,
     )
     .expect("passive mode validates")
 }
@@ -26,7 +26,7 @@ fn autonomous_shadow_mode() -> ValidatedFeeMode {
         },
         None,
         &FeeStateSnapshot::default(),
-        None,
+        &SeedBindingState::VirginStore,
     )
     .expect("autonomous shadow mode validates")
 }

@@ -53,8 +53,8 @@
 //! field of any kind that could hold a broadcaster, executor, or arm. This
 //! is a structural guarantee (nothing to leak), not a runtime check.
 
-use revops_db::fee_runway::FeeSeedEventRow;
 use revops_db::fee_runway::FeeStateSnapshot;
+use revops_db::fee_runway::SeedBindingState;
 
 use crate::cutover_arm::LiveSessionArm;
 
@@ -254,6 +254,12 @@ pub enum FeeModeDenyReason {
     /// live process must never be the first thing to ever touch the
     /// Rust-owned store.
     LiveModeRequiresSeededState,
+    /// Task 42 correction F1: the store's seed provenance failed derived
+    /// verification ([`SeedBindingState::Invalid`]) — a refusal-only
+    /// nonvirgin store, a legacy UNBOUND successful row, duplicate/
+    /// conflicting rows, a missing generation-1 binding, or a binding to
+    /// a cycle that does not exist. Carries the diagnostic reason.
+    SeedProvenanceInvalid(String),
 }
 
 impl FeeModeDenyReason {
@@ -265,6 +271,7 @@ impl FeeModeDenyReason {
             Self::LiveModeRequiresArm => "live_mode_requires_arm",
             Self::NeverSeeded => "stateful_shadow_never_seeded",
             Self::LiveModeRequiresSeededState => "live_mode_requires_seeded_state",
+            Self::SeedProvenanceInvalid(_) => "seed_provenance_invalid",
         }
     }
 }
@@ -307,6 +314,11 @@ impl std::fmt::Display for FeeModeDenyReason {
                  that never seeded is a misconfiguration",
                 self.code(),
             ),
+            Self::SeedProvenanceInvalid(reason) => write!(
+                f,
+                "{}: seed provenance failed derived verification: {reason}",
+                self.code(),
+            ),
             Self::LiveModeRequiresSeededState => write!(
                 f,
                 "{}: live fee authority mode requires the Rust-owned store to already hold \
@@ -333,17 +345,23 @@ fn store_is_virgin(state: &FeeStateSnapshot) -> bool {
 /// returning exactly one of the three accepted [`ValidatedFeeMode`]
 /// variants or a stable [`FeeModeDenyReason`].
 ///
-/// `state` and `seed_event` are read for `fee-stateful-shadow=true` (the
-/// autonomous-shadow row) AND for the live-fee-authority row (fix round 1,
-/// coordinator ruling I-6: live authority requires the store to already be
-/// seeded -- see [`FeeModeDenyReason::LiveModeRequiresSeededState`]); they
-/// are ignored only for passive observer, which has no seed-provenance
-/// requirement of its own.
+/// `state` and `seed_binding` are read for `fee-stateful-shadow=true`
+/// (the autonomous-shadow row) AND for the live-fee-authority row (fix
+/// round 1, coordinator ruling I-6: live authority requires the store to
+/// already be seeded); they are ignored only for passive observer, which
+/// has no seed-provenance requirement of its own.
+///
+/// Task 42 correction F1: the provenance input is the DERIVED
+/// [`SeedBindingState`] (`fee_runway::verified_seed_binding`), never a
+/// raw latest event — presence of "some event" proves nothing. Refusal
+/// rows, legacy unbound successful rows, duplicates, missing bindings,
+/// and decode/read failures all arrive here as
+/// [`SeedBindingState::Invalid`] and deny.
 pub fn validate_fee_mode(
     flags: ModeFlags,
     arm: Option<LiveSessionArm>,
     state: &FeeStateSnapshot,
-    seed_event: Option<&FeeSeedEventRow>,
+    seed_binding: &SeedBindingState,
 ) -> Result<ValidatedFeeMode, FeeModeDenyReason> {
     match (
         flags.observer,
@@ -364,11 +382,25 @@ pub fn validate_fee_mode(
                 return Err(FeeModeDenyReason::ArmPresentInNonLiveMode);
             }
             let seed_status = if store_is_virgin(state) {
-                ShadowSeedStatus::PendingFirstCycle
-            } else if seed_event.is_some() {
-                ShadowSeedStatus::AlreadySeeded
+                // A virgin STATE with any non-virgin binding verdict is a
+                // contradiction (e.g. a seeded row at generation 0) —
+                // fail closed rather than pending.
+                match seed_binding {
+                    SeedBindingState::VirginStore => ShadowSeedStatus::PendingFirstCycle,
+                    SeedBindingState::VerifiedBound { .. } | SeedBindingState::Invalid { .. } => {
+                        return Err(FeeModeDenyReason::SeedProvenanceInvalid(format!(
+                            "virgin state rows but non-virgin seed binding: {seed_binding:?}"
+                        )))
+                    }
+                }
             } else {
-                return Err(FeeModeDenyReason::NeverSeeded);
+                match seed_binding {
+                    SeedBindingState::VerifiedBound { .. } => ShadowSeedStatus::AlreadySeeded,
+                    SeedBindingState::VirginStore => return Err(FeeModeDenyReason::NeverSeeded),
+                    SeedBindingState::Invalid { reason } => {
+                        return Err(FeeModeDenyReason::SeedProvenanceInvalid(reason.clone()))
+                    }
+                }
             };
             Ok(ValidatedFeeMode::AutonomousShadow(ShadowMode {
                 seed_status,
@@ -387,8 +419,17 @@ pub fn validate_fee_mode(
             // for the shadow row) means this would be the FIRST thing to
             // ever touch the Rust-owned store, which must never happen for
             // a live process.
-            if state.generation == 0 || seed_event.is_none() {
+            if state.generation == 0 {
                 return Err(FeeModeDenyReason::LiveModeRequiresSeededState);
+            }
+            match seed_binding {
+                SeedBindingState::VerifiedBound { .. } => {}
+                SeedBindingState::VirginStore => {
+                    return Err(FeeModeDenyReason::LiveModeRequiresSeededState)
+                }
+                SeedBindingState::Invalid { reason } => {
+                    return Err(FeeModeDenyReason::SeedProvenanceInvalid(reason.clone()))
+                }
             }
             Ok(ValidatedFeeMode::LiveAuthority(LiveMode { arm }))
         }

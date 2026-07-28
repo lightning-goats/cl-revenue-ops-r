@@ -122,6 +122,8 @@ enum Command {
         event: FeeSeedEventRow,
         reply: oneshot::Sender<Result<i64>>,
     },
+    // -- Task 42 correction F1: derived, verified seed-provenance state --
+    VerifiedSeedBinding(oneshot::Sender<Result<fee_runway::SeedBindingState>>),
     LatestFeeSeedEvent(oneshot::Sender<Result<Option<FeeSeedEventRow>>>),
     RecordFeeRestartMarker {
         marker: FeeRestartMarkerRow,
@@ -751,6 +753,27 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 42 correction F1: the derived, verified seed-binding state
+    /// ([`fee_runway::verified_seed_binding`]).
+    pub async fn verified_seed_binding(&self) -> Result<fee_runway::SeedBindingState> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::VerifiedSeedBinding(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::verified_seed_binding`].
+    pub fn blocking_verified_seed_binding(&self) -> Result<fee_runway::SeedBindingState> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::VerifiedSeedBinding(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// The most recently recorded seed event, if any.
     pub async fn latest_fee_seed_event(&self) -> Result<Option<FeeSeedEventRow>> {
         let (reply, rx) = oneshot::channel();
@@ -1207,6 +1230,10 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::RecordSeedRefusal { event, reply } => {
                     let result = fee_runway::record_seed_refusal(&conn, &event);
+                    let _ = reply.send(result);
+                }
+                Command::VerifiedSeedBinding(reply) => {
+                    let result = fee_runway::verified_seed_binding(&conn);
                     let _ = reply.send(result);
                 }
                 Command::LatestFeeSeedEvent(reply) => {

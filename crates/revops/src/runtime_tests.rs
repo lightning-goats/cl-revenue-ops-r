@@ -504,7 +504,7 @@ async fn fee_cadence_makes_zero_requests_until_explicit_post_start_activation() 
         },
         None,
         &FeeStateSnapshot::default(),
-        None,
+        &revops_db::fee_runway::SeedBindingState::VirginStore,
     )
     .unwrap();
     let observer_mode = match mode.into_authority_plan(|_| -> () {
@@ -562,7 +562,7 @@ async fn passive_observer_token_rejects_a_fee_pass() {
         },
         None,
         &FeeStateSnapshot::default(),
-        None,
+        &revops_db::fee_runway::SeedBindingState::VirginStore,
     )
     .unwrap();
     let observer_mode = match mode.into_authority_plan(|_| -> () {

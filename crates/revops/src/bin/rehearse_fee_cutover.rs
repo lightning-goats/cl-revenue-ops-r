@@ -43,7 +43,7 @@ use revops::fee_execution::{
 
 use revops::fee_mode::{validate_fee_mode, LiveMode, ModeFlags, ValidatedFeeMode};
 use revops::python_authority::PythonAuthorityOff;
-use revops_db::fee_runway::{BroadcastAttemptIntent, FeeSeedEventRow, FeeStateSnapshot};
+use revops_db::fee_runway::{BroadcastAttemptIntent, FeeStateSnapshot};
 use revops_db::owner::{spawn_read_write, ObserverHandle};
 use revops_fees::execution::SetChannelRequest;
 
@@ -725,21 +725,6 @@ fn seeded_state() -> FeeStateSnapshot {
     }
 }
 
-fn seeded_event() -> FeeSeedEventRow {
-    FeeSeedEventRow {
-        seeded_at: 1_000,
-        outcome: "seeded".to_string(),
-        source_db_path: "<rehearsal-synthetic-source>".to_string(),
-        source_max_last_update: 999,
-        row_count: 1,
-        payload_sha256: "0".repeat(64),
-        source_commit: REHEARSAL_COMMIT.to_string(),
-        refused_channel: None,
-        refused_field: None,
-        detail: None,
-    }
-}
-
 /// Obtain a real `LiveMode` the only way possible: consume a genuine arm and
 /// pass it through the real mode matrix.
 fn rehearsal_live_mode(root: &Path, nonce: &str) -> Result<LiveMode, Refusal> {
@@ -765,7 +750,14 @@ fn rehearsal_live_mode(root: &Path, nonce: &str) -> Result<LiveMode, Refusal> {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    match validate_fee_mode(flags, Some(arm), &seeded_state(), Some(&seeded_event())) {
+    match validate_fee_mode(
+        flags,
+        Some(arm),
+        &seeded_state(),
+        &revops_db::fee_runway::SeedBindingState::VerifiedBound {
+            cycle_id: "rehearsal-seed-cycle".to_string(),
+        },
+    ) {
         Ok(ValidatedFeeMode::LiveAuthority(live)) => Ok(live),
         other => Err(Refusal::Input(format!(
             "expected LiveAuthority from the real mode matrix, got {other:?}"

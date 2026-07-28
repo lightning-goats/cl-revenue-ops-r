@@ -20,9 +20,7 @@ use revops::fee_execution::{
 };
 use revops::fee_mode::{validate_fee_mode, ModeFlags, ValidatedFeeMode};
 use revops::python_authority::PythonAuthorityOff;
-use revops_db::fee_runway::{
-    BroadcastAttemptIntent, FeeSeedEventRow, FeeStateSnapshot, QuarantineEntry,
-};
+use revops_db::fee_runway::{BroadcastAttemptIntent, FeeStateSnapshot, QuarantineEntry};
 use revops_db::owner::{spawn_read_write, ObserverHandle};
 use revops_fees::execution::SetChannelRequest;
 use serde_json::{json, Value};
@@ -100,21 +98,6 @@ fn seeded_state() -> FeeStateSnapshot {
     }
 }
 
-fn seeded_event() -> FeeSeedEventRow {
-    FeeSeedEventRow {
-        seeded_at: 1_000,
-        outcome: "seeded".to_string(),
-        source_db_path: "/var/lib/lightning/revops.db".to_string(),
-        source_max_last_update: 999,
-        row_count: 1,
-        payload_sha256: "0".repeat(64),
-        source_commit: SOURCE_COMMIT.to_string(),
-        refused_channel: None,
-        refused_field: None,
-        detail: None,
-    }
-}
-
 fn real_live_mode(tmp: &Path, nonce: &str) -> revops::fee_mode::LiveMode {
     use std::os::unix::fs::MetadataExt;
 
@@ -131,8 +114,14 @@ fn real_live_mode(tmp: &Path, nonce: &str) -> revops::fee_mode::LiveMode {
         fee_broadcast: true,
         fee_stateful_shadow: false,
     };
-    let seed_event = seeded_event();
-    match validate_fee_mode(flags, Some(arm), &seeded_state(), Some(&seed_event)) {
+    match validate_fee_mode(
+        flags,
+        Some(arm),
+        &seeded_state(),
+        &revops_db::fee_runway::SeedBindingState::VerifiedBound {
+            cycle_id: "live-fixture-seed-cycle".to_string(),
+        },
+    ) {
         Ok(ValidatedFeeMode::LiveAuthority(live)) => live,
         other => panic!("expected LiveAuthority, got {other:?}"),
     }
