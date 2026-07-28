@@ -304,7 +304,6 @@ impl LnPlusObserverPass {
 
     /// `revenue-lnplus-status` (py 4604-4612 + get_status 2114-2131).
     pub fn operator_status(&self) -> serde_json::Value {
-        use revops_lnplus::ports::LnPlusDb;
         let inner = &self.inner;
         let _serial = inner.serial.lock().expect("owner serialization poisoned");
         let snapshot = match revops_lnplus::watcher::get_status(inner.store.as_ref()) {
