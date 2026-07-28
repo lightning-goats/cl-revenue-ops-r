@@ -1,0 +1,1777 @@
+{
+  "methods": [
+    {
+      "allow_extra_named": false,
+      "name": "revenue-analyze",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-ban",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "operator",
+          "has_default": true,
+          "name": "reason",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-auto-cycle-run-now",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "force",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "dry_run",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-auto-cycle-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-backup",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "include_mnemonic",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-backup-verify",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "swap_mnemonic",
+          "python_kind": "positional",
+          "required": true
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-balance-cycle",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "dry_run",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1,
+          "has_default": true,
+          "name": "max_actions",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 40.0,
+          "has_default": true,
+          "name": "low_trigger_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 55.0,
+          "has_default": true,
+          "name": "low_target_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 80.0,
+          "has_default": true,
+          "name": "high_trigger_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 60.0,
+          "has_default": true,
+          "name": "high_target_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 100000,
+          "has_default": true,
+          "name": "min_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1000000,
+          "has_default": true,
+          "name": "max_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "only_peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "only_channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "require_profitable",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 0.0,
+          "has_default": true,
+          "name": "min_marginal_roi",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1.2,
+          "has_default": true,
+          "name": "profit_margin_factor",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 3.0,
+          "has_default": true,
+          "name": "expected_horizon_days",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 4.0,
+          "has_default": true,
+          "name": "cooldown_hours",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "allow_concurrent_swaps",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "LBTC",
+          "has_default": true,
+          "name": "loop_in_currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "LBTC",
+          "has_default": true,
+          "name": "loop_out_currency",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-balance-recommendations",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 40.0,
+          "has_default": true,
+          "name": "low_trigger_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 55.0,
+          "has_default": true,
+          "name": "low_target_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 80.0,
+          "has_default": true,
+          "name": "high_trigger_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 60.0,
+          "has_default": true,
+          "name": "high_target_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 100000,
+          "has_default": true,
+          "name": "min_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1000000,
+          "has_default": true,
+          "name": "max_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 20,
+          "has_default": true,
+          "name": "max_candidates",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "only_peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "only_channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "require_profitable",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 0.0,
+          "has_default": true,
+          "name": "min_marginal_roi",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1.2,
+          "has_default": true,
+          "name": "profit_margin_factor",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 3.0,
+          "has_default": true,
+          "name": "expected_horizon_days",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "LBTC",
+          "has_default": true,
+          "name": "loop_in_currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "LBTC",
+          "has_default": true,
+          "name": "loop_out_currency",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-budget",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-chainswap",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "from_currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "to_currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "to_address",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-claim",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "swap_ids",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "destination",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-deposit",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "currency",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-expansion-treasury-cycle",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "dry_run",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "max_actions",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "onchain_target_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "min_deficit_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "preferred_currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "min_source_local_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "exclude_protected",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "require_profitable",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 0.0,
+          "has_default": true,
+          "name": "min_marginal_roi",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1.2,
+          "has_default": true,
+          "name": "profit_margin_factor",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 3.0,
+          "has_default": true,
+          "name": "expected_horizon_days",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 100000,
+          "has_default": true,
+          "name": "min_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1500000,
+          "has_default": true,
+          "name": "max_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 4.0,
+          "has_default": true,
+          "name": "cooldown_hours",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "allow_concurrent_swaps",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-expansion-treasury-recommendations",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "onchain_target_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "min_deficit_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "preferred_currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "max_actions",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "min_source_local_pct",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "exclude_protected",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "require_profitable",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 0.0,
+          "has_default": true,
+          "name": "min_marginal_roi",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1.2,
+          "has_default": true,
+          "name": "profit_margin_factor",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 3.0,
+          "has_default": true,
+          "name": "expected_horizon_days",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 100000,
+          "has_default": true,
+          "name": "min_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 1500000,
+          "has_default": true,
+          "name": "max_amount_sats",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-expansion-treasury-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-external-pay-ignores",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": "list",
+          "has_default": true,
+          "name": "action",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "swap_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "note",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-history",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "limit",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-loop-in",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "currency",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-loop-out",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "address",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "routing_fee_limit_ppm",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-quote",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "reverse",
+          "has_default": true,
+          "name": "swap_type",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "currency",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-refund",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "swap_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "destination",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-status",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "swap_id",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-wallet",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-boltz-withdraw",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "destination",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "currency",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "sat_per_vbyte",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "sweep",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "confirm_sweep",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-capacity-report",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-capex-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-cleanup-closed",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-clear-reservations",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-config",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": "get",
+          "has_default": true,
+          "name": "action",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "key",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "value",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-dashboard",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 30,
+          "has_default": true,
+          "name": "window_days",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-econ-cycle",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-econ-reconcile",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "apply",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 3600,
+          "has_default": true,
+          "name": "stale_after_seconds",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-econ-snapshot",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-fee-authority-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-fee-cycle",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-fee-debug",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-health",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-history",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-hot-channel-protection-peers",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": "list",
+          "has_default": true,
+          "name": "action",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "note",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "min_depletion_trigger_pct",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-ignore",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": "manual",
+          "has_default": true,
+          "name": "reason",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-list-banned",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-list-ignored",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-lnplus-abandon",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "swap_id",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-lnplus-backfill",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-lnplus-breaker-clear",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-lnplus-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-planner-candidate-sources",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-planner-candidates",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 20,
+          "has_default": true,
+          "name": "limit",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-planner-execute",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-planner-history",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 20,
+          "has_default": true,
+          "name": "limit",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-planner-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-policy",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": "list",
+          "has_default": true,
+          "name": "action",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "strategy",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "rebalance",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "fee_ppm",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "tag",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "fee_multiplier_min",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "fee_multiplier_max",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "expires_in_hours",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-profile-preview",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "profile",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-profitability",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "refresh",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-rebalance",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "from_channel",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "to_channel",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "max_fee_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "force",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-rebalance-cycle",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 20,
+          "has_default": true,
+          "name": "max_candidates",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-rebalance-debug",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "summary_only",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": true,
+          "has_default": true,
+          "name": "include_hot_markers",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 0,
+          "has_default": true,
+          "name": "max_candidates",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-report",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": "summary",
+          "has_default": true,
+          "name": "report_type",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-set-fee",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "fee_ppm",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "force",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-spend-ledger",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 24,
+          "has_default": true,
+          "name": "window_hours",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "include_reservations",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 50,
+          "has_default": true,
+          "name": "reservation_limit",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-spend-release",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "reservation_id",
+          "python_kind": "positional",
+          "required": true
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-spend-release-stale",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": 3600,
+          "has_default": true,
+          "name": "max_age_seconds",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "category",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": 100,
+          "has_default": true,
+          "name": "limit",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-spend-reserve",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "reservation_id",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "category",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "amount_sats",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "subcategory",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "reference_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "channel_id",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "metadata_json",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-spend-settle",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "reservation_id",
+          "python_kind": "positional",
+          "required": true
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "actual_spent_sats",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "source",
+          "python_kind": "positional",
+          "required": false
+        },
+        {
+          "coercion": "handler_defined",
+          "default": false,
+          "has_default": true,
+          "name": "record_event",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-status",
+      "params": [],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-total-cost-budget",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "window_hours",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-unban",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": true
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-unignore",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": false,
+          "name": "peer_id",
+          "python_kind": "positional",
+          "required": true
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": false,
+      "name": "revenue-wake-all",
+      "params": [],
+      "python_binding": "positional_or_named"
+    }
+  ],
+  "python_source_commit": "e579de8df523f174283fc2aa21f395c8ef006ac6",
+  "python_source_sha256": "ec4abe1cd1887767f1d9680abb9065474f387ad9b1fa0b784dd3c01314f949e1",
+  "schema_version": 1
+}

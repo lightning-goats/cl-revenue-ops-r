@@ -11,4 +11,4 @@ fixtures/*.db-shm
 fixtures/*.db-wal
 .claude/worktrees/
 .worktrees/
-tools/diff-harness/__pycache__/
+__pycache__/

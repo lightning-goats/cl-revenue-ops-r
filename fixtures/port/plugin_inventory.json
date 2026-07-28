@@ -1,0 +1,2279 @@
+{
+  "external_boundaries": [
+    {
+      "id": "boltzcli",
+      "owner_task": "hexmem-63",
+      "python_evidence": [
+        {
+          "source_file": "modules/boltz_manager.py",
+          "source_line": 449
+        }
+      ],
+      "rust_adapter": "revops_boltz::ProcessBoltzCli",
+      "rust_transport": "local_fake_proven_unreachable"
+    },
+    {
+      "id": "close",
+      "owner_task": "hexmem-62",
+      "python_evidence": [
+        {
+          "source_file": "modules/capacity_planner.py",
+          "source_line": 3977
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "datastore",
+      "owner_task": "task-8-core-parity",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 445
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "dynamic_config",
+      "owner_task": "completed",
+      "python_evidence": [
+        {
+          "source_file": "cl-revenue-ops.py",
+          "source_line": 6723
+        }
+      ],
+      "rust_adapter": "PythonOptionCache::refresh",
+      "rust_transport": "local_fake_proven"
+    },
+    {
+      "id": "fundchannel",
+      "owner_task": "hexmem-61-and-62",
+      "python_evidence": [
+        {
+          "source_file": "modules/lnplus_swaps.py",
+          "source_line": 1366
+        },
+        {
+          "source_file": "modules/capacity_planner.py",
+          "source_line": 658
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "lnplus_https",
+      "owner_task": "hexmem-61",
+      "python_evidence": [
+        {
+          "source_file": "modules/lnplus_swaps.py",
+          "source_line": 20
+        }
+      ],
+      "rust_adapter": "revops_lnplus::HttpTransport trait only",
+      "rust_transport": "missing"
+    },
+    {
+      "id": "sendpay_waitsendpay",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 13
+        },
+        {
+          "source_file": "modules/rebalance_native_executor_v2.py",
+          "source_line": 351
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "setchannel",
+      "owner_task": "fee-port-reviewed",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 13
+        }
+      ],
+      "rust_adapter": "fee_execution::ClnFeeBroadcaster",
+      "rust_transport": "local_fake_proven"
+    },
+    {
+      "id": "signmessage",
+      "owner_task": "hexmem-61",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 303
+        }
+      ],
+      "rust_adapter": "revops_lnplus::Signer trait only",
+      "rust_transport": "trait_fake_only"
+    }
+  ],
+  "loops": [
+    {
+      "kind": "recurring",
+      "name": "flow-analysis",
+      "python_target": "flow_analysis_loop",
+      "rust_state": {
+        "compiled": true,
+        "effective": "absent",
+        "owner_task": "task-8-core-parity",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3588
+    },
+    {
+      "kind": "recurring",
+      "name": "fee-adjustment",
+      "python_target": "fee_adjustment_loop",
+      "rust_state": {
+        "compiled": true,
+        "effective": "full",
+        "owner_task": "fee-port-reviewed",
+        "reachable": true,
+        "review": "passed",
+        "soak": "passed"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3589
+    },
+    {
+      "kind": "recurring",
+      "name": "rebalance-check",
+      "python_target": "rebalance_check_loop",
+      "rust_state": {
+        "compiled": true,
+        "effective": "absent",
+        "owner_task": "hexmem-60",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3595
+    },
+    {
+      "kind": "one_shot",
+      "name": "startup-snapshot",
+      "python_target": "snapshot_peers_delayed",
+      "rust_state": {
+        "compiled": false,
+        "effective": "absent",
+        "owner_task": "task-8-core-parity",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3596
+    },
+    {
+      "kind": "recurring",
+      "name": "financial-snapshot",
+      "python_target": "financial_snapshot_loop",
+      "rust_state": {
+        "compiled": false,
+        "effective": "absent",
+        "owner_task": "task-8-core-parity",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3597
+    },
+    {
+      "kind": "recurring",
+      "name": "boltz-auto-cycle",
+      "python_target": "boltz_auto_cycle_loop",
+      "rust_state": {
+        "compiled": true,
+        "effective": "absent",
+        "owner_task": "hexmem-63",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3598
+    },
+    {
+      "kind": "recurring",
+      "name": "capacity-planner",
+      "python_target": "capacity_planner_loop",
+      "rust_state": {
+        "compiled": true,
+        "effective": "absent",
+        "owner_task": "hexmem-62",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3599
+    },
+    {
+      "kind": "recurring",
+      "name": "lnplus-watcher",
+      "python_target": "lnplus_watcher_loop",
+      "rust_state": {
+        "compiled": true,
+        "effective": "absent",
+        "owner_task": "hexmem-61",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending"
+      },
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3600
+    }
+  ],
+  "provenance": {
+    "generator": "tools/port/gen_plugin_inventory.py",
+    "generator_version": 1,
+    "python_source_commit": "e579de8df523f174283fc2aa21f395c8ef006ac6",
+    "rust_audit_base_commit": "c68fddd707a4f53dda691dcba7c04d659581b880",
+    "rust_main_sha256": "b84cf5075553c2bf8918a97e1537414c7ddb0ab8ce9708e520b497fadc916e3f",
+    "source_sha256": {
+      "cl-revenue-ops.py": "ec4abe1cd1887767f1d9680abb9065474f387ad9b1fa0b784dd3c01314f949e1",
+      "modules/boltz_manager.py": "f419993948c4500cb5ae7f84d45659d6ddfbf9b354b068835e28e0f06565199a",
+      "modules/capacity_planner.py": "be50ee8fbeb967ce0bc6a35c61f2095bd3053e46abe4b4b8a19eee8d6a99c359",
+      "modules/data_service.py": "6e43902e8ea87af146fde77d9d28dc5b591908798445c4093d6020a3e08e38e1",
+      "modules/lnplus_swaps.py": "7ab98e8089702127ca1ed357890afa106a9699569644c04923dc07b3f2a9504b",
+      "modules/rebalance_native_executor_v2.py": "d11c69c3480b1a5f547501186ad5a2d0050b7a936be15f356deb1d1220f467e3"
+    }
+  },
+  "python_options": [
+    {
+      "default": "~/.lightning/revenue_ops.db",
+      "description": "Path to the SQLite database for storing state",
+      "dynamic": false,
+      "name": "revenue-ops-db-path",
+      "opt_type": "string",
+      "source_line": 1152
+    },
+    {
+      "default": "3600",
+      "description": "Interval in seconds for flow analysis (default: 1 hour)",
+      "dynamic": false,
+      "name": "revenue-ops-flow-interval",
+      "opt_type": "string",
+      "source_line": 1158
+    },
+    {
+      "default": "1800",
+      "description": "Interval in seconds for fee adjustments (default: 30 min)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-interval",
+      "opt_type": "string",
+      "source_line": 1164
+    },
+    {
+      "default": true,
+      "description": "Permit Python fee evaluation and setchannel authority",
+      "dynamic": true,
+      "name": "revenue-ops-fee-authority-enabled",
+      "opt_type": "bool",
+      "source_line": 1170
+    },
+    {
+      "default": "false",
+      "description": "Internal observational fee-cycle replay capture. Disabled by default; enabling observes the next naturally scheduled cycle without starting a cycle.",
+      "dynamic": true,
+      "name": "revenue-ops-fee-replay-capture-enabled",
+      "opt_type": "string",
+      "source_line": 1179
+    },
+    {
+      "default": "900",
+      "description": "Interval in seconds for rebalance checks (default: 15 min)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-interval",
+      "opt_type": "string",
+      "source_line": 1191
+    },
+    {
+      "default": "10",
+      "description": "Minimum fee floor in PPM (default: 10)",
+      "dynamic": false,
+      "name": "revenue-ops-min-fee-ppm",
+      "opt_type": "string",
+      "source_line": 1198
+    },
+    {
+      "default": "0",
+      "description": "Class-aware min-fee floor (PPM) for channels classified saturated (outbound >= 85% of capacity) or source. Applied only when set BELOW revenue-ops-min-fee-ppm; 0 (default) allows true cheap egress on saturated edges. Cost-recovery floors still apply. Flow-aware exemption: high-local channels whose 7d flow is balanced at healthy turnover (self-refilling routers the discount cannot drain) keep the normal min-fee-ppm floor.",
+      "dynamic": true,
+      "name": "revenue-ops-min-fee-ppm-saturated",
+      "opt_type": "string",
+      "source_line": 1204
+    },
+    {
+      "default": "2000",
+      "description": "Maximum fee ceiling in PPM (default: 2000)",
+      "dynamic": false,
+      "name": "revenue-ops-max-fee-ppm",
+      "opt_type": "string",
+      "source_line": 1219
+    },
+    {
+      "default": "active",
+      "description": "Fee controller profile: 'active' for normal routing nodes, 'conservative' for low-volume nodes",
+      "dynamic": false,
+      "name": "revenue-ops-fee-profile",
+      "opt_type": "string",
+      "source_line": 1225
+    },
+    {
+      "default": "false",
+      "description": "Deprecated no-op compatibility flag; fee market boundary logic is ignored (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-market-boundary-enabled",
+      "opt_type": "string",
+      "source_line": 1231
+    },
+    {
+      "default": "3",
+      "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 3)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-market-boundary-min-competitors",
+      "opt_type": "string",
+      "source_line": 1237
+    },
+    {
+      "default": "5",
+      "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 5)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-market-boundary-margin-ppm",
+      "opt_type": "string",
+      "source_line": 1243
+    },
+    {
+      "default": "0.05",
+      "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 0.05)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-market-boundary-margin-ratio",
+      "opt_type": "string",
+      "source_line": 1249
+    },
+    {
+      "default": "0.35",
+      "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 0.35)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-market-boundary-max-downshift-ratio",
+      "opt_type": "string",
+      "source_line": 1255
+    },
+    {
+      "default": "60",
+      "description": "Deprecated no-op compatibility setting for fee market boundary logic (default: 60)",
+      "dynamic": false,
+      "name": "revenue-ops-fee-market-boundary-cache-seconds",
+      "opt_type": "string",
+      "source_line": 1261
+    },
+    {
+      "default": "undercut",
+      "description": "How to price relative to neighbor-median fee. \"undercut\" (default): price below the median to win volume. \"match\": target the median, no undercut. \"premium\": price above the median using the same per-corridor weight that would otherwise undercut. Use \"premium\" in inelastic-demand markets to maximize revenue per forward. \"competition_aware\": apply the median-undercut ONLY when a competitor is priced at or below DTS's target; preserve DTS when we're already below every competitor (undercut would otherwise drag fees down against an inelastic market).",
+      "dynamic": false,
+      "name": "revenue-ops-market-fee-mode",
+      "opt_type": "string",
+      "source_line": 1267
+    },
+    {
+      "default": "off",
+      "description": "Base-fee policy (Upgrade A, 2026-04-22). \"off\" (default) and \"adaptive\" are equivalent: every channel gets the internal base fee default of 0 msat (the per-role split was retired; there is no revenue-ops-base-fee-msat option).",
+      "dynamic": false,
+      "name": "revenue-ops-base-fee-policy",
+      "opt_type": "string",
+      "source_line": 1285
+    },
+    {
+      "default": "2",
+      "description": "Minimum competitor count for neighbor_median computation (default: 2). The median is used by market-fee-mode (undercut/match/premium/competition_aware); below this threshold the helper returns None and the market-fee-mode branch is skipped. Prod nodes with dense gossip may prefer 3.",
+      "dynamic": false,
+      "name": "revenue-ops-neighbor-median-min-competitors",
+      "opt_type": "string",
+      "source_line": 1296
+    },
+    {
+      "default": "10",
+      "description": "Deprecated no-op compatibility setting; minimum-profit gating is enforced by the sats-EV gate and revenue-ops-rebalance-hold-margin (default: 10)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-min-profit",
+      "opt_type": "string",
+      "source_line": 1308
+    },
+    {
+      "default": "0.10",
+      "description": "Local ratio below which a destination bypasses the channel-level rebalance cooldown (Phase 3, default: 0.10; 0 disables)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-emergency-local-ratio",
+      "opt_type": "string",
+      "source_line": 1318
+    },
+    {
+      "default": "0.30",
+      "description": "Drift since last successful rebalance that bypasses the cooldown (Phase 3, default: 0.30; 0 disables)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-drift-override-ratio",
+      "opt_type": "string",
+      "source_line": 1324
+    },
+    {
+      "default": "0.0",
+      "description": "Minimum final_score in SATS of expected net value a priced pair must clear or it is rejected as below_hold_margin (Phase 4, default: 0.0)",
+      "dynamic": true,
+      "name": "revenue-ops-rebalance-hold-margin",
+      "opt_type": "string",
+      "source_line": 1363
+    },
+    {
+      "default": "1000",
+      "description": "Per-pair fee budget = max(dest capex, ceil(amount * ppm / 1M)). Decouples per-rebalance fee from capex bootstrap (Iter1, default: 1000 = 0.1% of amount; 0 disables)",
+      "dynamic": true,
+      "name": "revenue-ops-pair-fee-cap-ppm",
+      "opt_type": "string",
+      "source_line": 1371
+    },
+    {
+      "default": "3600",
+      "description": "Window in seconds over which recent forwarding activity is measured for the activity-recency penalty (default: 3600 = 1 hour)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-activity-window-seconds",
+      "opt_type": "string",
+      "source_line": 1382
+    },
+    {
+      "default": "0.5",
+      "description": "Coefficient applied to the activity-recency penalty when scoring a rebalance candidate (default: 0.5; 0 disables)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-activity-penalty-coeff",
+      "opt_type": "string",
+      "source_line": 1388
+    },
+    {
+      "default": "0.5",
+      "description": "Maximum fraction of score the activity-recency penalty may remove (default: 0.5)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-activity-penalty-cap-frac",
+      "opt_type": "string",
+      "source_line": 1394
+    },
+    {
+      "default": "7",
+      "description": "Trailing window in days over which forwarding utilization is measured for utilization-based sizing (default: 7)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-utilization-window-days",
+      "opt_type": "string",
+      "source_line": 1400
+    },
+    {
+      "default": "0.05",
+      "description": "Minimum utilization ratio floor used when normalizing observed flow (default: 0.05)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-utilization-floor",
+      "opt_type": "string",
+      "source_line": 1406
+    },
+    {
+      "default": "1.0",
+      "description": "Maximum utilization ratio ceiling used when normalizing observed flow (default: 1.0)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-utilization-ceiling",
+      "opt_type": "string",
+      "source_line": 1412
+    },
+    {
+      "default": "5",
+      "description": "Minimum number of forwards in the utilization window required before utilization-based sizing is trusted (default: 5)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-utilization-min-forwards",
+      "opt_type": "string",
+      "source_line": 1418
+    },
+    {
+      "default": "true",
+      "description": "Enable size-tiered rebalance targets (bucket target amounts by channel capacity percentile instead of a single flat target) (default: true)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-size-tiered-targets",
+      "opt_type": "string",
+      "source_line": 1424
+    },
+    {
+      "default": "0.5",
+      "description": "Percentile (0.0-1.0) of the channel-capacity distribution used as the reference point for size-tiered target amounts (default: 0.5)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-size-reference-percentile",
+      "opt_type": "string",
+      "source_line": 1430
+    },
+    {
+      "default": "0.15",
+      "description": "Half-width (fraction) of the \"small channel\" band around the reference percentile (default: 0.15)",
+      "dynamic": false,
+      "name": "revenue-ops-rebalance-small-channel-band-half-width",
+      "opt_type": "string",
+      "source_line": 1436
+    },
+    {
+      "default": "7",
+      "description": "Number of days to analyze for flow calculation (default: 7)",
+      "dynamic": false,
+      "name": "revenue-ops-flow-window-days",
+      "opt_type": "string",
+      "source_line": 1443
+    },
+    {
+      "default": "5000",
+      "description": "Max rebalancing fees to spend in 24 hours (default: 5000)",
+      "dynamic": false,
+      "name": "revenue-ops-daily-budget-sats",
+      "opt_type": "string",
+      "source_line": 1449
+    },
+    {
+      "default": "false",
+      "description": "Enable dynamic growth budget: base daily budget plus bounded earned/growth credit (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-growth-budget-enabled",
+      "opt_type": "string",
+      "source_line": 1455
+    },
+    {
+      "default": "0.25",
+      "description": "Fraction of trailing net profit that can raise the effective daily budget when growth budget is enabled (default: 0.25)",
+      "dynamic": false,
+      "name": "revenue-ops-growth-budget-earned-fraction",
+      "opt_type": "string",
+      "source_line": 1461
+    },
+    {
+      "default": "0.10",
+      "description": "INERT since v2.17.0: the growth-experiment credit required the retired fleet prior producer; this option is kept only so existing configs load (default: 0.10)",
+      "dynamic": false,
+      "name": "revenue-ops-growth-budget-experiment-fraction",
+      "opt_type": "string",
+      "source_line": 1467
+    },
+    {
+      "default": "2000",
+      "description": "INERT since v2.17.0: caps the growth-experiment credit, which can no longer be granted (fleet prior producer retired); kept only so existing configs load (default: 2000)",
+      "dynamic": false,
+      "name": "revenue-ops-growth-budget-max-extra-sats",
+      "opt_type": "string",
+      "source_line": 1473
+    },
+    {
+      "default": "10000",
+      "description": "Local hard ceiling for dynamic effective daily budget; fleet hints cannot exceed this (default: 10000)",
+      "dynamic": false,
+      "name": "revenue-ops-growth-budget-hard-ceiling-sats",
+      "opt_type": "string",
+      "source_line": 1479
+    },
+    {
+      "default": "400",
+      "description": "Fee cap in sats for the diagnostic (defibrillator) shock rebalance; the shock ppm ceiling is derived from this cap. Clamped to [1, min(daily budget, 10000)] (default: 400)",
+      "dynamic": false,
+      "name": "revenue-ops-diagnostic-rebalance-max-fee-sats",
+      "opt_type": "string",
+      "source_line": 1485
+    },
+    {
+      "default": "false",
+      "description": "Allow automatic zero-fee rebalances when daily_budget_sats is zero (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-allow-zero-cost-auto-rebalance-when-budget-zero",
+      "opt_type": "string",
+      "source_line": 1495
+    },
+    {
+      "default": "35000",
+      "description": "Max rebalancing fees to spend in 7 days - hard ceiling over daily burst limit (default: 35000)",
+      "dynamic": false,
+      "name": "revenue-ops-weekly-budget-sats",
+      "opt_type": "string",
+      "source_line": 1501
+    },
+    {
+      "default": "1000000",
+      "description": "Minimum total funds (on-chain + off-chain) to keep in reserve (default: 1,000,000)",
+      "dynamic": false,
+      "name": "revenue-ops-min-wallet-reserve",
+      "opt_type": "string",
+      "source_line": 1507
+    },
+    {
+      "default": "false",
+      "description": "If true, log actions but do not execute (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-dry-run",
+      "opt_type": "string",
+      "source_line": 1513
+    },
+    {
+      "default": "0.8",
+      "description": "HTLC slot utilization threshold (0.0-1.0) above which channel is considered congested (default: 0.8)",
+      "dynamic": false,
+      "name": "revenue-ops-htlc-congestion-threshold",
+      "opt_type": "string",
+      "source_line": 1519
+    },
+    {
+      "default": "true",
+      "description": "If true, weight volume by peer reputation (success rate) in fee decisions (default: true)",
+      "dynamic": false,
+      "name": "revenue-ops-enable-reputation",
+      "opt_type": "string",
+      "source_line": 1526
+    },
+    {
+      "default": "0.98",
+      "description": "Reputation decay factor applied per flow-interval (default: 0.98). 0.98^24 ≈ 0.61 daily decay.",
+      "dynamic": false,
+      "name": "revenue-ops-reputation-decay",
+      "opt_type": "string",
+      "source_line": 1532
+    },
+    {
+      "default": "false",
+      "description": "If true, scale rebalance budget using Kelly Criterion based on peer reputation (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-enable-kelly",
+      "opt_type": "string",
+      "source_line": 1538
+    },
+    {
+      "default": "true",
+      "description": "Enable Vegas Reflex mempool spike defense (default: true)",
+      "dynamic": false,
+      "name": "revenue-ops-vegas-reflex",
+      "opt_type": "string",
+      "source_line": 1545
+    },
+    {
+      "default": "0.85",
+      "description": "Vegas Reflex decay rate per cycle, 0.0-1.0 (default: 0.85 = ~30min half-life)",
+      "dynamic": false,
+      "name": "revenue-ops-vegas-decay",
+      "opt_type": "string",
+      "source_line": 1551
+    },
+    {
+      "default": "15",
+      "description": "Hard timeout for all RPC calls to lightningd (default: 15)",
+      "dynamic": false,
+      "name": "revenue-ops-rpc-timeout-seconds",
+      "opt_type": "string",
+      "source_line": 1558
+    },
+    {
+      "default": "4",
+      "description": "Hours before stale budget reservations are auto-released (default: 4)",
+      "dynamic": false,
+      "name": "revenue-ops-reservation-timeout-hours",
+      "opt_type": "int",
+      "source_line": 1564
+    },
+    {
+      "default": "true",
+      "description": "Enable aggressive rebalance protection for fast-draining high-profit channels (default: true)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-enabled",
+      "opt_type": "string",
+      "source_line": 1572
+    },
+    {
+      "default": "",
+      "description": "CSV peer pubkeys to force hot-channel protection (default: empty)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-override-peers",
+      "opt_type": "string",
+      "source_line": 1578
+    },
+    {
+      "default": "0.20",
+      "description": "Minimum daily turnover ratio to qualify for hot-channel protection (default: 0.20)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-min-velocity",
+      "opt_type": "string",
+      "source_line": 1584
+    },
+    {
+      "default": "0.20",
+      "description": "Minimum marginal ROI (decimal) for hot-channel protection (default: 0.20)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-min-marginal-roi",
+      "opt_type": "string",
+      "source_line": 1590
+    },
+    {
+      "default": "0.75",
+      "description": "Max fraction of daily channel contribution spendable on protective rebalancing (default: 0.75)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-profit-budget-pct",
+      "opt_type": "string",
+      "source_line": 1596
+    },
+    {
+      "default": "4.0",
+      "description": "Max multiplier on rebalance chunk size for hot-channel protection (default: 4.0)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-max-chunk-multiplier",
+      "opt_type": "string",
+      "source_line": 1602
+    },
+    {
+      "default": "1.0",
+      "description": "Minimum cooldown hours for protected hot channels (default: 1.0)",
+      "dynamic": false,
+      "name": "revenue-ops-hot-channel-protection-min-cooldown-hours",
+      "opt_type": "string",
+      "source_line": 1608
+    },
+    {
+      "default": "false",
+      "description": "Enable Boltz CLI integration for revenue-boltz-* RPCs (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-enabled",
+      "opt_type": "string",
+      "source_line": 1614
+    },
+    {
+      "default": "/usr/local/bin/boltzcli",
+      "description": "Path to boltzcli binary (default: /usr/local/bin/boltzcli)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-cli-path",
+      "opt_type": "string",
+      "source_line": 1620
+    },
+    {
+      "default": "/var/lib/boltz",
+      "description": "Boltz data dir for boltzd client auth (default: /var/lib/boltz)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-datadir",
+      "opt_type": "string",
+      "source_line": 1626
+    },
+    {
+      "default": "false",
+      "description": "Run boltzcli via sudo -n -u <user> (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-use-sudo",
+      "opt_type": "string",
+      "source_line": 1632
+    },
+    {
+      "default": "boltz",
+      "description": "User for sudo boltzcli execution when enabled (default: boltz)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-sudo-user",
+      "opt_type": "string",
+      "source_line": 1638
+    },
+    {
+      "default": "60",
+      "description": "boltzcli command timeout in seconds (default: 60)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-timeout-seconds",
+      "opt_type": "string",
+      "source_line": 1644
+    },
+    {
+      "default": "3000",
+      "description": "Daily Boltz swap fee budget used by revenue-boltz loop methods (default: 3000)",
+      "dynamic": true,
+      "name": "revenue-ops-boltz-daily-budget-sats",
+      "opt_type": "string",
+      "source_line": 1650
+    },
+    {
+      "default": "true",
+      "description": "If true, reject Boltz swaps when estimated fee exceeds remaining daily budget (default: true)",
+      "dynamic": true,
+      "name": "revenue-ops-boltz-enforce-budget",
+      "opt_type": "string",
+      "source_line": 1657
+    },
+    {
+      "default": "CLN",
+      "description": "Preferred boltzd BTC wallet name (default: CLN)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-btc-wallet",
+      "opt_type": "string",
+      "source_line": 1664
+    },
+    {
+      "default": "LOOP-LBTC",
+      "description": "Preferred boltzd LBTC wallet name (default: LOOP-LBTC)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-lbtc-wallet",
+      "opt_type": "string",
+      "source_line": 1670
+    },
+    {
+      "default": "0",
+      "description": "Max routing fee in PPM for reverse swaps (0 = no limit, boltzcli default)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-routing-fee-limit-ppm",
+      "opt_type": "string",
+      "source_line": 1676
+    },
+    {
+      "default": "10000000",
+      "description": "Hard cap on a single Boltz on-chain withdraw in sats (default: 10000000; 0 disables). A sweep withdraw bypasses this cap and requires confirm_sweep=true.",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-max-withdraw-sats",
+      "opt_type": "string",
+      "source_line": 1682
+    },
+    {
+      "default": "false",
+      "description": "Enable in-plugin periodic profit-gated Boltz balance cycles (default: false; automated spending must be opted into explicitly)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-auto-cycle-enabled",
+      "opt_type": "string",
+      "source_line": 1688
+    },
+    {
+      "default": "15",
+      "description": "Minutes between scheduled Boltz auto-balance cycles (default: 15)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-auto-cycle-interval-minutes",
+      "opt_type": "string",
+      "source_line": 1694
+    },
+    {
+      "default": "1",
+      "description": "Maximum Boltz actions per scheduled auto-cycle (default: 1)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-auto-cycle-max-actions",
+      "opt_type": "string",
+      "source_line": 1700
+    },
+    {
+      "default": "120",
+      "description": "Startup delay before first Boltz auto-cycle run (default: 120)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-auto-cycle-startup-delay-seconds",
+      "opt_type": "string",
+      "source_line": 1706
+    },
+    {
+      "default": "0.30",
+      "description": "Node receivable/capacity ratio at which structural drain pressure reaches zero",
+      "dynamic": false,
+      "name": "revenue-ops-receivable-ratio-target",
+      "opt_type": "string",
+      "source_line": 1712
+    },
+    {
+      "default": "0.20",
+      "description": "Receivable/capacity ratio below which the node is considered inbound-starved",
+      "dynamic": false,
+      "name": "revenue-ops-receivable-ratio-floor",
+      "opt_type": "string",
+      "source_line": 1718
+    },
+    {
+      "default": "0",
+      "description": "Daily swap-fee budget (sats) for scarcity-credited Boltz loop-outs (0 = disabled)",
+      "dynamic": false,
+      "name": "revenue-ops-boltz-structural-budget-sats",
+      "opt_type": "string",
+      "source_line": 1724
+    },
+    {
+      "default": "0.0",
+      "description": "Max bounded fee discount on stagnant over-local channels (0.0 = disabled)",
+      "dynamic": false,
+      "name": "revenue-ops-drain-fee-discount-max",
+      "opt_type": "string",
+      "source_line": 1730
+    },
+    {
+      "default": "false",
+      "description": "Enable node-liquidity-aware auto-drain-bias on over-local channel fees when the node is source-heavy (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-node-drain-bias-enabled",
+      "opt_type": "string",
+      "source_line": 1736
+    },
+    {
+      "default": "0.3",
+      "description": "Max node-scaled fee discount applied to over-local channels when node-drain-bias is enabled (0.0-0.5)",
+      "dynamic": false,
+      "name": "revenue-ops-node-drain-bias-max",
+      "opt_type": "string",
+      "source_line": 1742
+    },
+    {
+      "default": "false",
+      "description": "Enable the dynamic htlc_max flow valve: scale each channel max HTLC by flow state (sinks tightest). Default: false",
+      "dynamic": false,
+      "name": "revenue-ops-enable-dynamic-htlcmax",
+      "opt_type": "string",
+      "source_line": 1748
+    },
+    {
+      "default": "0.50",
+      "description": "Max HTLC as a fraction of capacity for SOURCE channels when dynamic htlcmax is enabled (0.01-1.0)",
+      "dynamic": false,
+      "name": "revenue-ops-htlcmax-source-pct",
+      "opt_type": "string",
+      "source_line": 1754
+    },
+    {
+      "default": "0.25",
+      "description": "Max HTLC as a fraction of capacity for SINK channels when dynamic htlcmax is enabled (0.01-1.0)",
+      "dynamic": false,
+      "name": "revenue-ops-htlcmax-sink-pct",
+      "opt_type": "string",
+      "source_line": 1760
+    },
+    {
+      "default": "0.45",
+      "description": "Max HTLC as a fraction of capacity for balanced channels when dynamic htlcmax is enabled (0.01-1.0)",
+      "dynamic": false,
+      "name": "revenue-ops-htlcmax-balanced-pct",
+      "opt_type": "string",
+      "source_line": 1766
+    },
+    {
+      "default": "false",
+      "description": "Enable expansion treasury mode (reverse-swap excess LN to on-chain for opens) (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-enabled",
+      "opt_type": "string",
+      "source_line": 1772
+    },
+    {
+      "default": "5000000",
+      "description": "Target confirmed on-chain reserve in sats for expansion treasury mode (default: 5000000)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-onchain-target-sats",
+      "opt_type": "string",
+      "source_line": 1778
+    },
+    {
+      "default": "250000",
+      "description": "Minimum on-chain reserve deficit before treasury swaps are attempted (default: 250000)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-min-deficit-sats",
+      "opt_type": "string",
+      "source_line": 1784
+    },
+    {
+      "default": "BTC",
+      "description": "Preferred Boltz reverse-swap output currency for expansion treasury (BTC or LBTC; default: BTC)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-preferred-currency",
+      "opt_type": "string",
+      "source_line": 1790
+    },
+    {
+      "default": "1",
+      "description": "Max treasury reverse swaps per treasury cycle (default: 1)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-max-actions",
+      "opt_type": "string",
+      "source_line": 1796
+    },
+    {
+      "default": "80.0",
+      "description": "Minimum local balance percent to consider a channel as treasury harvest source (default: 80.0)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-min-source-local-pct",
+      "opt_type": "string",
+      "source_line": 1802
+    },
+    {
+      "default": "true",
+      "description": "Exclude hot/protected channels from treasury harvesting (default: true)",
+      "dynamic": false,
+      "name": "revenue-ops-expansion-treasury-exclude-protected",
+      "opt_type": "string",
+      "source_line": 1808
+    },
+    {
+      "default": "false",
+      "description": "Enable automated capacity planner for channel opens/closes (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-enabled",
+      "opt_type": "string",
+      "source_line": 1814
+    },
+    {
+      "default": "21600",
+      "description": "Seconds between capacity planner evaluation cycles (default: 21600 = 6 hours)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-interval",
+      "opt_type": "string",
+      "source_line": 1819
+    },
+    {
+      "default": "false",
+      "description": "Log planner decisions without executing (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-dry-run",
+      "opt_type": "string",
+      "source_line": 1824
+    },
+    {
+      "default": "1",
+      "description": "Maximum automated channel opens per planner cycle (default: 1)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-max-opens-per-cycle",
+      "opt_type": "string",
+      "source_line": 1829
+    },
+    {
+      "default": "0",
+      "description": "Maximum planner close executions per cycle when close execution is enabled (default: 0)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-max-closes-per-cycle",
+      "opt_type": "string",
+      "source_line": 1834
+    },
+    {
+      "default": "2.0",
+      "description": "Multiplier applied to estimated close fee for planner close budget reservation (default: 2.0)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-close-fee-reserve-multiplier",
+      "opt_type": "string",
+      "source_line": 1839
+    },
+    {
+      "default": "0",
+      "description": "Fixed planner close fee cap/reservation in sats; 0 uses reserve multiplier (default: 0)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-close-fee-cap-sats",
+      "opt_type": "string",
+      "source_line": 1844
+    },
+    {
+      "default": "false",
+      "description": "Pass a CLN close feerange cap derived from the planner close fee reservation (default: false)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-close-feerange-enabled",
+      "opt_type": "string",
+      "source_line": 1849
+    },
+    {
+      "default": "500000",
+      "description": "Minimum channel size in sats for automated opens (default: 500000)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-min-channel-sats",
+      "opt_type": "string",
+      "source_line": 1854
+    },
+    {
+      "default": "10000000",
+      "description": "Maximum channel size in sats for automated opens (default: 10000000)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-max-channel-sats",
+      "opt_type": "string",
+      "source_line": 1859
+    },
+    {
+      "default": "50.0",
+      "description": "Maximum on-chain fee rate (sat/vB) for automated opens/closes (default: 50.0)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-max-fee-rate",
+      "opt_type": "string",
+      "source_line": 1864
+    },
+    {
+      "default": "1.0",
+      "description": "Minimum annualized return hurdle for automated channel opens (default: 1.0%)",
+      "dynamic": false,
+      "name": "revenue-ops-planner-min-annual-roi-pct",
+      "opt_type": "string",
+      "source_line": 1869
+    },
+    {
+      "default": "false",
+      "description": "Allow the capacity planner to execute close RPCs (default: false)",
+      "dynamic": true,
+      "name": "revenue-ops-planner-execute-closes",
+      "opt_type": "string",
+      "source_line": 1874
+    },
+    {
+      "default": "true",
+      "description": "Enable LN+ liquidity swap automation (default: true)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-swaps-enabled",
+      "opt_type": "string",
+      "source_line": 1880
+    },
+    {
+      "default": "true",
+      "description": "Allow live LN+ swap applications; false = recommendation-only (default: true)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-execute-applications",
+      "opt_type": "string",
+      "source_line": 1886
+    },
+    {
+      "default": "0.2",
+      "description": "Regular open must beat swap EV by this fraction to win the slot (default: 0.2)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-swap-preference-margin",
+      "opt_type": "string",
+      "source_line": 1892
+    },
+    {
+      "default": "3",
+      "description": "Maximum LN+ swap contract duration in months (default: 3)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-max-duration-months",
+      "opt_type": "string",
+      "source_line": 1898
+    },
+    {
+      "default": "5",
+      "description": "Minimum LN+ positive ratings for every non-fleet swap participant (default: 5)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-min-peer-positive-ratings",
+      "opt_type": "string",
+      "source_line": 1904
+    },
+    {
+      "default": "8",
+      "description": "Minimum LN+ rank (1-10, higher better; 8=\"Gold\") for every non-fleet swap participant (default: 8)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-min-peer-rank",
+      "opt_type": "string",
+      "source_line": 1910
+    },
+    {
+      "default": "4",
+      "description": "Maximum LN+ swap participant count (default: 4)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-max-participants",
+      "opt_type": "string",
+      "source_line": 1916
+    },
+    {
+      "default": "3",
+      "description": "Minimum LN+ swap participant count; among equal-EV qualifiers fewer participants win (default: 3)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-min-participants",
+      "opt_type": "string",
+      "source_line": 1922
+    },
+    {
+      "default": "5000",
+      "description": "No LN+ applications when opening feerate exceeds this (perkw, default: 5000)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-apply-feerate-ceiling",
+      "opt_type": "string",
+      "source_line": 1928
+    },
+    {
+      "default": "7",
+      "description": "Withdraw LN+ applications stuck pending beyond this (default: 7)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-pending-timeout-days",
+      "opt_type": "string",
+      "source_line": 1934
+    },
+    {
+      "default": "0.5",
+      "description": "Damping on the inbound-liquidity EV credit for LN+ swaps (default: 0.5)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-inbound-credit-factor",
+      "opt_type": "string",
+      "source_line": 1940
+    },
+    {
+      "default": "3600",
+      "description": "LN+ obligations watcher interval in seconds (default: 3600)",
+      "dynamic": true,
+      "name": "revenue-ops-lnplus-watcher-interval",
+      "opt_type": "string",
+      "source_line": 1946
+    },
+    {
+      "default": "v3",
+      "description": "Rebalance route discovery: 'v3' (askrene getroutes, required). Legacy 'v2' getroute routing has been removed. This option remains only as a compatibility shim and only accepts 'v3'.",
+      "dynamic": true,
+      "name": "revenue-ops-rebalance-router",
+      "opt_type": "string",
+      "source_line": 1983
+    },
+    {
+      "default": "standalone",
+      "description": "CSV of askrene layer names passed to v3 router getroutes calls. Missing layers are silently dropped by askrene. Blank or 'standalone'/'none' values configure no layers (askrene's own gossip view only).",
+      "dynamic": false,
+      "name": "revenue-ops-askrene-layers",
+      "opt_type": "string",
+      "source_line": 1994
+    }
+  ],
+  "python_rpcs": [
+    {
+      "name": "revenue-analyze",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_analyze",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4517,
+      "state": {
+        "compiled": true,
+        "effective": "placeholder",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-ban",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_ban",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5249,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-boltz-auto-cycle-run-now",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_auto_cycle_run_now",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 9800,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-auto-cycle-status",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_auto_cycle_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 9780,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-backup",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_backup",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8064,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-backup-verify",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_backup_verify",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8072,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-balance-cycle",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_balance_cycle",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 10248,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-balance-recommendations",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_balance_recommendations",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 9712,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-budget",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_budget",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7996,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-chainswap",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_chainswap",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8032,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-claim",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_claim",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8022,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-deposit",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_deposit",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8056,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-expansion-treasury-cycle",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_expansion_treasury_cycle",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 10529,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-expansion-treasury-recommendations",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_expansion_treasury_recommendations",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 10322,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-expansion-treasury-status",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_expansion_treasury_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 10293,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-external-pay-ignores",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_external_pay_ignores",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7988,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-history",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_history",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7980,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-loop-in",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_loop_in",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7958,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-loop-out",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_loop_out",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7946,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-quote",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_quote",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7938,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-refund",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_refund",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8012,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-status",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7969,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-wallet",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_wallet",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8004,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-boltz-withdraw",
+      "owner_task": "hexmem-63",
+      "python_function": "revenue_boltz_withdraw",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 8043,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven_unreachable"
+      }
+    },
+    {
+      "name": "revenue-capacity-report",
+      "owner_task": "hexmem-62",
+      "python_function": "revenue_capacity_report",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4578,
+      "state": {
+        "compiled": true,
+        "effective": "placeholder",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-capex-status",
+      "owner_task": "hexmem-62",
+      "python_function": "revenue_capex_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7714,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-cleanup-closed",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_cleanup_closed",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 6363,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-clear-reservations",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_clear_reservations",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 6497,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-config",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_config",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5824,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-dashboard",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_dashboard",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5917,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-econ-cycle",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_econ_cycle",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 6154,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-econ-reconcile",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_econ_reconcile",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 6099,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-econ-snapshot",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_econ_snapshot",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 6062,
+      "state": {
+        "compiled": true,
+        "effective": "placeholder",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-fee-authority-status",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_fee_authority_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3829,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-fee-cycle",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_fee_cycle",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4496,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven"
+      }
+    },
+    {
+      "name": "revenue-fee-debug",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_fee_debug",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4331,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-health",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_health",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 6181,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-history",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_history",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5086,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-hot-channel-protection-peers",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_hot_channel_protection_peers",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5723,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-ignore",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_ignore",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5130,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-list-banned",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_list_banned",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5308,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-list-ignored",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_list_ignored",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5216,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-lnplus-abandon",
+      "owner_task": "hexmem-61",
+      "python_function": "revenue_lnplus_abandon",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4627,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "missing"
+      }
+    },
+    {
+      "name": "revenue-lnplus-backfill",
+      "owner_task": "hexmem-61",
+      "python_function": "revenue_lnplus_backfill",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4663,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "missing"
+      }
+    },
+    {
+      "name": "revenue-lnplus-breaker-clear",
+      "owner_task": "hexmem-61",
+      "python_function": "revenue_lnplus_breaker_clear",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4615,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "missing"
+      }
+    },
+    {
+      "name": "revenue-lnplus-status",
+      "owner_task": "hexmem-61",
+      "python_function": "revenue_lnplus_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4604,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-planner-candidate-sources",
+      "owner_task": "hexmem-62",
+      "python_function": "planner_candidate_sources",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4677,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-planner-candidates",
+      "owner_task": "hexmem-62",
+      "python_function": "revenue_planner_candidates",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4685,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-planner-execute",
+      "owner_task": "hexmem-62",
+      "python_function": "revenue_planner_execute",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4701,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "missing"
+      }
+    },
+    {
+      "name": "revenue-planner-history",
+      "owner_task": "hexmem-62",
+      "python_function": "revenue_planner_history",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4709,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-planner-status",
+      "owner_task": "hexmem-62",
+      "python_function": "revenue_planner_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4596,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-policy",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_policy",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5325,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-profile-preview",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_profile_preview",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5779,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-profitability",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_profitability",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4906,
+      "state": {
+        "compiled": true,
+        "effective": "placeholder",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-rebalance",
+      "owner_task": "hexmem-60",
+      "python_function": "revenue_rebalance",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4826,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "missing"
+      }
+    },
+    {
+      "name": "revenue-rebalance-cycle",
+      "owner_task": "hexmem-60",
+      "python_function": "revenue_rebalance_cycle",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3802,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "missing"
+      }
+    },
+    {
+      "name": "revenue-rebalance-debug",
+      "owner_task": "hexmem-60",
+      "python_function": "revenue_rebalance_debug",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3896,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-report",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_report",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5581,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-set-fee",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_set_fee",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4722,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven"
+      }
+    },
+    {
+      "name": "revenue-spend-ledger",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_spend_ledger",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7780,
+      "state": {
+        "compiled": true,
+        "effective": "full",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-spend-release",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_spend_release",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7877,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-spend-release-stale",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_spend_release_stale",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7888,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-spend-reserve",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_spend_reserve",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7806,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-spend-settle",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_spend_settle",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7915,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-status",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_status",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 3843,
+      "state": {
+        "compiled": true,
+        "effective": "partial",
+        "reachable": true,
+        "review": "passed",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-total-cost-budget",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_total_cost_budget",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 7705,
+      "state": {
+        "compiled": true,
+        "effective": "unreachable",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-unban",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_unban",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5283,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-unignore",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_unignore",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 5178,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    },
+    {
+      "name": "revenue-wake-all",
+      "owner_task": "task-8-core-parity",
+      "python_function": "revenue_wake_all",
+      "source_file": "cl-revenue-ops.py",
+      "source_line": 4548,
+      "state": {
+        "compiled": false,
+        "effective": "absent",
+        "reachable": false,
+        "review": "pending",
+        "soak": "not_required",
+        "transport_proven": "not_required"
+      }
+    }
+  ],
+  "rust_only_methods": [
+    "revenue-fee-wake",
+    "revenue-ping",
+    "revenue-rebalance-plan",
+    "revops-fee-runway-status"
+  ],
+  "schema_version": 1,
+  "shutdown": {
+    "bounded": true,
+    "join_timeout_seconds": 10.0,
+    "name": "rpc-shutdown",
+    "semantics": "daemon drain thread; bounded wait; process exit proceeds on timeout",
+    "source_file": "cl-revenue-ops.py",
+    "source_line": 599
+  }
+}

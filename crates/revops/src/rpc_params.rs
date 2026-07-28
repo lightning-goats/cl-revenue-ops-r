@@ -23,7 +23,217 @@
 //!    every caller in this crate the SAME coercion instead of each
 //!    reinventing (and subtly diverging on) it.
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Map, Value};
+use std::fmt;
+
+/// Binding policy is an explicit call-site choice. The checked-in Python
+/// contract records `PositionalOrNamed`; a still-incomplete Rust handler may
+/// deliberately choose `NamedOnly`, which produces a typed refusal before its
+/// closure runs instead of silently defaulting positional arguments.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamBinding {
+    PositionalOrNamed,
+    NamedOnly,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamCoercion {
+    /// Signature extraction cannot truthfully infer coercion performed inside
+    /// a Python handler. Preserve the JSON value for the handler-specific port.
+    HandlerDefined,
+    String,
+    PythonInt,
+    Number,
+    Boolean,
+    PythonTruthy,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ParamSpec {
+    pub name: String,
+    pub required: bool,
+    pub has_default: bool,
+    pub default: Value,
+    pub coercion: ParamCoercion,
+    /// `None` is accepted for small synthetic test contracts. Generated
+    /// contracts always set this to `positional` or `keyword_only`.
+    #[serde(default)]
+    pub python_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RpcMethodSpec {
+    pub name: String,
+    pub python_binding: ParamBinding,
+    #[serde(default)]
+    pub allow_extra_named: bool,
+    pub params: Vec<ParamSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RpcParameterContract {
+    pub schema_version: u32,
+    pub python_source_commit: String,
+    pub python_source_sha256: String,
+    pub methods: Vec<RpcMethodSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamDecodeError {
+    InvalidShape { actual: &'static str },
+    NamedOnly,
+    ExcessPositional { expected: usize, actual: usize },
+    UnknownNamed { name: String },
+    MissingRequired { name: String },
+    Coercion { name: String, message: String },
+}
+
+impl fmt::Display for ParamDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidShape { actual } => {
+                write!(
+                    f,
+                    "RPC params must be an object, array, or null; got {actual}"
+                )
+            }
+            Self::NamedOnly => write!(
+                f,
+                "positional parameters are not supported; use named parameters"
+            ),
+            Self::ExcessPositional { expected, actual } => write!(
+                f,
+                "too many positional parameters: expected at most {expected}, got {actual}"
+            ),
+            Self::UnknownNamed { name } => write!(f, "unknown named parameter: {name}"),
+            Self::MissingRequired { name } => write!(f, "missing required parameter: {name}"),
+            Self::Coercion { name, message } => {
+                write!(f, "invalid parameter {name}: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParamDecodeError {}
+
+pub fn load_rpc_contract() -> RpcParameterContract {
+    serde_json::from_str(include_str!("../../../fixtures/port/rpc_params.json"))
+        .expect("embedded RPC parameter contract is valid")
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn coerce(spec: &ParamSpec, value: &Value) -> Result<Value, ParamDecodeError> {
+    let failed = |message: String| ParamDecodeError::Coercion {
+        name: spec.name.clone(),
+        message,
+    };
+    match spec.coercion {
+        ParamCoercion::HandlerDefined => Ok(value.clone()),
+        ParamCoercion::String => value
+            .as_str()
+            .map(|text| Value::String(text.to_string()))
+            .ok_or_else(|| failed(format!("expected string, got {}", value_kind(value)))),
+        ParamCoercion::PythonInt => python_int(value)
+            .map(|number| Value::Number(number.into()))
+            .map_err(failed),
+        ParamCoercion::Number => match value {
+            Value::Number(_) => Ok(value.clone()),
+            _ => Err(failed(format!(
+                "expected number, got {}",
+                value_kind(value)
+            ))),
+        },
+        ParamCoercion::Boolean => value
+            .as_bool()
+            .map(Value::Bool)
+            .ok_or_else(|| failed(format!("expected boolean, got {}", value_kind(value)))),
+        ParamCoercion::PythonTruthy => Ok(Value::Bool(is_truthy_py(value))),
+    }
+}
+
+/// Decode raw CLN JSON params into one named map. Every refusal is returned
+/// before a handler can see partially bound/defaulted values.
+pub fn decode_params(
+    spec: &RpcMethodSpec,
+    raw: &Value,
+    binding: ParamBinding,
+) -> Result<Map<String, Value>, ParamDecodeError> {
+    let mut supplied = Map::new();
+    match raw {
+        Value::Null => {}
+        Value::Object(values) => {
+            for (name, value) in values {
+                if !spec.allow_extra_named && !spec.params.iter().any(|param| param.name == *name) {
+                    return Err(ParamDecodeError::UnknownNamed { name: name.clone() });
+                }
+                supplied.insert(name.clone(), value.clone());
+            }
+        }
+        Value::Array(values) => {
+            if binding == ParamBinding::NamedOnly && !values.is_empty() {
+                return Err(ParamDecodeError::NamedOnly);
+            }
+            let positional = spec
+                .params
+                .iter()
+                .filter(|param| param.python_kind.as_deref() != Some("keyword_only"))
+                .collect::<Vec<_>>();
+            if values.len() > positional.len() {
+                return Err(ParamDecodeError::ExcessPositional {
+                    expected: positional.len(),
+                    actual: values.len(),
+                });
+            }
+            for (value, param) in values.iter().zip(positional) {
+                supplied.insert(param.name.clone(), value.clone());
+            }
+        }
+        scalar => {
+            return Err(ParamDecodeError::InvalidShape {
+                actual: value_kind(scalar),
+            });
+        }
+    }
+
+    let mut decoded = Map::new();
+    for param in &spec.params {
+        if let Some(value) = supplied.remove(&param.name) {
+            decoded.insert(param.name.clone(), coerce(param, &value)?);
+        } else if param.has_default {
+            decoded.insert(param.name.clone(), coerce(param, &param.default)?);
+        } else if param.required {
+            return Err(ParamDecodeError::MissingRequired {
+                name: param.name.clone(),
+            });
+        }
+    }
+    // Only a Python **kwargs contract can leave names here.
+    decoded.extend(supplied);
+    Ok(decoded)
+}
+
+pub fn decode_and_call<R>(
+    spec: &RpcMethodSpec,
+    raw: &Value,
+    binding: ParamBinding,
+    handler: impl FnOnce(Map<String, Value>) -> R,
+) -> Result<R, ParamDecodeError> {
+    let decoded = decode_params(spec, raw, binding)?;
+    Ok(handler(decoded))
+}
 
 /// Batch A's params-shape gate. `lightning-cli`'s own no-argument call
 /// shape is an EMPTY JSON array (`[]`), not `{}` -- that must still mean

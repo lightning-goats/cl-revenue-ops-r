@@ -21,6 +21,20 @@
   "dynamic": false
  },
  {
+  "name": "revenue-ops-fee-authority-enabled",
+  "opt_type": "bool",
+  "default": true,
+  "description": "Permit Python fee evaluation and setchannel authority",
+  "dynamic": true
+ },
+ {
+  "name": "revenue-ops-fee-replay-capture-enabled",
+  "opt_type": "string",
+  "default": "false",
+  "description": "Internal observational fee-cycle replay capture. Disabled by default; enabling observes the next naturally scheduled cycle without starting a cycle.",
+  "dynamic": true
+ },
+ {
   "name": "revenue-ops-rebalance-interval",
   "opt_type": "string",
   "default": "900",
