@@ -89,6 +89,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     // function (both `owner::spawn_read_write` and direct-connection
     // tests) gets the full schema, including `PRAGMA foreign_keys = ON`.
     crate::fee_runway::init_schema(conn)?;
+    crate::loop_health::init_schema(conn)?;
     Ok(())
 }
 

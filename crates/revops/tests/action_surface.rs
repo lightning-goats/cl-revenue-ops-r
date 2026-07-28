@@ -69,6 +69,7 @@ const ALLOWED_FILES: &[&str] = &[
 const CLN_FEE_BROADCASTER_ALLOWED_FILES: &[&str] = &[
     "crates/revops/src/fee_execution.rs",
     "crates/revops/src/main.rs",
+    "crates/revops/src/runtime.rs",
     "crates/revops/src/bin/rehearse_fee_cutover.rs",
 ];
 
@@ -190,6 +191,46 @@ fn shadow_constructors_never_mention_cln_fee_broadcaster() {
          (every shadow/autonomous construction path must stay capability-free) -- found it in: \
          {violations:?}"
     );
+}
+
+#[test]
+fn observer_runtime_source_cannot_name_any_action_capability() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/runtime.rs")).unwrap();
+    let observer = source.split("pub struct LiveRuntime").next().unwrap();
+    for forbidden in [
+        "ClnFeeBroadcaster",
+        "PaymentMode::Live",
+        "ExecutionMode::Armed",
+    ] {
+        assert!(
+            !observer.contains(forbidden),
+            "ObserverRuntime construction and fields must not name {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn production_composition_spawns_only_the_real_fee_pass() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
+    assert_eq!(
+        source.matches("passes.insert(").count(),
+        1,
+        "Task 57 production must instantiate exactly one real pass"
+    );
+    assert!(source.contains("passes.insert(revops_db::loop_health::LoopId::Fee"));
+    for unwired in [
+        "LoopId::Rebalance",
+        "LoopId::Planner",
+        "LoopId::LnPlus",
+        "LoopId::Boltz",
+    ] {
+        assert!(
+            !source.contains(&format!("passes.insert(revops_db::loop_health::{unwired}")),
+            "{unwired} must remain not_wired without a real pass"
+        );
+    }
 }
 
 /// Sanity check on the scan itself: it must actually find files (a scan

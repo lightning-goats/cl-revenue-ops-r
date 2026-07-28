@@ -6,6 +6,7 @@ use std::path::Path;
 pub mod actor;
 pub mod budget;
 pub mod fee_runway;
+pub mod loop_health;
 pub mod notifications;
 pub mod owner;
 pub mod queries;

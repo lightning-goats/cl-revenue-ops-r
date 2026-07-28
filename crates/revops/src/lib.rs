@@ -16,6 +16,7 @@ pub mod fee_scheduler;
 pub mod fee_state;
 pub mod fee_triggers;
 pub mod hydration;
+pub mod loop_health;
 pub mod notify;
 pub mod options_table;
 pub mod python_authority;
@@ -47,6 +48,7 @@ pub mod rpc_report;
 pub mod rpc_spend_ledger;
 pub mod rpc_status;
 pub mod rpc_total_cost_budget;
+pub mod runtime;
 
 /// Current Unix time in whole seconds, matching Python's
 /// `int(time.time())` as used throughout `database.py`/

@@ -272,6 +272,8 @@ pub enum TriggerMode {
     /// by `phase_offset_secs` from spawn) -- T6's behavior, correct once
     /// Python is gone and there is no flush to observe.
     FixedInterval { phase_offset_secs: u64 },
+    /// Owner-only mode: cadence requests arrive through the bounded observer runtime.
+    ExternalOnly,
 }
 
 impl Default for TriggerMode {
@@ -489,7 +491,10 @@ pub enum FeeDebugQuery {
 pub enum CycleMsg {
     /// One cycle's prepared inputs from the async prefetch half; one
     /// message == one cycle on the owner thread.
-    RunPrepared(Box<PreparedCycle>),
+    RunPrepared(
+        Box<PreparedCycle>,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
     /// Ask for an immediate out-of-schedule cycle: the owner thread
     /// forwards this to the async half (only IT can prefetch), which
     /// prepares inputs and sends back a `RunPrepared`.
@@ -856,6 +861,13 @@ fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
         CycleOutcome::PersistenceFailed => {
             "ran but PersistenceFailed: atomic commit failed, generation not advanced".to_string()
         }
+    }
+}
+
+fn cycle_completion(outcome: &CycleOutcome) -> Result<(), String> {
+    match outcome {
+        CycleOutcome::Ran { .. } => Ok(()),
+        other => Err(describe_cycle_outcome(other)),
     }
 }
 
@@ -1420,6 +1432,7 @@ pub struct CycleOwner {
     /// the two. Bounded to ONE entry: a newer prepared snapshot
     /// supersedes an older deferred one (loudly, counted).
     deferred_cycle: Option<Box<PreparedCycle>>,
+    deferred_cycle_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     /// F7: deferred prepared cycles that were superseded by a newer one
     /// before they could run (each one loud, never silent). Never reset.
     deferred_cycles_superseded: u64,
@@ -1488,6 +1501,7 @@ impl CycleOwner {
             initial_fee_conflicts: 0,
             state_generation: None,
             deferred_cycle: None,
+            deferred_cycle_ack: None,
             deferred_cycles_superseded: 0,
         }
     }
@@ -2965,7 +2979,10 @@ impl CycleOwner {
                     "revops: running the prepared cycle deferred behind an in-flight A3 \
                      commit (the cycle now sees the synchronized post-A3 state)"
                 );
-                let _ = self.run_cycle(*deferred, clock);
+                let outcome = self.run_cycle(*deferred, clock);
+                if let Some(completion) = self.deferred_cycle_ack.take() {
+                    let _ = completion.send(cycle_completion(&outcome));
+                }
             }
         }
     }
@@ -3416,6 +3433,31 @@ impl CycleOwner {
         None
     }
 
+    pub fn run_or_defer_cycle_with_ack(
+        &mut self,
+        prepared: Box<PreparedCycle>,
+        clock: &mut dyn FnMut() -> i64,
+        completion: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let prior_completion = if !self.pending_initial_fees.is_empty() {
+            self.deferred_cycle_ack.take()
+        } else {
+            None
+        };
+        match self.run_or_defer_cycle(prepared, clock) {
+            Some(outcome) => {
+                let _ = completion.send(cycle_completion(&outcome));
+            }
+            None => {
+                if let Some(prior) = prior_completion {
+                    let _ =
+                        prior.send(Err("deferred cycle superseded before execution".to_string()));
+                }
+                self.deferred_cycle_ack = Some(completion);
+            }
+        }
+    }
+
     /// F7: deferred prepared cycles superseded by a newer one (red
     /// counter; see the field doc).
     pub fn deferred_cycles_superseded(&self) -> u64 {
@@ -3568,6 +3610,110 @@ pub struct SchedulerHandle {
     pub wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
+pub fn spawn_owner_for_runtime(
+    mut cfg: SchedulerConfig,
+    store: Option<Box<dyn RunwayStateStore>>,
+) -> anyhow::Result<SchedulerHandle> {
+    cfg.trigger = TriggerMode::ExternalOnly;
+    spawn(cfg, None, PythonOptionCache::empty(), store)
+}
+
+pub struct FeeObserverPass {
+    socket_path: PathBuf,
+    db_handle: Option<DbHandle>,
+    python_options: PythonOptionCache,
+    tx: mpsc::Sender<CycleMsg>,
+    interval_secs: std::sync::atomic::AtomicU64,
+}
+
+impl FeeObserverPass {
+    pub fn new(
+        socket_path: PathBuf,
+        db_handle: Option<DbHandle>,
+        python_options: PythonOptionCache,
+        tx: mpsc::Sender<CycleMsg>,
+        initial_interval_secs: u64,
+    ) -> Self {
+        Self {
+            socket_path,
+            db_handle,
+            python_options,
+            tx,
+            interval_secs: std::sync::atomic::AtomicU64::new(initial_interval_secs.max(1)),
+        }
+    }
+    pub fn interval_secs(&self) -> u64 {
+        self.interval_secs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::loop_health::ObserverPass for FeeObserverPass {
+    fn run(
+        &self,
+        _key: crate::loop_health::RequestKey,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let _ = self.python_options.refresh(&self.socket_path).await;
+            let prepared = prepare_cycle(
+                &self.socket_path,
+                self.db_handle.as_ref(),
+                &self.python_options.snapshot(),
+            )
+            .await
+            .map_err(|error| error.context("fee prefetch"))?;
+            self.interval_secs.store(
+                prepared.cfg.fee_interval.max(1) as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            let (completion, acknowledged) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(CycleMsg::RunPrepared(Box::new(prepared), completion))
+                .map_err(|_| anyhow::anyhow!("fee owner disconnected before dispatch"))?;
+            acknowledged
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("fee owner disconnected before completion: {error}")
+                })?
+                .map_err(anyhow::Error::msg)
+        })
+    }
+}
+
+pub fn spawn_bounded_fee_trigger(
+    handle: crate::loop_health::LoopHandle,
+    pass: std::sync::Arc<FeeObserverPass>,
+    phase_offset_secs: u64,
+) {
+    tokio::spawn(async move {
+        let mut first = true;
+        loop {
+            let delay =
+                pass.interval_secs()
+                    .saturating_add(if first { phase_offset_secs } else { 0 });
+            first = false;
+            tokio::time::sleep(Duration::from_secs(delay.max(1))).await;
+            match handle
+                .request(crate::loop_health::RequestKey::from("fixed_interval"))
+                .await
+            {
+                Ok(
+                    crate::loop_health::Admission::Enqueued
+                    | crate::loop_health::Admission::Coalesced,
+                ) => {}
+                Ok(crate::loop_health::Admission::Dropped) => {
+                    eprintln!("revops: fee loop request dropped by bounded runtime")
+                }
+                Err(error) => {
+                    eprintln!(
+                        "revops: fee loop request persistence failed: {error:#}; trigger exiting"
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// Spawn the scheduler: the owner thread (a) and the trigger task (b).
 /// Must be called from within the plugin's tokio runtime. Returns the
 /// cheap [`SchedulerHandle`]; dropping every clone of `handle.tx` plus a
@@ -3624,11 +3770,8 @@ where
         let mut clock = crate::now_unix;
         while let Ok(msg) = rx.recv() {
             match msg {
-                CycleMsg::RunPrepared(prepared) => {
-                    // Outcome logging happens inside the owner; the loop
-                    // must survive every outcome. (F7: while an A3 store
-                    // result is pending the cycle is deferred, not run.)
-                    let _ = owner.run_or_defer_cycle(prepared, &mut clock);
+                CycleMsg::RunPrepared(prepared, completion) => {
+                    owner.run_or_defer_cycle_with_ack(prepared, &mut clock, completion);
                 }
                 CycleMsg::RunCycleNow => {
                     // Only the async half can prefetch; hand over.
@@ -3733,13 +3876,20 @@ async fn dispatch_cycle(
     match prepare_cycle(socket_path, db_handle, &snapshot).await {
         Ok(prepared) => {
             let interval_secs = prepared.cfg.fee_interval.max(1) as u64;
+            let (completion, acknowledged) = tokio::sync::oneshot::channel();
             if tick_tx
-                .send(CycleMsg::RunPrepared(Box::new(prepared)))
+                .send(CycleMsg::RunPrepared(Box::new(prepared), completion))
                 .is_err()
             {
-                Dispatch::OwnerGone
-            } else {
-                Dispatch::Sent(interval_secs)
+                return Dispatch::OwnerGone;
+            }
+            match acknowledged.await {
+                Ok(Ok(())) => Dispatch::Sent(interval_secs),
+                Ok(Err(error)) => {
+                    eprintln!("revops: fee cycle owner reported failure: {error}");
+                    Dispatch::Skipped
+                }
+                Err(_) => Dispatch::OwnerGone,
             }
         }
         Err(e) => {
@@ -3769,6 +3919,11 @@ async fn trigger_loop(
             .max(1) as u64;
 
     match trigger {
+        TriggerMode::ExternalOnly => {
+            while wake_rx.recv().await.is_some() {
+                eprintln!("revops: ignored legacy RunCycleNow in ExternalOnly mode; use bounded LoopHandle ingress");
+            }
+        }
         TriggerMode::FixedInterval { phase_offset_secs } => {
             let mut next = tokio::time::Instant::now()
                 + Duration::from_secs(interval_secs + phase_offset_secs);

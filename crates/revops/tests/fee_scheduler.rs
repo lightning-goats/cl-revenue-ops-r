@@ -1074,6 +1074,41 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     handle.tx.send(CycleMsg::Shutdown).ok();
 }
 
+#[tokio::test]
+async fn run_prepared_acknowledges_only_after_real_owner_outcome() {
+    let fx = fixture();
+    let handle = revops::fee_scheduler::spawn_owner_for_runtime(
+        SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::FixedInterval {
+                phase_offset_secs: 999_999,
+            },
+        },
+        None,
+    )
+    .expect("spawn owner");
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    handle
+        .tx
+        .send(CycleMsg::RunPrepared(
+            Box::new(prepared(json!(3), false)),
+            ack_tx,
+        ))
+        .expect("dispatch prepared cycle");
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .expect("owner completion deadline")
+        .expect("owner reply");
+    assert!(
+        outcome.is_ok(),
+        "real owner outcome must be acknowledged: {outcome:?}"
+    );
+    handle.tx.send(CycleMsg::Shutdown).ok();
+}
+
 // ---------------------------------------------------------------------------
 // Task 9 (stateful-shadow revision plan): the cutover task that introduces
 // the guarded broadcast path. Per this test's OWN prior doc comment
