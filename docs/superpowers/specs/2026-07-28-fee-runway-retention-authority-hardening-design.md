@@ -1,12 +1,13 @@
-# Fee-runway retention, store-timeout, authority-fetch, and arm-reuse hardening — design checkpoint (revision 2)
+# Fee-runway retention, store-timeout, authority-fetch, and arm-reuse hardening — design checkpoint (revision 3)
 
 - Task: hexmem 58 (pre-cutover programme Task 9). Design only: no
   production code is edited by this checkpoint, no live node was
   contacted, no production DB was read.
-- Revision 2 executes the full correction contract
-  `/home/sat/agent-tasks/task-58-review-findings.md` (F1–F14 + required
-  cleanups). Appendix A maps every finding to its corrected section and
-  tests.
+- Revision 2 executed the round-1 correction contract
+  `/home/sat/agent-tasks/task-58-review-findings.md` (F1–F14; Appendix
+  A). Revision 3 executes the round-2 contract
+  `/home/sat/agent-tasks/task-58-review-round2-findings.md`
+  (R2-F1–R2-F4; Appendix B).
 - Base: canonical main `a598239` (post-Task-57 merge of reviewed
   `49a940a`); this branch is rebased onto it, with revision 1 preserved
   as `8864fcd` for the correction diff. `file:line` references marked
@@ -54,13 +55,17 @@ deferred to a separate cursor-preserving task); no operator sweep RPC.
   `spawn_blocking` task, commands on a **capacity-64** tokio mpsc
   channel, executed **serially**. A queued command is not cancellable —
   an outer timeout abandons the reply, never the work.
-- The fee-scheduler owner thread's own inbox (`CycleMsg`) is an
-  **unbounded** `std::sync::mpsc` (`std_mpsc`, fee_scheduler.rs:152)
-  `[57 ✓]` — Task 57 bounds external loop ADMISSION
-  (`LoopHandle::request` → `Enqueued`/`Coalesced`/`Dropped`,
-  fee_scheduler.rs:3848-3855) but the internal queue stays unbounded;
-  T2's bound derivation (§3.3) therefore reasons over queue
-  composition, not queue capacity.
+- The fee-scheduler owner thread's inbox is a **BOUNDED Tokio MPSC,
+  capacity `OWNER_QUEUE_CAPACITY = 64`** (fee_scheduler.rs:222), behind
+  the private-sender `SchedulerIngress` boundary (:236-260 — async
+  `send().await` backpressure is the only public production send API,
+  compile_fail-pinned; sync callback/owner threads use `blocking_send`;
+  constructed at `spawn_with_thread_spawner`, :3905). The `std_mpsc`
+  alias (:152) serves only the per-Query REPLY channel, not the inbox.
+  (Corrected per R2-F1 — revision 2 misstated this as an unbounded
+  `std::sync::mpsc`.) Task 57's `LoopHandle::request` admission
+  (`Enqueued`/`Coalesced`/`Dropped`, :3848-3855) additionally gates
+  loop-generated messages before a send exists.
 - Task 57's loop-health store writes (`begin`/`pass`/`fail` upserts,
   crates/revops/src/loop_health.rs:300) run on the ASYNC side through
   the same store actor — they add small single-row upserts to the store
@@ -98,7 +103,7 @@ loop-health table: classified in §2.1 `[57 ✓]`.
 | `LiveBatchAuthorization::authorize` store reads (fee_execution.rs:294-341) | `AUTHORIZE_STORE_BUDGET` = 7 s (:115) | pattern kept; claim narrowed by F9 (§3.2) |
 | `broadcast_batch` intent/result/quarantine writes | `store_budget()` = operator `timeout_seconds`, unclamped (:731) | T1 (§3.2) |
 | `record_result` (:735-760) | budgeted, **error swallowed to stderr; batch continues** | **F4 (§3.4)** |
-| RPC bridge `spawn_blocking(reply_rx.recv())` (main.rs:1259, :1330 at `a598239`) | none | T2 (§3.3) |
+| RPC bridge: `handle.tx.send(Query).await` (main.rs:1249, :1318 — **admission itself is an unbounded await on a full queue**) then `spawn_blocking(reply_rx.recv())` (main.rs:1259, :1330) | none on either phase | T2 (§3.3) |
 | Owner-thread blocking store calls | none (deliberate) | §3.5 |
 | A3 dispatches | none; identity/CAS-bound results | §3.6 |
 | Async notification writes | none | out of scope; Task 57 loop health (§3.7) |
@@ -253,14 +258,14 @@ deletion; it only names where the boundary sits.
 
 ### 2.6 Schema/migration
 
-- One idempotent DDL addition:
-  `CREATE INDEX IF NOT EXISTS idx_rust_fee_cycles_completed ON
-  rust_fee_cycles(completed_at);` — no longer a sweep key (F1), but
-  kept: `RETENTION_BATCH` no longer scans cycles, while the gate and
-  diagnosis queries do scan by recency and currently walk the PK.
-  (Reviewer may strike this as out-of-scope; it is separable.)
-- `rust_consumed_arm_nonces` DDL (§5.3).
-- No destructive changes; old binaries ignore both.
+- `rust_consumed_arm_nonces` DDL (§5.3) — the only DDL addition.
+  (Revision 2's `idx_rust_fee_cycles_completed` is REMOVED per R2-F4:
+  no current query filters or orders `rust_fee_cycles` by
+  `completed_at` — the only cycle query is identity lookup by
+  `cycle_id` — and no retention statement touches the table. A later
+  task may add it alongside the concrete query and query-plan evidence
+  that needs it.)
+- No destructive changes; old binaries ignore the addition.
 
 ### 2.7 Classification lint
 
@@ -318,42 +323,64 @@ UNKNOWN, not clean failure.
 
 ### 3.3 T2 — bound the RPC bridge (derivation re-done post-57, F13)
 
-Both bridge waits become
-`reply_rx.recv_timeout(RPC_BRIDGE_RECV_TIMEOUT)` `[57 ✓]` — the two
-sites are main.rs:1259 and main.rs:1330 at `a598239`.
+Two independently-bounded phases replace today's two unbounded waits
+(main.rs:1249/:1318 admission, :1259/:1330 response) — corrected per
+R2-F1: revision 2 bounded only the response, leaving admission an
+unbounded `send().await` against the full bounded queue.
 
-- **Semantics first (the part that is provable):** expiry is a
-  **section-local read failure** — the RPC returns a typed JSON error
-  naming the timeout and pointing at `revops-fee-debug`/loop health; it
-  is NOT evidence the owner is dead (the owner may be paying legitimate
-  lock waits for queued work), and nothing anywhere may treat it as a
-  trip condition.
-- **Bound (derived over the MERGED post-57 composition at `a598239`,
-  not queue capacity):** the scheduler inbox (unbounded `std_mpsc`,
-  §1.1) is written by the trigger paths (`RunCycleNow`,
-  `PolicyChanged`, `VegasSpikeCheck`, `WakeAll`, `FailedForward`,
-  `ForwardEvent` — per-cycle bounded by coalescing and by Task 57's
-  admission gate, which turns excess into `Coalesced`/`Dropped` before
-  a message exists), `RunPrepared` (at most one in flight plus one
-  deferred, Task 44), A3 `InitialFeeStoreResult` messages (bounded by
-  the pending map), and `Query` itself. Store-side, the owner's
-  blocking calls additionally wait behind the store actor's queue,
-  where Task 57's loop-health upserts and the notification inserts are
-  small single-row writes (≤ 1 lock wait each). The worst *legitimate*
-  serial chain ahead of a Query is one full `RunPrepared` execution —
-  evidence reads + mempool insert+prune (≤ 1×BUSY) + MA-comparison
-  write (≤ 1×BUSY) + guarded commit (≤ 2×BUSY) + trigger receipts
-  (≤ 1×BUSY) — plus a handful of cheap messages: ≈ 5×BUSY + work
-  ≈ 25 s + margin under full lock contention on every statement.
-  **`RPC_BRIDGE_RECV_TIMEOUT = 30 s`.** Universal pathological
-  contention (every queued store command paying full BUSY) can exceed
-  any constant — which is exactly why the SEMANTICS above, not the
-  constant, carry the safety: expiry denies one read, loudly,
-  retryably.
-- Test (F13): with several legitimate messages queued ahead of the
-  Query (including one store-heavy commit), the Query still answers
-  inside the bound; with a wedged store, the RPC returns the typed
-  error and the plugin remains otherwise functional.
+- **Phase 1 — admission is refused, never awaited.** A new
+  `SchedulerIngress::try_send_query(query: FeeDebugQuery, reply:
+  std_mpsc::Sender<Value>) -> Result<(), QueryAdmissionRefused>`
+  constructs `CycleMsg::Query` internally and `try_send`s it. A full
+  queue returns the typed section-local error `owner_queue_saturated`
+  IMMEDIATELY — the RPC never parks on admission, and a refused send
+  provably enqueued nothing (Tokio `try_send` either transfers the
+  message or returns it — no later enqueue is possible, closing the
+  cancellation-safety question the review raised). The method carries
+  ONLY `FeeDebugQuery` messages by construction, so Task 57's pinned
+  "async backpressure is the only public production send API" property
+  survives verbatim for every effectful message type — the try-path
+  structurally cannot carry anything but a diagnostic read.
+- **Phase 2 — response.** `reply_rx.recv_timeout(
+  RPC_BRIDGE_RECV_TIMEOUT)`; expiry returns the DISTINCT typed error
+  `owner_response_timeout`.
+- **Semantics (both phases):** each is a **section-local read
+  failure** — retryable, loud, and NOT evidence the owner died
+  (`owner_queue_saturated` = the owner is busy admitting real work;
+  `owner_response_timeout` = an admitted Query sat behind a legitimate
+  store-contended backlog, or the owner is genuinely stuck — the error
+  text says both readings and points at loop health). Nothing anywhere
+  may treat either as a trip condition.
+- **Derivation over the ACTUAL bounded composition (R2-F1):** an
+  admitted Query can sit behind up to **63** legitimate messages. The
+  expensive owner handlers are `RunPrepared` (evidence + mempool
+  insert+prune + MA write + guarded commit + receipts ≈ 5×BUSY + work)
+  and `handle_failed_forward` (fee_scheduler.rs:2475 — synchronous
+  idempotency read + guarded nudge commit + receipt on the owner
+  thread, ≈ 3×BUSY + work each); trigger/A3-result messages are
+  cheap-to-moderate. A fully store-contended 63-deep backlog of heavy
+  handlers is therefore **minutes-scale in the worst legitimate case —
+  no constant both covers it and stays useful as a diagnostic bound.**
+  The design consequently does NOT claim the response timeout bounds
+  legitimate backlog. `RPC_BRIDGE_RECV_TIMEOUT = 30 s` is a
+  DIAGNOSTIC FRESHNESS bound: it covers the typical worst (a Query
+  behind one heavy handler chain under full lock contention, ≈ 25 s)
+  and converts everything slower into the retryable
+  `owner_response_timeout` — honestly labeled as "busy or backlogged,
+  retry" rather than failure, per the semantics above.
+- Tests (replacing revision 2's single T2, per R2-F1):
+  - T2a `saturated_queue_refuses_query_admission_typed`: fill the
+    bounded inbox to capacity with legitimate messages; the RPC returns
+    `owner_queue_saturated` immediately (no hang); mutation: revert
+    admission to `.send().await` — the test times out/red.
+  - T2b `admitted_query_answers_behind_max_legitimate_backlog`: enqueue
+    a maximum bounded backlog that includes at least one store-blocking
+    heavy handler (`FailedForward` with a lock-holding store) ahead of
+    an admitted Query; the Query eventually answers (no deadlock) and a
+    deliberately-small test budget demonstrates the typed
+    `owner_response_timeout` on the way; mutation: revert
+    `recv_timeout` to `recv()` — red via harness timeout.
+
 
 ### 3.4 F4 — terminal result-write failure poisons the batch
 
@@ -452,6 +479,24 @@ pub struct BracketedAuthorityOff { /* private */ }
   minting — the second fetch is inside the authorization path,
   immediately before the single-use authorization exists. There is no
   public `close`, so no caller can hold a closed bracket around.
+- **Stale OPEN bracket refusal (R2-F2 — distinct from the minted
+  deadline below):** `close()` FIRST checks
+  `self.opened_at.elapsed() > OPEN_BRACKET_MAX_LIFETIME` (proposed
+  **30 s**, monotonic) and, independently, revalidates the FIRST
+  reading's wall-clock age against authorization-time `now` via the
+  same `max_age_seconds` bound `validate_status` used at open. Either
+  failure returns the NEW typed deny
+  `PythonAuthorityDenyReason::StaleOpenBracket { age_seconds,
+  max_seconds }` (code `python_authority_stale_open_bracket` — a new
+  variant, honoring the never-reword-existing-codes contract) and
+  mints nothing. **Call-count contract (explicit per the review):
+  fetch #2 is SKIPPED for an already-stale open bracket** — a refused
+  stale bracket performs exactly ONE total fetch (the open), a
+  successful bracket exactly TWO; tests assert the fake server's call
+  count in both cases. A retained two-fetch proof can therefore never
+  span more than `OPEN_BRACKET_MAX_LIFETIME` of wall clock before the
+  second fetch, and the batch it authorizes is additionally bounded by
+  the dispatch deadline below.
 - **Dispatch deadline (F5):** `LiveBatchAuthorization` gains a private
   `minted_at: Instant`; `broadcast_batch` refuses with a typed
   `BroadcastError::AuthorizationStale` when
@@ -530,27 +575,51 @@ let arm = cutover_arm::consume_validated(validated, consumed_dir)?;
 ### 5.4 One resolution per process (F7)
 
 The source scan is demoted to defense-in-depth. The proof becomes a
-**linear process capability**:
+**pure kernel + guarded production wrapper** (reshaped per R2-F3 so the
+existing startup-mode test matrix stays deterministic without any
+reset seam):
 
 ```rust
-/// Minted at most once per process (static AtomicBool::swap).
+// PRIVATE pure kernel: the current resolve_startup_mode body, verbatim.
+// No global state, no token — the existing multi-case unit-test matrix
+// in main.rs migrates here UNCHANGED and remains order-independent.
+async fn resolve_startup_mode_kernel(inputs: StartupModeInputs<'_>)
+    -> Result<ValidatedFeeMode, StartupModeDenyReason>;
+
+/// Minted at most once per process (static AtomicBool::swap; private
+/// field; no Clone; NO reset API of any kind, cfg(test) included).
 pub struct StartupResolutionToken { _private: () }
-impl StartupResolutionToken {
-    pub fn take() -> Option<Self>;   // second call: None, forever
-}
+impl StartupResolutionToken { pub fn take() -> Option<Self>; }
+
+/// The ONLY public resolution path: consumes the token by value and
+/// delegates to the kernel.
 pub async fn resolve_startup_mode(token: StartupResolutionToken,
-                                  inputs: StartupModeInputs<'_>) -> ...
-// token consumed by value; no Clone.
+                                  inputs: StartupModeInputs<'_>)
+    -> Result<ValidatedFeeMode, StartupModeDenyReason>;
 ```
 
+- **Test-seam boundary (R2-F3):** the mode MATRIX tests exercise the
+  private kernel directly (same file's unit-test module — no
+  visibility widening needed) and never touch the global guard, so
+  they stay order-independent. Exactly ONE test touches
+  `StartupResolutionToken::take()`: the same-process double-invocation
+  test, which takes the token, resolves once, proves the second
+  `take()` returns `None`, and asserts the wrapper's typed
+  `AlreadyResolved` refusal path. One consumer of the process-global
+  per test binary = deterministic under any test order.
+- **Structural sealing:** there is NO test-only factory, reset, or
+  `cfg(test)` constructor — nothing to leak into production or
+  integration tests. The kernel is private to `main.rs`'s module, so
+  external/integration code cannot bypass the wrapper; a
+  `compile_fail` doctest pins token non-constructibility, and the
+  action-surface scan asserts exactly one production call site of
+  `resolve_startup_mode` and zero non-test references to the kernel.
 - A second in-process resolution cannot obtain a token: fail-closed
-  typed refusal (`StartupModeDenyReason::AlreadyResolved`) at the call
-  site that tried, regardless of fresh nonces.
-- Tests (F7): same-process double resolution refuses (the red today:
-  two calls with two fresh arms both succeed); `compile_fail` doctest
-  pins the private constructor; the source scan
-  (`validate_and_consume`… now `validate`/`consume_validated` single
-  production caller) stays as a secondary tripwire.
+  typed `StartupModeDenyReason::AlreadyResolved`, regardless of fresh
+  nonces (the round-1 F7 red: today two calls with two fresh arms both
+  succeed).
+- The source scan (`validate`/`consume_validated` single production
+  caller) stays as a secondary tripwire.
 
 ### 5.5 Threat and recovery boundary (F12 — stated, not solved)
 
@@ -585,14 +654,14 @@ design):
 | file | change |
 |---|---|
 | `crates/revops-db/src/retention.rs` (new) | constants, 4-class table classification consts + `SQLITE_INTERNAL` allowlist, `RetentionReport` |
-| `crates/revops-db/src/fee_runway.rs` | `run_retention_sweep` (round-robin cursor, global batch cap); `rust_consumed_arm_nonces` DDL + `insert_consumed_nonce`; optional `idx_rust_fee_cycles_completed` |
+| `crates/revops-db/src/fee_runway.rs` | `run_retention_sweep` (round-robin cursor, global batch cap); `rust_consumed_arm_nonces` DDL + `insert_consumed_nonce` (index removed per R2-F4) |
 | `crates/revops-db/src/owner.rs` | `Command::RunRetentionSweep`, `Command::InsertConsumedArmNonce` + siblings |
 | `crates/revops/src/fee_state.rs` | trait + ObserverHandle `dispatch_run_retention_sweep` |
-| `crates/revops/src/fee_scheduler.rs` | sweep enqueue after scheduled commit; `retention_failures`, `oldest_pending_age_seconds`; pending clock stamp — merged post-57 scheduler (admission gate + LoopHandle wiring) is the rebase target |
+| `crates/revops/src/fee_scheduler.rs` | sweep enqueue after scheduled commit; `retention_failures`, `oldest_pending_age_seconds`; pending clock stamp; `SchedulerIngress::try_send_query` (Query-only try-path preserving the async-backpressure pin for effectful messages) |
 | `crates/revops/src/fee_execution.rs` | `STORE_BUDGET_FLOOR` clamp; try_send admission contract; fallible `record_result` + `ResultPersistenceUnknown` + poison-on-result-failure; `authorize(bracket: OpenBracket, ...)` by value; `AuthorizationStale` dispatch deadline |
-| `crates/revops/src/python_authority.rs` | private fields; `OpenBracket` (client-owning) / `BracketedAuthorityOff`; `pub(crate) close`; 4 compile_fail pins |
+| `crates/revops/src/python_authority.rs` | private fields; `OpenBracket` (client-owning, `opened_at` lifetime-checked) / `BracketedAuthorityOff`; `pub(crate) close`; `StaleOpenBracket` variant; `OPEN_BRACKET_MAX_LIFETIME`; 4 compile_fail pins |
 | `crates/revops/src/cutover_arm.rs` | `validate`/`consume_validated` split; `ValidatedArm` |
-| `crates/revops/src/main.rs` | async `resolve_startup_mode(token, ...)`; `StartupResolutionToken`; `RPC_BRIDGE_RECV_TIMEOUT` + `recv_timeout` at main.rs:1259/:1330 |
+| `crates/revops/src/main.rs` | private `resolve_startup_mode_kernel` + guarded public wrapper; `StartupResolutionToken` (no reset seam); bridge sites switch to `try_send_query` + `recv_timeout` (main.rs:1249/:1259, :1318/:1330) |
 | `crates/revops/src/bin/rehearse_fee_cutover.rs` | migrate to validate/consume split + bracket harness |
 | `docs/runbooks/rust-fee-cutover.md` | VACUUM policy; never-prune list; F12 ledger-identity binding + restore recovery procedure |
 
@@ -613,8 +682,13 @@ design):
 
 - `RetentionReport { deleted: BTreeMap<&'static str, u64>, truncated }`;
   failure → `retention_failures` + log, never affects a cycle.
-- Bridge expiry → typed JSON error; explicitly a section-local read
-  failure (F13), never a trip condition.
+- Bridge: `owner_queue_saturated` (admission refused, nothing
+  enqueued — R2-F1) and `owner_response_timeout` (admitted, response
+  expired — busy/backlogged reading stated in the error text) —
+  DISTINCT typed JSON errors, each a section-local read failure (F13),
+  never a trip condition.
+- `PythonAuthorityDenyReason::StaleOpenBracket { age_seconds,
+  max_seconds }` (R2-F2 — new variant, added not reworded).
 - `store_admission_refused` (not enqueued — clean) vs
   `store_intent_outcome_unknown` (admitted, expired — UNKNOWN,
   non-durable string, F10) — distinct deny reasons.
@@ -639,17 +713,20 @@ design):
 | T1a | `store_budget_never_undercuts_a_real_lock_wait` (2 s held lock, clamped budget survives) | current 1 s-budget behavior | remove `.max(STORE_BUDGET_FLOOR)` |
 | T1b | `unresponsive_actor_denies_within_clamped_budget` (WedgedStore rewrite of tests/fee_execution.rs:1106) | — | — |
 | T1c | `admission_full_is_clean_deny_post_admission_expiry_is_unknown` (F9) | single-outcome current shape | collapse the two deny reasons |
-| T2 | `query_answers_behind_legitimate_queued_work_and_errors_typed_when_wedged` (F13) | unbounded recv (harness-timeout red) | revert `recv_timeout` |
+| T2a | `saturated_queue_refuses_query_admission_typed` (R2-F1) | current `.send().await` admission (hangs on full queue — harness-timeout red) | revert `try_send_query` to `.send().await` |
+| T2b | `admitted_query_answers_behind_max_legitimate_backlog` (63-deep incl. a store-blocking `FailedForward` handler; typed `owner_response_timeout` demonstrated with a small test budget) (R2-F1/F13) | unbounded `recv()` (harness-timeout red) | revert `recv_timeout` to `recv()` |
 | T4 | `a3_pending_age_visible_after_threshold` | no age surface | drop counter update |
 | F4a-c | wedged result-write after success / rejection / clean-failure ⇒ batch stops, poison, `ResultPersistenceUnknown` | current log-and-continue `record_result` | restore swallow body (each independently) |
 | F1c | compile_fail: reuse a moved `OpenBracket` / `LiveBatchAuthorization`; forge `PythonAuthorityOff`/`BracketedAuthorityOff` (F3) | fields currently pub / params currently by-ref | re-widen / re-borrow |
 | F5a | `close_targets_the_opening_endpoint_only` (structural: no client param — asserted via API shape test + doc) | revision-1 `close(client)` shape | re-add client param |
 | F5b | `stale_authorization_refused_at_dispatch` (mock clock past freshness) | no deadline today | remove `AuthorizationStale` check |
+| F5d | `stale_open_bracket_refused_before_second_fetch` (mock clock past `OPEN_BRACKET_MAX_LIFETIME`; fake server asserts exactly ONE fetch) (R2-F2) | no open-bracket lifetime today | remove the `opened_at` check (independently of F5b's) |
 | F5c | `second_fetch_happens_inside_authorize` (fake server call-count == 2, second strictly during authorize) | injected-readings shape | make close reuse `first` |
 | A1 | `wiped_consumed_dir_does_not_permit_replay` (DB denies) | filesystem-only ledger | skip DB insert |
 | A1b | `fresh_observer_db_does_not_permit_replay` (dir denies — F12 single-loss pair) | — | skip rename |
 | A2 | `nonce_insert_before_rename_survives_crash_between` | rename-first order | swap order |
-| A5 | `same_process_second_resolution_refuses` (F7; red today: both succeed with fresh arms) | current unguarded resolution | bypass token take |
+| A5 | `same_process_second_resolution_refuses` — the ONE test touching the process-global guard; matrix tests exercise the private kernel and never share it (R2-F3) | current unguarded resolution (red today: both succeed with fresh arms) | bypass token take |
+| A5b | action-surface scan: one production `resolve_startup_mode` call site, zero non-test kernel references, no token constructor/reset anywhere (R2-F3) | n/a (structural pin) | add a reset/factory seam |
 | A6 | `current_thread_runtime_consumption_no_panic` (F6) | revision-1 blocking bridge (panic) | reintroduce blocking_send bridge |
 | F14 | `same_second_second_read_denies_without_retry` (fake server asserts exactly 2 calls, no loop) | n/a (pins no-retry) | add retry loop |
 | gates | full workspace debug+release, clippy, fmt, T8b byte-guards | — | — |
@@ -679,12 +756,11 @@ substitutes, disclosed in the implementation report.
 
 ## 11. Open questions for the reviewer (non-blocking defaults)
 
-1. §2.6's `idx_rust_fee_cycles_completed` — keep (cheap, helps gate
-   queries) or strike as scope creep? Default: keep.
-2. `AUTHORIZATION_DISPATCH_FRESHNESS = 30 s` — acceptable ceiling?
-3. `RPC_BRIDGE_RECV_TIMEOUT` — final constant to be fixed against
-   merged Task 57 composition per §3.3's derivation; reviewer confirms
-   the derivation method rather than the number.
+1. `AUTHORIZATION_DISPATCH_FRESHNESS = 30 s` and
+   `OPEN_BRACKET_MAX_LIFETIME = 30 s` — acceptable ceilings?
+2. `RPC_BRIDGE_RECV_TIMEOUT = 30 s` as a diagnostic-freshness bound
+   (explicitly NOT a legitimate-backlog bound, per §3.3) — confirm the
+   framing.
 
 ## Appendix A — F1–F14 correction mapping
 
@@ -702,10 +778,19 @@ substitutes, disclosed in the implementation report.
 | F10 unpersisted attribution | claim withdrawn; generic conservative quarantine documented; deny string documented non-durable | §3.8 | (crash row in §7) |
 | F11 ambiguous batch bound | one GLOBAL cap + fixed-order round-robin + cross-sweep cursor; worst-case occupancy stated | §2.4 | R4 |
 | F12 dual-ledger rollback | explicit residual trust boundary; single-loss test pair; runbook binds ledger identity into start-arg identity + restore recovery procedure (fresh arm, nonces treated burned) | §5.5, §7 | A1, A1b |
-| F13 20 s not queue-proven | semantics pinned (section-local read failure, never owner-death proof); bound re-derived over merged post-57 composition; queued-work test | §3.3 | T2 |
+| F13 20 s not queue-proven | superseded by R2-F1's two-phase redesign (Appendix B): admission refused via `try_send_query`, response bounded as a diagnostic-freshness timeout, derivation over the actual bounded 64-capacity ingress | §3.3 | T2a, T2b |
 | F14 "bounded every table" overstated | four-class model with explicit append-only growth contract + manual archival boundary; same-second no-retry pinned | §2.5, §4.2 | F14 |
 
-Cleanups: §10.1 (strict after-57 sequencing — corrected), §2.1/§2.7
+## Appendix B — R2-F1–R2-F4 correction mapping (revision 3)
+
+| finding | disposition | sections | tests |
+|---|---|---|---|
+| R2-F1 wrong queue + unbounded admission | §1.1 queue facts corrected (bounded Tokio MPSC cap 64 behind `SchedulerIngress`; `std_mpsc` = reply channel only); two-phase bridge: `try_send_query` admission refusal (`owner_queue_saturated`, provably nothing enqueued, Query-only so the async-backpressure pin survives for effectful messages) + `recv_timeout` response (`owner_response_timeout`); derivation redone over 63-deep bounded backlog incl. `handle_failed_forward`'s synchronous store work; 30 s explicitly a diagnostic-freshness bound, NOT a legitimate-backlog bound; neither error proves owner death | §1.1, §1.3, §3.3, §8 | T2a, T2b (+ independent mutations) |
+| R2-F2 stale retained OpenBracket | `close()` checks `opened_at` against `OPEN_BRACKET_MAX_LIFETIME` (30 s, monotonic) AND revalidates the first reading's age with authorization-time `now`; new `StaleOpenBracket` deny variant; fetch #2 SKIPPED when stale (call-count contract: 1 fetch refused / 2 fetches success); distinct from the minted-authorization dispatch deadline | §4.2, §8 | F5d (+ F5b stays independent) |
+| R2-F3 token has no safe test seam | pure private `resolve_startup_mode_kernel` (existing matrix migrates verbatim, order-independent, no global) + guarded public wrapper owning the once-only token; NO reset/factory/cfg(test) constructor exists; exactly one test touches the global guard; compile_fail + action-surface pins | §5.4 | A5, A5b, compile_fail |
+| R2-F4 unproven index | `idx_rust_fee_cycles_completed` removed; DDL additions reduced to `rust_consumed_arm_nonces`; future task must bring query-plan evidence | §2.6, §6 | — |
+
+Round-1 cleanups: §10.1 (strict after-57 sequencing — corrected), §2.1/§2.7
 (`rust_loop_health` Class C, `sqlite_sequence` allowlist), §9 (matrix
 reworked per above), §2.3 (30 d kept; forwards constants removed; no
 operator sweep RPC), line references re-derived against `a598239`
