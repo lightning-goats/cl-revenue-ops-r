@@ -21,9 +21,11 @@ use revops_lnplus::types::{MySwaps, NotificationEntry, Rating, SwapDetail, SwapL
 
 // ============================= Logger =====================================
 
+/// `Mutex` (not `RefCell`) so the fake is `Send + Sync` — the sqlite
+/// store's logger crosses threads since Task 61 4D.
 #[derive(Default)]
 pub struct FakeLogger {
-    pub lines: RefCell<Vec<(LogLevel, String)>>,
+    pub lines: std::sync::Mutex<Vec<(LogLevel, String)>>,
 }
 
 impl FakeLogger {
@@ -32,13 +34,15 @@ impl FakeLogger {
     }
     pub fn contains(&self, needle: &str) -> bool {
         self.lines
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .any(|(_, msg)| msg.contains(needle))
     }
     pub fn count_containing(&self, needle: &str) -> usize {
         self.lines
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .filter(|(_, msg)| msg.contains(needle))
             .count()
@@ -47,7 +51,10 @@ impl FakeLogger {
 
 impl Logger for FakeLogger {
     fn log(&self, level: LogLevel, message: &str) {
-        self.lines.borrow_mut().push((level, message.to_string()));
+        self.lines
+            .lock()
+            .unwrap()
+            .push((level, message.to_string()));
     }
 }
 

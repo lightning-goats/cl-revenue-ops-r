@@ -34,15 +34,26 @@ pub struct ObserverRuntime {
 /// ```
 pub struct ObserverPassSet {
     fee: Option<Arc<crate::fee_scheduler::FeeObserverPass>>,
+    lnplus: Option<Arc<crate::lnplus_runtime::LnPlusObserverPass>>,
 }
 
 impl ObserverPassSet {
     pub fn empty() -> Self {
-        Self { fee: None }
+        Self {
+            fee: None,
+            lnplus: None,
+        }
     }
 
     pub fn with_fee(mut self, pass: Arc<crate::fee_scheduler::FeeObserverPass>) -> Self {
         self.fee = Some(pass);
+        self
+    }
+
+    /// Task 61 4D: the REAL LN+ observer pass (watcher-only; observer
+    /// adapter types with pure action refusals — see `lnplus_runtime`).
+    pub fn with_lnplus(mut self, pass: Arc<crate::lnplus_runtime::LnPlusObserverPass>) -> Self {
+        self.lnplus = Some(pass);
         self
     }
 }
@@ -74,9 +85,15 @@ impl ObserverRuntime {
         if passes.fee.is_some() && !mode.autonomous_shadow() {
             anyhow::bail!("passive observer cannot start the autonomous fee pass");
         }
+        if passes.lnplus.is_some() && !mode.autonomous_shadow() {
+            anyhow::bail!("passive observer cannot start the LN+ observer pass");
+        }
         let mut generic: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
         if let Some(fee) = passes.fee {
             generic.insert(LoopId::Fee, fee);
+        }
+        if let Some(lnplus) = passes.lnplus {
+            generic.insert(LoopId::LnPlus, lnplus);
         }
         Self::start_internal(store, generic).await
     }

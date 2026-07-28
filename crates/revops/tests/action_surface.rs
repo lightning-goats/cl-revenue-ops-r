@@ -202,12 +202,68 @@ fn observer_runtime_source_cannot_name_any_action_capability() {
         "ClnFeeBroadcaster",
         "PaymentMode::Live",
         "ExecutionMode::Armed",
+        // Task 61 4D: the action-capable CLN adapter must never enter
+        // observer composition — the observer holds ObserverClnChain
+        // (read-only refusals) instead.
+        "ClnChainAdapter",
     ] {
         assert!(
             !observer.contains(forbidden),
             "ObserverRuntime construction and fields must not name {forbidden}"
         );
     }
+}
+
+/// Task 61 4D: the LN+ observer runtime module is the observer-side
+/// composition for LN+ — it must be structurally unable to hold an
+/// action capability. Any of these names appearing there means an
+/// action-capable object (or the mode that arms one) leaked into
+/// observer composition.
+#[test]
+fn lnplus_observer_runtime_source_cannot_name_any_action_capability() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/lnplus_runtime.rs")).unwrap();
+    for forbidden in [
+        "ClnChainAdapter",
+        "ClnFeeBroadcaster",
+        "ExecutionMode::Armed",
+        "PaymentMode::Live",
+        "fundchannel",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "lnplus_runtime.rs must not name {forbidden}"
+        );
+    }
+    // And it must hold the read-only observer types, not raw trait
+    // objects a caller could substitute with armed implementations.
+    assert!(source.contains("ObserverClnChain"));
+    assert!(source.contains("ObserverLnPlusApi"));
+}
+
+/// Task 61 4C/4D: the quoted CLN RPC method literal `"fundchannel"` has
+/// exactly ONE sanctioned call site — the concrete chain adapter. Same
+/// allowlist discipline as `setchannel`.
+#[test]
+fn fundchannel_call_literal_confined_to_the_lnplus_adapter() {
+    let root = workspace_root();
+    let mut violations = Vec::new();
+    for path in non_test_rust_sources(&root) {
+        let rel = relative_to(&root, &path);
+        if rel == "crates/revops/src/lnplus_adapters.rs" {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        if contents.contains("\"fundchannel\"") {
+            violations.push(rel);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "the quoted literal \"fundchannel\" must appear only in the concrete adapter -- found \
+         it (also) in: {violations:?}"
+    );
 }
 
 #[test]
@@ -282,20 +338,23 @@ fn scheduler_has_no_unbounded_owner_or_wake_ingress() {
 }
 
 #[test]
-fn production_composition_spawns_only_the_real_fee_pass() {
+fn production_composition_spawns_only_the_real_fee_and_lnplus_passes() {
+    // Task 57 established fee as the only real pass; Task 61 4D adds the
+    // REAL LN+ observer pass. Rebalance/planner/Boltz stay not_wired
+    // until Tasks 5-7 — no success-shaped no-op owners.
     let root = workspace_root();
     let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
     assert_eq!(
         source.matches("passes.with_fee(").count(),
         1,
-        "Task 57 production must instantiate exactly one real pass"
+        "production must instantiate exactly one real fee pass"
     );
-    for unwired in [
-        "with_rebalance(",
-        "with_planner(",
-        "with_lnplus(",
-        "with_boltz(",
-    ] {
+    assert_eq!(
+        source.matches("passes.with_lnplus(").count(),
+        1,
+        "Task 61 production must instantiate exactly one real LN+ pass"
+    );
+    for unwired in ["with_rebalance(", "with_planner(", "with_boltz("] {
         assert!(
             !source.contains(unwired),
             "{unwired} must remain not_wired without a real pass"

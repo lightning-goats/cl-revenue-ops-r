@@ -191,7 +191,7 @@ impl From<revops_db::budget::BudgetError> for OpenError {
 /// from more than one OS thread.
 pub struct SqliteLnPlusDb {
     conn: Mutex<Connection>,
-    logger: Box<dyn Logger>,
+    logger: Box<dyn Logger + Send + Sync>,
 }
 
 impl SqliteLnPlusDb {
@@ -200,7 +200,7 @@ impl SqliteLnPlusDb {
     /// own database file — never lnnode's production `revenue_ops.db`
     /// (see `revops_db::budget`'s module doc for why: the Rust plugin
     /// does not hold production write authority pre-cutover).
-    pub fn open(path: &Path, logger: Box<dyn Logger>) -> Result<Self, OpenError> {
+    pub fn open(path: &Path, logger: Box<dyn Logger + Send + Sync>) -> Result<Self, OpenError> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;

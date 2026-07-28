@@ -2341,6 +2341,7 @@ async fn main() -> Result<()> {
         )
     });
     let mut fee_cadence = None;
+    let mut lnplus_cadence = None;
     let authority_runtime = match authority_plan {
         revops::fee_mode::AuthorityPlan::Live(broadcaster) => {
             if let Some(handle) = observer_db.clone() {
@@ -2374,6 +2375,40 @@ async fn main() -> Result<()> {
                     );
                     let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
+                    let mut lnplus_pass = None;
+                    if autonomous_shadow {
+                        // Task 61 4D: the REAL LN+ observer pass, against
+                        // the Rust observer parallel-state DB (collision
+                        // with production already vetoed upstream).
+                        // Watcher-only + DryRun + read-side observer
+                        // adapter types; disabled-by-default via the LN+
+                        // store's own config until an operator enables it.
+                        match observer_db_path_expanded.as_ref() {
+                            Some(lnplus_store_path) => {
+                                match revops::lnplus_runtime::LnPlusObserverPass::observer(
+                                    revops::lnplus_runtime::LnPlusRuntimeConfig {
+                                        store_path: lnplus_store_path.clone(),
+                                        socket_path: init_socket_path.clone(),
+                                        base_url: revops_lnplus::http::BASE_URL.to_string(),
+                                        http_timeout: std::time::Duration::from_secs(20),
+                                        rpc_timeout: revops::lnplus_adapters::DEFAULT_RPC_TIMEOUT,
+                                    },
+                                ) {
+                                    Ok(pass) => {
+                                        passes = passes.with_lnplus(pass.clone());
+                                        lnplus_pass = Some(pass);
+                                    }
+                                    Err(error) => eprintln!(
+                                        "revops: LN+ observer pass FAILED to build: {error:#}; \
+                                         LN+ loop remains not_wired"
+                                    ),
+                                }
+                            }
+                            None => eprintln!(
+                                "revops: LN+ loop not wired: observer DB path unavailable"
+                            ),
+                        }
+                    }
                     if autonomous_shadow {
                         match (production_db_path_expanded.as_ref(), journal_dir.as_ref()) {
                             (Some(prod_db_path), Some(journal_dir)) => {
@@ -2427,6 +2462,14 @@ async fn main() -> Result<()> {
                             revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
                         ));
                     }
+                    if let (Some(pass), Some(handle)) = (
+                        lnplus_pass,
+                        runtime.handle(revops_db::loop_health::LoopId::LnPlus),
+                    ) {
+                        lnplus_cadence = Some(
+                            revops::lnplus_runtime::LnPlusCadenceActivation::new(handle, pass),
+                        );
+                    }
                     revops::runtime::AuthorityRuntime::Observer(runtime)
                 }
             }
@@ -2452,6 +2495,9 @@ async fn main() -> Result<()> {
 
     if let Some(fee_cadence) = fee_cadence {
         fee_cadence.activate();
+    }
+    if let Some(lnplus_cadence) = lnplus_cadence {
+        lnplus_cadence.activate();
     }
 
     // Startup hydration runs as a background task, off the init-handshake

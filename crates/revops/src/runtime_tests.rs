@@ -598,3 +598,104 @@ async fn passive_observer_token_rejects_a_fee_pass() {
         "mode/pass-set refusal must precede registration and reconciliation"
     );
 }
+
+/// Task 61 4D: the REAL LnPlusObserverPass — not a fake — completes a
+/// pass through the bounded single-flight owner and records genuine loop
+/// health. Built with unreachable adapters and a disabled store: the pass
+/// is a clean skip performing zero network work, which is exactly the
+/// production default until an operator enables observation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_lnplus_pass_completes_through_the_bounded_owner() {
+    let store = Arc::new(MemoryStore::default());
+    let dir = tempfile::tempdir().unwrap();
+    let pass = crate::lnplus_runtime::LnPlusObserverPass::observer(
+        crate::lnplus_runtime::LnPlusRuntimeConfig {
+            store_path: dir.path().join("observer.db"),
+            socket_path: dir.path().join("no-such-lightning-rpc"),
+            base_url: "http://127.0.0.1:1/api/2".to_string(),
+            http_timeout: std::time::Duration::from_millis(200),
+            rpc_timeout: std::time::Duration::from_millis(200),
+        },
+    )
+    .expect("build real pass");
+    let mut passes: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
+    passes.insert(LoopId::LnPlus, pass);
+    let runtime = ObserverRuntime::start_for_tests(store.clone(), passes)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.row(LoopId::LnPlus).wiring_status,
+        WiringStatus::Ready,
+        "the real LN+ pass registers the loop as genuinely wired"
+    );
+    let handle = runtime.handle(LoopId::LnPlus).expect("lnplus handle");
+    assert_eq!(
+        handle
+            .request(RequestKey::from("fixed_interval"))
+            .await
+            .unwrap(),
+        Admission::Enqueued
+    );
+    handle.wait_idle().await;
+    assert_eq!(
+        store.row(LoopId::LnPlus).terminal_generation,
+        1,
+        "one real pass completed through begin/finish"
+    );
+}
+
+/// Task 61 4D: the passive-observer guard covers the LN+ pass exactly as
+/// it covers the fee pass — a passive mode cannot start ANY real pass,
+/// and the refusal precedes every store write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passive_observer_refuses_the_lnplus_pass_before_any_store_write() {
+    use crate::fee_mode::{validate_fee_mode, AuthorityPlan, ModeFlags};
+    use revops_db::fee_runway::FeeStateSnapshot;
+    let mode = validate_fee_mode(
+        ModeFlags {
+            observer: true,
+            fee_dryrun: false,
+            fee_broadcast: false,
+            fee_stateful_shadow: false,
+        },
+        None,
+        &FeeStateSnapshot::default(),
+        &revops_db::fee_runway::SeedBindingState::VirginStore,
+    )
+    .unwrap();
+    let observer_mode = match mode.into_authority_plan(|_| -> () {
+        panic!("passive observer construction touched action factory")
+    }) {
+        AuthorityPlan::Observer(token) => token,
+        AuthorityPlan::Live(()) => unreachable!(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pass = crate::lnplus_runtime::LnPlusObserverPass::observer(
+        crate::lnplus_runtime::LnPlusRuntimeConfig {
+            store_path: dir.path().join("observer.db"),
+            socket_path: dir.path().join("no-such-lightning-rpc"),
+            base_url: "http://127.0.0.1:1/api/2".to_string(),
+            http_timeout: std::time::Duration::from_millis(200),
+            rpc_timeout: std::time::Duration::from_millis(200),
+        },
+    )
+    .unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let result = ObserverRuntime::start(
+        observer_mode,
+        store.clone(),
+        crate::runtime::ObserverPassSet::empty().with_lnplus(pass),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("passive observer accepted an LN+ pass"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("passive observer cannot start the LN+ observer pass"));
+    assert!(
+        store.writes().is_empty(),
+        "mode/pass-set refusal must precede registration and reconciliation"
+    );
+}

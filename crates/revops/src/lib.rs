@@ -17,6 +17,7 @@ pub mod fee_state;
 pub mod fee_triggers;
 pub mod hydration;
 pub mod lnplus_adapters;
+pub mod lnplus_runtime;
 pub mod loop_health;
 pub mod notify;
 pub mod options_table;
