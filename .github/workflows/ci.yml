@@ -5,6 +5,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Check out pinned Python authority source
+        uses: actions/checkout@v4
+        with:
+          repository: lightning-goats/cl_revenue_ops
+          ref: e579de8df523f174283fc2aa21f395c8ef006ac6
+          path: _python-authority
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install pytest
+      - name: Verify generated whole-plugin inventory
+        env:
+          REVOPS_PYTHON_REPO: ${{ github.workspace }}/_python-authority
+        run: |
+          pytest -q tools/tests/test_gen_plugin_inventory.py
+          python tools/port/gen_plugin_inventory.py \
+            --python-repo "$REVOPS_PYTHON_REPO" \
+            --python-commit e579de8df523f174283fc2aa21f395c8ef006ac6 \
+            --repo-root . --check
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
       - run: cargo fmt --all --check

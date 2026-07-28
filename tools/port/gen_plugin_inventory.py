@@ -22,8 +22,7 @@ from typing import Any
 
 
 DEFAULT_PYTHON_COMMIT = "e579de8df523f174283fc2aa21f395c8ef006ac6"
-RUST_AUDIT_BASE = "c68fddd707a4f53dda691dcba7c04d659581b880"
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 
 PYTHON_FILES = (
     "cl-revenue-ops.py",
@@ -61,6 +60,42 @@ FULL_EFFECTIVE_RPCS = {
     "revenue-planner-history",
     "revenue-planner-status",
     "revenue-spend-ledger",
+}
+
+# Registration is mechanically derived; effective/review state is not. New
+# registrations must be classified here before inventory generation succeeds.
+CLASSIFIED_REACHABLE_RPCS = {
+    "revenue-analyze",
+    "revenue-capacity-report",
+    "revenue-config",
+    "revenue-dashboard",
+    "revenue-econ-snapshot",
+    "revenue-fee-debug",
+    "revenue-health",
+    "revenue-history",
+    "revenue-hot-channel-protection-peers",
+    "revenue-list-banned",
+    "revenue-list-ignored",
+    "revenue-planner-candidate-sources",
+    "revenue-planner-candidates",
+    "revenue-planner-history",
+    "revenue-planner-status",
+    "revenue-policy",
+    "revenue-profitability",
+    "revenue-report",
+    "revenue-spend-ledger",
+    "revenue-status",
+}
+
+CLASSIFIED_RUST_ONLY_METHODS = {
+    "revenue-fee-wake",
+    "revenue-ping",
+    "revenue-rebalance-plan",
+    "revops-fee-runway-status",
+}
+
+REVIEW_EVIDENCE = {
+    name: "task-8-core-parity-audit" for name in FULL_EFFECTIVE_RPCS
 }
 
 # Compiled means an exact-contract response module/builder exists, not merely
@@ -342,11 +377,15 @@ def derive_rust_methods(repo_root: Path) -> set[str]:
     if missing:
         raise ValueError(f"unresolved Rust rpcmethod name bindings: {missing}")
     registered = {bindings[variable] for variable in registered_vars}
-    if len(registered_vars) != 24 or len(registered) != 24:
+    if len(registered_vars) != len(registered):
         raise ValueError(
-            "expected 24 unique Rust registrations at audit base, got "
-            f"{len(registered_vars)}/{len(registered)}"
+            "Rust RPC registrations are not unique: "
+            f"{len(registered_vars)} registrations/{len(registered)} names"
         )
+    classified = CLASSIFIED_REACHABLE_RPCS | CLASSIFIED_RUST_ONLY_METHODS
+    unclassified = sorted(registered - classified)
+    if unclassified:
+        raise ValueError(f"unclassified new Rust RPC registrations: {unclassified}")
     return registered
 
 
@@ -398,7 +437,8 @@ def rpc_state(name: str, reachable: set[str]) -> dict[str, Any]:
         "reachable": is_reachable,
         "effective": effective,
         "transport_proven": external,
-        "review": "passed" if is_reachable else "pending",
+        "review": "passed" if name in REVIEW_EVIDENCE else "pending",
+        "review_evidence": REVIEW_EVIDENCE.get(name),
         "soak": "pending" if external != "not_required" else "not_required",
     }
 
@@ -410,102 +450,225 @@ def first_line(sources: dict[str, bytes], path: str, needle: bytes) -> int:
     raise ValueError(f"cannot find {needle!r} in pinned {path}")
 
 
-def ref(sources: dict[str, bytes], path: str, needle: bytes) -> dict[str, Any]:
-    return {"source_file": path, "source_line": first_line(sources, path, needle)}
+def dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return None
+
+
+def rpc_call_refs(
+    sources: dict[str, bytes], path: str, method: str
+) -> list[dict[str, Any]]:
+    tree = ast.parse(sources[path].decode("utf-8"))
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = dotted_name(node.func) or ""
+        called = None
+        if function.endswith("._rpc_call"):
+            if node.args and isinstance(node.args[0], ast.Constant):
+                called = node.args[0].value
+        elif function.endswith(".rpc.call"):
+            if node.args and isinstance(node.args[0], ast.Constant):
+                called = node.args[0].value
+        elif ".rpc." in function:
+            called = function.rsplit(".", 1)[-1]
+        if called == method:
+            lines.append(node.lineno)
+    if not lines:
+        raise ValueError(f"cannot find structural RPC call {method!r} in pinned {path}")
+    return [
+        {"source_file": path, "source_line": line} for line in sorted(set(lines))
+    ]
+
+
+def dotted_call_refs(
+    sources: dict[str, bytes], path: str, function_name: str
+) -> list[dict[str, Any]]:
+    tree = ast.parse(sources[path].decode("utf-8"))
+    lines = sorted(
+        {
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and dotted_name(node.func) == function_name
+        }
+    )
+    if not lines:
+        raise ValueError(
+            f"cannot find structural call {function_name!r} in pinned {path}"
+        )
+    return [{"source_file": path, "source_line": line} for line in lines]
+
+
+def function_ref(
+    sources: dict[str, bytes], path: str, function_name: str
+) -> dict[str, Any]:
+    tree = ast.parse(sources[path].decode("utf-8"))
+    lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+    ]
+    if len(lines) != 1:
+        raise ValueError(
+            f"expected one function {function_name!r} in pinned {path}, got {lines}"
+        )
+    return {"source_file": path, "source_line": lines[0]}
+
+
+def boundary(
+    boundary_id: str,
+    evidence: list[dict[str, Any]],
+    owner_task: str,
+    rust_adapter: str | None = None,
+    rust_transport: str = "missing",
+) -> dict[str, Any]:
+    return {
+        "id": boundary_id,
+        "python_evidence": evidence,
+        "rust_adapter": rust_adapter,
+        "rust_transport": rust_transport,
+        "owner_task": owner_task,
+    }
 
 
 def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
+    data = "modules/data_service.py"
+    rebalance = "modules/rebalance_native_executor_v2.py"
     rows = [
-        {
-            "id": "setchannel",
-            "python_evidence": [ref(sources, "modules/data_service.py", b"setchannel")],
-            "rust_adapter": "fee_execution::ClnFeeBroadcaster",
-            "rust_transport": "local_fake_proven",
-            "owner_task": "fee-port-reviewed",
-        },
-        {
-            "id": "sendpay_waitsendpay",
-            "python_evidence": [
-                ref(sources, "modules/data_service.py", b"sendpay"),
-                ref(
-                    sources,
-                    "modules/rebalance_native_executor_v2.py",
-                    b"waitsendpay",
-                ),
-            ],
-            "rust_adapter": None,
-            "rust_transport": "missing",
-            "owner_task": "hexmem-60",
-        },
-        {
-            "id": "fundchannel",
-            "python_evidence": [
-                ref(sources, "modules/lnplus_swaps.py", b"fundchannel"),
-                ref(sources, "modules/capacity_planner.py", b"fundchannel"),
-            ],
-            "rust_adapter": None,
-            "rust_transport": "missing",
-            "owner_task": "hexmem-61-and-62",
-        },
-        {
-            "id": "close",
-            "python_evidence": [
-                ref(
-                    sources,
-                    "modules/capacity_planner.py",
-                    b'plugin.rpc.call("close"',
-                )
-            ],
-            "rust_adapter": None,
-            "rust_transport": "missing",
-            "owner_task": "hexmem-62",
-        },
-        {
-            "id": "signmessage",
-            "python_evidence": [
-                ref(sources, "modules/data_service.py", b"signmessage")
-            ],
-            "rust_adapter": "revops_lnplus::Signer trait only",
-            "rust_transport": "trait_fake_only",
-            "owner_task": "hexmem-61",
-        },
-        {
-            "id": "datastore",
-            "python_evidence": [ref(sources, "modules/data_service.py", b"datastore")],
-            "rust_adapter": None,
-            "rust_transport": "missing",
-            "owner_task": "task-8-core-parity",
-        },
-        {
-            "id": "boltzcli",
-            "python_evidence": [
-                ref(sources, "modules/boltz_manager.py", b"subprocess.run")
-            ],
-            "rust_adapter": "revops_boltz::ProcessBoltzCli",
-            "rust_transport": "local_fake_proven_unreachable",
-            "owner_task": "hexmem-63",
-        },
-        {
-            "id": "lnplus_https",
-            "python_evidence": [
-                ref(sources, "modules/lnplus_swaps.py", b"urllib.request")
-            ],
-            "rust_adapter": "revops_lnplus::HttpTransport trait only",
-            "rust_transport": "missing",
-            "owner_task": "hexmem-61",
-        },
-        {
-            "id": "dynamic_config",
-            "python_evidence": [
-                ref(sources, "cl-revenue-ops.py", b"def _refresh_dynamic_config")
-            ],
-            "rust_adapter": "PythonOptionCache::refresh",
-            "rust_transport": "local_fake_proven",
-            "owner_task": "completed",
-        },
+        boundary(
+            "setchannel",
+            rpc_call_refs(sources, data, "setchannel"),
+            "fee-port-reviewed",
+            "fee_execution::ClnFeeBroadcaster",
+            "local_fake_proven",
+        ),
+        boundary(
+            "sendpay_waitsendpay",
+            rpc_call_refs(sources, data, "sendpay")
+            + rpc_call_refs(sources, data, "waitsendpay")
+            + rpc_call_refs(sources, rebalance, "sendpay")
+            + rpc_call_refs(sources, rebalance, "waitsendpay"),
+            "hexmem-60",
+        ),
+        boundary(
+            "fundchannel",
+            rpc_call_refs(sources, data, "fundchannel")
+            + rpc_call_refs(sources, "modules/lnplus_swaps.py", "fundchannel")
+            + rpc_call_refs(sources, "modules/capacity_planner.py", "fundchannel"),
+            "hexmem-61-and-62",
+        ),
+        boundary(
+            "close",
+            rpc_call_refs(sources, data, "close")
+            + rpc_call_refs(sources, "modules/capacity_planner.py", "close"),
+            "hexmem-62",
+        ),
+        boundary("connect", rpc_call_refs(sources, data, "connect"), "hexmem-61"),
+        boundary(
+            "signmessage",
+            rpc_call_refs(sources, data, "signmessage"),
+            "hexmem-61",
+            "revops_lnplus::Signer trait only",
+            "trait_fake_only",
+        ),
+        boundary(
+            "invoice",
+            rpc_call_refs(sources, data, "invoice")
+            + rpc_call_refs(sources, rebalance, "invoice"),
+            "hexmem-60",
+        ),
+        boundary(
+            "delpay",
+            rpc_call_refs(sources, data, "delpay")
+            + rpc_call_refs(sources, rebalance, "delpay"),
+            "hexmem-60",
+        ),
+        boundary(
+            "delinvoice",
+            rpc_call_refs(sources, data, "delinvoice")
+            + rpc_call_refs(sources, rebalance, "delinvoice"),
+            "hexmem-60",
+        ),
+        boundary("pay", rpc_call_refs(sources, data, "pay"), "task-8-core-parity"),
+        boundary(
+            "datastore",
+            rpc_call_refs(sources, data, "datastore"),
+            "task-8-core-parity",
+        ),
+        boundary(
+            "boltzcli",
+            dotted_call_refs(sources, "modules/boltz_manager.py", "subprocess.run"),
+            "hexmem-63",
+            "revops_boltz::ProcessBoltzCli",
+            "local_fake_proven_unreachable",
+        ),
+        boundary(
+            "lnplus_https",
+            dotted_call_refs(sources, "modules/lnplus_swaps.py", "urllib.request.urlopen"),
+            "hexmem-61",
+            "revops_lnplus::HttpTransport trait only",
+        ),
+        boundary(
+            "dynamic_config",
+            [function_ref(sources, "cl-revenue-ops.py", "_refresh_dynamic_config")],
+            "completed",
+            "PythonOptionCache::refresh",
+            "local_fake_proven",
+        ),
     ]
+    askrene = {
+        "askrene_age": "askrene-age",
+        "askrene_bias_channel": "askrene-bias-channel",
+        "askrene_bias_node": "askrene-bias-node",
+        "askrene_create_layer": "askrene-create-layer",
+        "askrene_disable_node": "askrene-disable-node",
+        "askrene_inform_channel": "askrene-inform-channel",
+        "askrene_remove_layer": "askrene-remove-layer",
+        "askrene_reserve": "askrene-reserve",
+        "askrene_unreserve": "askrene-unreserve",
+        "askrene_update_channel": "askrene-update-channel",
+    }
+    rows.extend(
+        boundary(boundary_id, rpc_call_refs(sources, data, method), "hexmem-60")
+        for boundary_id, method in askrene.items()
+    )
     return sorted(rows, key=lambda row: row["id"])
 
+
+def git_text(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
+    return result.stdout.strip()
+
+
+def rust_source_identity(repo_root: Path) -> dict[str, str]:
+    relative = "crates/revops/src/main.rs"
+    source_commit = git_text(repo_root, "log", "-1", "--format=%H", "--", relative)
+    source_tree = git_text(repo_root, "rev-parse", f"{source_commit}^{{tree}}")
+    source_blob = git_text(repo_root, "rev-parse", f"{source_commit}:{relative}")
+    working_blob = git_text(repo_root, "hash-object", relative)
+    if working_blob != source_blob:
+        raise ValueError(
+            "inspected Rust main.rs is not committed; commit it before regenerating"
+        )
+    return {
+        "rust_source_commit": source_commit,
+        "rust_source_tree": source_tree,
+        "rust_main_blob_oid": source_blob,
+        "rust_main_sha256": sha256((repo_root / relative).read_bytes()),
+    }
 
 def generate(
     python_repo: Path, python_commit: str, repo_root: Path
@@ -521,10 +684,12 @@ def generate(
     python_names = {entry["name"] for entry in rpcs}
     reachable = registered & python_names
     rust_only = registered - python_names
-    if len(reachable) != 20 or len(rust_only) != 4:
+    unclassified_reachable = sorted(reachable - CLASSIFIED_REACHABLE_RPCS)
+    unclassified_rust_only = sorted(rust_only - CLASSIFIED_RUST_ONLY_METHODS)
+    if unclassified_reachable or unclassified_rust_only:
         raise ValueError(
-            "expected 20 Python-equivalent plus four Rust-only methods, got "
-            f"{len(reachable)}+{len(rust_only)}"
+            "unclassified Rust registrations: "
+            f"python={unclassified_reachable}, rust_only={unclassified_rust_only}"
         )
     for entry in rpcs:
         entry["owner_task"] = owner_task(entry["name"])
@@ -534,10 +699,7 @@ def generate(
         "generator": "tools/port/gen_plugin_inventory.py",
         "generator_version": GENERATOR_VERSION,
         "python_source_commit": python_commit,
-        "rust_audit_base_commit": RUST_AUDIT_BASE,
-        "rust_main_sha256": sha256(
-            (repo_root / "crates/revops/src/main.rs").read_bytes()
-        ),
+        **rust_source_identity(repo_root),
         "source_sha256": {
             path: sha256(sources[path]) for path in sorted(sources)
         },

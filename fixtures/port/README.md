@@ -26,6 +26,16 @@ python3 tools/port/gen_plugin_inventory.py \
   --repo-root .
 ```
 
-Use `--check` in verification to refuse any stale checked-in artifact. The
-generator also refreshes `fixtures/options.json`; this is what restores the two
-fee-authority/replay-capture options that the prior 119-entry fixture omitted.
+Use `--check` in verification to refuse any stale checked-in artifact. CI
+checks out the Python repository at the exact pinned commit, runs the focused
+Python tests, and runs this drift check, so it never depends on a host-specific
+path. The generator also refreshes `fixtures/options.json`; this is what restores
+the two fee-authority/replay-capture options that the prior 119-entry fixture
+omitted.
+
+External-boundary evidence is derived from structural AST call sites, never a
+first text match. New Rust RPC registrations fail closed until explicitly
+classified. Reachability does not imply review: only methods named in the
+review-evidence registry are marked passed; all others remain pending. Rust
+provenance records the committed source commit, tree, and blob that supplied the
+inspected `main.rs`, and generation refuses a dirty replacement.

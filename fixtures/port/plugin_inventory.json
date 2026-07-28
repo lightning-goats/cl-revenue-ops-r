@@ -1,6 +1,126 @@
 {
   "external_boundaries": [
     {
+      "id": "askrene_age",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 419
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_bias_channel",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 408
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_bias_node",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 401
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_create_layer",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 379
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_disable_node",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 412
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_inform_channel",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 429
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_remove_layer",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 385
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_reserve",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 433
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_unreserve",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 437
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "askrene_update_channel",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 394
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
       "id": "boltzcli",
       "owner_task": "hexmem-63",
       "python_evidence": [
@@ -17,8 +137,24 @@
       "owner_task": "hexmem-62",
       "python_evidence": [
         {
+          "source_file": "modules/data_service.py",
+          "source_line": 288
+        },
+        {
           "source_file": "modules/capacity_planner.py",
           "source_line": 3977
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "connect",
+      "owner_task": "hexmem-61",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 296
         }
       ],
       "rust_adapter": null,
@@ -30,7 +166,39 @@
       "python_evidence": [
         {
           "source_file": "modules/data_service.py",
-          "source_line": 445
+          "source_line": 473
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "delinvoice",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 344
+        },
+        {
+          "source_file": "modules/rebalance_native_executor_v2.py",
+          "source_line": 391
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "delpay",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 340
+        },
+        {
+          "source_file": "modules/rebalance_native_executor_v2.py",
+          "source_line": 386
         }
       ],
       "rust_adapter": null,
@@ -53,12 +221,32 @@
       "owner_task": "hexmem-61-and-62",
       "python_evidence": [
         {
+          "source_file": "modules/data_service.py",
+          "source_line": 281
+        },
+        {
           "source_file": "modules/lnplus_swaps.py",
-          "source_line": 1366
+          "source_line": 1672
         },
         {
           "source_file": "modules/capacity_planner.py",
-          "source_line": 658
+          "source_line": 3060
+        }
+      ],
+      "rust_adapter": null,
+      "rust_transport": "missing"
+    },
+    {
+      "id": "invoice",
+      "owner_task": "hexmem-60",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 328
+        },
+        {
+          "source_file": "modules/rebalance_native_executor_v2.py",
+          "source_line": 431
         }
       ],
       "rust_adapter": null,
@@ -70,10 +258,22 @@
       "python_evidence": [
         {
           "source_file": "modules/lnplus_swaps.py",
-          "source_line": 20
+          "source_line": 93
         }
       ],
       "rust_adapter": "revops_lnplus::HttpTransport trait only",
+      "rust_transport": "missing"
+    },
+    {
+      "id": "pay",
+      "owner_task": "task-8-core-parity",
+      "python_evidence": [
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 349
+        }
+      ],
+      "rust_adapter": null,
       "rust_transport": "missing"
     },
     {
@@ -82,11 +282,19 @@
       "python_evidence": [
         {
           "source_file": "modules/data_service.py",
-          "source_line": 13
+          "source_line": 332
+        },
+        {
+          "source_file": "modules/data_service.py",
+          "source_line": 336
         },
         {
           "source_file": "modules/rebalance_native_executor_v2.py",
-          "source_line": 351
+          "source_line": 461
+        },
+        {
+          "source_file": "modules/rebalance_native_executor_v2.py",
+          "source_line": 462
         }
       ],
       "rust_adapter": null,
@@ -98,7 +306,7 @@
       "python_evidence": [
         {
           "source_file": "modules/data_service.py",
-          "source_line": 13
+          "source_line": 275
         }
       ],
       "rust_adapter": "fee_execution::ClnFeeBroadcaster",
@@ -241,10 +449,12 @@
   ],
   "provenance": {
     "generator": "tools/port/gen_plugin_inventory.py",
-    "generator_version": 1,
+    "generator_version": 2,
     "python_source_commit": "e579de8df523f174283fc2aa21f395c8ef006ac6",
-    "rust_audit_base_commit": "c68fddd707a4f53dda691dcba7c04d659581b880",
+    "rust_main_blob_oid": "edf0ebe0c70617fd201beb06939377c04711eee9",
     "rust_main_sha256": "b84cf5075553c2bf8918a97e1537414c7ddb0ab8ce9708e520b497fadc916e3f",
+    "rust_source_commit": "c94a54bd2bd87ce84004f8f926c5cb09d3baae4a",
+    "rust_source_tree": "ddfaf0ed11f06afe340880f25a8fadab74a08356",
     "source_sha256": {
       "cl-revenue-ops.py": "ec4abe1cd1887767f1d9680abb9065474f387ad9b1fa0b784dd3c01314f949e1",
       "modules/boltz_manager.py": "f419993948c4500cb5ae7f84d45659d6ddfbf9b354b068835e28e0f06565199a",
@@ -1235,7 +1445,8 @@
         "compiled": true,
         "effective": "placeholder",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1251,6 +1462,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1266,6 +1478,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1281,6 +1494,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1296,6 +1510,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1311,6 +1526,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1326,6 +1542,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1341,6 +1558,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1356,6 +1574,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1371,6 +1590,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1386,6 +1606,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1401,6 +1622,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1416,6 +1638,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1431,6 +1654,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1446,6 +1670,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1461,6 +1686,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1476,6 +1702,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1491,6 +1718,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1506,6 +1734,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1521,6 +1750,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1536,6 +1766,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1551,6 +1782,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1566,6 +1798,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1581,6 +1814,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven_unreachable"
       }
@@ -1595,7 +1829,8 @@
         "compiled": true,
         "effective": "placeholder",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1611,6 +1846,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1626,6 +1862,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1641,6 +1878,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1655,7 +1893,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1670,7 +1909,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1686,6 +1926,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1701,6 +1942,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1715,7 +1957,8 @@
         "compiled": true,
         "effective": "placeholder",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1731,6 +1974,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1746,6 +1990,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven"
       }
@@ -1760,7 +2005,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1775,7 +2021,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1791,6 +2038,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1805,7 +2053,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1821,6 +2070,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1836,6 +2086,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1851,6 +2102,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1866,6 +2118,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "missing"
       }
@@ -1881,6 +2134,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "missing"
       }
@@ -1896,6 +2150,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "missing"
       }
@@ -1911,6 +2166,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1926,6 +2182,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1941,6 +2198,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1956,6 +2214,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "missing"
       }
@@ -1971,6 +2230,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -1986,6 +2246,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2000,7 +2261,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2016,6 +2278,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2030,7 +2293,8 @@
         "compiled": true,
         "effective": "placeholder",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2046,6 +2310,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "missing"
       }
@@ -2061,6 +2326,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "missing"
       }
@@ -2076,6 +2342,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2090,7 +2357,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2106,6 +2374,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "pending",
         "transport_proven": "local_fake_proven"
       }
@@ -2121,6 +2390,7 @@
         "effective": "full",
         "reachable": true,
         "review": "passed",
+        "review_evidence": "task-8-core-parity-audit",
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2136,6 +2406,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2151,6 +2422,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2166,6 +2438,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2181,6 +2454,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2195,7 +2469,8 @@
         "compiled": true,
         "effective": "partial",
         "reachable": true,
-        "review": "passed",
+        "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2211,6 +2486,7 @@
         "effective": "unreachable",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2226,6 +2502,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2241,6 +2518,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
@@ -2256,6 +2534,7 @@
         "effective": "absent",
         "reachable": false,
         "review": "pending",
+        "review_evidence": null,
         "soak": "not_required",
         "transport_proven": "not_required"
       }
