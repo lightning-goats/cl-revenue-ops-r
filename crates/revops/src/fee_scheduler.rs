@@ -3724,39 +3724,60 @@ impl crate::loop_health::ObserverPass for FeeObserverPass {
     }
 }
 
-pub fn spawn_bounded_fee_trigger(
+pub struct FeeCadenceActivation {
     handle: crate::loop_health::LoopHandle,
     pass: std::sync::Arc<FeeObserverPass>,
     phase_offset_secs: u64,
-) {
-    tokio::spawn(async move {
-        let mut first = true;
-        loop {
-            let delay =
-                pass.interval_secs()
-                    .saturating_add(if first { phase_offset_secs } else { 0 });
-            first = false;
-            tokio::time::sleep(Duration::from_secs(delay.max(1))).await;
-            match handle
-                .request(crate::loop_health::RequestKey::from("fixed_interval"))
-                .await
-            {
-                Ok(
-                    crate::loop_health::Admission::Enqueued
-                    | crate::loop_health::Admission::Coalesced,
-                ) => {}
-                Ok(crate::loop_health::Admission::Dropped) => {
-                    eprintln!("revops: fee loop request dropped by bounded runtime")
-                }
-                Err(error) => {
-                    eprintln!(
-                        "revops: fee loop request persistence failed: {error:#}; trigger exiting"
-                    );
-                    return;
+}
+
+impl FeeCadenceActivation {
+    pub fn new(
+        handle: crate::loop_health::LoopHandle,
+        pass: std::sync::Arc<FeeObserverPass>,
+        phase_offset_secs: u64,
+    ) -> Self {
+        Self {
+            handle,
+            pass,
+            phase_offset_secs,
+        }
+    }
+
+    pub fn activate(self) {
+        let Self {
+            handle,
+            pass,
+            phase_offset_secs,
+        } = self;
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let delay =
+                    pass.interval_secs()
+                        .saturating_add(if first { phase_offset_secs } else { 0 });
+                first = false;
+                tokio::time::sleep(Duration::from_secs(delay.max(1))).await;
+                match handle
+                    .request(crate::loop_health::RequestKey::from("fixed_interval"))
+                    .await
+                {
+                    Ok(
+                        crate::loop_health::Admission::Enqueued
+                        | crate::loop_health::Admission::Coalesced,
+                    ) => {}
+                    Ok(crate::loop_health::Admission::Dropped) => {
+                        eprintln!("revops: fee loop request dropped by bounded runtime")
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "revops: fee loop request persistence failed: {error:#}; trigger exiting"
+                        );
+                        return;
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 }
 
 /// Spawn the scheduler: the owner thread (a) and the trigger task (b).

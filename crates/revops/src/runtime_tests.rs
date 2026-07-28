@@ -1,6 +1,6 @@
+use crate::loop_health::{Admission, LoopHandle, LoopHealthPersistence, ObserverPass, RequestKey};
+use crate::runtime::{ObserverRuntime, REQUIRED_LOOPS};
 use anyhow::{anyhow, Result};
-use revops::loop_health::{Admission, LoopHandle, LoopHealthPersistence, ObserverPass, RequestKey};
-use revops::runtime::{ObserverRuntime, REQUIRED_LOOPS};
 use revops_db::loop_health::{LoopHealthRow, LoopId, RuntimeStatus, WiringStatus};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -228,7 +228,7 @@ impl ObserverPass for BlockingPass {
 async fn one_loop(store: Arc<MemoryStore>, pass: Arc<BlockingPass>) -> LoopHandle {
     let mut passes: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
     passes.insert(LoopId::Fee, pass);
-    ObserverRuntime::start(store, passes)
+    ObserverRuntime::start_for_tests(store, passes)
         .await
         .unwrap()
         .handle(LoopId::Fee)
@@ -238,7 +238,7 @@ async fn one_loop(store: Arc<MemoryStore>, pass: Arc<BlockingPass>) -> LoopHandl
 #[tokio::test]
 async fn registers_exact_five_identities_without_noop_owners() {
     let store = Arc::new(MemoryStore::default());
-    let runtime = ObserverRuntime::start(store.clone(), BTreeMap::new())
+    let runtime = ObserverRuntime::start_for_tests(store.clone(), BTreeMap::new())
         .await
         .unwrap();
     assert_eq!(REQUIRED_LOOPS.len(), 5);
@@ -263,7 +263,9 @@ async fn fake_passes_exercise_all_five_loop_identities() {
         passes.insert(id, pass.clone());
         concrete.push((id, pass));
     }
-    let runtime = ObserverRuntime::start(store.clone(), passes).await.unwrap();
+    let runtime = ObserverRuntime::start_for_tests(store.clone(), passes)
+        .await
+        .unwrap();
     for (id, pass) in concrete {
         let handle = runtime.handle(id).expect("wired fake handle");
         handle
@@ -484,4 +486,62 @@ async fn suspension_retry_stops_only_when_store_actor_is_provably_unavailable() 
     assert!(handle.is_suspended());
     assert_eq!(pass.calls.load(Ordering::SeqCst), 0);
     assert_eq!(store.suspend_attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fee_cadence_makes_zero_requests_until_explicit_post_start_activation() {
+    use crate::fee_mode::{validate_fee_mode, AuthorityPlan, ModeFlags};
+    use crate::fee_scheduler::{FeeCadenceActivation, FeeObserverPass, SchedulerIngress};
+    use crate::runtime::ObserverPassSet;
+    use revops_db::fee_runway::FeeStateSnapshot;
+
+    let mode = validate_fee_mode(
+        ModeFlags {
+            observer: true,
+            fee_dryrun: true,
+            fee_broadcast: false,
+            fee_stateful_shadow: true,
+        },
+        None,
+        &FeeStateSnapshot::default(),
+        None,
+    )
+    .unwrap();
+    let observer_mode = match mode.into_authority_plan(|_| -> () {
+        panic!("observer cadence construction touched action factory")
+    }) {
+        AuthorityPlan::Observer(token) => token,
+        AuthorityPlan::Live(()) => unreachable!(),
+    };
+    let store = Arc::new(MemoryStore::default());
+    let (scheduler_tx, _owner_rx) = SchedulerIngress::bounded_channel(1);
+    let pass = Arc::new(FeeObserverPass::new(
+        std::path::PathBuf::from("/nonexistent/post-start-cadence-test-rpc"),
+        None,
+        crate::config_resolve::PythonOptionCache::empty(),
+        scheduler_tx,
+        1,
+    ));
+    let runtime = ObserverRuntime::start(
+        observer_mode,
+        store.clone(),
+        ObserverPassSet::empty().with_fee(pass.clone()),
+    )
+    .await
+    .unwrap();
+    let activation = FeeCadenceActivation::new(runtime.handle(LoopId::Fee).unwrap(), pass, 0);
+
+    tokio::time::advance(std::time::Duration::from_secs(300)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        store.row(LoopId::Fee).generation,
+        0,
+        "constructing the runtime and cadence handle must remain inert before plugin start"
+    );
+
+    activation.activate();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(store.row(LoopId::Fee).generation, 1);
 }

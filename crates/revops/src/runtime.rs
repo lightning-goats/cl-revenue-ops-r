@@ -1,3 +1,4 @@
+use crate::fee_mode::ObserverMode;
 use crate::loop_health::{spawn_loop, LoopHandle, LoopHealthPersistence, ObserverPass};
 use anyhow::Result;
 use revops_db::loop_health::{LoopId, WiringStatus};
@@ -19,8 +20,44 @@ pub struct ObserverRuntime {
     boltz: Option<LoopHandle>,
 }
 
+/// Vetted observer passes accepted by production composition. Fields are
+/// private: future subsystem ports must add their own concrete observer type
+/// and constructor instead of injecting an arbitrary trait object.
+///
+/// ```
+/// let _empty = revops::runtime::ObserverPassSet::empty();
+/// ```
+///
+/// ```compile_fail,E0451
+/// // External code cannot open the set and insert an action-bearing fake.
+/// let forged = revops::runtime::ObserverPassSet { fee: None };
+/// ```
+pub struct ObserverPassSet {
+    fee: Option<Arc<crate::fee_scheduler::FeeObserverPass>>,
+}
+
+impl ObserverPassSet {
+    pub fn empty() -> Self {
+        Self { fee: None }
+    }
+
+    pub fn with_fee(mut self, pass: Arc<crate::fee_scheduler::FeeObserverPass>) -> Self {
+        self.fee = Some(pass);
+        self
+    }
+}
+
+pub async fn register_unwired_loops(store: Arc<dyn LoopHealthPersistence>) -> Result<()> {
+    let now = crate::now_unix();
+    for id in REQUIRED_LOOPS {
+        store.register(id, WiringStatus::NotWired, now).await?;
+    }
+    store.reconcile(now).await?;
+    Ok(())
+}
+
 impl ObserverRuntime {
-    pub fn unavailable() -> Self {
+    pub fn unavailable(_mode: ObserverMode) -> Self {
         Self {
             fee: None,
             rebalance: None,
@@ -30,6 +67,18 @@ impl ObserverRuntime {
         }
     }
     pub async fn start(
+        _mode: ObserverMode,
+        store: Arc<dyn LoopHealthPersistence>,
+        passes: ObserverPassSet,
+    ) -> Result<Self> {
+        let mut generic: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
+        if let Some(fee) = passes.fee {
+            generic.insert(LoopId::Fee, fee);
+        }
+        Self::start_internal(store, generic).await
+    }
+
+    async fn start_internal(
         store: Arc<dyn LoopHealthPersistence>,
         mut passes: BTreeMap<LoopId, Arc<dyn ObserverPass>>,
     ) -> Result<Self> {
@@ -55,6 +104,14 @@ impl ObserverRuntime {
             lnplus: take(LoopId::LnPlus),
             boltz: take(LoopId::Boltz),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn start_for_tests(
+        store: Arc<dyn LoopHealthPersistence>,
+        passes: BTreeMap<LoopId, Arc<dyn ObserverPass>>,
+    ) -> Result<Self> {
+        Self::start_internal(store, passes).await
     }
     pub fn handle(&self, id: LoopId) -> Option<LoopHandle> {
         match id {

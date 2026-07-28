@@ -6,7 +6,8 @@ use revops::cutover_arm::{
     self, validate_and_consume, RunningIdentity, CUTOVER_ARM_SCHEMA, CUTOVER_SUBSYSTEM_FEES,
 };
 use revops::fee_mode::{
-    validate_fee_mode, FeeModeDenyReason, ModeFlags, ShadowSeedStatus, ValidatedFeeMode,
+    validate_fee_mode, AuthorityPlan, FeeModeDenyReason, ModeFlags, ShadowSeedStatus,
+    ValidatedFeeMode,
 };
 use revops_db::fee_runway::{FeeSeedEventRow, FeeStateSnapshot};
 use std::os::unix::fs::MetadataExt;
@@ -154,6 +155,35 @@ fn live_authority_row_accepted_with_valid_consumed_arm_and_seeded_state() {
             assert_eq!(live.arm().nonce(), "live-nonce-1");
         }
         other => panic!("expected LiveAuthority, got {other:?}"),
+    }
+}
+
+#[test]
+fn validated_live_mode_invokes_action_factory_exactly_once_with_the_real_capability() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm = real_consumed_arm(tmp.path(), "live-action-factory-control");
+    let seed_event = some_seed_event();
+    let mode = validate_fee_mode(
+        ModeFlags {
+            observer: false,
+            fee_dryrun: false,
+            fee_broadcast: true,
+            fee_stateful_shadow: false,
+        },
+        Some(arm),
+        &non_virgin_state(),
+        Some(&seed_event),
+    )
+    .unwrap();
+    let calls = std::cell::Cell::new(0);
+    let plan = mode.into_authority_plan(|live| {
+        calls.set(calls.get() + 1);
+        live.arm().nonce().to_string()
+    });
+    assert_eq!(calls.get(), 1);
+    match plan {
+        AuthorityPlan::Live(nonce) => assert_eq!(nonce, "live-action-factory-control"),
+        AuthorityPlan::Observer(_) => panic!("validated live mode became observer"),
     }
 }
 

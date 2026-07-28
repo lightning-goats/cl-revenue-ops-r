@@ -211,6 +211,55 @@ fn observer_runtime_source_cannot_name_any_action_capability() {
 }
 
 #[test]
+fn observer_runtime_requires_nonforgeable_mode_and_concrete_pass_set() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/runtime.rs")).unwrap();
+    assert!(source.contains("pub struct ObserverPassSet"));
+    assert!(source.contains("_mode: ObserverMode"));
+    assert!(source.contains("passes: ObserverPassSet"));
+    assert!(
+        !source.contains("pub fee:"),
+        "pass-set fields must stay private"
+    );
+    let public_start_signature = source
+        .split("pub async fn start(")
+        .nth(1)
+        .expect("public observer runtime start")
+        .split(") -> Result<Self>")
+        .next()
+        .expect("public observer runtime start signature");
+    assert!(
+        !public_start_signature.contains("BTreeMap<LoopId, Arc<dyn ObserverPass>>"),
+        "production observer construction must not accept arbitrary pass implementations"
+    );
+    assert!(source.contains("async fn start_internal("));
+    let loop_source =
+        std::fs::read_to_string(root.join("crates/revops/src/loop_health.rs")).unwrap();
+    assert!(loop_source.contains("pub(crate) trait ObserverPass"));
+    assert!(loop_source.contains("pub(crate) fn spawn_loop("));
+}
+
+#[test]
+fn fee_cadence_activation_occurs_only_after_plugin_start() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
+    assert!(
+        !source.contains("spawn_bounded_fee_trigger("),
+        "main must retain an inert activation handle instead of spawning cadence pre-start"
+    );
+    let started = source
+        .find("configured.start(state).await?")
+        .expect("plugin start call");
+    let activated = source
+        .find("fee_cadence.activate()")
+        .expect("post-start cadence activation");
+    assert!(
+        activated > started,
+        "cadence must activate only after plugin start succeeds"
+    );
+}
+
+#[test]
 fn scheduler_has_no_unbounded_owner_or_wake_ingress() {
     let root = workspace_root();
     let source = std::fs::read_to_string(root.join("crates/revops/src/fee_scheduler.rs")).unwrap();
@@ -233,19 +282,18 @@ fn production_composition_spawns_only_the_real_fee_pass() {
     let root = workspace_root();
     let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
     assert_eq!(
-        source.matches("passes.insert(").count(),
+        source.matches("passes.with_fee(").count(),
         1,
         "Task 57 production must instantiate exactly one real pass"
     );
-    assert!(source.contains("passes.insert(revops_db::loop_health::LoopId::Fee"));
     for unwired in [
-        "LoopId::Rebalance",
-        "LoopId::Planner",
-        "LoopId::LnPlus",
-        "LoopId::Boltz",
+        "with_rebalance(",
+        "with_planner(",
+        "with_lnplus(",
+        "with_boltz(",
     ] {
         assert!(
-            !source.contains(&format!("passes.insert(revops_db::loop_health::{unwired}")),
+            !source.contains(unwired),
             "{unwired} must remain not_wired without a real pass"
         );
     }

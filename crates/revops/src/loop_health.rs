@@ -29,7 +29,7 @@ pub enum Admission {
     Dropped,
 }
 
-pub trait ObserverPass: Send + Sync + 'static {
+pub(crate) trait ObserverPass: Send + Sync + 'static {
     fn run<'a>(&'a self, key: RequestKey) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
@@ -256,7 +256,7 @@ impl LoopHandle {
     }
 }
 
-pub fn spawn_loop(
+pub(crate) fn spawn_loop(
     id: LoopId,
     store: Arc<dyn LoopHealthPersistence>,
     pass: Arc<dyn ObserverPass>,

@@ -20,7 +20,7 @@ use revops::{as_bool_default, as_int_default, as_string_default, now_unix};
 use revops::{hydration, notify};
 use revops_db::fee_runway::{FeeSeedEventRow, FeeStateSnapshot};
 use revops_db::queries;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -48,7 +48,9 @@ struct State {
     /// subscription handler and startup hydration treat that as a no-op,
     /// never falling back to the read-only `db` connection above.
     observer_db: Option<revops_db::owner::ObserverHandle>,
-    /// Real fee-owner handle for diagnostic and notification messages. The full-cycle cadence is not sent through this unbounded channel: Task 57 routes it through `AuthorityRuntime::Observer`'s bounded `LoopHandle`.
+    /// Real fee-owner handle for diagnostic and notification messages. Every
+    /// producer uses the scheduler's bounded ingress; full-cycle cadence also
+    /// routes through `AuthorityRuntime::Observer`'s bounded `LoopHandle`.
     scheduler: std::sync::OnceLock<revops::fee_scheduler::SchedulerHandle>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
@@ -2283,34 +2285,32 @@ async fn main() -> Result<()> {
     };
 
     let resolved_mode_label = mode_label(&mode);
-    let autonomous_shadow = matches!(mode, ValidatedFeeMode::AutonomousShadow(_));
-
     let scheduler = std::sync::OnceLock::new();
-    let authority_runtime = match mode {
-        ValidatedFeeMode::LiveAuthority(live_mode) => {
+    let authority_plan = mode.into_authority_plan(|live_mode| {
+        let store = observer_db
+            .clone()
+            .expect("live authority mode gate guarantees observer_db is Some");
+        ClnFeeBroadcaster::new(
+            init_socket_path.clone(),
+            store,
+            LIVE_BROADCASTER_TIMEOUT_SECONDS,
+            live_mode,
+        )
+    });
+    let mut fee_cadence = None;
+    let authority_runtime = match authority_plan {
+        revops::fee_mode::AuthorityPlan::Live(broadcaster) => {
             if let Some(handle) = observer_db.clone() {
                 let store: Arc<dyn revops::loop_health::LoopHealthPersistence> =
                     Arc::new(revops::loop_health::LoopHealthStore::new(handle));
-                if let Err(error) =
-                    revops::runtime::ObserverRuntime::start(store, BTreeMap::new()).await
-                {
+                if let Err(error) = revops::runtime::register_unwired_loops(store).await {
                     configured
                         .disable(&format!("loop-health registration failed: {error:#}"))
                         .await?;
                     return Ok(());
                 }
             }
-            let store = observer_db
-                .clone()
-                .expect("live authority mode gate guarantees observer_db is Some");
-            let broadcaster = match ClnFeeBroadcaster::new(
-                init_socket_path.clone(),
-                store,
-                LIVE_BROADCASTER_TIMEOUT_SECONDS,
-                live_mode,
-            )
-            .await
-            {
+            let broadcaster = match broadcaster.await {
                 Ok(broadcaster) => broadcaster,
                 Err(error) => {
                     configured.disable(&format!("live authority gate: restart quarantine reconciliation failed: {error}")).await?;
@@ -2319,19 +2319,17 @@ async fn main() -> Result<()> {
             };
             revops::runtime::AuthorityRuntime::Live(revops::runtime::LiveRuntime::new(broadcaster))
         }
-        ValidatedFeeMode::PassiveObserver | ValidatedFeeMode::AutonomousShadow(_) => {
+        revops::fee_mode::AuthorityPlan::Observer(observer_mode) => {
+            let autonomous_shadow = observer_mode.autonomous_shadow();
             match observer_db.clone() {
                 None => revops::runtime::AuthorityRuntime::Observer(
-                    revops::runtime::ObserverRuntime::unavailable(),
+                    revops::runtime::ObserverRuntime::unavailable(observer_mode),
                 ),
                 Some(observer_handle) => {
                     let store: Arc<dyn revops::loop_health::LoopHealthPersistence> = Arc::new(
                         revops::loop_health::LoopHealthStore::new(observer_handle.clone()),
                     );
-                    let mut passes: BTreeMap<
-                        revops_db::loop_health::LoopId,
-                        Arc<dyn revops::loop_health::ObserverPass>,
-                    > = BTreeMap::new();
+                    let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
                     if autonomous_shadow {
                         match (production_db_path_expanded.as_ref(), journal_dir.as_ref()) {
@@ -2347,7 +2345,7 @@ async fn main() -> Result<()> {
                             Ok(handle) => {
                                 let initial_interval = revops::fee_config::resolve_fee_cfg(db.as_ref(), &python_options.snapshot()).await.fee_interval.max(1) as u64;
                                 let pass = Arc::new(revops::fee_scheduler::FeeObserverPass::new(init_socket_path.clone(), db.clone(), python_options.clone(), handle.tx.clone(), initial_interval));
-                                passes.insert(revops_db::loop_health::LoopId::Fee, pass.clone());
+                                passes = passes.with_fee(pass.clone());
                                 fee_pass = Some(pass);
                                 let _ = scheduler.set(handle);
                             }
@@ -2362,27 +2360,29 @@ async fn main() -> Result<()> {
                             ),
                         }
                     }
-                    let runtime = match revops::runtime::ObserverRuntime::start(store, passes).await
-                    {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            configured
-                                .disable(&format!(
+                    let runtime =
+                        match revops::runtime::ObserverRuntime::start(observer_mode, store, passes)
+                            .await
+                        {
+                            Ok(runtime) => runtime,
+                            Err(error) => {
+                                configured
+                                    .disable(&format!(
                                     "observer runtime loop-health initialization failed: {error:#}"
                                 ))
-                                .await?;
-                            return Ok(());
-                        }
-                    };
+                                    .await?;
+                                return Ok(());
+                            }
+                        };
                     if let (Some(pass), Some(handle)) = (
                         fee_pass,
                         runtime.handle(revops_db::loop_health::LoopId::Fee),
                     ) {
-                        revops::fee_scheduler::spawn_bounded_fee_trigger(
+                        fee_cadence = Some(revops::fee_scheduler::FeeCadenceActivation::new(
                             handle,
                             pass,
                             revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
-                        );
+                        ));
                     }
                     revops::runtime::AuthorityRuntime::Observer(runtime)
                 }
@@ -2406,6 +2406,10 @@ async fn main() -> Result<()> {
     });
 
     let plugin = configured.start(state).await?;
+
+    if let Some(fee_cadence) = fee_cadence {
+        fee_cadence.activate();
+    }
 
     // Startup hydration runs as a background task, off the init-handshake
     // path: paging `listforwards` over a live socket could be slow on a

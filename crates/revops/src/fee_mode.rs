@@ -106,6 +106,33 @@ pub struct LiveMode {
     arm: LiveSessionArm,
 }
 
+/// Capability proving this process passed validation as either passive
+/// observer or autonomous shadow. All fields are private and the only value
+/// production can obtain is emitted by [`ValidatedFeeMode::into_authority_plan`].
+///
+/// ```compile_fail,E0451
+/// // External code cannot forge observer authority from a boolean.
+/// let forged = revops::fee_mode::ObserverMode { autonomous_shadow: true };
+/// ```
+#[derive(Debug)]
+pub struct ObserverMode {
+    autonomous_shadow: bool,
+}
+
+impl ObserverMode {
+    pub fn autonomous_shadow(&self) -> bool {
+        self.autonomous_shadow
+    }
+}
+
+/// Type-directed authority split. Observer variants carry only the
+/// nonforgeable observer capability; the supplied action factory is invoked
+/// exclusively for a validated live variant.
+pub enum AuthorityPlan<T> {
+    Observer(ObserverMode),
+    Live(T),
+}
+
 impl LiveMode {
     /// The consumed arm that authorized this session.
     pub fn arm(&self) -> &LiveSessionArm {
@@ -168,6 +195,23 @@ pub enum ValidatedFeeMode {
     PassiveObserver,
     AutonomousShadow(ShadowMode),
     LiveAuthority(LiveMode),
+}
+
+impl ValidatedFeeMode {
+    pub fn into_authority_plan<T>(
+        self,
+        action_factory: impl FnOnce(LiveMode) -> T,
+    ) -> AuthorityPlan<T> {
+        match self {
+            Self::PassiveObserver => AuthorityPlan::Observer(ObserverMode {
+                autonomous_shadow: false,
+            }),
+            Self::AutonomousShadow(_) => AuthorityPlan::Observer(ObserverMode {
+                autonomous_shadow: true,
+            }),
+            Self::LiveAuthority(live) => AuthorityPlan::Live(action_factory(live)),
+        }
+    }
 }
 
 /// Every fail-closed reason [`validate_fee_mode`] can return. Each is

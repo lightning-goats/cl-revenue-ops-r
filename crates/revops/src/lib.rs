@@ -50,6 +50,9 @@ pub mod rpc_status;
 pub mod rpc_total_cost_budget;
 pub mod runtime;
 
+#[cfg(test)]
+mod runtime_tests;
+
 /// Current Unix time in whole seconds, matching Python's
 /// `int(time.time())` as used throughout `database.py`/
 /// `profitability_analyzer.py`'s windowed queries. A thin wrapper so the

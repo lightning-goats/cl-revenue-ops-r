@@ -37,4 +37,4 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
