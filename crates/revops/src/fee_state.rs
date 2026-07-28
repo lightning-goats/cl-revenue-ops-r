@@ -323,7 +323,12 @@ pub trait RunwayStateStore: Send {
         &self,
         commit: revops_db::fee_runway::FeeCycleCommit,
     ) -> anyhow::Result<u64>;
-    fn record_seed_event(
+    /// Task 42: record one STANDALONE seed-refusal event. Refusal is
+    /// itself the terminal fact; SUCCESSFUL seed provenance has no
+    /// standalone write path -- it rides `FeeCycleCommit::pending_seed`
+    /// through [`RunwayStateStore::commit_fee_cycle`] atomically with the
+    /// generation-1 transaction.
+    fn record_seed_refusal(
         &self,
         event: revops_db::fee_runway::FeeSeedEventRow,
     ) -> anyhow::Result<i64>;
@@ -341,6 +346,16 @@ pub trait RunwayStateStore: Send {
         sat_per_vbyte: f64,
         retain_since: i64,
     ) -> anyhow::Result<()>;
+    /// Task 42: insert the current sample, prune the window, and return
+    /// the resulting Rust-only aggregate in ONE transaction
+    /// (`fee_runway::refresh_mempool_window`) -- the virgin-first-cycle
+    /// evidence primitive.
+    fn refresh_mempool_window(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> anyhow::Result<revops_db::fee_runway::MempoolWindow>;
     /// Every Rust-owned mempool sample at or after `since`, oldest first
     /// -- the input `FeeEvidence::mempool_ma_24h` computes from in
     /// autonomous (`SeedOnce`) mode.
@@ -508,11 +523,11 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         self.blocking_commit_fee_cycle(commit)
     }
 
-    fn record_seed_event(
+    fn record_seed_refusal(
         &self,
         event: revops_db::fee_runway::FeeSeedEventRow,
     ) -> anyhow::Result<i64> {
-        self.blocking_record_fee_seed_event(event)
+        self.blocking_record_seed_refusal(event)
     }
 
     fn record_restart_marker(
@@ -529,6 +544,15 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         retain_since: i64,
     ) -> anyhow::Result<()> {
         self.blocking_record_mempool_sample_pruned(sampled_at, sat_per_vbyte, retain_since)
+    }
+
+    fn refresh_mempool_window(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> anyhow::Result<revops_db::fee_runway::MempoolWindow> {
+        self.blocking_refresh_mempool_window(sampled_at, sat_per_vbyte, retain_since)
     }
 
     fn query_mempool_samples_since(

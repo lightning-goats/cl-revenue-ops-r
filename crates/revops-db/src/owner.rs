@@ -77,6 +77,14 @@ enum Command {
         retain_since: i64,
         reply: oneshot::Sender<Result<()>>,
     },
+    // -- Task 42: combined insert+prune+aggregate for virgin SeedOnce
+    // first-cycle evidence --
+    RefreshMempoolWindow {
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+        reply: oneshot::Sender<Result<fee_runway::MempoolWindow>>,
+    },
     QueryMempoolSamplesSince {
         since: i64,
         reply: oneshot::Sender<Result<Vec<MempoolSampleRow>>>,
@@ -106,8 +114,11 @@ enum Command {
         reply: oneshot::Sender<Result<i64>>,
     },
     LatestRunwaySnapshot(oneshot::Sender<Result<Option<RunwaySnapshotRow>>>),
-    // -- Task 5: SeedOnce seed events + restart markers --
-    RecordFeeSeedEvent {
+    // -- Task 5: SeedOnce seed events + restart markers (Task 42: the
+    // standalone write path records REFUSALS only; successful seed
+    // provenance rides FeeCycleCommit::pending_seed through the atomic
+    // commit) --
+    RecordSeedRefusal {
         event: FeeSeedEventRow,
         reply: oneshot::Sender<Result<i64>>,
     },
@@ -456,6 +467,48 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 42: insert the current sample, prune, and read the Rust-only
+    /// window aggregate in ONE transaction
+    /// ([`fee_runway::refresh_mempool_window`]).
+    pub async fn refresh_mempool_window(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> Result<fee_runway::MempoolWindow> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RefreshMempoolWindow {
+                sampled_at,
+                sat_per_vbyte,
+                retain_since,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::refresh_mempool_window`].
+    pub fn blocking_refresh_mempool_window(
+        &self,
+        sampled_at: i64,
+        sat_per_vbyte: f64,
+        retain_since: i64,
+    ) -> Result<fee_runway::MempoolWindow> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RefreshMempoolWindow {
+                sampled_at,
+                sat_per_vbyte,
+                retain_since,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Every mempool sample at or after `since`, oldest first.
     pub async fn query_mempool_samples_since(&self, since: i64) -> Result<Vec<MempoolSampleRow>> {
         let (reply, rx) = oneshot::channel();
@@ -676,21 +729,23 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
-    /// Record one SeedOnce seed event (import or fail-closed refusal).
-    pub async fn record_fee_seed_event(&self, event: FeeSeedEventRow) -> Result<i64> {
+    /// Record one STANDALONE SeedOnce seed REFUSAL (Task 42: success
+    /// provenance has no standalone path -- see
+    /// [`fee_runway::record_seed_refusal`]).
+    pub async fn record_seed_refusal(&self, event: FeeSeedEventRow) -> Result<i64> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::RecordFeeSeedEvent { event, reply })
+            .send(Command::RecordSeedRefusal { event, reply })
             .await
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
 
-    /// Blocking sibling of [`ObserverHandle::record_fee_seed_event`].
-    pub fn blocking_record_fee_seed_event(&self, event: FeeSeedEventRow) -> Result<i64> {
+    /// Blocking sibling of [`ObserverHandle::record_seed_refusal`].
+    pub fn blocking_record_seed_refusal(&self, event: FeeSeedEventRow) -> Result<i64> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .blocking_send(Command::RecordFeeSeedEvent { event, reply })
+            .blocking_send(Command::RecordSeedRefusal { event, reply })
             .context("observer actor gone (blocking)")?;
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
@@ -1100,6 +1155,20 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                     );
                     let _ = reply.send(result);
                 }
+                Command::RefreshMempoolWindow {
+                    sampled_at,
+                    sat_per_vbyte,
+                    retain_since,
+                    reply,
+                } => {
+                    let result = fee_runway::refresh_mempool_window(
+                        &conn,
+                        sampled_at,
+                        sat_per_vbyte,
+                        retain_since,
+                    );
+                    let _ = reply.send(result);
+                }
                 Command::QueryMempoolSamplesSince { since, reply } => {
                     let result = fee_runway::query_mempool_samples_since(&conn, since);
                     let _ = reply.send(result);
@@ -1136,8 +1205,8 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                     let result = fee_runway::latest_runway_snapshot(&conn);
                     let _ = reply.send(result);
                 }
-                Command::RecordFeeSeedEvent { event, reply } => {
-                    let result = fee_runway::record_seed_event(&conn, &event);
+                Command::RecordSeedRefusal { event, reply } => {
+                    let result = fee_runway::record_seed_refusal(&conn, &event);
                     let _ = reply.send(result);
                 }
                 Command::LatestFeeSeedEvent(reply) => {

@@ -53,7 +53,6 @@ use anyhow::{Context, Result};
 use cln_rpc::ClnRpc;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_core::msat::{base_to_sats_ceil, base_to_sats_floor, parse_msat};
-use revops_db::fee_runway::MempoolSampleRow;
 use revops_fees::cycle::{ChannelInfo, ChannelStateRow, FeeEvidence, GossipRow, PeerFeeHistory};
 use revops_fees::drain::NodeChannel;
 use revops_fees::floors::{
@@ -586,7 +585,7 @@ fn group_gossip_by_destination(gossip_channels: &[Value]) -> HashMap<String, Vec
 /// candidate falls through Python's `or` chain to the 1000 sat/kvB
 /// fallback, and the sanity clamps (`open >= 500`, `close >= 300`) make an
 /// empty or all-zero result impossible (py 8293-8295).
-fn chain_costs_from_feerates(feerates: Option<&Value>) -> Option<ChainCosts> {
+pub(crate) fn chain_costs_from_feerates(feerates: Option<&Value>) -> Option<ChainCosts> {
     let fr = feerates?;
     let perkb = fr.get("perkb");
 
@@ -657,12 +656,17 @@ pub enum MempoolEvidenceSource {
     /// Autonomous shadow/live mode (`StateLifecycle::SeedOnce`): ONLY
     /// fresh Rust-owned rows, queried by the CALLER before the snapshot is
     /// built (same prefetch-then-freeze shape as [`RpcPrefetch`] -- the
-    /// scheduler owns the blocking store query, this module never opens a
-    /// second connection). An EMPTY slice (no sample in the last 24h) is
-    /// fail-closed: `FeeEvidence::mempool_ma_24h` returns `Err` rather
-    /// than a silent Python-style `1.0` default -- "missing/stale samples
-    /// deny a decision that needs Vegas evidence."
-    Rust(Vec<MempoolSampleRow>),
+    /// scheduler owns the blocking store operation, this module never
+    /// opens a second connection). Task 42: the value is the Rust-only
+    /// 24h window AVERAGE computed by the store's combined
+    /// insert+prune+aggregate refresh (`fee_runway::
+    /// refresh_mempool_window`), so a virgin first cycle's frozen
+    /// evidence already includes its own current sample. `None` (no
+    /// sample in the window) is fail-closed: `FeeEvidence::
+    /// mempool_ma_24h` returns `Err` rather than a silent Python-style
+    /// `1.0` default -- "missing/stale samples deny a decision that
+    /// needs Vegas evidence."
+    Rust(Option<f64>),
 }
 
 /// The computed mempool evidence value, or the reason it is unavailable
@@ -699,14 +703,10 @@ pub fn build_evidence_snapshot(
         MempoolEvidenceSource::Python => {
             MempoolMaValue::Value(read_mempool_ma(&conn, now - MEMPOOL_MA_WINDOW_SECONDS)?)
         }
-        MempoolEvidenceSource::Rust(rows) => {
-            if rows.is_empty() {
-                MempoolMaValue::MissingRustEvidence
-            } else {
-                let avg = rows.iter().map(|r| r.sat_per_vbyte).sum::<f64>() / rows.len() as f64;
-                MempoolMaValue::Value(avg)
-            }
-        }
+        MempoolEvidenceSource::Rust(average) => match average {
+            None => MempoolMaValue::MissingRustEvidence,
+            Some(avg) => MempoolMaValue::Value(avg),
+        },
     };
 
     Ok(EvidenceSnapshot {
@@ -1422,10 +1422,11 @@ impl EvidenceSnapshot {
     /// Python's `mempool_fee_history` table -- see [`read_mempool_ma`] for
     /// the SQL; never fails (falsy average -> `1.0` fallback).
     ///
-    /// [`MempoolEvidenceSource::Rust`]: the average of the caller-supplied
-    /// Rust-owned samples, or `Err` if none were fresh (Task 6: "missing/
-    /// stale samples deny a decision that needs Vegas evidence" -- no
-    /// silent `1.0` synthesis in autonomous mode).
+    /// [`MempoolEvidenceSource::Rust`]: the caller-supplied Rust-only
+    /// window average (Task 42: computed by the store's combined
+    /// insert+prune+aggregate refresh), or `Err` if the window is empty
+    /// (Task 6: "missing/stale samples deny a decision that needs Vegas
+    /// evidence" -- no silent `1.0` synthesis in autonomous mode).
     ///
     /// Rust's own recorder (`CycleOwner::record_mempool_evidence`,
     /// `fee_scheduler.rs`) writes `rust_mempool_fee_history` every cycle

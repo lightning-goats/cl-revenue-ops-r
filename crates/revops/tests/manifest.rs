@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use revops::now_unix;
-use revops_db::fee_runway::{record_seed_event, FeeSeedEventRow};
+use revops_db::fee_runway::FeeSeedEventRow;
 
 /// Speak the first half of the CLN plugin handshake to the compiled binary
 /// and return the parsed `getmanifest` response's `"result"` object.
@@ -734,22 +734,32 @@ fn runway_status_seed_provenance_reports_a_recorded_seed_event() {
     {
         let conn = rusqlite::Connection::open(&observer_db_path).expect("open observer db");
         revops_db::notifications::init_schema(&conn).expect("init observer db schema");
-        record_seed_event(
+        // Task 42: a successful 'seeded' row only exists atomically with
+        // its generation-1 commit -- the fixture uses the same path.
+        revops_db::fee_runway::commit_fee_cycle(
             &conn,
-            &FeeSeedEventRow {
-                seeded_at: 1_700_000_000,
-                outcome: "seeded".to_string(),
-                source_db_path: "/var/lib/lightning/revenue_ops.db".to_string(),
-                source_max_last_update: 1_699_999_000,
-                row_count: 7,
-                payload_sha256: "ab".repeat(32),
+            &revops_db::fee_runway::FeeCycleCommit {
+                cycle_id: "manifest-fixture-cycle".to_string(),
+                started_at: 1_700_000_000,
+                completed_at: 1_700_000_000,
                 source_commit: "deadbeefcafef00d".to_string(),
-                refused_channel: None,
-                refused_field: None,
-                detail: None,
+                binary_sha256: "0".repeat(64),
+                pending_seed: Some(FeeSeedEventRow {
+                    seeded_at: 1_700_000_000,
+                    outcome: "seeded".to_string(),
+                    source_db_path: "/var/lib/lightning/revenue_ops.db".to_string(),
+                    source_max_last_update: 1_699_999_000,
+                    row_count: 7,
+                    payload_sha256: "ab".repeat(32),
+                    source_commit: "deadbeefcafef00d".to_string(),
+                    refused_channel: None,
+                    refused_field: None,
+                    detail: None,
+                }),
+                ..Default::default()
             },
         )
-        .expect("seed the observer db with a seed-provenance event");
+        .expect("seed the observer db with committed seed provenance");
     }
 
     let result = call_after_init(

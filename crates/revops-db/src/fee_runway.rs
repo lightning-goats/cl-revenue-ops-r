@@ -482,6 +482,15 @@ pub struct FeeCycleCommit {
     pub governor: Vec<GovernorAuditRow>,
     pub ledger: Vec<LedgerAuditRow>,
     pub outcomes: Vec<ShadowCycleOutcomeRow>,
+    /// Task 42: successful seed provenance, committed ATOMICALLY with the
+    /// generation-1 transaction or not at all. `Some` is only legal when
+    /// this commit creates generation 1 from a virgin store (enforced by
+    /// [`insert_successful_seed_locked`] inside the transaction — any
+    /// other prior generation rolls the whole commit back). Scheduled
+    /// non-bootstrap commits and every A3 commit leave this `None`.
+    /// Refusals never appear here: they are standalone terminal facts
+    /// ([`record_seed_refusal`]).
+    pub pending_seed: Option<FeeSeedEventRow>,
     /// Task 44 / A3: the ONE trigger receipt this commit's decision is
     /// bound to, when this commit is an out-of-cycle
     /// `commit_initial_fee_event` rather than a scheduled cycle. Inserted
@@ -691,6 +700,14 @@ fn commit_fee_cycle_locked(conn: &Connection, commit: &FeeCycleCommit) -> Result
         .context("insert atomic trigger receipt row")?;
     }
 
+    // Task 42: successful seed provenance rides the SAME transaction as
+    // the generation bump it describes -- see
+    // `FeeCycleCommit::pending_seed` and `insert_successful_seed_locked`
+    // (which enforces the virgin-store / generation-1 gate).
+    if let Some(seed) = &commit.pending_seed {
+        insert_successful_seed_locked(conn, seed, current_generation)?;
+    }
+
     conn.execute_batch("COMMIT")
         .context("commit fee cycle transaction")?;
     Ok(next_generation as u64)
@@ -876,6 +893,59 @@ pub fn prune_mempool_samples_before(conn: &Connection, cutoff: i64) -> Result<us
 /// callers gate the call the same way Python gates `record_mempool_fee`
 /// (only when Vegas Reflex is enabled and chain costs resolved this
 /// cycle), so the two histories stay sample-for-sample comparable.
+/// The post-refresh Rust-only mempool window aggregate (Task 42):
+/// everything a virgin `SeedOnce` decision needs, without materializing
+/// the window's rows on the single DB actor. `average` is `None` iff
+/// `count == 0`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MempoolWindow {
+    pub count: u64,
+    pub latest_sampled_at: Option<i64>,
+    pub average: Option<f64>,
+}
+
+/// Task 42: insert the CURRENT Rust sample, prune rows strictly before
+/// `retain_since`, and read back the resulting Rust-only window
+/// aggregate — all inside ONE `BEGIN IMMEDIATE`/`COMMIT`, so a virgin
+/// first cycle's frozen evidence includes its own current observation
+/// (the two-cycle bootstrap defect) and a failure anywhere leaves the
+/// table exactly as it was. The committed sample deliberately survives a
+/// LATER failed cycle: it is a truthful observation, never a
+/// state-success claim.
+pub fn refresh_mempool_window(
+    conn: &Connection,
+    sampled_at: i64,
+    sat_per_vbyte: f64,
+    retain_since: i64,
+) -> Result<MempoolWindow> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("begin mempool window refresh transaction")?;
+    let result = (|| -> Result<MempoolWindow> {
+        record_mempool_sample(conn, sampled_at, sat_per_vbyte)?;
+        prune_mempool_samples_before(conn, retain_since)?;
+        conn.query_row(
+            "SELECT COUNT(*), MAX(sampled_at), AVG(sat_per_vbyte)
+             FROM rust_mempool_fee_history",
+            [],
+            |r| {
+                Ok(MempoolWindow {
+                    count: r.get::<_, i64>(0)? as u64,
+                    latest_sampled_at: r.get(1)?,
+                    average: r.get(2)?,
+                })
+            },
+        )
+        .context("read refreshed mempool window aggregate")
+    })();
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    } else {
+        conn.execute_batch("COMMIT")
+            .context("commit mempool window refresh transaction")?;
+    }
+    result
+}
+
 pub fn record_mempool_sample_pruned(
     conn: &Connection,
     sampled_at: i64,
@@ -1103,7 +1173,30 @@ pub fn active_quarantine(conn: &Connection) -> Result<Option<QuarantineRow>> {
 /// Record one seed event (successful import or fail-closed refusal).
 /// Returns the new row's id. The `outcome` CHECK rejects anything but
 /// `'seeded'`/`'seed_refused'`.
-pub fn record_seed_event(conn: &Connection, ev: &FeeSeedEventRow) -> Result<i64> {
+/// Record one STANDALONE seed-refusal event (Task 42): refusal is itself
+/// the terminal fact being recorded, so it stays durable on its own. A
+/// row claiming SUCCESS (`outcome = 'seeded'`) is refused here outright —
+/// successful seed provenance is only writable inside the same
+/// transaction as the generation-1 commit
+/// ([`insert_successful_seed_locked`], reachable exclusively through
+/// [`FeeCycleCommit::pending_seed`]), so a "seeded" row can never exist
+/// without the durable state it claims.
+pub fn record_seed_refusal(conn: &Connection, ev: &FeeSeedEventRow) -> Result<i64> {
+    anyhow::ensure!(
+        ev.outcome == "seed_refused",
+        "record_seed_refusal only records refusals (got outcome={:?}); successful \
+         seed provenance commits atomically with generation 1 via \
+         FeeCycleCommit::pending_seed",
+        ev.outcome
+    );
+    insert_seed_event_row(conn, ev).context("insert seed refusal row")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// The raw row insert shared by [`record_seed_refusal`] and
+/// [`insert_successful_seed_locked`]. Private: every public path goes
+/// through one of those two typed gates.
+fn insert_seed_event_row(conn: &Connection, ev: &FeeSeedEventRow) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO rust_fee_seed_events
              (seeded_at, outcome, source_db_path, source_max_last_update, row_count,
@@ -1122,8 +1215,39 @@ pub fn record_seed_event(conn: &Connection, ev: &FeeSeedEventRow) -> Result<i64>
             ev.detail,
         ],
     )
-    .context("insert fee seed event row")?;
-    Ok(conn.last_insert_rowid())
+}
+
+/// Insert successful seed provenance INSIDE an already-open commit
+/// transaction (Task 42). Callable only from
+/// [`commit_fee_cycle_locked`]; the gates here are the DB-level belt
+/// under the scheduler's own sequencing:
+///
+/// * the row must claim `outcome = 'seeded'` (refusals never ride a
+///   commit — they are standalone terminal facts);
+/// * the transaction must be creating generation 1 from a virgin store
+///   (prior generation 0). Any other prior generation means state no
+///   longer derives purely from the Python import this provenance
+///   describes, so persisting it would be a false claim — the whole
+///   transaction rolls back.
+fn insert_successful_seed_locked(
+    conn: &Connection,
+    ev: &FeeSeedEventRow,
+    prior_generation: i64,
+) -> Result<()> {
+    anyhow::ensure!(
+        ev.outcome == "seeded",
+        "pending seed provenance must claim outcome='seeded' (got {:?})",
+        ev.outcome
+    );
+    anyhow::ensure!(
+        prior_generation == 0,
+        "pending seed provenance requires a virgin store: prior generation is {} \
+         (state no longer derives purely from the described Python import); \
+         rolling the commit back",
+        prior_generation
+    );
+    insert_seed_event_row(conn, ev).context("insert successful seed provenance row")?;
+    Ok(())
 }
 
 /// The most recently recorded seed event, if any.

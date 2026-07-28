@@ -147,6 +147,7 @@ fn sample_commit(cycle_id: &str, at: i64) -> FeeCycleCommit {
             disposition: Some("broadcast".to_string()),
             skip_gate_comparable: true,
         }],
+        pending_seed: None,
         trigger_receipt: None,
     }
 }
@@ -465,9 +466,9 @@ async fn fee_cycle_transaction_seed_event_and_restart_marker_through_actor() {
     let blocking = handle.clone();
     tokio::task::spawn_blocking(move || {
         blocking
-            .blocking_record_fee_seed_event(FeeSeedEventRow {
+            .blocking_record_seed_refusal(FeeSeedEventRow {
                 seeded_at: 1_800_000_000,
-                outcome: "seeded".to_string(),
+                outcome: "seed_refused".to_string(),
                 source_db_path: "/prod/revenue_ops.db".to_string(),
                 source_max_last_update: 1_799_999_000,
                 row_count: 3,
@@ -497,7 +498,7 @@ async fn fee_cycle_transaction_seed_event_and_restart_marker_through_actor() {
         .await
         .unwrap()
         .expect("seed event visible to async side");
-    assert_eq!(seed.outcome, "seeded");
+    assert_eq!(seed.outcome, "seed_refused");
     assert_eq!(seed.row_count, 3);
     let marker = handle
         .latest_fee_restart_marker()

@@ -16,7 +16,6 @@ use revops::fee_evidence::{
     build_evidence_snapshot, prefetch_rpc, EvidenceSnapshot, MempoolEvidenceSource, RpcPrefetch,
 };
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
-use revops_db::fee_runway::MempoolSampleRow;
 use revops_fees::floors::{FlowWindow, PeerLatency};
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -410,8 +409,9 @@ fn mempool_ma_24h_empty_table_falls_back_to_one() {
 // Task 6 / R8 amendment: MempoolEvidenceSource::Rust (autonomous mode)
 // ---------------------------------------------------------------------------
 
-/// Autonomous mode reads ONLY the caller-supplied Rust-owned rows -- even
-/// with Python's `mempool_fee_history` table populated, its rows are
+/// Autonomous mode reads ONLY the caller-supplied Rust-only aggregate
+/// (Task 42: the store's combined refresh computes it) -- even with
+/// Python's `mempool_fee_history` table populated, its rows are
 /// completely ignored.
 #[test]
 fn mempool_ma_24h_rust_source_ignores_pythons_table() {
@@ -424,21 +424,13 @@ fn mempool_ma_24h_rust_source_ignores_pythons_table() {
     .unwrap();
     drop(conn);
 
-    let rows = vec![
-        MempoolSampleRow {
-            sampled_at: NOW - 1000,
-            sat_per_vbyte: 10.0,
-        },
-        MempoolSampleRow {
-            sampled_at: NOW - 2000,
-            sat_per_vbyte: 30.0,
-        },
-    ];
-    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(rows));
+    // The average of Rust samples (10, 30), as `refresh_mempool_window`
+    // would return it.
+    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(Some(20.0)));
     assert_eq!(
         snap.mempool_ma_24h(),
         Ok(20.0),
-        "must average ONLY the Rust rows (10, 30), never Python's 999.0 row"
+        "must consume ONLY the Rust aggregate, never Python's 999.0 row"
     );
 }
 
@@ -447,22 +439,19 @@ fn mempool_ma_24h_rust_source_ignores_pythons_table() {
 #[test]
 fn mempool_ma_24h_rust_source_empty_is_fail_closed_error() {
     let (_dir, path, _conn) = seeded_db();
-    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(Vec::new()));
+    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(None));
     assert!(
         snap.mempool_ma_24h().is_err(),
         "empty Rust-owned evidence must deny the decision, not synthesize 1.0"
     );
 }
 
-/// A single fresh Rust row is enough -- no synthetic minimum sample count.
+/// A single fresh Rust sample's aggregate is enough -- no synthetic
+/// minimum sample count.
 #[test]
 fn mempool_ma_24h_rust_source_single_sample() {
     let (_dir, path, _conn) = seeded_db();
-    let rows = vec![MempoolSampleRow {
-        sampled_at: NOW - 10,
-        sat_per_vbyte: 42.5,
-    }];
-    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(rows));
+    let snap = build_with_mempool_source(&path, None, MempoolEvidenceSource::Rust(Some(42.5)));
     assert_eq!(snap.mempool_ma_24h(), Ok(42.5));
 }
 
