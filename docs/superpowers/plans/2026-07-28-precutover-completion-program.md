@@ -189,29 +189,63 @@ integration/action-surface tests.
 Task 57 passed all three Hexmem criteria at reviewed `49a940a` and is merged
 into canonical main through `a598239`.
 
-### Task 4: LN+ Runtime, Operator Surface, and Fake Boundaries
+### Task 4: LN+ Runtime, Operator Surface, and Fake Boundaries — Hexmem Task 61
 
-**Files:** create `crates/revops/src/lnplus_runtime.rs`; modify `crates/revops/src/main.rs`, `crates/revops-lnplus/src/http.rs`, `crates/revops-lnplus/src/ports.rs`, and LN+ integration tests.
+**Files:** create `crates/revops/src/lnplus_runtime.rs`; modify
+`crates/revops/src/{main,runtime,lib}.rs`, the LN+ lifecycle/store types,
+`crates/revops-db` owner/schema/tests, manifest/action-surface tests, Cargo
+manifests/lock, loop health/request types, and the parity checklist.
 
-- [ ] Wire the Rust-owned `SqliteLnPlusDb`, evaluator/watcher owners, status, breaker-clear, abandon, and backfill RPCs.
-- [ ] Add concrete HTTP and CLN-signmessage adapters exercised only against local fake servers/sockets.
-- [ ] Prove structured terminal/idempotent outcomes, first-cause breaker preservation, governed reservation, ambiguous quarantine, and exactly-once settlement.
+- [ ] Make every lifecycle write fallible and acknowledged, replace overwrite-prone
+      swaps with CAS transitions, and make compound terminal/breaker changes atomic.
+- [ ] Persist a stable attempt/reservation identity and distinguish not-submitted,
+      committed, and outcome-unknown; unknown retains the reservation, enters
+      quarantine, reconciles after restart, and cannot be retried automatically.
+- [ ] Wire one typed evaluator/watcher owner and the exact four Python-equivalent
+      status, breaker-clear, abandon, and backfill RPCs through durable owner acks.
+- [ ] Add concrete HTTP and CLN signer/chain adapters exercised only against local
+      TCP/Unix fakes, including exact request, timeout/reset phase, cap, malformed,
+      recovery, and no-resubmit cases.
+- [ ] Keep every action adapter structurally absent from `ObserverRuntime`; dry-run
+      observation must not create failed success-shaped intents.
 
-### Task 5: Rebalance Runtime, RPCs, and Fake Payment Transport
+Task 61 follows Task 42 because both change the manifest. It lands before Task 59
+so the whole-plugin authority bracket can include LN+ readiness and reuse the same
+admission/outcome-unknown vocabulary.
+
+### Task 5: Rebalance Runtime, RPCs, and Fake Payment Transport — Hexmem Task 60
 
 **Files:** create `crates/revops/src/rebalance_runtime.rs`; modify `crates/revops-rebalance/src/executor.rs`, `crates/revops-rebalance/src/ports.rs`, `crates/revops/src/main.rs`, and integration tests.
 
 - [ ] Register cycle/debug/manual rebalance RPCs and spawn the observer owner.
 - [ ] Exercise `sendpay`/`waitsendpay` through a fake CLN socket, including rejection, timeout, disconnect-after-submit, and reconciliation.
-- [ ] Prove reservation-before-submit and exactly-once settle/release behavior.
+- [ ] Replace string-based failure inference with typed clean-before-write,
+      rejected, success, and outcome-unknown-after-submit results.
+- [ ] Prove durable intent/reservation before submission, persistent quarantine with
+      no retry after ambiguity, and transactional exactly-once receipt plus
+      settle/release behavior across restart.
+- [ ] Require manual/force actions to retain durable reservation, hard cap, intent,
+      and quarantine invariants even when soft policy is bypassed.
 
-### Task 6: CapacityPlanner Runtime and Fake Channel Mutation Transport
+Task 60 follows Tasks 42 and 59 so it reuses the canonical store admission,
+timeout, authority-bracket, and nonce semantics.
+
+### Task 6: CapacityPlanner Runtime and Fake Channel Mutation Transport — Hexmem Task 62
 
 **Files:** create `crates/revops/src/planner_runtime.rs`; modify `crates/revops-capital`, `crates/revops/src/main.rs`, and planner integration tests.
 
 - [ ] Wire planner status/report/execute/history/candidate RPCs and the observer planning loop.
 - [ ] Add governed `fundchannel`, `close`, and defibrillation adapters against fake CLN sockets.
-- [ ] Prove no action on missing evidence, budget denial, unknown outcome, or persistence failure.
+- [ ] Define the Rust-owned planner store and rewire read surfaces explicitly so
+      owner writes cannot be hidden behind production read-only DB queries.
+- [ ] Require a positive resolved budget plus durable intent/action/reservation
+      before submission; revalidate fresh authority, policy, conflict, budget, and
+      action evidence at execution time.
+- [ ] Prove no action on missing/stale evidence, budget denial, unknown outcome,
+      or persistence failure; unknown retains reservation/quarantine and cannot retry.
+
+Task 62 follows Tasks 42, 59, 61, and 60. Defibrillation reuses Task 60's governed
+rebalance facade and channel mutations reuse Task 61's shared outcome semantics.
 
 ### Task 7: Boltz Runtime, Full RPC Surface, and Governed Autocycle
 
@@ -232,8 +266,9 @@ into canonical main through `a598239`.
 ### Task 9: Retention, Store Budget, and Authority-Fetch Hardening — Hexmem Tasks 58 and 59
 
 **Reviewed design:** Task 58 revision 3 at `ddeb14c` (design branch; review
-passed 2/2). **Implementation:** Hexmem Task 59, blocked on Task 42 because
-both touch scheduler/startup surfaces.
+passed 2/2). **Implementation:** Hexmem Task 59. Its stored dependency is Task
+42; the operational merge order additionally requires Task 61 first because
+Task 59 must bind the now-present LN+ readiness state into the authority bracket.
 
 **Files:** add `crates/revops-db/src/retention.rs`; modify
 `crates/revops-db/src/{fee_runway,owner}.rs`,
