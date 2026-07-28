@@ -45,8 +45,9 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::breaker::{BreakerCause, BreakerState};
 use crate::db_types::{PeerRow, SwapPatch, SwapRow};
 use crate::ports::{
+    AttemptIntent, AttemptKind, AttemptResolution, AttemptRow, AttemptState, BeginAttemptAck,
     CasOutcome, CompoundOutcome, InsertOutcome, LnPlusDb, Logger, PlannerActionRequest, PortError,
-    PortResult, ReserveSpendRequest, TerminalizeSpec, TripAck,
+    PortResult, ReserveSpendRequest, ResolveAck, TerminalizeSpec, TripAck,
 };
 use crate::types::{Metadata, Rating};
 
@@ -115,6 +116,22 @@ CREATE TABLE IF NOT EXISTS lnplus_peers (
     defections INTEGER NOT NULL DEFAULT 0,
     last_swap_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS lnplus_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    swap_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reservation_id TEXT,
+    peer_id TEXT,
+    amount_sats INTEGER,
+    detail TEXT,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lnplus_attempts_inflight
+    ON lnplus_attempts(swap_id, kind)
+    WHERE state IN ('intent', 'outcome_unknown');
+CREATE INDEX IF NOT EXISTS idx_lnplus_attempts_state ON lnplus_attempts(state);
 ";
 
 /// `database.py`'s `_lnplus_breaker` key (`crate::breaker::BREAKER_KEY`) and
@@ -704,6 +721,217 @@ impl LnPlusDb for SqliteLnPlusDb {
 
     // -- planner-action breadcrumbs --------------------------------------
 
+    // -- attempt/reservation identity (Task 61 4B) -----------------------
+
+    fn begin_attempt(&self, intent: &AttemptIntent) -> PortResult<BeginAttemptAck> {
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err("begin_attempt begin", e))?;
+        let result: Result<BeginAttemptAck, String> = (|| {
+            // The partial unique index enforces this too; checking first
+            // yields the typed Blocked with the existing identity instead
+            // of a constraint error.
+            let existing: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT attempt_id, state FROM lnplus_attempts \
+                     WHERE swap_id = ?1 AND kind = ?2 \
+                       AND state IN ('intent', 'outcome_unknown')",
+                    rusqlite::params![intent.swap_id, intent.kind.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("inflight lookup: {e}"))?;
+            if let Some((existing_attempt_id, state)) = existing {
+                let state = AttemptState::parse(&state)
+                    .ok_or_else(|| format!("undecodable attempt state {state:?}"))?;
+                tx.commit().map_err(|e| format!("commit: {e}"))?;
+                return Ok(BeginAttemptAck::Blocked {
+                    existing_attempt_id,
+                    state,
+                });
+            }
+            tx.execute(
+                "INSERT INTO lnplus_attempts \
+                 (attempt_id, swap_id, kind, state, reservation_id, peer_id, \
+                  amount_sats, created_at) \
+                 VALUES (?1, ?2, ?3, 'intent', ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    intent.attempt_id,
+                    intent.swap_id,
+                    intent.kind.as_str(),
+                    intent.reservation_id,
+                    intent.peer_id,
+                    intent.amount_sats,
+                    intent.created_at,
+                ],
+            )
+            .map_err(|e| format!("intent insert: {e}"))?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
+            Ok(BeginAttemptAck::Started)
+        })();
+        result.map_err(|e| self.ack_err(&format!("begin_attempt({})", intent.attempt_id), e))
+    }
+
+    /// Task 61 4B compound resolutions: each is ONE `BEGIN IMMEDIATE`
+    /// transaction; the attempt-state CAS is the exactly-once guard, and
+    /// the row/settle/receipt/release writes join that same transaction —
+    /// a failure on ANY half rolls the whole resolution back.
+    fn resolve_attempt(
+        &self,
+        attempt_id: &str,
+        resolution: &AttemptResolution,
+        now: i64,
+    ) -> PortResult<ResolveAck> {
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err("resolve_attempt begin", e))?;
+        let result: Result<ResolveAck, String> = (|| {
+            let Some(attempt) =
+                get_attempt_on(&tx, attempt_id).map_err(|e| format!("attempt read: {e}"))?
+            else {
+                tx.commit().map_err(|e| format!("commit: {e}"))?;
+                return Ok(ResolveAck::UnknownAttempt);
+            };
+            // Exactly-once guard: only non-terminal states may resolve.
+            // Quarantining is additionally restricted to Intent (an
+            // already-unknown attempt is not "re-quarantined").
+            let (new_state, detail): (AttemptState, Option<&str>) = match resolution {
+                AttemptResolution::NotSubmitted { detail } => {
+                    (AttemptState::NotSubmitted, Some(detail))
+                }
+                AttemptResolution::CommittedApply => (AttemptState::Committed, None),
+                AttemptResolution::CommittedFund { .. } => (AttemptState::Committed, None),
+                AttemptResolution::OutcomeUnknown { detail } => {
+                    (AttemptState::OutcomeUnknown, Some(detail))
+                }
+            };
+            let allowed_from = match resolution {
+                AttemptResolution::OutcomeUnknown { .. } => vec![AttemptState::Intent],
+                _ => vec![AttemptState::Intent, AttemptState::OutcomeUnknown],
+            };
+            if !allowed_from.contains(&attempt.state) {
+                tx.commit().map_err(|e| format!("commit: {e}"))?;
+                return Ok(ResolveAck::AlreadyResolved {
+                    state: attempt.state,
+                });
+            }
+
+            // The compound halves, all joining this one transaction.
+            match resolution {
+                AttemptResolution::NotSubmitted { .. } => {
+                    if let Some(rid) = &attempt.reservation_id {
+                        revops_db::budget::release_spend_reservation_on(&tx, rid)
+                            .map_err(|e| format!("release: {e}"))?;
+                    }
+                }
+                AttemptResolution::CommittedFund {
+                    txid,
+                    actual_cost_sats,
+                } => {
+                    let cas = cas_swap_on(
+                        &tx,
+                        &attempt.swap_id,
+                        &["applied", "opening"],
+                        false,
+                        &SwapPatch::default()
+                            .channel_funding_txid(txid.clone())
+                            .opened_at(now),
+                    )
+                    .map_err(|e| format!("row cas: {e}"))?;
+                    if let CasOutcome::Conflict { actual } = cas {
+                        // A funded channel with no in-flight row is a
+                        // serious inconsistency — fail closed, attempt
+                        // stays reconcilable, operator-visible.
+                        return Err(format!(
+                            "swap {} moved (now {actual:?}) under a committed fund attempt",
+                            attempt.swap_id
+                        ));
+                    }
+                    if let Some(rid) = &attempt.reservation_id {
+                        match revops_db::budget::mark_spent_in_tx(
+                            &tx,
+                            rid,
+                            *actual_cost_sats,
+                            Some("lnplus_swaps"),
+                            true,
+                            now,
+                        )
+                        .map_err(|e| format!("settle: {e}"))?
+                        {
+                            revops_db::budget::MarkSpentTx::Applied(true) => {}
+                            revops_db::budget::MarkSpentTx::Applied(false) => {
+                                return Err(format!(
+                                    "reservation {rid} was not active under a committed fund \
+                                     attempt — refusing a receipt-less settle"
+                                ));
+                            }
+                            revops_db::budget::MarkSpentTx::EventRejected => {
+                                return Err(format!(
+                                    "settlement event for {rid} rejected — rolling the whole \
+                                     resolution back"
+                                ));
+                            }
+                        }
+                    }
+                }
+                AttemptResolution::CommittedApply | AttemptResolution::OutcomeUnknown { .. } => {}
+            }
+
+            let changed = tx
+                .execute(
+                    "UPDATE lnplus_attempts \
+                     SET state = ?1, detail = COALESCE(?2, detail), resolved_at = ?3 \
+                     WHERE attempt_id = ?4",
+                    rusqlite::params![new_state.as_str(), detail, now, attempt_id],
+                )
+                .map_err(|e| format!("attempt update: {e}"))?;
+            if changed == 0 {
+                return Err("attempt row vanished mid-resolution".to_string());
+            }
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
+            Ok(ResolveAck::Resolved)
+        })();
+        result.map_err(|e| self.ack_err(&format!("resolve_attempt({attempt_id})"), e))
+    }
+
+    fn get_attempt(&self, attempt_id: &str) -> PortResult<Option<AttemptRow>> {
+        let conn = self.conn.lock().unwrap();
+        get_attempt_on(&conn, attempt_id).map_err(|e| self.ack_err("get_attempt", e))
+    }
+
+    fn unknown_attempts(&self) -> PortResult<Vec<AttemptRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT attempt_id, swap_id, kind, state, reservation_id, peer_id, \
+                 amount_sats, detail, created_at, resolved_at \
+                 FROM lnplus_attempts WHERE state = 'outcome_unknown' ORDER BY created_at",
+            )
+            .map_err(|e| self.ack_err("unknown_attempts prepare", e))?;
+        let rows = stmt
+            .query_map([], row_to_attempt)
+            .map_err(|e| self.ack_err("unknown_attempts query", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let row = row.map_err(|e| self.ack_err("unknown_attempts row", e))?;
+            out.push(row.map_err(PortError::new)?);
+        }
+        Ok(out)
+    }
+
+    fn quarantine_stale_intents(&self, detail: &str, _now: i64) -> PortResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE lnplus_attempts \
+             SET state = 'outcome_unknown', detail = ?1, resolved_at = NULL \
+             WHERE state = 'intent'",
+            rusqlite::params![detail],
+        )
+        .map_err(|e| self.ack_err("quarantine_stale_intents", e))
+    }
+
     /// `record_planner_action` (`database.py:7454-7468`).
     fn record_planner_action(&self, req: &PlannerActionRequest) -> PortResult<i64> {
         let now = Self::now();
@@ -879,6 +1107,59 @@ impl LnPlusDb for SqliteLnPlusDb {
             }
         })();
         result.map_err(|e| self.ack_err("mark_spend_reservation_spent", e))
+    }
+}
+
+// -- attempt rows (Task 61 4B) ---------------------------------------------
+
+/// Inner `Result<AttemptRow, String>` so an undecodable kind/state is a
+/// fail-closed error, never a silently skipped row.
+#[allow(clippy::type_complexity)]
+fn row_to_attempt(row: &rusqlite::Row) -> rusqlite::Result<Result<AttemptRow, String>> {
+    let kind_raw: String = row.get("kind")?;
+    let state_raw: String = row.get("state")?;
+    let (Some(kind), Some(state)) = (
+        AttemptKind::parse(&kind_raw),
+        AttemptState::parse(&state_raw),
+    ) else {
+        return Ok(Err(format!(
+            "undecodable attempt kind/state ({kind_raw:?}/{state_raw:?}) — refusing to guess"
+        )));
+    };
+    Ok(Ok(AttemptRow {
+        attempt_id: row.get("attempt_id")?,
+        swap_id: row.get("swap_id")?,
+        kind,
+        state,
+        reservation_id: row.get("reservation_id")?,
+        peer_id: row.get("peer_id")?,
+        amount_sats: row.get("amount_sats")?,
+        detail: row.get("detail")?,
+        created_at: row.get("created_at")?,
+        resolved_at: row.get("resolved_at")?,
+    }))
+}
+
+/// Attempt read on a connection or an open transaction; fail-closed on
+/// undecodable rows.
+fn get_attempt_on(
+    conn: &rusqlite::Connection,
+    attempt_id: &str,
+) -> Result<Option<AttemptRow>, String> {
+    let row = conn
+        .query_row(
+            "SELECT attempt_id, swap_id, kind, state, reservation_id, peer_id, \
+             amount_sats, detail, created_at, resolved_at \
+             FROM lnplus_attempts WHERE attempt_id = ?1",
+            [attempt_id],
+            row_to_attempt,
+        )
+        .optional()
+        .map_err(|e| format!("attempt query: {e}"))?;
+    match row {
+        None => Ok(None),
+        Some(Ok(attempt)) => Ok(Some(attempt)),
+        Some(Err(e)) => Err(e),
     }
 }
 

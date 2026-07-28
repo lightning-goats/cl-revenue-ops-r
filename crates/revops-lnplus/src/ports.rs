@@ -134,6 +134,143 @@ pub enum CompoundOutcome {
     Conflict { actual: Option<String> },
 }
 
+/// Which external submit an attempt guards (Task 61 4B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptKind {
+    /// `LnPlusApi::create_application` — the irreversible LN+ commitment.
+    Apply,
+    /// `ChainPort::fund_channel` — the money-moving channel open (carries
+    /// a budget reservation).
+    Fund,
+}
+
+impl AttemptKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttemptKind::Apply => "apply",
+            AttemptKind::Fund => "fund",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "apply" => Some(AttemptKind::Apply),
+            "fund" => Some(AttemptKind::Fund),
+            _ => None,
+        }
+    }
+}
+
+/// Durable attempt lifecycle state (Task 61 4B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptState {
+    /// Persisted BEFORE the external submit; a live pass resolves it in
+    /// the same call. Found at restart = crashed in flight = unknown by
+    /// definition (see `quarantine_stale_intents`).
+    Intent,
+    /// Known clean failure before the wire write — reservation released.
+    NotSubmitted,
+    /// The submit landed — for Fund, row txid + settle + receipt landed
+    /// atomically with this state.
+    Committed,
+    /// Post-submit ambiguity: reservation RETAINED, attempt quarantined,
+    /// no new attempt for this (swap, kind) until reconciled.
+    OutcomeUnknown,
+}
+
+impl AttemptState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttemptState::Intent => "intent",
+            AttemptState::NotSubmitted => "not_submitted",
+            AttemptState::Committed => "committed",
+            AttemptState::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "intent" => Some(AttemptState::Intent),
+            "not_submitted" => Some(AttemptState::NotSubmitted),
+            "committed" => Some(AttemptState::Committed),
+            "outcome_unknown" => Some(AttemptState::OutcomeUnknown),
+            _ => None,
+        }
+    }
+}
+
+/// The durable pre-submit record: stable attempt id, the reservation it
+/// binds (Fund only), and what/whom it targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptIntent {
+    pub attempt_id: String,
+    pub swap_id: String,
+    pub kind: AttemptKind,
+    pub reservation_id: Option<String>,
+    pub peer_id: Option<String>,
+    pub amount_sats: Option<i64>,
+    pub created_at: i64,
+}
+
+/// One persisted attempt row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptRow {
+    pub attempt_id: String,
+    pub swap_id: String,
+    pub kind: AttemptKind,
+    pub state: AttemptState,
+    pub reservation_id: Option<String>,
+    pub peer_id: Option<String>,
+    pub amount_sats: Option<i64>,
+    pub detail: Option<String>,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+}
+
+/// Acknowledged outcome of [`LnPlusDb::begin_attempt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginAttemptAck {
+    Started,
+    /// An attempt for this (swap, kind) is already in flight or
+    /// quarantined — the no-auto-resubmit rail, enforced by the store.
+    Blocked {
+        existing_attempt_id: String,
+        state: AttemptState,
+    },
+}
+
+/// Typed resolution of an attempt (Task 61 4B).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttemptResolution {
+    /// Clean failure before the wire write. Releases the bound
+    /// reservation in the same transaction.
+    NotSubmitted { detail: String },
+    /// The application landed on LN+.
+    CommittedApply,
+    /// The channel funded: ONE transaction covers the row's funding
+    /// txid/opened_at CAS, the reservation settle, the receipt event, and
+    /// the attempt state. `actual_cost_sats: None` settles at the
+    /// reservation's reserved amount (the restart-reconciliation path,
+    /// where the true fee is unknowable).
+    CommittedFund {
+        txid: String,
+        actual_cost_sats: Option<i64>,
+    },
+    /// Post-submit ambiguity: quarantine. Reservation untouched (HELD).
+    OutcomeUnknown { detail: String },
+}
+
+/// Acknowledged outcome of [`LnPlusDb::resolve_attempt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveAck {
+    Resolved,
+    /// The attempt already reached a terminal state — exactly-once
+    /// replay: NOTHING was written by this call.
+    AlreadyResolved {
+        state: AttemptState,
+    },
+    /// No attempt with that id exists.
+    UnknownAttempt,
+}
+
 /// The local SQLite ledger (`database.py`'s `lnplus_*` methods +
 /// budget-rail methods this module calls). Deliberately one trait per
 /// concern would fragment fakes across too many mocks for tests that
@@ -222,6 +359,29 @@ pub trait LnPlusDb {
         now: i64,
     ) -> PortResult<CompoundOutcome>;
 
+    // -- attempt/reservation identity (Task 61 4B) -----------------------
+    /// Durably record the pre-submit intent. Blocked (typed, nothing
+    /// written) while another attempt for the same (swap, kind) is in
+    /// flight or quarantined — the store-level no-auto-resubmit rail.
+    fn begin_attempt(&self, intent: &AttemptIntent) -> PortResult<BeginAttemptAck>;
+    /// Resolve an attempt exactly once. Fund-committed and not-submitted
+    /// resolutions are COMPOUNDS: row/settle/receipt/release join the
+    /// attempt transition in one transaction — all-or-nothing.
+    fn resolve_attempt(
+        &self,
+        attempt_id: &str,
+        resolution: &AttemptResolution,
+        now: i64,
+    ) -> PortResult<ResolveAck>;
+    fn get_attempt(&self, attempt_id: &str) -> PortResult<Option<AttemptRow>>;
+    /// Every attempt currently in `OutcomeUnknown` — the restart
+    /// reconciliation work list.
+    fn unknown_attempts(&self) -> PortResult<Vec<AttemptRow>>;
+    /// Promote stale in-flight `Intent` rows (a crashed process died
+    /// between begin and resolve) to `OutcomeUnknown` — quarantine
+    /// survives restart. Returns how many were promoted.
+    fn quarantine_stale_intents(&self, detail: &str, now: i64) -> PortResult<usize>;
+
     // -- planner-action breadcrumbs --------------------------------------
     /// Returns the new action id.
     fn record_planner_action(&self, req: &PlannerActionRequest) -> PortResult<i64>;
@@ -293,6 +453,21 @@ pub struct FundChannelResult {
     pub txid: Option<String>,
 }
 
+/// Task 61 4B: the typed submit outcome of [`ChainPort::fund_channel`].
+/// `Err(PortError)` on the method is reserved for CLEAN pre-submit
+/// failures (nothing reached the node — refused connection, invalid
+/// params); post-submit ambiguity is this enum's `OutcomeUnknown` variant
+/// so callers CANNOT conflate the two.
+#[derive(Debug, Clone)]
+pub enum FundChannelOutcome {
+    /// The node answered: the channel funded (txid when it reported one).
+    Funded(FundChannelResult),
+    /// The request may have reached the node but no answer came back
+    /// (timeout / disconnect after submit). Funds MAY be committed —
+    /// quarantine, never retry or release automatically.
+    OutcomeUnknown { detail: String },
+}
+
 /// A feerate directive for `fundchannel`, mirroring the three string
 /// literals `_execute_swap_open` picks from deadline slack (py 1583).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,13 +507,15 @@ pub trait ChainPort {
     /// `rpc.connect(target)` / `data_service.connect_peer(target)`.
     fn connect(&self, target: &str) -> PortResult<()>;
     /// `rpc.fundchannel(peer, amount, feerate=...)` /
-    /// `data_service.fund_channel(...)`.
+    /// `data_service.fund_channel(...)`. Task 61 4B: `Err` = CLEAN
+    /// pre-submit failure only; post-submit ambiguity is
+    /// [`FundChannelOutcome::OutcomeUnknown`].
     fn fund_channel(
         &self,
         peer: &str,
         amount_sats: i64,
         feerate: Feerate,
-    ) -> PortResult<FundChannelResult>;
+    ) -> PortResult<FundChannelOutcome>;
 }
 
 /// `ignore_peer_fn` (py `SwapLifecycle.__init__`'s optional injected

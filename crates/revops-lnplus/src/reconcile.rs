@@ -10,7 +10,9 @@ use crate::backfill;
 use crate::breaker::{self, BreakerCause};
 use crate::db_types::{SwapPatch, TERMINAL_PENDING_GHOST_STATUSES};
 use crate::error::LnPlusError;
-use crate::ports::{ChainPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PortResult};
+use crate::ports::{
+    AttemptKind, AttemptResolution, ChainPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PortResult,
+};
 use crate::types::MySwaps;
 
 /// py 676 `_RECONCILE_GRACE_SECONDS`: local 'applied' rows younger than
@@ -224,6 +226,150 @@ pub fn reconcile(
     }
 
     Ok(ok)
+}
+
+/// Task 61 4B — restart reconciliation for quarantined attempts.
+///
+/// First promotes stale in-flight `Intent` rows (a crashed process died
+/// mid-submit — unknown by definition; quarantine must survive restart).
+/// Then, for every `OutcomeUnknown` attempt, resolves EXACTLY ONCE from
+/// authoritative evidence:
+///  - Fund: a genuine `listpeerchannels` answer. A channel to the
+///    attempt's peer matching the committed capacity (the same I5(b)/B7
+///    total_msat-or-to_us_msat rule as the open path) → `CommittedFund`
+///    (row txid + settle-at-reserved + receipt, one transaction);
+///    a genuine empty answer → `NotSubmitted` (release). An RPC failure
+///    leaves the attempt quarantined — never resolved on a guess.
+///  - Apply: LN+'s own `get_my_swaps` listing (`my`). Listed in any
+///    bucket → `CommittedApply`; genuinely absent → `NotSubmitted` plus
+///    the row failed. `my: None` (outage pass) leaves apply attempts
+///    quarantined.
+pub fn reconcile_unknown_attempts(
+    my: Option<&MySwaps>,
+    db: &dyn LnPlusDb,
+    chain: &dyn ChainPort,
+    logger: &dyn Logger,
+    now: i64,
+) -> PortResult<()> {
+    let promoted = db.quarantine_stale_intents("process restarted with attempt in flight", now)?;
+    if promoted > 0 {
+        logger.log(
+            LogLevel::Warn,
+            &format!(
+                "LNPLUS: promoted {promoted} stale in-flight attempt(s) to quarantine — a \
+                 previous process died mid-submit; resolving from evidence"
+            ),
+        );
+    }
+
+    for attempt in db.unknown_attempts()? {
+        let aid = attempt.attempt_id.clone();
+        match attempt.kind {
+            AttemptKind::Fund => {
+                let Some(peer) = attempt.peer_id.clone() else {
+                    logger.log(
+                        LogLevel::Error,
+                        &format!(
+                            "LNPLUS: quarantined fund attempt {aid} has no peer recorded — \
+                             cannot verify from chain; operator review needed"
+                        ),
+                    );
+                    continue;
+                };
+                let channels = match chain.list_peer_channels(Some(&peer)) {
+                    Ok(channels) => channels,
+                    Err(e) => {
+                        logger.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "LNPLUS: cannot verify quarantined attempt {aid} \
+                                 (listpeerchannels failed: {e}) — staying quarantined"
+                            ),
+                        );
+                        continue;
+                    }
+                };
+                let capacity = attempt.amount_sats.unwrap_or(-1);
+                let matched = channels.iter().find(|ch| {
+                    ch.peer_id == peer
+                        && crate::open::OPEN_STATES.contains(&ch.state.as_str())
+                        && (ch.total_msat / 1000 == capacity || ch.to_us_msat / 1000 == capacity)
+                });
+                let resolution = match matched {
+                    Some(ch) => {
+                        let txid = ch.funding_txid.clone().unwrap_or_else(|| {
+                            "unknown (reconciled from channel evidence)".to_string()
+                        });
+                        logger.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "LNPLUS: quarantined attempt {aid} RESOLVED committed — chain \
+                                 shows the matching channel (txid {txid})"
+                            ),
+                        );
+                        AttemptResolution::CommittedFund {
+                            txid,
+                            actual_cost_sats: None,
+                        }
+                    }
+                    None => {
+                        logger.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "LNPLUS: quarantined attempt {aid} RESOLVED not-submitted — a \
+                                 genuine chain answer shows no matching channel; releasing its \
+                                 reservation"
+                            ),
+                        );
+                        AttemptResolution::NotSubmitted {
+                            detail: "chain shows no matching channel after restart".to_string(),
+                        }
+                    }
+                };
+                db.resolve_attempt(&aid, &resolution, now)?;
+            }
+            AttemptKind::Apply => {
+                let Some(my) = my else { continue };
+                let sid = attempt.swap_id.clone();
+                let listed = my.pending_ids().contains(&sid)
+                    || my.opening_ids().contains(&sid)
+                    || my.completed_ids().contains(&sid);
+                if listed {
+                    logger.log(
+                        LogLevel::Warn,
+                        &format!(
+                            "LNPLUS: quarantined apply attempt {aid} RESOLVED committed — LN+ \
+                             lists swap {sid}"
+                        ),
+                    );
+                    db.resolve_attempt(&aid, &AttemptResolution::CommittedApply, now)?;
+                } else {
+                    logger.log(
+                        LogLevel::Warn,
+                        &format!(
+                            "LNPLUS: quarantined apply attempt {aid} RESOLVED not-submitted — \
+                             LN+ does not list swap {sid}; marking the row failed"
+                        ),
+                    );
+                    db.resolve_attempt(
+                        &aid,
+                        &AttemptResolution::NotSubmitted {
+                            detail: "LN+ does not list the swap after restart".to_string(),
+                        },
+                        now,
+                    )?;
+                    db.cas_swap(
+                        &sid,
+                        &["applied"],
+                        &SwapPatch::default()
+                            .status("failed")
+                            .outcome("apply never landed (reconciled after restart)"),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Re-exported so callers only need one `use` for reconcile-adjacent

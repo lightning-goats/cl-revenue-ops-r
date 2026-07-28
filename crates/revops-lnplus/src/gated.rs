@@ -30,7 +30,7 @@
 use crate::error::LnPlusError;
 use crate::exec_mode::ExecutionMode;
 use crate::ports::{
-    ChainPort, ChannelInfo, Feerate, FundChannelResult, LnPlusApi, LogLevel, Logger, PortError,
+    ChainPort, ChannelInfo, Feerate, FundChannelOutcome, LnPlusApi, LogLevel, Logger, PortError,
     PortResult,
 };
 use crate::types::{MySwaps, NotificationEntry, Rating, SwapDetail, SwapListing};
@@ -175,7 +175,10 @@ impl<'a> ChainPort for GatedChainPort<'a> {
         peer: &str,
         amount_sats: i64,
         feerate: Feerate,
-    ) -> PortResult<FundChannelResult> {
+    ) -> PortResult<FundChannelOutcome> {
+        // A DryRun guard refusal is a CLEAN pre-submit failure by
+        // construction — nothing reached the node — so `Err` here keeps
+        // the Task 61 4B contract (never OutcomeUnknown).
         self.guard(&format!("fund_channel({peer}, {amount_sats} sats)"))?;
         self.inner.fund_channel(peer, amount_sats, feerate)
     }

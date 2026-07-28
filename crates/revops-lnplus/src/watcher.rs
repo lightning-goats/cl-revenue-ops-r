@@ -71,6 +71,10 @@ pub fn run_watcher_once(
                 &format!("LNPLUS: get_my_swaps unreachable: {e}"),
             );
             summary.skipped = Some("lnplus unreachable".to_string());
+            // Task 61 4B: quarantined attempts reconcile from CHAIN
+            // evidence even when LN+ is down (apply attempts stay
+            // quarantined without LN+ evidence — my=None).
+            reconcile::reconcile_unknown_attempts(None, db, chain, logger, now)?;
             // B1: outage path -- drive obligations off the local ledger
             // unconditionally (live_ids=None disables the dead-swap filter).
             phase_3b(
@@ -89,6 +93,11 @@ pub fn run_watcher_once(
             return Ok(summary);
         }
     };
+
+    // Phase 1.5 (Task 61 4B): resolve quarantined attempts from the fresh
+    // authoritative evidence BEFORE divergence checks, so an adopted
+    // outcome is visible to them.
+    reconcile::reconcile_unknown_attempts(Some(&my), db, chain, logger, now)?;
 
     // Phase 2: reconcile (choke point + divergence checks; breaker does
     // not block the phases below).

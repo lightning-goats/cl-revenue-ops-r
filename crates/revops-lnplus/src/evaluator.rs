@@ -19,8 +19,9 @@ use crate::config::LnPlusConfig;
 use crate::db_types::SwapPatch;
 use crate::error::LnPlusError;
 use crate::ports::{
-    ChainPort, InsertOutcome, LnPlusApi, LnPlusDb, LogLevel, Logger, PlannerActionRequest,
-    PlannerPort, PolicyPort, PortResult,
+    AttemptIntent, AttemptKind, AttemptResolution, BeginAttemptAck, ChainPort, InsertOutcome,
+    LnPlusApi, LnPlusDb, LogLevel, Logger, PlannerActionRequest, PlannerPort, PolicyPort,
+    PortResult,
 };
 use crate::types::{Metadata, Participant, SwapListing};
 
@@ -620,7 +621,74 @@ fn select_and_apply(
         }
     }
 
+    // Task 61 4B: durable attempt identity BEFORE the irreversible LN+
+    // commitment. Blocked = a prior apply attempt is quarantined — no
+    // auto-resubmit.
+    let attempt_id = format!("apply:{}:{now}", swap.id);
+    match db.begin_attempt(&AttemptIntent {
+        attempt_id: attempt_id.clone(),
+        swap_id: swap.id.clone(),
+        kind: AttemptKind::Apply,
+        reservation_id: None,
+        peer_id: assignment.outbound_peer.clone(),
+        amount_sats: Some(capacity),
+        created_at: now,
+    })? {
+        BeginAttemptAck::Started => {}
+        BeginAttemptAck::Blocked {
+            existing_attempt_id,
+            state,
+        } => {
+            db.update_planner_action(action_id, "failed")?;
+            logger.log(
+                LogLevel::Error,
+                &format!(
+                    "LNPLUS: swap {} has apply attempt {existing_attempt_id} in state {state:?} \
+                     — NOT applying again (no auto-resubmit)",
+                    swap.id
+                ),
+            );
+            summary.reject(&swap.id, "ledger:apply attempt quarantined — not applying");
+            summary.swap_id = None;
+            return Ok(());
+        }
+    }
+
     if let Err(e) = api.create_application(&swap.id) {
+        if e.is_outcome_unknown() {
+            // The application MAY be live on LN+ — quarantine; the row
+            // stays 'applied' (never falsified to 'failed'), and
+            // reconciliation resolves from get_my_swaps evidence.
+            db.resolve_attempt(
+                &attempt_id,
+                &AttemptResolution::OutcomeUnknown {
+                    detail: format!("create_application outcome unknown: {e}"),
+                },
+                now,
+            )?;
+            db.cas_swap(
+                &swap.id,
+                &["applied"],
+                &SwapPatch::default().outcome(format!("apply outcome unknown — quarantined ({e})")),
+            )?;
+            db.update_planner_action(action_id, "outcome_unknown")?;
+            logger.log(
+                LogLevel::Error,
+                &format!(
+                    "LNPLUS: application to {} has UNKNOWN outcome ({e}) — quarantined; \
+                     reconciliation will resolve from LN+ evidence",
+                    swap.id
+                ),
+            );
+            return Ok(());
+        }
+        db.resolve_attempt(
+            &attempt_id,
+            &AttemptResolution::NotSubmitted {
+                detail: format!("apply clean failure: {e}"),
+            },
+            now,
+        )?;
         db.cas_swap(
             &swap.id,
             &["applied"],
@@ -635,6 +703,7 @@ fn select_and_apply(
         );
         return Ok(());
     }
+    db.resolve_attempt(&attempt_id, &AttemptResolution::CommittedApply, now)?;
     db.update_planner_action(action_id, "completed")?;
     logger.log(
         LogLevel::Info,

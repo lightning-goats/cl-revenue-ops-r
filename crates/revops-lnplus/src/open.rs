@@ -14,8 +14,9 @@ use crate::breaker::BreakerCause;
 use crate::db_types::{SwapPatch, SwapRow};
 use crate::error::LnPlusError;
 use crate::ports::{
-    CasOutcome, ChainPort, CompoundOutcome, Feerate, LnPlusApi, LnPlusDb, LogLevel, Logger,
-    PlannerActionRequest, PortResult, ReserveSpendRequest, TerminalizeSpec,
+    AttemptIntent, AttemptKind, AttemptResolution, BeginAttemptAck, CasOutcome, ChainPort,
+    CompoundOutcome, Feerate, FundChannelOutcome, LnPlusApi, LnPlusDb, LogLevel, Logger,
+    PlannerActionRequest, PortResult, ReserveSpendRequest, ResolveAck, TerminalizeSpec,
 };
 use crate::types::{Metadata, MySwapEntry};
 use crate::validation::valid_connect_addr;
@@ -213,54 +214,129 @@ pub fn execute_swap_open(
             return Ok(false);
         }
 
+        // Task 61 4B: durable attempt identity BEFORE the irreversible
+        // submit, binding the reservation. Blocked = an earlier attempt is
+        // quarantined (or somehow still in flight) — the no-auto-resubmit
+        // rail: release this pass's fresh reservation and stand down.
+        let attempt_id = format!("fund:{sid}:{now}");
+        match db.begin_attempt(&AttemptIntent {
+            attempt_id: attempt_id.clone(),
+            swap_id: sid.clone(),
+            kind: AttemptKind::Fund,
+            reservation_id: Some(reservation_id.clone()),
+            peer_id: Some(peer.clone()),
+            amount_sats: Some(capacity_sats),
+            created_at: now,
+        })? {
+            BeginAttemptAck::Started => {}
+            BeginAttemptAck::Blocked {
+                existing_attempt_id,
+                state,
+            } => {
+                logger.log(
+                    LogLevel::Error,
+                    &format!(
+                        "LNPLUS: swap {sid} has attempt {existing_attempt_id} in state {state:?} \
+                         — NOT funding again (no auto-resubmit); reconciliation owns it"
+                    ),
+                );
+                release_swap_open_reservation(&reservation_id, &sid, db, logger);
+                return Ok(false);
+            }
+        }
+
         match chain.fund_channel(&peer, capacity_sats, feerate) {
             Err(e) => {
+                // Typed CLEAN pre-submit failure: nothing reached the
+                // node. Resolve not_submitted — the release rides the
+                // same transaction as the attempt transition.
                 logger.log(
                     LogLevel::Error,
                     &format!("LNPLUS: fundchannel to {peer} failed for swap {sid}: {e}"),
                 );
-                release_swap_open_reservation(&reservation_id, &sid, db, logger);
+                db.resolve_attempt(
+                    &attempt_id,
+                    &AttemptResolution::NotSubmitted {
+                        detail: format!("fundchannel clean failure: {e}"),
+                    },
+                    now,
+                )?;
                 maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
                 return Ok(false);
             }
-            Ok(result) => match result.txid {
+            Ok(FundChannelOutcome::OutcomeUnknown { detail }) => {
+                // Post-submit ambiguity: funds MAY be committed on chain.
+                // Quarantine (reservation RETAINED), never terminalize the
+                // row, never trip the deadline miss, never retry.
+                logger.log(
+                    LogLevel::Error,
+                    &format!(
+                        "LNPLUS: fundchannel outcome UNKNOWN for swap {sid} ({detail}) — \
+                         quarantining attempt {attempt_id}; reservation held; \
+                         reconciliation will resolve from chain evidence"
+                    ),
+                );
+                db.resolve_attempt(
+                    &attempt_id,
+                    &AttemptResolution::OutcomeUnknown {
+                        detail: detail.clone(),
+                    },
+                    now,
+                )?;
+                db.cas_swap(
+                    &sid,
+                    &["applied", "opening"],
+                    &SwapPatch::default().outcome(format!(
+                        "fundchannel outcome unknown — quarantined ({detail})"
+                    )),
+                )?;
+                return Ok(false);
+            }
+            Ok(FundChannelOutcome::Funded(result)) => match result.txid {
                 None => {
+                    // The node reported success without a txid: the open
+                    // very likely HAPPENED — this is ambiguity, not a
+                    // clean failure. Quarantine; never release.
                     logger.log(
                         LogLevel::Error,
-                        &format!("LNPLUS: fundchannel for swap {sid} returned no txid"),
+                        &format!(
+                            "LNPLUS: fundchannel for swap {sid} returned success with no txid — \
+                             treating as OUTCOME UNKNOWN; quarantining attempt {attempt_id}"
+                        ),
                     );
-                    release_swap_open_reservation(&reservation_id, &sid, db, logger);
-                    maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
+                    db.resolve_attempt(
+                        &attempt_id,
+                        &AttemptResolution::OutcomeUnknown {
+                            detail: "fundchannel success response carried no txid".to_string(),
+                        },
+                        now,
+                    )?;
                     return Ok(false);
                 }
                 Some(txid) => {
-                    if let CasOutcome::Conflict { actual } = db.cas_swap(
-                        &sid,
-                        &["opening"],
-                        &SwapPatch::default()
-                            .channel_funding_txid(txid)
-                            .opened_at(now),
+                    // Task 61 4B compound: row txid/opened_at + reservation
+                    // settle + receipt + attempt state, ONE transaction.
+                    match db.resolve_attempt(
+                        &attempt_id,
+                        &AttemptResolution::CommittedFund {
+                            txid,
+                            actual_cost_sats: Some(params.estimated_cost_sats),
+                        },
+                        now,
                     )? {
-                        // The channel funded but the row moved out from
-                        // under us — surface loudly; the funding txid is
-                        // real money on chain with no ledger anchor.
-                        logger.log(
-                            LogLevel::Error,
-                            &format!(
-                                "LNPLUS: swap {sid} moved (now {actual:?}) between fundchannel \
-                                 and its txid record — operator review needed"
-                            ),
-                        );
-                        return Ok(false);
+                        ResolveAck::Resolved => {}
+                        other => {
+                            logger.log(
+                                LogLevel::Error,
+                                &format!(
+                                    "LNPLUS: committed-fund resolution for swap {sid} did not \
+                                     apply ({other:?}) — not reporting opened"
+                                ),
+                            );
+                            return Ok(false);
+                        }
                     }
                     first_fund = true;
-                    settle_swap_open_reservation(
-                        &reservation_id,
-                        params.estimated_cost_sats,
-                        &sid,
-                        db,
-                        logger,
-                    );
                 }
             },
         }
@@ -346,34 +422,13 @@ fn release_swap_open_reservation(
     }
 }
 
-fn settle_swap_open_reservation(
-    reservation_id: &str,
-    estimated_cost: i64,
-    sid: &str,
-    db: &dyn LnPlusDb,
-    logger: &dyn Logger,
-) {
-    for attempt in 1..=3 {
-        match db.mark_spend_reservation_spent(reservation_id, estimated_cost, "lnplus_swaps") {
-            Ok(true) => return,
-            Ok(false) => {
-                logger.log(
-                    LogLevel::Warn,
-                    &format!("LNPLUS: swap-open settle write returned failure for swap {sid} (attempt {attempt}/3); retrying"),
-                );
-            }
-            Err(e) => {
-                logger.log(LogLevel::Warn, &format!("LNPLUS: swap-open settle write failed for swap {sid} (attempt {attempt}/3): {e}"));
-            }
-        }
-    }
-    logger.log(
-        LogLevel::Error,
-        &format!(
-            "LNPLUS: swap-open settle write PERSISTENTLY FAILED for swap {sid}: committed fee kept as an active reservation ({estimated_cost} sats) so it stays counted against the unified budget; investigate spend_events."
-        ),
-    );
-}
+// (The pre-4B `settle_swap_open_reservation` retry loop is gone: the
+// settle + receipt now ride the SAME transaction as the row's funding
+// txid and the attempt's committed state — see
+// `LnPlusDb::resolve_attempt` / `AttemptResolution::CommittedFund`. A
+// settle failure rolls the whole resolution back and the attempt stays
+// reconcilable, instead of a best-effort loop leaving a settled-or-not
+// reservation beside an already-updated row.)
 
 /// py `_maybe_trip_deadline_miss` (1785-1793) — **defect #4 fix here**.
 /// Python trips the breaker and records a `failed` planner-action

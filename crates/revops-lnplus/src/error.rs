@@ -28,6 +28,12 @@ pub struct LnPlusError {
     pub message: String,
     pub http_status: Option<u16>,
     pub errors: Option<ErrorsMap>,
+    /// Task 61 4B: `true` iff the failure happened AFTER the request may
+    /// have reached LN+ (response timeout / connection reset mid-exchange)
+    /// — the submit's outcome is UNKNOWN, not cleanly failed. Producers:
+    /// the transport mapping (4C) and test fakes. Consumers must
+    /// quarantine, never treat as a clean not-submitted failure.
+    pub outcome_unknown: bool,
 }
 
 impl LnPlusError {
@@ -36,7 +42,22 @@ impl LnPlusError {
             message: message.into(),
             http_status: None,
             errors: None,
+            outcome_unknown: false,
         }
+    }
+
+    /// A post-submit-ambiguous failure (see the `outcome_unknown` field).
+    pub fn unknown_outcome(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            http_status: None,
+            errors: None,
+            outcome_unknown: true,
+        }
+    }
+
+    pub fn is_outcome_unknown(&self) -> bool {
+        self.outcome_unknown
     }
 
     pub fn with_status(message: impl Into<String>, http_status: u16) -> Self {
@@ -44,6 +65,7 @@ impl LnPlusError {
             message: message.into(),
             http_status: Some(http_status),
             errors: None,
+            outcome_unknown: false,
         }
     }
 
@@ -52,6 +74,7 @@ impl LnPlusError {
             message: message.into(),
             http_status: Some(http_status),
             errors: Some(errors),
+            outcome_unknown: false,
         }
     }
 

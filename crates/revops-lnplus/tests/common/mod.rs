@@ -11,10 +11,11 @@ use revops_lnplus::breaker::{BreakerCause, BreakerState};
 use revops_lnplus::db_types::{PeerRow, SwapPatch, SwapRow};
 use revops_lnplus::error::LnPlusError;
 use revops_lnplus::ports::{
-    CasOutcome, ChainPort, ChannelInfo, CompoundOutcome, Feerate, FundChannelResult,
+    AttemptIntent, AttemptResolution, AttemptRow, AttemptState, BeginAttemptAck, CasOutcome,
+    ChainPort, ChannelInfo, CompoundOutcome, Feerate, FundChannelOutcome, FundChannelResult,
     IgnorePeerPort, InsertOutcome, LnPlusApi, LnPlusDb, LogLevel, Logger, PeerPolicy,
     PlannerActionRequest, PlannerPort, PolicyPort, PortError, PortResult, ReserveSpendRequest,
-    TerminalizeSpec, TripAck,
+    ResolveAck, TerminalizeSpec, TripAck,
 };
 use revops_lnplus::types::{MySwaps, NotificationEntry, Rating, SwapDetail, SwapListing};
 
@@ -83,6 +84,10 @@ pub struct FakeDb {
     pub fail_delete_config: RefCell<bool>,
     pub fail_planner_actions: RefCell<bool>,
     pub fail_prune: RefCell<bool>,
+    // -- Task 61 4B attempts --
+    pub attempts: RefCell<BTreeMap<String, AttemptRow>>,
+    pub fail_begin_attempt: RefCell<bool>,
+    pub fail_resolve_attempt: RefCell<bool>,
 }
 
 fn injected(flag: &RefCell<bool>, what: &str) -> PortResult<()> {
@@ -328,6 +333,130 @@ impl LnPlusDb for FakeDb {
                 Ok(CompoundOutcome::Terminalized { breaker: ack })
             }
         }
+    }
+
+    fn begin_attempt(&self, intent: &AttemptIntent) -> PortResult<BeginAttemptAck> {
+        injected(&self.fail_begin_attempt, "begin_attempt")?;
+        let mut attempts = self.attempts.borrow_mut();
+        if let Some(existing) = attempts.values().find(|a| {
+            a.swap_id == intent.swap_id
+                && a.kind == intent.kind
+                && matches!(a.state, AttemptState::Intent | AttemptState::OutcomeUnknown)
+        }) {
+            return Ok(BeginAttemptAck::Blocked {
+                existing_attempt_id: existing.attempt_id.clone(),
+                state: existing.state,
+            });
+        }
+        attempts.insert(
+            intent.attempt_id.clone(),
+            AttemptRow {
+                attempt_id: intent.attempt_id.clone(),
+                swap_id: intent.swap_id.clone(),
+                kind: intent.kind,
+                state: AttemptState::Intent,
+                reservation_id: intent.reservation_id.clone(),
+                peer_id: intent.peer_id.clone(),
+                amount_sats: intent.amount_sats,
+                detail: None,
+                created_at: intent.created_at,
+                resolved_at: None,
+            },
+        );
+        Ok(BeginAttemptAck::Started)
+    }
+
+    fn resolve_attempt(
+        &self,
+        attempt_id: &str,
+        resolution: &AttemptResolution,
+        now: i64,
+    ) -> PortResult<ResolveAck> {
+        injected(&self.fail_resolve_attempt, "resolve_attempt")?;
+        // Read phase (no long borrows across the compound halves).
+        let attempt = match self.attempts.borrow().get(attempt_id) {
+            None => return Ok(ResolveAck::UnknownAttempt),
+            Some(a) => a.clone(),
+        };
+        let allowed_from: &[AttemptState] = match resolution {
+            AttemptResolution::OutcomeUnknown { .. } => &[AttemptState::Intent],
+            _ => &[AttemptState::Intent, AttemptState::OutcomeUnknown],
+        };
+        if !allowed_from.contains(&attempt.state) {
+            return Ok(ResolveAck::AlreadyResolved {
+                state: attempt.state,
+            });
+        }
+        let (new_state, detail) = match resolution {
+            AttemptResolution::NotSubmitted { detail } => {
+                if let Some(rid) = &attempt.reservation_id {
+                    if let Some(r) = self.reservations.borrow_mut().get_mut(rid) {
+                        r.active = false;
+                    }
+                }
+                (AttemptState::NotSubmitted, Some(detail.clone()))
+            }
+            AttemptResolution::CommittedApply => (AttemptState::Committed, None),
+            AttemptResolution::CommittedFund {
+                txid,
+                actual_cost_sats: _,
+            } => {
+                self.cas_inner(
+                    &attempt.swap_id,
+                    &["applied", "opening"],
+                    false,
+                    &SwapPatch::default()
+                        .channel_funding_txid(txid.clone())
+                        .opened_at(now),
+                );
+                if let Some(rid) = &attempt.reservation_id {
+                    if let Some(r) = self.reservations.borrow_mut().get_mut(rid) {
+                        r.active = false;
+                        r.spent = true;
+                    }
+                }
+                (AttemptState::Committed, None)
+            }
+            AttemptResolution::OutcomeUnknown { detail } => {
+                (AttemptState::OutcomeUnknown, Some(detail.clone()))
+            }
+        };
+        let mut attempts = self.attempts.borrow_mut();
+        let row = attempts.get_mut(attempt_id).expect("attempt present");
+        row.state = new_state;
+        if detail.is_some() {
+            row.detail = detail;
+        }
+        row.resolved_at = Some(now);
+        Ok(ResolveAck::Resolved)
+    }
+
+    fn get_attempt(&self, attempt_id: &str) -> PortResult<Option<AttemptRow>> {
+        Ok(self.attempts.borrow().get(attempt_id).cloned())
+    }
+
+    fn unknown_attempts(&self) -> PortResult<Vec<AttemptRow>> {
+        let mut rows: Vec<AttemptRow> = self
+            .attempts
+            .borrow()
+            .values()
+            .filter(|a| a.state == AttemptState::OutcomeUnknown)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|a| a.created_at);
+        Ok(rows)
+    }
+
+    fn quarantine_stale_intents(&self, detail: &str, _now: i64) -> PortResult<usize> {
+        let mut promoted = 0;
+        for a in self.attempts.borrow_mut().values_mut() {
+            if a.state == AttemptState::Intent {
+                a.state = AttemptState::OutcomeUnknown;
+                a.detail = Some(detail.to_string());
+                promoted += 1;
+            }
+        }
+        Ok(promoted)
     }
 
     fn record_planner_action(&self, req: &PlannerActionRequest) -> PortResult<i64> {
@@ -678,7 +807,7 @@ pub struct FakeChain {
     pub confirmed_sats: RefCell<PortResult<i64>>,
     pub connect_calls: RefCell<Vec<String>>,
     pub connect_result: RefCell<PortResult<()>>,
-    pub fund_channel_result: RefCell<PortResult<FundChannelResult>>,
+    pub fund_channel_result: RefCell<PortResult<FundChannelOutcome>>,
     pub fund_channel_calls: RefCell<Vec<(String, i64, Feerate)>>,
     /// Call counters for [`crate::loop_drivers`] short-circuit-ordering
     /// tests.
@@ -696,9 +825,9 @@ impl Default for FakeChain {
             confirmed_sats: RefCell::new(Ok(1_000_000_000)),
             connect_calls: RefCell::new(Vec::new()),
             connect_result: RefCell::new(Ok(())),
-            fund_channel_result: RefCell::new(Ok(FundChannelResult {
+            fund_channel_result: RefCell::new(Ok(FundChannelOutcome::Funded(FundChannelResult {
                 txid: Some("txid1".to_string()),
-            })),
+            }))),
             fund_channel_calls: RefCell::new(Vec::new()),
             opening_feerate_calls: RefCell::new(0),
             confirmed_sats_calls: RefCell::new(0),
@@ -747,7 +876,7 @@ impl ChainPort for FakeChain {
         peer: &str,
         amount_sats: i64,
         feerate: Feerate,
-    ) -> PortResult<FundChannelResult> {
+    ) -> PortResult<FundChannelOutcome> {
         self.fund_channel_calls
             .borrow_mut()
             .push((peer.to_string(), amount_sats, feerate));
