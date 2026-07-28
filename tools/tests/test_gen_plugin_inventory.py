@@ -95,6 +95,15 @@ def test_eight_startup_loops_and_shutdown_are_separate_exact_registries():
         "lnplus-watcher",
     }
     assert len(inventory["loops"]) == 8
+    loops_by_name = {entry["name"]: entry for entry in inventory["loops"]}
+    assert loops_by_name["lnplus-watcher"]["rust_state"] == {
+        "compiled": True,
+        "reachable": True,
+        "effective": "partial",
+        "review": "passed",
+        "soak": "pending",
+        "owner_task": "hexmem-61",
+    }
     assert inventory["shutdown"] == {
         "bounded": True,
         "join_timeout_seconds": 10.0,
@@ -134,7 +143,14 @@ def test_external_adapter_registry_has_exact_classes_and_never_claims_missing_tr
         "setchannel",
         "signmessage",
     }
-    assert by_id["lnplus_https"]["rust_transport"] == "missing"
+    assert by_id["lnplus_https"]["rust_adapter"] == "revops_lnplus::UreqTransport"
+    assert by_id["lnplus_https"]["rust_transport"] == "local_fake_proven"
+    assert by_id["signmessage"]["rust_adapter"] == "revops::lnplus_adapters::ClnSigner"
+    assert by_id["signmessage"]["rust_transport"] == "local_fake_proven"
+    assert by_id["connect"]["rust_adapter"] == "revops::lnplus_adapters::ClnChainAdapter"
+    assert by_id["connect"]["rust_transport"] == "local_fake_proven"
+    assert by_id["fundchannel"]["rust_adapter"] == "revops::lnplus_adapters::ClnChainAdapter"
+    assert by_id["fundchannel"]["rust_transport"] == "local_fake_proven"
     assert by_id["sendpay_waitsendpay"]["rust_transport"] == "missing"
     assert by_id["boltzcli"]["rust_transport"] == "local_fake_proven_unreachable"
     assert by_id["setchannel"]["python_evidence"] == [
@@ -262,6 +278,10 @@ def test_reachability_never_implies_independent_review():
         assert by_name[name]["state"]["review_evidence"] is None
     for name in (
         "revenue-history",
+        "revenue-lnplus-abandon",
+        "revenue-lnplus-backfill",
+        "revenue-lnplus-breaker-clear",
+        "revenue-lnplus-status",
         "revenue-list-banned",
         "revenue-list-ignored",
         "revenue-planner-candidate-sources",
@@ -272,6 +292,10 @@ def test_reachability_never_implies_independent_review():
     ):
         assert by_name[name]["state"]["review"] == "passed"
         assert by_name[name]["state"]["review_evidence"]
+    assert (
+        by_name["revenue-lnplus-status"]["state"]["review_evidence"]
+        == "hexmem-task-61@9c99d7c"
+    )
 
 
 def test_rust_only_methods_are_separate_and_placeholders_are_not_effective():
@@ -296,7 +320,7 @@ def test_rust_only_methods_are_separate_and_placeholders_are_not_effective():
         assert by_name[name]["state"]["effective"] != "full"
 
 
-def test_only_eight_audited_reads_are_full_and_false_successes_stay_partial():
+def test_reviewed_reads_and_lnplus_rpcs_are_full_and_false_successes_stay_partial():
     inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
     by_name = {entry["name"]: entry for entry in inventory["python_rpcs"]}
     assert {
@@ -305,6 +329,10 @@ def test_only_eight_audited_reads_are_full_and_false_successes_stay_partial():
         if entry["state"]["effective"] == "full"
     } == {
         "revenue-history",
+        "revenue-lnplus-abandon",
+        "revenue-lnplus-backfill",
+        "revenue-lnplus-breaker-clear",
+        "revenue-lnplus-status",
         "revenue-list-banned",
         "revenue-list-ignored",
         "revenue-planner-candidate-sources",
@@ -313,6 +341,12 @@ def test_only_eight_audited_reads_are_full_and_false_successes_stay_partial():
         "revenue-planner-status",
         "revenue-spend-ledger",
     }
+    for name in (
+        "revenue-lnplus-abandon",
+        "revenue-lnplus-backfill",
+        "revenue-lnplus-breaker-clear",
+    ):
+        assert by_name[name]["state"]["transport_proven"] == "local_fake_proven"
     for name in ("revenue-config", "revenue-fee-debug", "revenue-status"):
         assert by_name[name]["state"]["effective"] == "partial"
 

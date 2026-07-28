@@ -51,14 +51,14 @@ comparison against Python's 69 registered names established the pre-Task-56
 surface as 20 total Rust methods, 16 Python-equivalent, and four Rust-only:
 `revenue-ping`, `revops-fee-runway-status`, `revenue-fee-wake`, and
 `revenue-rebalance-plan`. Task 56 adds four genuinely Python-equivalent planner
-read RPCs, so the current guarded surface is **24 total / 20 of 69
-Python-equivalent** (≈29%).**
+read RPCs, and Task 61 adds four LN+ operator RPCs, so the current guarded
+surface is **28 total / 24 of 69 Python-equivalent** (≈35%).**
 
-- **Total Rust RPC methods registered:** **24**, guarded by
+- **Total Rust RPC methods registered:** **28**, guarded by
   `crates/revops/tests/manifest.rs`'s exact manifest count. Four are the
   Rust-only operational methods listed above and must never count toward the
   69-method Python denominator.
-- **Python-equivalent RPCs registered in Rust:** **20 of 69**. The 49 absent
+- **Python-equivalent RPCs registered in Rust:** **24 of 69**. The 45 absent
   exact Python names remain the honest pre-cutover work queue; source-only
   builders do not count.
 
@@ -260,10 +260,12 @@ counts are close; the RPC surface was **13%**. That gap is the honest shape of
 the port: the *decision kernels* are broadly ported, the *operator surface and
 the capital-deploying subsystems* are not.
 
-**Updated after Task 56 (planner read quartet).** Registered Rust RPC methods:
-**24 total**; of those, **20 of 69 Python-equivalent RPCs (≈29%)** — Task 49
-made ten Python-equivalent builders reachable, and Task 56 made four planner
-read builders reachable against real DB/config evidence. The four Rust-only
+**Updated after Task 61 (LN+ runtime and operator quartet).** Registered Rust
+RPC methods: **28 total**; of those, **24 of 69 Python-equivalent RPCs (≈35%)**
+— Task 49 made ten Python-equivalent builders reachable, Task 56 made four
+planner read builders reachable against real DB/config evidence, and Task 61
+made four LN+ operator methods reachable through the real LN+ owner. The four
+Rust-only
 methods (`revenue-ping`, `revops-fee-runway-status`, `revenue-fee-wake`,
 `revenue-rebalance-plan`) are excluded from the 69-method denominator.
 
@@ -283,9 +285,9 @@ missing evidence.
 | plugin-bootstrap-and-init | `main.rs` | `[x]` |
 | threadsafe-rpc-proxy | `revops-rpc` (timeout guard) + `cln-rpc` | `[x]` |
 | option-registration-and-config | `options_table.rs`, `config_resolve.rs` (126 options in manifest) | `[x]` |
-| background-scheduler-loops | `runtime.rs`, `loop_health.rs`, `fee_scheduler.rs` | `[~]` real fee pass reachable only in autonomous shadow; rebalance/planner/LN+/Boltz identities are durably `not_wired` with no no-op owner |
+| background-scheduler-loops | `runtime.rs`, `loop_health.rs`, `fee_scheduler.rs` | `[~]` real fee pass plus the Task 61 LN+ watcher owner are reachable; LN+ evaluation waits on Task 62, while rebalance/planner/Boltz remain durably `not_wired` with no no-op owner |
 | core-cycle-functions | `fee_scheduler.rs`, `revops-fees/cycle.rs` | `[~]` fee cycle only |
-| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders + Task 56's four planner read handlers | `[~]` **20 of 69 Python-equivalent registered**, **24 total Rust RPC methods** (four Rust-only); measured via `crates/revops/tests/manifest.rs`'s method-count guard and distinctive-row handler tests |
+| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders + Task 56's four planner reads + Task 61's four LN+ methods | `[~]` **24 of 69 Python-equivalent registered**, **28 total Rust RPC methods** (four Rust-only); measured via `crates/revops/tests/manifest.rs`'s method-count guard and distinctive-row/owner-ack handler tests |
 | notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[x]` all 4 subscribed (Python subscribes to exactly the same 4); `channel_state_changed` now parses BOTH closure events and the opening→NORMAL matrix (Task 44 A3 — the "closure events only" narrowing is gone); per-notification EFFECT parity is tracked in §2, not by this row |
 | spend-budget-and-capex-rpcs | `revenue-r-spend-ledger` (Task 49) | `[~]` spend-ledger reads reachable; capex RPCs not registered |
 | boltz-swap-rpcs-and-auto-cycle | — | `[ ]` |
@@ -325,6 +327,21 @@ transport-proven and promotion-ready remain pending independent verification.
 #### Task 57 — observer runtime and durable loop health, 2026-07-28
 
 The plugin now registers exactly five loop identities in the Rust-owned observer database and exposes them through `revenue-health.loops`. Only the existing real fee owner is instantiated in autonomous-shadow mode; rebalance, planner, LN+, and Boltz have no handles or success-shaped no-op passes and report current-boot `not_wired`. The bounded runtime permits one in-flight pass and eight distinct pending keys, durably counts coalesced/dropped work, begins before execution, and generation-CAS records terminal pass/error state. Terminal generation plus terminal kind, rather than second-resolution timestamp ordering, makes same-second restarts and pass↔error sequences unambiguous. Missing begin/terminal/backpressure persistence suspends fail-closed; terminal-write loss leaves an unmatched durable generation. `AuthorityRuntime::Observer` cannot hold or construct action adapters; the broadcaster exists only in `AuthorityRuntime::Live`. Evidence: `crates/revops-db/tests/loop_health.rs`, `crates/revops/src/runtime_tests.rs`, `crates/revops/tests/{fee_scheduler,action_surface,manifest}.rs`, and `rpc_health.rs` unit tests. State: **fee runtime compiled/reachable/effective in autonomous shadow; durable inventory effective; other four loops not reachable and not effective; no authority transition, deployment, or live call performed.**
+
+#### Task 61 — LN+ runtime and operator surface, 2026-07-28, `9c99d7c`
+
+Task 61 supersedes the Task 57 and Task 52 LN+ reachability statements above:
+the real watcher owner now runs behind `LoopId::LnPlus`; evaluation remains
+honestly deferred until Task 62 supplies the planner rail. Concrete local-fake
+proof covers `revops_lnplus::UreqTransport`, `ClnSigner`, and
+`ClnChainAdapter`. The exact Python methods `revenue-lnplus-status`,
+`revenue-lnplus-breaker-clear`, `revenue-lnplus-abandon`, and
+`revenue-lnplus-backfill` are registered and complete through owner
+acknowledgements, including admitted-versus-outcome-unknown handling. Task 61
+passed independent review. State: **RPCs compiled/reachable/effective and
+transport-proven locally; watcher compiled/reachable/partial; soak and live
+promotion remain pending; no deployment, authority transition, or live external
+call was performed.**
 
 **Round-2 correction (P1): the table below is the CURRENT response contract
 for each of the ten Batch A RPCs** (i.e. it already reflects the Task 50
@@ -563,7 +580,7 @@ tier-1 project in its own right, not a follow-up.
 | CapacityPlanner (~4200 LOC) | `revops-capital/planner/` (planning half incl. Task 47 orchestration) | `[~]` no execution call sites, no caller |
 | BoltzCliManager (~2670 LOC) | `revops-boltz` (kernels + Task 54 subprocess transport) | `[~]` transport-proven, not reachable |
 | BoltzAutoCycle (~1400 LOC) | `revops-boltz/autocycle.rs` (kernels only) | `[~]` |
-| LNPlusSwapAutomation (~2099 LOC) | `revops-lnplus` (6,218 src LOC incl. wiring layer) | `[~]` no concrete wire transport, no caller |
+| LNPlusSwapAutomation (~2099 LOC) | `revops-lnplus` + Task 61 owner/adapters/RPCs | `[~]` concrete transport and watcher/operator caller are locally proven; evaluator waits on Task 62 and live promotion/soak remain pending |
 
 **Task 52 refresh correction (2026-07-27): the paragraph this replaces
 ("`boltz` and `lnplus` appear in Rust only as arbiter policy strings … no

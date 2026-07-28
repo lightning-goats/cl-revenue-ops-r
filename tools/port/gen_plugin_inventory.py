@@ -157,6 +157,10 @@ PLACEHOLDER_RPCS = {
 
 FULL_EFFECTIVE_RPCS = {
     "revenue-history",
+    "revenue-lnplus-abandon",
+    "revenue-lnplus-backfill",
+    "revenue-lnplus-breaker-clear",
+    "revenue-lnplus-status",
     "revenue-list-banned",
     "revenue-list-ignored",
     "revenue-planner-candidate-sources",
@@ -171,9 +175,8 @@ FULL_EFFECTIVE_RPCS = {
 CLASSIFIED_REACHABLE_RPCS = {
     "revenue-analyze",
     # Task 61 4E: the four LN+ operator RPCs through the LN+ owner's
-    # serialization lock (completion acks). Classified PARTIAL, review
-    # pending — full-effective requires the independent Python review;
-    # never self-declared.
+    # serialization lock (completion acks), independently reviewed at
+    # the exact evidence revision below.
     "revenue-lnplus-abandon",
     "revenue-lnplus-backfill",
     "revenue-lnplus-breaker-clear",
@@ -207,8 +210,17 @@ CLASSIFIED_RUST_ONLY_METHODS = {
 }
 
 REVIEW_EVIDENCE = {
-    name: "task-8-core-parity-audit" for name in FULL_EFFECTIVE_RPCS
+    name: "task-8-core-parity-audit"
+    for name in FULL_EFFECTIVE_RPCS
+    if not name.startswith("revenue-lnplus-")
 }
+REVIEW_EVIDENCE.update(
+    {
+        name: "hexmem-task-61@9c99d7c"
+        for name in FULL_EFFECTIVE_RPCS
+        if name.startswith("revenue-lnplus-")
+    }
+)
 
 # Compiled means an exact-contract response module/builder exists, not merely
 # that a subsystem kernel with a vaguely related purpose compiles.
@@ -465,13 +477,13 @@ def loop_state(name: str) -> dict[str, Any]:
     if name == "lnplus-watcher":
         # Task 61 4D/4E: the REAL LN+ observer pass is spawned behind
         # LoopId::LnPlus (watcher-only; evaluator waits on the Task 62
-        # planner-evidence rail). PARTIAL, review pending — never
-        # self-declared full.
+        # planner-evidence rail). The partial watcher path was independently
+        # reviewed in Task 61; soak remains pending.
         return {
             "compiled": True,
             "reachable": True,
             "effective": "partial",
-            "review": "pending",
+            "review": "passed",
             "soak": "pending",
             "owner_task": "hexmem-61",
         }
@@ -559,8 +571,10 @@ def transport_state(name: str) -> str:
         "revenue-rebalance",
         "revenue-rebalance-cycle",
         "revenue-planner-execute",
-    } or name.startswith("revenue-lnplus-"):
-        return "missing" if name != "revenue-lnplus-status" else "not_required"
+    }:
+        return "missing"
+    if name.startswith("revenue-lnplus-"):
+        return "local_fake_proven"
     return "not_required"
 
 
@@ -704,10 +718,20 @@ def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
             "PythonOptionCache::refresh",
             "local_fake_proven",
         ),
+        "connect": (
+            "hexmem-61",
+            "revops::lnplus_adapters::ClnChainAdapter",
+            "local_fake_proven",
+        ),
+        "fundchannel": (
+            "hexmem-61-and-62",
+            "revops::lnplus_adapters::ClnChainAdapter",
+            "local_fake_proven",
+        ),
         "lnplus_https": (
             "hexmem-61",
-            "revops_lnplus::HttpTransport trait only",
-            "missing",
+            "revops_lnplus::UreqTransport",
+            "local_fake_proven",
         ),
         "setchannel": (
             "fee-port-reviewed",
@@ -716,8 +740,8 @@ def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
         ),
         "signmessage": (
             "hexmem-61",
-            "revops_lnplus::Signer trait only",
-            "trait_fake_only",
+            "revops::lnplus_adapters::ClnSigner",
+            "local_fake_proven",
         ),
     }
     owners = {

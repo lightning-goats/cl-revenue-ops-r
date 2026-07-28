@@ -185,8 +185,8 @@
           "source_line": 1604
         }
       ],
-      "rust_adapter": null,
-      "rust_transport": "missing"
+      "rust_adapter": "revops::lnplus_adapters::ClnChainAdapter",
+      "rust_transport": "local_fake_proven"
     },
     {
       "id": "datastore",
@@ -269,8 +269,8 @@
           "source_line": 1672
         }
       ],
-      "rust_adapter": null,
-      "rust_transport": "missing"
+      "rust_adapter": "revops::lnplus_adapters::ClnChainAdapter",
+      "rust_transport": "local_fake_proven"
     },
     {
       "id": "invoice",
@@ -297,8 +297,8 @@
           "source_line": 93
         }
       ],
-      "rust_adapter": "revops_lnplus::HttpTransport trait only",
-      "rust_transport": "missing"
+      "rust_adapter": "revops_lnplus::UreqTransport",
+      "rust_transport": "local_fake_proven"
     },
     {
       "id": "pay",
@@ -365,8 +365,8 @@
           "source_line": 130
         }
       ],
-      "rust_adapter": "revops_lnplus::Signer trait only",
-      "rust_transport": "trait_fake_only"
+      "rust_adapter": "revops::lnplus_adapters::ClnSigner",
+      "rust_transport": "local_fake_proven"
     }
   ],
   "loops": [
@@ -484,7 +484,7 @@
         "effective": "partial",
         "owner_task": "hexmem-61",
         "reachable": true,
-        "review": "pending",
+        "review": "passed",
         "soak": "pending"
       },
       "source_file": "cl-revenue-ops.py",
@@ -2204,12 +2204,12 @@
       "source_line": 4627,
       "state": {
         "compiled": true,
-        "effective": "partial",
+        "effective": "full",
         "reachable": true,
-        "review": "pending",
-        "review_evidence": null,
+        "review": "passed",
+        "review_evidence": "hexmem-task-61@9c99d7c",
         "soak": "pending",
-        "transport_proven": "missing"
+        "transport_proven": "local_fake_proven"
       }
     },
     {
@@ -2220,12 +2220,12 @@
       "source_line": 4663,
       "state": {
         "compiled": true,
-        "effective": "partial",
+        "effective": "full",
         "reachable": true,
-        "review": "pending",
-        "review_evidence": null,
+        "review": "passed",
+        "review_evidence": "hexmem-task-61@9c99d7c",
         "soak": "pending",
-        "transport_proven": "missing"
+        "transport_proven": "local_fake_proven"
       }
     },
     {
@@ -2236,12 +2236,12 @@
       "source_line": 4615,
       "state": {
         "compiled": true,
-        "effective": "partial",
+        "effective": "full",
         "reachable": true,
-        "review": "pending",
-        "review_evidence": null,
+        "review": "passed",
+        "review_evidence": "hexmem-task-61@9c99d7c",
         "soak": "pending",
-        "transport_proven": "missing"
+        "transport_proven": "local_fake_proven"
       }
     },
     {
@@ -2252,12 +2252,12 @@
       "source_line": 4604,
       "state": {
         "compiled": true,
-        "effective": "partial",
+        "effective": "full",
         "reachable": true,
-        "review": "pending",
-        "review_evidence": null,
-        "soak": "not_required",
-        "transport_proven": "not_required"
+        "review": "passed",
+        "review_evidence": "hexmem-task-61@9c99d7c",
+        "soak": "pending",
+        "transport_proven": "local_fake_proven"
       }
     },
     {
