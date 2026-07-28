@@ -164,10 +164,12 @@ Owner marks only Task 56 `impl`; Python verifier owns `review`.
 **Files:** `crates/revops/build.rs`, `crates/revops/tests/manifest.rs`, `crates/revops/src/fee_scheduler.rs`, `crates/revops/src/fee_runway.rs`, `crates/revops/tests/fee_scheduler.rs`.
 
 - [x] Implement Task 41's Git-ref/index rerun tracking with a docs-only HEAD-advance regression (reviewed and merged at `7688e40`).
-- [x] Implement Task 42's first-cycle Rust mempool evidence and commit-coupled
-      seed provenance semantics at `0ca9742`.
-- [x] Independently mutation-test Task 42; its Python review passed all four
-      criteria plus two novel mutations and Hexmem auto-completed 2/2.
+- [ ] Correct the three supervisor-review blockers at `0ca9742`: verified
+      bound success provenance, pre-hydration A3 generation denial, and
+      rollback/reusability after a real transaction-boundary failure.
+- [ ] Re-run independent Python review at the correction SHA. The initial PASS
+      was superseded to FAIL after F1–F3 were reproduced first-hand; do not
+      publish or unblock Task 61 from the `0ca9742` checkpoint.
 
 ### Task 3: Observer Runtime Framework and Persistent Loop Health — Hexmem Task 57
 
