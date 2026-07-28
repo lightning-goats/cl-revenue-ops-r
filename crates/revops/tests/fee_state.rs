@@ -767,10 +767,25 @@ fn seed_once_records_provenance_readback() {
     altered[0].v2_state_json.push(' ');
     assert_ne!(event.payload_sha256, seed_payload_sha256(&altered));
 
-    // Round-trip through the Rust-owned store and read it back.
+    // Round-trip through the Rust-owned store and read it back. Task 42:
+    // successful seed provenance has no standalone write path -- it rides
+    // the atomic generation-1 commit (`FeeCycleCommit::pending_seed`).
     let store = Connection::open_in_memory().unwrap();
     revops_db::notifications::init_schema(&store).unwrap();
-    revops_db::fee_runway::record_seed_event(&store, &event).unwrap();
+    let commit = revops_db::fee_runway::FeeCycleCommit {
+        cycle_id: "seed-roundtrip-cycle".to_string(),
+        started_at: event.seeded_at,
+        completed_at: event.seeded_at,
+        source_commit: event.source_commit.clone(),
+        binary_sha256: "0".repeat(64),
+        pending_seed: Some(event.clone()),
+        ..Default::default()
+    };
+    assert_eq!(
+        revops_db::fee_runway::commit_fee_cycle(&store, &commit).unwrap(),
+        1,
+        "seed provenance commits with generation 1"
+    );
     let read = revops_db::fee_runway::latest_seed_event(&store)
         .unwrap()
         .expect("seed event persisted");

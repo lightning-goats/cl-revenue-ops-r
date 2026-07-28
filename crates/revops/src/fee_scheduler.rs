@@ -932,6 +932,14 @@ pub enum CycleOutcome {
     /// recorded generation's rows were corrupt/missing (NEVER reseeded
     /// from Python), or the one-time seed was refused. No cycle runs.
     SkippedStateUnavailable,
+    /// `SeedOnce` fail-closed (Task 42): the combined autonomous
+    /// mempool-evidence refresh (insert current sample + prune + read
+    /// the Rust-only aggregate) failed at the store. Distinct from
+    /// [`CycleOutcome::SkippedEvidence`] (the read-only snapshot) and
+    /// NEVER degraded to "no fresh evidence": a store that cannot answer
+    /// must stop the cycle BEFORE hydration, not let it proceed on an
+    /// empty window.
+    SkippedAutonomousEvidence,
     /// `SeedOnce`: the cycle ran but the atomic Rust-owned commit failed.
     /// The generation did not advance and the red
     /// [`CycleOwner::persistence_failures`] counter was incremented.
@@ -953,6 +961,10 @@ fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
         }
         CycleOutcome::SkippedStateUnavailable => {
             "skipped: SeedOnce state unavailable (fail-closed)".to_string()
+        }
+        CycleOutcome::SkippedAutonomousEvidence => {
+            "skipped: autonomous mempool-evidence refresh failed (fail-closed, before              hydration)"
+                .to_string()
         }
         CycleOutcome::PersistenceFailed => {
             "ran but PersistenceFailed: atomic commit failed, generation not advanced".to_string()
@@ -1450,6 +1462,15 @@ pub struct CycleOwner {
     lifecycle: StateLifecycle,
     /// `SeedOnce` only: whether the one-time hydration has happened.
     hydrated_once: bool,
+    /// Task 42, `SeedOnce` only: successful Python-import provenance
+    /// awaiting its atomic generation-1 commit. Set by hydration's virgin
+    /// path, carried into `FeeCycleCommit::pending_seed`, cleared ONLY
+    /// after `commit_fee_cycle` returns success. While `Some`, the
+    /// out-of-cycle commit paths (A3 new-channel, failed-forward nudges)
+    /// refuse: they would otherwise take generation 1 without the seed
+    /// row and orphan this provenance permanently (the DB gate would then
+    /// reject every retry).
+    pending_seed: Option<revops_db::fee_runway::FeeSeedEventRow>,
     /// `SeedOnce` only (Task 5): the one-time seed was refused this
     /// process lifetime -- every later cycle fails closed without
     /// re-attempting (and re-recording) the refusal; a restart re-attempts
@@ -1579,6 +1600,7 @@ impl CycleOwner {
             applied_failure_nudges_pending: HashSet::new(),
             last_policy_updated_at: HashMap::new(),
             hydrated_once: false,
+            pending_seed: None,
             seed_refused: false,
             store,
             spawn_now: seed_now,
@@ -1758,19 +1780,22 @@ impl CycleOwner {
         let mempool_source = match self.lifecycle {
             StateLifecycle::RehydratePerCycle => MempoolEvidenceSource::Python,
             StateLifecycle::SeedOnce => {
-                let rows = match self.store.as_ref() {
-                    Some(store) => store
-                        .query_mempool_samples_since(now - MEMPOOL_MA_WINDOW_SECONDS)
-                        .unwrap_or_else(|e| {
-                            eprintln!(
-                                "revops: SeedOnce mempool sample query failed ({e:#}); \
-                                 treating as no fresh autonomous evidence this cycle"
-                            );
-                            Vec::new()
-                        }),
-                    None => Vec::new(),
-                };
-                MempoolEvidenceSource::Rust(rows)
+                // Task 42: the current sample is made durable and folded
+                // into the Rust-only aggregate BEFORE the snapshot
+                // freezes, so a VIRGIN store's first cycle sees its own
+                // observation instead of deterministically failing into a
+                // two-cycle bootstrap. Any store failure here fails the
+                // cycle CLOSED before hydration -- never "no evidence".
+                match self.refresh_autonomous_mempool_evidence(now, &prepared) {
+                    Ok(average) => MempoolEvidenceSource::Rust(average),
+                    Err(reason) => {
+                        eprintln!(
+                            "revops: FEE CYCLE FAIL-CLOSED (autonomous mempool evidence \
+                             refresh failed, before hydration): {reason}"
+                        );
+                        return (CycleOutcome::SkippedAutonomousEvidence, None);
+                    }
+                }
             }
         };
         let snapshot =
@@ -1919,6 +1944,11 @@ impl CycleOwner {
                     // F7: keep the owner's persisted-generation view
                     // current -- the A3 guarded commit CASes against it.
                     self.state_generation = Some(generation);
+                    // Task 42: the pending seed provenance (if any) is
+                    // now durable INSIDE the committed transaction --
+                    // only success clears it; a failure retains it for
+                    // the same-process retry.
+                    self.pending_seed = None;
                 }
                 Err(e) => {
                     self.persistence_failures += 1;
@@ -1973,7 +2003,71 @@ impl CycleOwner {
     /// failure here is logged loudly and never fails the cycle -- this
     /// recorder is bookkeeping, not decision-relevant evidence, in
     /// `RehydratePerCycle` mode.
+    /// Task 42: the autonomous (`SeedOnce`) mempool-evidence refresh,
+    /// run BEFORE the evidence snapshot freezes. Mirrors the Python
+    /// recorder gate (`record_mempool_fee`'s call site: Vegas Reflex
+    /// enabled and chain costs resolved this cycle):
+    ///
+    /// * Vegas disabled -> no sample, no aggregate (`Ok(None)`; the
+    ///   kernel never consults the MA).
+    /// * Vegas enabled + chain costs resolved -> ONE store transaction
+    ///   inserts the current sample, prunes the 24h window, and returns
+    ///   the Rust-only average the decision will consume.
+    /// * Vegas enabled, chain costs unresolved (feerates prefetch
+    ///   absent) -> no insert (cadence gate), read-only window average.
+    ///
+    /// EVERY store failure is `Err` -- fail-closed before hydration,
+    /// never degraded to an empty window (the audit's "query errors are
+    /// converted to an empty vector" defect).
+    fn refresh_autonomous_mempool_evidence(
+        &self,
+        now: i64,
+        prepared: &PreparedCycle,
+    ) -> Result<Option<f64>, String> {
+        if !prepared.cfg.enable_vegas_reflex {
+            return Ok(None);
+        }
+        let Some(store) = self.store.as_ref() else {
+            // No store at all is a STATE-unavailability condition, not an
+            // evidence failure: return no evidence and let
+            // `seed_once_hydrate` fail the cycle closed with its accurate
+            // `SkippedStateUnavailable` reason (nothing here could have
+            // been recorded anyway).
+            return Ok(None);
+        };
+        let retain_since = now - MEMPOOL_MA_WINDOW_SECONDS;
+        match crate::fee_evidence::chain_costs_from_feerates(prepared.rpc.feerates.as_ref()) {
+            Some(costs) => store
+                .refresh_mempool_window(now, costs.sat_per_vbyte, retain_since)
+                .map(|window| window.average)
+                .map_err(|e| format!("mempool window refresh failed: {e:#}")),
+            None => {
+                // Same cadence gate as the recorder: no resolved chain
+                // costs, no new sample -- but existing fresh samples are
+                // still legitimate evidence.
+                let rows = store
+                    .query_mempool_samples_since(retain_since)
+                    .map_err(|e| format!("mempool window read failed: {e:#}"))?;
+                if rows.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        rows.iter().map(|r| r.sat_per_vbyte).sum::<f64>() / rows.len() as f64,
+                    ))
+                }
+            }
+        }
+    }
+
     fn record_mempool_evidence(&self, now: i64, snapshot: &EvidenceSnapshot, cfg: &FeeCfgSnapshot) {
+        // Task 42: in `SeedOnce` the current sample is inserted (and the
+        // window pruned) by `refresh_autonomous_mempool_evidence` BEFORE
+        // the snapshot froze -- recording it again here would double the
+        // cadence, and the Python-MA comparison below is
+        // `RehydratePerCycle`-only anyway.
+        if !matches!(self.lifecycle, StateLifecycle::RehydratePerCycle) {
+            return;
+        }
         if !cfg.enable_vegas_reflex {
             return;
         }
@@ -2100,22 +2194,24 @@ impl CycleOwner {
                 source_commit(),
             ) {
                 SeedOutcome::Seeded(event) => {
-                    if let Err(e) = store.record_seed_event(event) {
-                        // Provenance is part of the seed contract: without
-                        // it the import didn't happen. Roll the hydration
-                        // back and retry next cycle (the seed is
-                        // deterministic over the snapshot).
-                        clear_hydrated_state(&mut self.state);
-                        return Err(format!(
-                            "seed provenance record failed: {e:#} (seed rolled back; will \
-                             retry next cycle)"
-                        ));
-                    }
+                    // Task 42: success provenance is NOT written here.
+                    // It becomes the owner's pending in-memory value and
+                    // commits ATOMICALLY with the generation-1
+                    // transaction (`FeeCycleCommit::pending_seed`) -- a
+                    // standalone 'seeded' row before that commit would be
+                    // a false durable success claim (the audit's false
+                    // seed event). A same-process retry after a failed
+                    // commit retains this pending value; a restart with
+                    // generation 0 re-derives it from the new pinned
+                    // snapshot.
+                    self.pending_seed = Some(event);
                     HydrationSource::PythonSeed
                 }
                 SeedOutcome::Refused(event) => {
                     self.seed_refused = true;
-                    if let Err(e) = store.record_seed_event(event) {
+                    // Refusal IS the terminal fact -- it stays a
+                    // standalone durable event (Task 42 keeps this path).
+                    if let Err(e) = store.record_seed_refusal(event) {
                         eprintln!(
                             "revops: seed refusal could not be recorded in the Rust-owned \
                              store: {e:#} (refusal still enforced in-process)"
@@ -2144,6 +2240,10 @@ impl CycleOwner {
         };
         if let Err(e) = store.record_restart_marker(marker) {
             clear_hydrated_state(&mut self.state);
+            // Task 42: hydration is rolled back, so the pending seed it
+            // may have produced is rolled back with it (the retry
+            // re-derives deterministically from the pinned snapshot).
+            self.pending_seed = None;
             return Err(format!("restart marker record failed: {e:#}"));
         }
         // F7: hydration establishes the owner's view of the persisted
@@ -2256,6 +2356,9 @@ impl CycleOwner {
             governor,
             ledger: Vec::new(),
             outcomes,
+            // Task 42: the pending seed provenance (virgin bootstrap
+            // only) commits atomically with this cycle or not at all.
+            pending_seed: self.pending_seed.clone(),
             // Regular scheduled cycles keep using the existing separate
             // (non-atomic) `record_trigger_event` path for the
             // `FixedInterval` receipt -- see `FeeCycleCommit::
@@ -2498,6 +2601,28 @@ impl CycleOwner {
         }
 
         let coalesced = matches!(queue_outcome, TriggerOutcome::Coalesced);
+
+        // Task 42 (fail-closed): a nudge commit while seed provenance is
+        // pending its atomic generation-1 commit would take that
+        // generation without the seed row and orphan the provenance
+        // permanently -- same hazard, same refusal as the A3
+        // new-channel guard.
+        if self.pending_seed.is_some() {
+            eprintln!(
+                "revops: FAILED-FORWARD NUDGE REFUSED (fail-closed): seed provenance is \
+                 pending its atomic generation-1 commit (channel {channel_id} at {now})"
+            );
+            self.record_trigger_receipt(
+                &trigger,
+                now,
+                coalesced,
+                None,
+                "REFUSED (no decision, no state, no action): seed provenance pending its \
+                 atomic generation-1 commit",
+            );
+            return;
+        }
+
         if coalesced && self.applied_failure_nudges_pending.contains(channel_id) {
             self.record_trigger_receipt(
                 &trigger,
@@ -2912,6 +3037,30 @@ impl CycleOwner {
                 None,
                 detail,
                 "new_channel dropped/coalesced receipt",
+            );
+            return;
+        }
+
+        // Task 42 (fail-closed): while seed provenance is pending its
+        // atomic generation-1 commit, an out-of-cycle A3 commit would
+        // take generation 1 WITHOUT the seed row -- permanently orphaning
+        // the provenance (the DB's virgin-store gate would then reject
+        // every scheduled retry). Refuse; the event replays later.
+        if self.pending_seed.is_some() {
+            eprintln!(
+                "revops: A3 NEW-CHANNEL REFUSED (fail-closed): seed provenance is pending \
+                 its atomic generation-1 commit; no out-of-cycle commit may take that \
+                 generation (channel {channel_id} at {now})"
+            );
+            self.dispatch_a3_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "REFUSED (no decision, no state, no action): seed provenance pending its \
+                 atomic generation-1 commit"
+                    .to_string(),
+                "new_channel pending-seed refusal receipt",
             );
             return;
         }
@@ -3706,6 +3855,7 @@ impl CycleOwner {
                 },
                 "hydrated_once": self.hydrated_once,
                 "seed_refused": self.seed_refused,
+                "pending_seed": self.pending_seed.is_some(),
                 "persistence_failures": self.persistence_failures,
                 "trigger_queue": {
                     "pending": self.trigger_queue.pending_len(),

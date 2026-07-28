@@ -1369,6 +1369,11 @@ mod seedonce_restart {
     struct TestStore {
         path: PathBuf,
         fail_commits: Arc<AtomicBool>,
+        /// Task 42: fail the autonomous mempool-evidence store operations
+        /// (the combined refresh, and the legacy record/query pair) so the
+        /// bootstrap tests can prove a refresh failure fails CLOSED before
+        /// hydration instead of degrading to "no evidence".
+        fail_mempool: Arc<AtomicBool>,
         launch_failures: DispatchLaunchFailures,
     }
 
@@ -1379,6 +1384,20 @@ mod seedonce_restart {
                 fail_commits,
                 DispatchLaunchFailures::default(),
             )
+        }
+
+        fn open_with_mempool_failure(
+            path: &Path,
+            fail_commits: Arc<AtomicBool>,
+            fail_mempool: Arc<AtomicBool>,
+        ) -> TestStore {
+            let mut store = Self::open_with_dispatch_launch_failures(
+                path,
+                fail_commits,
+                DispatchLaunchFailures::default(),
+            );
+            store.fail_mempool = fail_mempool;
+            store
         }
 
         fn open_with_commit_launch_failure(
@@ -1401,6 +1420,7 @@ mod seedonce_restart {
             let store = TestStore {
                 path: path.to_path_buf(),
                 fail_commits,
+                fail_mempool: Arc::new(AtomicBool::new(false)),
                 launch_failures,
             };
             store.conn(); // create + init schema
@@ -1426,8 +1446,25 @@ mod seedonce_restart {
             fee_runway::commit_fee_cycle(&self.conn(), &commit)
         }
 
-        fn record_seed_event(&self, event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
-            fee_runway::record_seed_event(&self.conn(), &event)
+        fn record_seed_refusal(&self, event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
+            fee_runway::record_seed_refusal(&self.conn(), &event)
+        }
+
+        fn refresh_mempool_window(
+            &self,
+            sampled_at: i64,
+            sat_per_vbyte: f64,
+            retain_since: i64,
+        ) -> anyhow::Result<fee_runway::MempoolWindow> {
+            if self.fail_mempool.load(Ordering::SeqCst) {
+                anyhow::bail!("injected mempool store failure");
+            }
+            fee_runway::refresh_mempool_window(
+                &self.conn(),
+                sampled_at,
+                sat_per_vbyte,
+                retain_since,
+            )
         }
 
         fn record_restart_marker(
@@ -1443,6 +1480,9 @@ mod seedonce_restart {
             sat_per_vbyte: f64,
             retain_since: i64,
         ) -> anyhow::Result<()> {
+            if self.fail_mempool.load(Ordering::SeqCst) {
+                anyhow::bail!("injected mempool store failure");
+            }
             fee_runway::record_mempool_sample_pruned(
                 &self.conn(),
                 sampled_at,
@@ -1455,6 +1495,9 @@ mod seedonce_restart {
             &self,
             since: i64,
         ) -> anyhow::Result<Vec<fee_runway::MempoolSampleRow>> {
+            if self.fail_mempool.load(Ordering::SeqCst) {
+                anyhow::bail!("injected mempool store failure");
+            }
             fee_runway::query_mempool_samples_since(&self.conn(), since)
         }
 
@@ -1600,6 +1643,7 @@ mod seedonce_restart {
         owner: CycleOwner,
         store_path: PathBuf,
         fail_commits: Arc<AtomicBool>,
+        fail_mempool: Arc<AtomicBool>,
         cycles: i64,
     }
 
@@ -1642,13 +1686,19 @@ mod seedonce_restart {
         let store_path = fx.journal_dir.join("rust-owned.db");
         std::fs::create_dir_all(&fx.journal_dir).expect("journal dir");
         let fail_commits = Arc::new(AtomicBool::new(false));
-        let store = TestStore::open(&store_path, Arc::clone(&fail_commits));
+        let fail_mempool = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open_with_mempool_failure(
+            &store_path,
+            Arc::clone(&fail_commits),
+            Arc::clone(&fail_mempool),
+        );
         let owner = owner_with_store(&fx, Some(Box::new(store)));
         SeedOnceHarness {
             fx,
             owner,
             store_path,
             fail_commits,
+            fail_mempool,
             cycles: 0,
         }
     }
@@ -1678,7 +1728,11 @@ mod seedonce_restart {
         /// in-memory state, fresh `hydrated_once`) over the SAME
         /// Rust-owned store file and production DB.
         pub fn restart(&mut self) {
-            let store = TestStore::open(&self.store_path, Arc::clone(&self.fail_commits));
+            let store = TestStore::open_with_mempool_failure(
+                &self.store_path,
+                Arc::clone(&self.fail_commits),
+                Arc::clone(&self.fail_mempool),
+            );
             self.owner = owner_with_store(&self.fx, Some(Box::new(store)));
         }
 
@@ -1716,6 +1770,73 @@ mod seedonce_restart {
                 })
                 .expect("count seed events")
         }
+
+        fn seeded_event_count(&self) -> i64 {
+            self.store_conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM rust_fee_seed_events WHERE outcome = 'seeded'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count seeded events")
+        }
+
+        fn generation(&self) -> u64 {
+            fee_runway::load_latest_state(&self.store_conn())
+                .expect("load state")
+                .generation
+        }
+
+        fn state_row_count(&self) -> usize {
+            fee_runway::load_latest_state(&self.store_conn())
+                .expect("load state")
+                .rows
+                .len()
+        }
+
+        fn mempool_sample_count(&self) -> i64 {
+            self.store_conn()
+                .query_row("SELECT COUNT(*) FROM rust_mempool_fee_history", [], |r| {
+                    r.get(0)
+                })
+                .expect("count mempool samples")
+        }
+
+        /// Task 42's indivisibility invariant (audit test 6), scoped to
+        /// the scheduled bootstrap flow: at every observation point, a
+        /// durable generation >= 1 and a committed `outcome='seeded'`
+        /// event exist together or not at all.
+        fn assert_seed_indivisible(&self, at: &str) {
+            let generation = self.generation();
+            let seeded = self.seeded_event_count();
+            assert_eq!(
+                generation >= 1,
+                seeded > 0,
+                "indivisibility violated at '{at}': generation={generation} but \
+                 seeded-event count={seeded} (exactly one of durable generation and \
+                 committed seed provenance exists)"
+            );
+        }
+
+        /// [`SeedOnceHarness::prepared`] with Vegas Reflex ON and truthy
+        /// chain costs (`feerates` yields `sat_per_vbyte = 3.0`) -- the
+        /// configuration under which cycle 1 needs autonomous mempool
+        /// evidence (Task 42: the harness's Vegas-off default is exactly
+        /// why the first-cycle ordering defect was invisible here).
+        fn prepared_vegas(&self) -> PreparedCycle {
+            let mut p = self.prepared();
+            p.cfg = FeeCfgSnapshot::default();
+            p.rpc.feerates = Some(json!({"perkb": {"opening": 3000}}));
+            p
+        }
+
+        pub fn run_cycle_vegas(&mut self) -> CycleOutcome {
+            self.cycles += 1;
+            let now = NOW + self.cycles * 1800;
+            let mut clock = || now;
+            let prepared = self.prepared_vegas();
+            self.owner.run_cycle(prepared, &mut clock)
+        }
     }
 
     #[test]
@@ -1752,6 +1873,279 @@ mod seedonce_restart {
         assert_eq!(marker.prior_generation, 0);
         assert_eq!(marker.process_id, std::process::id() as i64);
         assert_eq!(marker.started_at, SEED, "startup timestamp is spawn time");
+    }
+
+    // -----------------------------------------------------------------
+    // Task 42: SeedOnce first-cycle bootstrap evidence + atomic seed
+    // provenance (audit: /home/sat/agent-tasks/task-42-design-audit.md).
+    // -----------------------------------------------------------------
+
+    /// Audit test 1: a VIRGIN store with Vegas enabled must run and commit
+    /// cycle 1 using its own current Rust sample — not deterministically
+    /// fail into a two-cycle bootstrap because the evidence froze before
+    /// the sample was recorded.
+    #[test]
+    fn virgin_seedonce_first_cycle_uses_current_rust_sample() {
+        let mut h = seedonce_harness_with_one_channel();
+
+        let outcome = h.run_cycle_vegas();
+        assert!(
+            matches!(outcome, CycleOutcome::Ran { .. }),
+            "virgin first cycle with Vegas ON must consume its own current sample \
+             and run, got {outcome:?}"
+        );
+        assert_eq!(h.generation(), 1, "cycle 1 commits generation 1");
+        assert_eq!(
+            h.mempool_sample_count(),
+            1,
+            "exactly the current cycle's sample was recorded"
+        );
+        assert_eq!(
+            h.seeded_event_count(),
+            1,
+            "exactly one successful seed event, committed with generation 1"
+        );
+        assert_eq!(h.state_row_count(), 1);
+        h.assert_seed_indivisible("after virgin first cycle");
+    }
+
+    /// Audit test 2: a refresh/store failure for autonomous evidence must
+    /// fail the cycle CLOSED before hydration — never degrade to "no
+    /// fresh evidence", never import Python state, never record success
+    /// provenance.
+    #[test]
+    fn autonomous_sample_refresh_failure_fails_before_hydration() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.fail_mempool.store(true, Ordering::SeqCst);
+
+        let outcome = h.run_cycle_vegas();
+        assert!(
+            !matches!(outcome, CycleOutcome::Ran { .. }),
+            "a failed evidence refresh must fail the cycle closed, got {outcome:?}"
+        );
+        assert!(
+            h.state().fee_states.is_empty(),
+            "hydration must not have run after an evidence-refresh failure"
+        );
+        assert_eq!(
+            h.seeded_event_count(),
+            0,
+            "no successful seed provenance may exist after a pre-hydration failure"
+        );
+        assert_eq!(h.generation(), 0);
+        assert_eq!(h.state_row_count(), 0);
+        let attempts: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_broadcast_attempts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(attempts, 0, "no live action of any kind");
+    }
+
+    /// Audit test 3: when the generation-1 commit fails, NOTHING of the
+    /// seed may survive durably — the observation sample may (it is a
+    /// truthful observation, not a success claim).
+    #[test]
+    fn seed_success_rolls_back_with_generation_commit() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.fail_commits.store(true, Ordering::SeqCst);
+
+        let outcome = h.run_cycle();
+        assert_eq!(outcome, CycleOutcome::PersistenceFailed, "{outcome:?}");
+
+        assert_eq!(h.generation(), 0, "generation must not advance");
+        assert_eq!(h.state_row_count(), 0, "no durable state rows");
+        assert_eq!(
+            h.seeded_event_count(),
+            0,
+            "seed provenance must roll back with the failed generation commit \
+             (a standalone 'seeded' row here is a false durable success claim)"
+        );
+        let cycles: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_fee_cycles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cycles, 0, "no cycle row");
+        h.assert_seed_indivisible("after failed first commit");
+    }
+
+    /// Audit test 4: restart after a failed first commit re-derives the
+    /// seed from the pinned snapshot and ends with EXACTLY ONE committed
+    /// seed event — not one per attempt.
+    #[test]
+    fn restart_after_failed_first_commit_reseeds_once() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.fail_commits.store(true, Ordering::SeqCst);
+
+        let outcome = h.run_cycle();
+        assert_eq!(outcome, CycleOutcome::PersistenceFailed, "{outcome:?}");
+        assert_eq!(h.generation(), 0);
+        assert_eq!(
+            h.seeded_event_count(),
+            0,
+            "no committed seed provenance before the restart"
+        );
+
+        h.restart();
+        h.fail_commits.store(false, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        assert_eq!(h.generation(), 1);
+        assert_eq!(
+            h.seeded_event_count(),
+            1,
+            "exactly one committed seed event after recovery (the second owner's \
+             verified provenance, not one per attempt)"
+        );
+        h.assert_seed_indivisible("after restart recovery");
+    }
+
+    /// Audit test 5: a same-process retry (no restart) carries the pending
+    /// in-memory provenance and persists it exactly once, atomically with
+    /// the successful commit.
+    #[test]
+    fn same_process_retry_carries_pending_provenance() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.fail_commits.store(true, Ordering::SeqCst);
+
+        let outcome = h.run_cycle();
+        assert_eq!(outcome, CycleOutcome::PersistenceFailed, "{outcome:?}");
+        assert_eq!(
+            h.seeded_event_count(),
+            0,
+            "pending provenance must not be durable before a successful commit"
+        );
+
+        h.fail_commits.store(false, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        assert_eq!(h.generation(), 1);
+        assert_eq!(
+            h.seeded_event_count(),
+            1,
+            "the original pending provenance, once"
+        );
+        let seed = fee_runway::latest_seed_event(&h.store_conn())
+            .unwrap()
+            .expect("committed seed event");
+        assert_eq!(seed.outcome, "seeded");
+        assert_eq!(
+            seed.source_max_last_update,
+            NOW - 900,
+            "provenance still describes the ORIGINAL pinned Python snapshot"
+        );
+        h.assert_seed_indivisible("after same-process retry");
+    }
+
+    /// Audit test 6: across a scripted fail/fail/succeed bootstrap, no
+    /// observation point may see only one of {generation >= 1, committed
+    /// seed provenance}.
+    #[test]
+    fn successful_generation_one_and_seed_are_indivisible() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.assert_seed_indivisible("virgin store");
+
+        h.fail_commits.store(true, Ordering::SeqCst);
+        let _ = h.run_cycle();
+        h.assert_seed_indivisible("after failed commit #1");
+        let _ = h.run_cycle();
+        h.assert_seed_indivisible("after failed commit #2");
+
+        h.restart();
+        h.assert_seed_indivisible("after restart with generation 0");
+
+        h.fail_commits.store(false, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        h.assert_seed_indivisible("after successful bootstrap");
+        assert_eq!(h.generation(), 1);
+        assert_eq!(h.seeded_event_count(), 1);
+    }
+
+    /// Task 42 guard: while seed provenance is pending its atomic
+    /// generation-1 commit (a failed virgin bootstrap awaiting retry), an
+    /// out-of-cycle failed-forward nudge commit must be REFUSED — it
+    /// would otherwise take generation 1 without the seed row, and the
+    /// DB's virgin-store gate would then reject every scheduled retry,
+    /// orphaning the provenance permanently.
+    #[test]
+    fn pending_seed_refuses_out_of_cycle_commits_until_committed() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.fail_commits.store(true, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert_eq!(outcome, CycleOutcome::PersistenceFailed, "{outcome:?}");
+
+        // Pending window: a nudge for the hydrated channel must refuse.
+        h.fail_commits.store(false, Ordering::SeqCst);
+        h.owner
+            .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 100));
+        assert_eq!(
+            h.generation(),
+            0,
+            "no out-of-cycle commit may take generation 1 while seed provenance is pending"
+        );
+        assert_eq!(h.seeded_event_count(), 0);
+
+        // The next scheduled cycle commits generation 1 + seed atomically;
+        // afterwards nudges are admissible again (not asserted here — the
+        // existing A1 suite covers the normal path).
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(h.generation(), 1);
+        assert_eq!(h.seeded_event_count(), 1);
+        h.assert_seed_indivisible("after retry with guard released");
+    }
+
+    /// Audit test 7: the autonomous decision consumes ONLY Rust-owned
+    /// evidence and mutates nothing outside the Rust observer store. The
+    /// Python mempool table is DROPPED outright: any code path that so
+    /// much as reads it fails the cycle, which is stronger than a
+    /// conflicting value.
+    #[test]
+    fn rust_only_evidence_and_no_authority_mutation() {
+        let mut h = seedonce_harness_with_one_channel();
+        h.prod_conn()
+            .execute_batch("DROP TABLE mempool_fee_history")
+            .expect("drop python mempool table");
+
+        // A probe connection held across the cycle: `PRAGMA data_version`
+        // changes iff ANOTHER connection commits a write to the
+        // production DB.
+        let probe = h.prod_conn();
+        let before: i64 = probe
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap();
+
+        let outcome = h.run_cycle_vegas();
+        assert!(
+            matches!(outcome, CycleOutcome::Ran { .. }),
+            "autonomous evidence must come from the Rust store alone (the Python \
+             mempool table does not even exist), got {outcome:?}"
+        );
+        assert_eq!(h.generation(), 1);
+
+        let after: i64 = probe
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "the production DB must not receive any write"
+        );
+
+        let attempts: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_broadcast_attempts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(attempts, 0, "zero broadcast attempts");
+        // Prepared-request rows are legitimate would-broadcast AUDIT in
+        // shadow mode; the actual mutation surface is the broadcast
+        // attempt ledger (asserted zero above) and the production DB
+        // (asserted unchanged above).
     }
 
     #[test]
@@ -2312,8 +2706,19 @@ mod seedonce_restart {
         );
     }
 
+    /// Task 42 replaced `mempool_seedonce_denies_a_vegas_decision_without_
+    /// fresh_rust_evidence`: with resolved chain costs the combined
+    /// refresh makes autonomous evidence exist BY CONSTRUCTION (see
+    /// `virgin_seedonce_first_cycle_uses_current_rust_sample`), and with
+    /// unresolved costs the Vegas ratio is never computed -- the
+    /// missing-evidence deny (`MempoolEvidenceSource::Rust(None)` ->
+    /// `Err`) stays pinned at the unit level in `tests/fee_evidence.rs`.
+    /// What still needs a scheduler-level pin is the costs-UNRESOLVED
+    /// branch: existing in-window samples remain legitimate evidence and
+    /// are READ without recording a new sample (the Python-parity cadence
+    /// gate: no resolved chain costs, no sample).
     #[test]
-    fn mempool_seedonce_denies_a_vegas_decision_without_fresh_rust_evidence() {
+    fn mempool_seedonce_costs_unresolved_reads_existing_window_without_recording() {
         let fx = fixture();
         let conn = Connection::open(&fx.db_path).expect("open for seeding");
         conn.execute(
@@ -2324,17 +2729,33 @@ mod seedonce_restart {
         )
         .unwrap();
         drop(conn);
-        let mut owner = owner_with_test_store(&fx);
+
+        let store_path = fx.journal_dir.join("rust-owned.db");
+        std::fs::create_dir_all(&fx.journal_dir).unwrap();
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        {
+            let conn = store.conn();
+            fee_runway::record_mempool_sample_pruned(&conn, NOW - 10, 42.0, NOW - 90_000).unwrap();
+        }
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
         let mut clock = || NOW;
 
-        // `prepared()`'s default cfg has Vegas Reflex ON and a truthy
-        // `chain_costs` -- SeedOnce has NO Rust-owned mempool sample yet,
-        // so the cycle must fail closed (Task 6: "missing/stale samples
-        // deny a decision that needs Vegas evidence"), never silently
-        // fabricate a `1.0` MA the way strict-replay's Python fallback
-        // would.
-        let outcome = owner.run_cycle(prepared(json!(3), false), &mut clock);
-        assert_eq!(outcome, CycleOutcome::SkippedDecisionInput, "{outcome:?}");
+        let mut p = prepared(json!(3), false);
+        p.rpc.feerates = None; // chain costs unresolved
+        let outcome = owner.run_cycle(p, &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        let conn = Connection::open(&store_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rust_mempool_fee_history", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "no new sample may be recorded when chain costs are unresolved \
+             (Python-parity cadence gate); the existing sample is read-only evidence"
+        );
     }
 
     #[test]
@@ -3849,8 +4270,18 @@ mod seedonce_restart {
             RunwayStateStore::commit_fee_cycle(&self.inner, commit)
         }
 
-        fn record_seed_event(&self, event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
-            self.inner.record_seed_event(event)
+        fn record_seed_refusal(&self, event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
+            self.inner.record_seed_refusal(event)
+        }
+
+        fn refresh_mempool_window(
+            &self,
+            sampled_at: i64,
+            sat_per_vbyte: f64,
+            retain_since: i64,
+        ) -> anyhow::Result<fee_runway::MempoolWindow> {
+            self.inner
+                .refresh_mempool_window(sampled_at, sat_per_vbyte, retain_since)
         }
 
         fn record_restart_marker(
@@ -4889,7 +5320,16 @@ mod seedonce_restart {
             self.wedge()
         }
 
-        fn record_seed_event(&self, _event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
+        fn refresh_mempool_window(
+            &self,
+            _sampled_at: i64,
+            _sat_per_vbyte: f64,
+            _retain_since: i64,
+        ) -> anyhow::Result<fee_runway::MempoolWindow> {
+            self.wedge()
+        }
+
+        fn record_seed_refusal(&self, _event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
             self.wedge()
         }
 

@@ -248,6 +248,7 @@ fn sample_commit(cycle_id: &str, at: i64) -> FeeCycleCommit {
             disposition: Some("broadcast".to_string()),
             skip_gate_comparable: true,
         }],
+        pending_seed: None,
         trigger_receipt: None,
     }
 }
@@ -655,13 +656,17 @@ fn rust_fee_schema_quarantine_and_runway_snapshot() {
 
 #[test]
 fn rust_fee_schema_seed_event_records_provenance_and_refusal() {
-    use revops_db::fee_runway::{latest_seed_event, record_seed_event, FeeSeedEventRow};
+    use revops_db::fee_runway::{
+        commit_fee_cycle, latest_seed_event, record_seed_refusal, FeeCycleCommit, FeeSeedEventRow,
+    };
 
     let conn = Connection::open_in_memory().unwrap();
     init_schema(&conn).unwrap();
 
     assert!(latest_seed_event(&conn).unwrap().is_none());
 
+    // Task 42: SUCCESS provenance has no standalone write path -- it
+    // commits atomically with generation 1.
     let seeded = FeeSeedEventRow {
         seeded_at: 1_800_000_000,
         outcome: "seeded".to_string(),
@@ -674,13 +679,31 @@ fn rust_fee_schema_seed_event_records_provenance_and_refusal() {
         refused_field: None,
         detail: None,
     };
-    let id = record_seed_event(&conn, &seeded).unwrap();
-    assert!(id > 0);
+    assert!(
+        record_seed_refusal(&conn, &seeded).is_err(),
+        "the standalone path must refuse a success row outright"
+    );
+    assert!(latest_seed_event(&conn).unwrap().is_none());
+    let generation = commit_fee_cycle(
+        &conn,
+        &FeeCycleCommit {
+            cycle_id: "seed-cycle-1".to_string(),
+            started_at: 1_800_000_000,
+            completed_at: 1_800_000_000,
+            source_commit: "649c320".to_string(),
+            binary_sha256: "0".repeat(64),
+            pending_seed: Some(seeded.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(generation, 1);
     let read = latest_seed_event(&conn).unwrap().expect("seed event");
     assert_eq!(read, seeded);
 
     // A later refusal supersedes as the LATEST event and carries the
-    // offending channel + field (fail-closed seed import, Task R6).
+    // offending channel + field (fail-closed seed import, Task R6) --
+    // refusal remains a STANDALONE durable event (Task 42).
     let refused = FeeSeedEventRow {
         seeded_at: 1_800_000_100,
         outcome: "seed_refused".to_string(),
@@ -693,18 +716,163 @@ fn rust_fee_schema_seed_event_records_provenance_and_refusal() {
         refused_field: Some("thompson_state._last_fee_min".to_string()),
         detail: Some("non-numeric value where Python float() raises".to_string()),
     };
-    record_seed_event(&conn, &refused).unwrap();
+    record_seed_refusal(&conn, &refused).unwrap();
     let read = latest_seed_event(&conn).unwrap().expect("refusal event");
     assert_eq!(read, refused);
 
-    // Outcome vocabulary is closed: anything else is rejected by CHECK.
+    // Outcome vocabulary is closed: anything else is rejected before the
+    // insert (and the pending-seed path equally refuses non-'seeded').
     let bogus = FeeSeedEventRow {
         outcome: "partial".to_string(),
         ..seeded
     };
     assert!(
-        record_seed_event(&conn, &bogus).is_err(),
+        record_seed_refusal(&conn, &bogus).is_err(),
         "outcome must be 'seeded' or 'seed_refused' -- no partial seeds exist"
+    );
+}
+
+#[test]
+fn refresh_mempool_window_inserts_prunes_and_aggregates_in_one_transaction() {
+    use revops_db::fee_runway::{record_mempool_sample, refresh_mempool_window, MempoolWindow};
+
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    // Pre-existing window: one fresh (kept) + one stale (pruned) sample.
+    record_mempool_sample(&conn, 1_800_000_000 - 1_000, 10.0).unwrap();
+    record_mempool_sample(&conn, 1_800_000_000 - 90_000, 500.0).unwrap();
+
+    let window =
+        refresh_mempool_window(&conn, 1_800_000_000, 30.0, 1_800_000_000 - 86_400).unwrap();
+    assert_eq!(
+        window,
+        MempoolWindow {
+            count: 2,
+            latest_sampled_at: Some(1_800_000_000),
+            average: Some(20.0),
+        },
+        "the aggregate covers the post-prune window INCLUDING the just-inserted \
+         current sample (virgin first-cycle evidence), excluding the pruned row"
+    );
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM rust_mempool_fee_history", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 2, "stale row pruned, fresh + current kept");
+
+    // A virgin table: the FIRST refresh already returns its own sample.
+    let virgin = Connection::open_in_memory().unwrap();
+    init_schema(&virgin).unwrap();
+    let window =
+        refresh_mempool_window(&virgin, 1_800_000_000, 3.0, 1_800_000_000 - 86_400).unwrap();
+    assert_eq!(
+        window,
+        MempoolWindow {
+            count: 1,
+            latest_sampled_at: Some(1_800_000_000),
+            average: Some(3.0),
+        }
+    );
+}
+
+/// Task 42: the DB-level virgin-store gate under the pending-seed
+/// contract. A commit carrying success provenance against an ALREADY
+/// ADVANCED store must roll back ENTIRELY — generation, cycle, and seed
+/// table all unchanged.
+#[test]
+fn pending_seed_against_advanced_store_rolls_back_the_whole_commit() {
+    use revops_db::fee_runway::{
+        commit_fee_cycle, current_state_generation, latest_seed_event, FeeCycleCommit,
+        FeeSeedEventRow,
+    };
+
+    let conn = Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    let seed = FeeSeedEventRow {
+        seeded_at: 1_800_000_000,
+        outcome: "seeded".to_string(),
+        source_db_path: "/prod/revenue_ops.db".to_string(),
+        source_max_last_update: 1_799_999_000,
+        row_count: 1,
+        payload_sha256: "ab".repeat(32),
+        source_commit: "649c320".to_string(),
+        refused_channel: None,
+        refused_field: None,
+        detail: None,
+    };
+
+    // Advance the store to generation 1 WITHOUT a seed (e.g. an A3-first
+    // virgin store — a consistent no-seed-claim state).
+    commit_fee_cycle(
+        &conn,
+        &FeeCycleCommit {
+            cycle_id: "cycle-1".to_string(),
+            started_at: 1_800_000_000,
+            completed_at: 1_800_000_000,
+            source_commit: "649c320".to_string(),
+            binary_sha256: "0".repeat(64),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let err = commit_fee_cycle(
+        &conn,
+        &FeeCycleCommit {
+            cycle_id: "cycle-2".to_string(),
+            started_at: 1_800_000_100,
+            completed_at: 1_800_000_100,
+            source_commit: "649c320".to_string(),
+            binary_sha256: "0".repeat(64),
+            pending_seed: Some(seed.clone()),
+            ..Default::default()
+        },
+    )
+    .expect_err("pending seed provenance requires a virgin store");
+    assert!(
+        err.to_string().contains("virgin store"),
+        "typed reason names the gate: {err:#}"
+    );
+
+    assert_eq!(current_state_generation(&conn).unwrap(), 1);
+    assert!(latest_seed_event(&conn).unwrap().is_none());
+    let cycle2: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rust_fee_cycles WHERE cycle_id = 'cycle-2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        cycle2, 0,
+        "the ENTIRE commit rolled back, not only the seed row"
+    );
+
+    // And a pending row claiming refusal is refused as a commit rider.
+    let refused_rider = FeeSeedEventRow {
+        outcome: "seed_refused".to_string(),
+        ..seed
+    };
+    let fresh = Connection::open_in_memory().unwrap();
+    init_schema(&fresh).unwrap();
+    assert!(
+        commit_fee_cycle(
+            &fresh,
+            &FeeCycleCommit {
+                cycle_id: "cycle-r".to_string(),
+                started_at: 1_800_000_000,
+                completed_at: 1_800_000_000,
+                source_commit: "649c320".to_string(),
+                binary_sha256: "0".repeat(64),
+                pending_seed: Some(refused_rider),
+                ..Default::default()
+            },
+        )
+        .is_err(),
+        "refusals never ride a commit — they are standalone terminal facts"
     );
 }
 
