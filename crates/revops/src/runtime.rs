@@ -67,10 +67,13 @@ impl ObserverRuntime {
         }
     }
     pub async fn start(
-        _mode: ObserverMode,
+        mode: ObserverMode,
         store: Arc<dyn LoopHealthPersistence>,
         passes: ObserverPassSet,
     ) -> Result<Self> {
+        if passes.fee.is_some() && !mode.autonomous_shadow() {
+            anyhow::bail!("passive observer cannot start the autonomous fee pass");
+        }
         let mut generic: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
         if let Some(fee) = passes.fee {
             generic.insert(LoopId::Fee, fee);

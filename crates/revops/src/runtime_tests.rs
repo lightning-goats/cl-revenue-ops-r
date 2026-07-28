@@ -545,3 +545,56 @@ async fn fee_cadence_makes_zero_requests_until_explicit_post_start_activation() 
     tokio::task::yield_now().await;
     assert_eq!(store.row(LoopId::Fee).generation, 1);
 }
+
+#[tokio::test]
+async fn passive_observer_token_rejects_a_fee_pass() {
+    use crate::fee_mode::{validate_fee_mode, AuthorityPlan, ModeFlags};
+    use crate::fee_scheduler::{FeeObserverPass, SchedulerIngress};
+    use crate::runtime::ObserverPassSet;
+    use revops_db::fee_runway::FeeStateSnapshot;
+
+    let mode = validate_fee_mode(
+        ModeFlags {
+            observer: true,
+            fee_dryrun: false,
+            fee_broadcast: false,
+            fee_stateful_shadow: false,
+        },
+        None,
+        &FeeStateSnapshot::default(),
+        None,
+    )
+    .unwrap();
+    let observer_mode = match mode.into_authority_plan(|_| -> () {
+        panic!("passive observer construction touched action factory")
+    }) {
+        AuthorityPlan::Observer(token) => token,
+        AuthorityPlan::Live(()) => unreachable!(),
+    };
+    let (scheduler_tx, _owner_rx) = SchedulerIngress::bounded_channel(1);
+    let pass = Arc::new(FeeObserverPass::new(
+        std::path::PathBuf::from("/nonexistent/passive-fee-pass-test-rpc"),
+        None,
+        crate::config_resolve::PythonOptionCache::empty(),
+        scheduler_tx,
+        60,
+    ));
+    let store = Arc::new(MemoryStore::default());
+    let result = ObserverRuntime::start(
+        observer_mode,
+        store.clone(),
+        ObserverPassSet::empty().with_fee(pass),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("passive observer accepted an autonomous fee pass"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("passive observer cannot start the autonomous fee pass"));
+    assert!(
+        store.writes().is_empty(),
+        "mode/pass-set refusal must precede registration and reconciliation"
+    );
+}

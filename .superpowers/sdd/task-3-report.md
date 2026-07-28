@@ -99,6 +99,24 @@ Terminal updates require `terminal_generation < generation`; a generation can
 accept exactly one terminal result. Tests reject same-generation pass-to-error
 and error-to-pass flips.
 
+## Independent re-review corrections
+
+The reopened independent review found four remaining capability-boundary gaps;
+all are corrected in this checkpoint:
+
+- Store-dispatch thread launch failure is now an explicit `Result` and never
+  invokes a completion callback inline. The owner handles launch failure
+  terminally in place, clears pending state, and counts persistence failure.
+- Passive mode now carries a sealed `PassiveMode` capability which external
+  callers cannot construct. Runtime startup also rejects a passive token paired
+  with a fee pass before registration, reconciliation, or any store write.
+- `SchedulerIngress::bounded_channel` is crate-private. The public test seam
+  exposes only `A3ResultReceiver`, whose API can return only
+  `InitialFeeStoreResult`, rather than a raw `Receiver<CycleMsg>`.
+- The action-surface guard now parses the concrete public runtime start
+  signature and requires both `mode: ObserverMode` and
+  `passes: ObserverPassSet`, avoiding a vacuous whole-file substring check.
+
 ## RED and mutation evidence
 
 Every mutation below was temporary, observed RED, and restored before the final
@@ -117,24 +135,38 @@ green runs.
 - Original lifecycle mutations remain covered: removing begin, finish, fail,
   coalesced, or dropped persistence writes fails the corresponding focused
   runtime assertion.
+- Dispatch launch failure: making the injected spawner run the callback inline
+  deadlocked the saturated-queue regression test; suppressing each owner's
+  inline launch-error handler failed its terminal/no-pending-leak assertion.
+- Passive sealing and raw receiver isolation: removing the passive-plus-fee
+  rejection accepted the invalid pair and wrote state; widening
+  `bounded_channel` made both the compile-fail doctest and action-surface guard
+  fail.
+- Public signature guard: renaming either concrete `start` parameter made the
+  structural assertion fail.
 
 ## Focused GREEN evidence
 
 - `cargo test -p revops-db --test loop_health` — 5 passed.
-- `cargo test -p revops --lib runtime_tests` — 9 passed.
-- `cargo test -p revops --test fee_scheduler` — 90 passed.
+- `cargo test -p revops --lib runtime_tests` — 10 passed.
+- `cargo test -p revops --test fee_scheduler` — 93 passed.
 - `cargo test -p revops --test action_surface` — 8 passed.
 - `cargo test -p revops --lib rpc_health::tests` — 11 passed.
 - `cargo test -p revops --test manifest health` — 3 passed.
-- `cargo test -p revops --doc` — 7 passed, including the compile-fail proofs.
+- `cargo test -p revops --doc` — 10 passed, including the compile-fail proofs.
+- The real bounded owner queue was filled before injected dispatch launch
+  failure; the result callback was never invoked inline and the test completed
+  without deadlock.
 
 ## Full verification gates
 
-- `cargo test --workspace --all-targets` — exit 0; every workspace target passed.
+- `cargo test --workspace --all-targets --quiet` — exit 0; every workspace
+  target passed.
 - `cargo fmt --all -- --check` — exit 0.
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0.
 - `git diff --check` — exit 0.
-- The isolated correction worktree was clean before this report update.
+- The isolated correction worktree passed every code gate before this report
+  update; final cleanliness is checked after the report commit.
 
 ## Remaining limits
 

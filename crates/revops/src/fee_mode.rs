@@ -98,6 +98,19 @@ impl ShadowMode {
     }
 }
 
+/// Capability proving the passive-observer row passed validation. Its private
+/// field prevents external callers from constructing the passive variant
+/// directly.
+///
+/// ~~~compile_fail,E0451
+/// let forged = revops::fee_mode::PassiveMode { sealed: () };
+/// let _ = revops::fee_mode::ValidatedFeeMode::PassiveObserver(forged);
+/// ~~~
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassiveMode {
+    sealed: (),
+}
+
 /// The live-fee-authority mode capability. Its only field is a private
 /// [`LiveSessionArm`], and its only constructor is [`validate_fee_mode`] --
 /// see the module doc's "`LiveAuthority` cannot be forged".
@@ -192,7 +205,7 @@ impl LiveMode {
 /// ```
 #[derive(Debug)]
 pub enum ValidatedFeeMode {
-    PassiveObserver,
+    PassiveObserver(PassiveMode),
     AutonomousShadow(ShadowMode),
     LiveAuthority(LiveMode),
 }
@@ -203,7 +216,7 @@ impl ValidatedFeeMode {
         action_factory: impl FnOnce(LiveMode) -> T,
     ) -> AuthorityPlan<T> {
         match self {
-            Self::PassiveObserver => AuthorityPlan::Observer(ObserverMode {
+            Self::PassiveObserver(_) => AuthorityPlan::Observer(ObserverMode {
                 autonomous_shadow: false,
             }),
             Self::AutonomousShadow(_) => AuthorityPlan::Observer(ObserverMode {
@@ -342,7 +355,9 @@ pub fn validate_fee_mode(
             if arm.is_some() {
                 return Err(FeeModeDenyReason::ArmPresentInNonLiveMode);
             }
-            Ok(ValidatedFeeMode::PassiveObserver)
+            Ok(ValidatedFeeMode::PassiveObserver(PassiveMode {
+                sealed: (),
+            }))
         }
         (true, true, false, true) => {
             if arm.is_some() {

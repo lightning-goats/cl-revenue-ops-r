@@ -215,8 +215,6 @@ fn observer_runtime_requires_nonforgeable_mode_and_concrete_pass_set() {
     let root = workspace_root();
     let source = std::fs::read_to_string(root.join("crates/revops/src/runtime.rs")).unwrap();
     assert!(source.contains("pub struct ObserverPassSet"));
-    assert!(source.contains("_mode: ObserverMode"));
-    assert!(source.contains("passes: ObserverPassSet"));
     assert!(
         !source.contains("pub fee:"),
         "pass-set fields must stay private"
@@ -228,6 +226,8 @@ fn observer_runtime_requires_nonforgeable_mode_and_concrete_pass_set() {
         .split(") -> Result<Self>")
         .next()
         .expect("public observer runtime start signature");
+    assert!(public_start_signature.contains("mode: ObserverMode"));
+    assert!(public_start_signature.contains("passes: ObserverPassSet"));
     assert!(
         !public_start_signature.contains("BTreeMap<LoopId, Arc<dyn ObserverPass>>"),
         "production observer construction must not accept arbitrary pass implementations"
@@ -275,6 +275,10 @@ fn scheduler_has_no_unbounded_owner_or_wake_ingress() {
     }
     assert!(source.contains("blocking_recv()"));
     assert!(source.contains("blocking_send(CycleMsg::InitialFeeStoreResult"));
+    assert!(source.contains("pub(crate) fn bounded_channel"));
+    assert!(!source.contains("pub fn bounded_channel"));
+    assert!(source.contains("pub struct A3ResultReceiver"));
+    assert!(source.contains("rx: std::sync::Mutex<tokio_mpsc::Receiver<CycleMsg>>"));
 }
 
 #[test]

@@ -116,7 +116,7 @@ fn passive_observer_row_accepted_without_arm() {
         fee_stateful_shadow: false,
     };
     let result = validate_fee_mode(flags, None, &virgin_state(), None).expect("passive is valid");
-    assert!(matches!(result, ValidatedFeeMode::PassiveObserver));
+    assert!(matches!(result, ValidatedFeeMode::PassiveObserver(_)));
 }
 
 #[test]

@@ -543,7 +543,7 @@ pub fn resolve_startup_mode(
 /// `State::mode_label` for the status/runway RPCs and startup logging.
 pub fn mode_label(mode: &ValidatedFeeMode) -> &'static str {
     match mode {
-        ValidatedFeeMode::PassiveObserver => "passive_observer",
+        ValidatedFeeMode::PassiveObserver(_) => "passive_observer",
         ValidatedFeeMode::AutonomousShadow(_) => "autonomous_shadow",
         ValidatedFeeMode::LiveAuthority(_) => "live_authority",
     }
@@ -2859,7 +2859,7 @@ mod tests {
             rust_state_store_configured: false,
         })
         .expect("passive observer needs no Rust state");
-        assert!(matches!(result, ValidatedFeeMode::PassiveObserver));
+        assert!(matches!(result, ValidatedFeeMode::PassiveObserver(_)));
         assert_eq!(mode_label(&result), "passive_observer");
     }
 
@@ -3150,10 +3150,9 @@ mod tests {
             cutover_arm::validate_and_consume(&arm_path, &consumed_dir, &test_identity(owner_uid))
                 .expect("valid arm consumes");
 
-        assert_eq!(
-            mode_label(&ValidatedFeeMode::PassiveObserver),
-            "passive_observer"
-        );
+        let passive = fee_mode::validate_fee_mode(passive_flags(), None, &virgin_state(), None)
+            .expect("passive row valid");
+        assert_eq!(mode_label(&passive), "passive_observer");
         let shadow = fee_mode::validate_fee_mode(shadow_flags(), None, &virgin_state(), None)
             .expect("shadow row valid");
         assert_eq!(mode_label(&shadow), "autonomous_shadow");

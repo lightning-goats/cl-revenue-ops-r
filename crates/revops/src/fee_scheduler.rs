@@ -150,6 +150,7 @@ use std::collections::{HashMap, HashSet};
 use revops_fees::thompson::dynamics;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -223,6 +224,14 @@ pub const OWNER_QUEUE_CAPACITY: usize = 64;
 /// The private-sender boundary for scheduler admission. Exposing this
 /// wrapper (rather than Tokio's raw sender) makes async backpressure the
 /// only public production send API.
+///
+/// ~~~compile_fail,E0451
+/// fn forge(
+///     tx: tokio::sync::mpsc::Sender<revops::fee_scheduler::CycleMsg>,
+/// ) -> revops::fee_scheduler::SchedulerIngress {
+///     revops::fee_scheduler::SchedulerIngress { tx }
+/// }
+/// ~~~
 #[derive(Clone)]
 pub struct SchedulerIngress {
     tx: tokio_mpsc::Sender<CycleMsg>,
@@ -233,14 +242,21 @@ impl SchedulerIngress {
         self.tx.send(msg).await
     }
 
-    fn blocking_send(&self, msg: CycleMsg) -> Result<(), tokio_mpsc::error::SendError<CycleMsg>> {
+    pub(crate) fn blocking_send(
+        &self,
+        msg: CycleMsg,
+    ) -> Result<(), tokio_mpsc::error::SendError<CycleMsg>> {
         self.tx.blocking_send(msg)
     }
 
-    /// Bounded test plumbing for direct `CycleOwner` integration tests.
-    /// The raw sender remains private and no unbounded construction exists.
-    #[doc(hidden)]
-    pub fn bounded_channel(capacity: usize) -> (Self, tokio_mpsc::Receiver<CycleMsg>) {
+    /// Raw receiver construction is crate-private: external code may submit
+    /// through `send`, but can never install an arbitrary consumer behind a
+    /// vetted observer pass.
+    ///
+    /// ~~~compile_fail,E0624
+    /// let _ = revops::fee_scheduler::SchedulerIngress::bounded_channel(1);
+    /// ~~~
+    pub(crate) fn bounded_channel(capacity: usize) -> (Self, tokio_mpsc::Receiver<CycleMsg>) {
         let (tx, rx) = tokio_mpsc::channel(capacity.max(1));
         (Self { tx }, rx)
     }
@@ -623,6 +639,54 @@ pub enum InitialFeeStoreResult {
         context: String,
         result: Result<(), String>,
     },
+}
+
+/// Result-only callback capability for A3 store completions. Unlike
+/// `SchedulerIngress`, this cannot receive wake, query, cycle, notification,
+/// or any future action-bearing owner messages.
+#[derive(Clone)]
+struct InitialFeeResultSink {
+    deliver: Arc<dyn Fn(InitialFeeStoreResult) -> bool + Send + Sync + 'static>,
+}
+
+impl InitialFeeResultSink {
+    fn new(deliver: impl Fn(InitialFeeStoreResult) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            deliver: Arc::new(deliver),
+        }
+    }
+
+    fn deliver(&self, result: InitialFeeStoreResult) -> bool {
+        (self.deliver)(result)
+    }
+
+    fn scheduler(ingress: SchedulerIngress) -> Self {
+        Self::new(move |result| {
+            ingress
+                .blocking_send(CycleMsg::InitialFeeStoreResult(result))
+                .is_ok()
+        })
+    }
+}
+
+/// Safe integration-test receiver for A3 store results. The raw
+/// `Receiver<CycleMsg>` stays private and any non-result message is rejected.
+pub struct A3ResultReceiver {
+    rx: std::sync::Mutex<tokio_mpsc::Receiver<CycleMsg>>,
+}
+
+impl A3ResultReceiver {
+    pub fn try_recv(&self) -> Result<InitialFeeStoreResult, tokio_mpsc::error::TryRecvError> {
+        match self
+            .rx
+            .lock()
+            .expect("A3 result receiver poisoned")
+            .try_recv()?
+        {
+            CycleMsg::InitialFeeStoreResult(result) => Ok(result),
+            _ => panic!("A3 result receiver observed a non-result owner message"),
+        }
+    }
 }
 
 /// One in-flight A3 occurrence's owner-side bookkeeping, keyed by
@@ -1437,7 +1501,7 @@ pub struct CycleOwner {
     /// (`spawn_with_thread_spawner`) always sets this; a bare test-driven
     /// owner without one fails the A3 path CLOSED (a commit whose result
     /// could never return must not be dispatched).
-    self_tx: Option<SchedulerIngress>,
+    result_sink: Option<InitialFeeResultSink>,
     /// F5: in-flight A3 occurrences, keyed by channel_id. An entry's
     /// presence is the same-channel fail-closed race guard; its staged
     /// clones install only on a successful identity-matched commit
@@ -1527,7 +1591,7 @@ impl CycleOwner {
             last_profile: "active".to_string(),
             last_cycle_at: None,
             last_cycle_outcome: None,
-            self_tx: None,
+            result_sink: None,
             pending_initial_fees: HashMap::new(),
             initial_fee_dispatch_seq: 0,
             initial_fee_conflicts: 0,
@@ -1538,13 +1602,20 @@ impl CycleOwner {
         }
     }
 
-    /// F5: wire the owner's own queue sender (see the `self_tx` field
-    /// doc). `spawn_with_thread_spawner` calls this before entering the
-    /// message loop; tests driving an owner directly call it with their
-    /// own receiver's sender and pump the resulting
-    /// [`CycleMsg::InitialFeeStoreResult`] messages back in.
-    pub fn set_self_sender(&mut self, tx: SchedulerIngress) {
-        self.self_tx = Some(tx);
+    /// F5: wire the private result-only sink. `spawn_with_thread_spawner`
+    /// calls this before entering the message loop; tests driving an owner
+    /// directly attach the result-only receiver and pump those results back in.
+    fn set_initial_fee_result_sink(&mut self, sink: InitialFeeResultSink) {
+        self.result_sink = Some(sink);
+    }
+
+    #[doc(hidden)]
+    pub fn attach_a3_result_receiver_for_tests(&mut self, capacity: usize) -> A3ResultReceiver {
+        let (ingress, rx) = SchedulerIngress::bounded_channel(capacity);
+        self.set_initial_fee_result_sink(InitialFeeResultSink::scheduler(ingress));
+        A3ResultReceiver {
+            rx: std::sync::Mutex::new(rx),
+        }
     }
 
     /// F5's red conflict counter (see the `initial_fee_conflicts` field
@@ -2896,14 +2967,14 @@ impl CycleOwner {
             return;
         }
 
-        // F5: without a self-sender the off-owner store results could
+        // F5: without a result sink the off-owner store results could
         // never return to the owner, so the occurrence must fail CLOSED
         // before any decision/RNG -- never dispatch work whose outcome is
         // undeliverable. Production wiring always sets one.
-        let Some(self_tx) = self.self_tx.clone() else {
+        let Some(result_sink) = self.result_sink.clone() else {
             self.persistence_failures += 1;
             eprintln!(
-                "revops: A3 NEW-CHANNEL REFUSED (failure #{}): owner has no self-sender for \
+                "revops: A3 NEW-CHANNEL REFUSED (failure #{}): owner has no result sink for \
                  commit-result routing; channel {channel_id} at {now} -- no decision was made, \
                  no entropy was drawn",
                 self.persistence_failures
@@ -2913,9 +2984,9 @@ impl CycleOwner {
                 now,
                 false,
                 None,
-                "REFUSED: owner has no self-sender for commit-result routing; no decision was \
+                "REFUSED: owner has no result sink for commit-result routing; no decision was \
                  made",
-                "new_channel no-self-sender refusal receipt",
+                "new_channel no-result-sink refusal receipt",
             );
             return;
         };
@@ -2945,24 +3016,29 @@ impl CycleOwner {
         );
         let store = self.store.as_ref().expect("checked store.is_none() above");
         let reply_key = event_key.clone();
-        store.dispatch_cycle_exists_with_generation(
+        let callback_channel_id = channel_id.clone();
+        let callback_reply_key = reply_key.clone();
+        let launch = store.dispatch_cycle_exists_with_generation(
             event_key,
             Box::new(move |result| {
-                if self_tx
-                    .blocking_send(CycleMsg::InitialFeeStoreResult(
-                        InitialFeeStoreResult::Idempotency {
-                            channel_id,
-                            event_key: reply_key,
-                            generation,
-                            result: result.map_err(|e| format!("{e:#}")),
-                        },
-                    ))
-                    .is_err()
-                {
+                if !result_sink.deliver(InitialFeeStoreResult::Idempotency {
+                    channel_id: callback_channel_id,
+                    event_key: callback_reply_key,
+                    generation,
+                    result: result.map_err(|e| format!("{e:#}")),
+                }) {
                     eprintln!("revops: A3 idempotency result lost: owner ingress closed");
                 }
             }),
         );
+        if let Err(e) = launch {
+            self.handle_idempotency_result(
+                channel_id,
+                reply_key,
+                generation,
+                Err(format!("{e:#}")),
+            );
+        }
     }
 
     /// [`CycleMsg::InitialFeeStoreResult`]'s handler (live-review finding
@@ -3403,37 +3479,38 @@ impl CycleOwner {
         // idempotency dispatch and are never unset; fail closed anyway
         // rather than panic the owner thread if that invariant ever
         // breaks.
-        let (Some(self_tx), Some(store)) = (self.self_tx.clone(), self.store.as_ref()) else {
+        let (Some(result_sink), Some(store)) = (self.result_sink.clone(), self.store.as_ref())
+        else {
             self.pending_initial_fees.remove(&channel_id);
             self.persistence_failures += 1;
             eprintln!(
                 "revops: A3 NEW-CHANNEL COMMIT NOT DISPATCHED (failure #{}): store or \
-                 self-sender vanished mid-flight for channel {channel_id}; nothing was \
+                 result sink vanished mid-flight for channel {channel_id}; nothing was \
                  committed, nothing was installed",
                 self.persistence_failures
             );
             return;
         };
         let event_key = prepared.event_key.clone();
-        store.dispatch_commit_fee_cycle_guarded(
+        let callback_channel_id = channel_id.clone();
+        let callback_event_key = event_key.clone();
+        let launch = store.dispatch_commit_fee_cycle_guarded(
             commit,
             expected_prior_generation,
             Box::new(move |result| {
-                if self_tx
-                    .blocking_send(CycleMsg::InitialFeeStoreResult(
-                        InitialFeeStoreResult::Commit {
-                            channel_id,
-                            event_key,
-                            generation,
-                            result: result.map_err(|e| format!("{e:#}")),
-                        },
-                    ))
-                    .is_err()
-                {
+                if !result_sink.deliver(InitialFeeStoreResult::Commit {
+                    channel_id: callback_channel_id,
+                    event_key: callback_event_key,
+                    generation,
+                    result: result.map_err(|e| format!("{e:#}")),
+                }) {
                     eprintln!("revops: A3 commit result lost: owner ingress closed");
                 }
             }),
         );
+        if let Err(e) = launch {
+            self.handle_commit_result(channel_id, event_key, generation, Err(format!("{e:#}")));
+        }
     }
 
     /// [`CycleMsg::RunPrepared`]'s owner-side entry. F7 sequencing rule
@@ -3511,13 +3588,13 @@ impl CycleOwner {
     /// interaction -- a receipt write against a stalled store must not
     /// wedge the owner either. The write's own failure comes back as an
     /// [`InitialFeeStoreResult::Receipt`] (loud + counted) when a
-    /// self-sender is wired; without one it is logged from the dispatch
+    /// result sink is wired; without one it is logged from the dispatch
     /// thread. Without a store this is a no-op, exactly like
     /// [`Self::record_trigger_receipt`]'s posture (the refusal stays
     /// loudly logged by the caller and enforced in-process).
     #[allow(clippy::too_many_arguments)]
     fn dispatch_a3_receipt(
-        &self,
+        &mut self,
         trigger: &FeeTrigger,
         received_at: i64,
         coalesced: bool,
@@ -3530,31 +3607,41 @@ impl CycleOwner {
         };
         let row = build_receipt(trigger, received_at, coalesced, cycle, detail);
         let context = context.to_string();
-        match self.self_tx.clone() {
-            Some(tx) => store.dispatch_record_trigger_event(
-                row,
-                Box::new(move |result| {
-                    if tx
-                        .blocking_send(CycleMsg::InitialFeeStoreResult(
-                            InitialFeeStoreResult::Receipt {
-                                context,
-                                result: result.map_err(|e| format!("{e:#}")),
-                            },
-                        ))
-                        .is_err()
-                    {
-                        eprintln!("revops: A3 receipt result lost: owner ingress closed");
-                    }
-                }),
-            ),
-            None => store.dispatch_record_trigger_event(
-                row,
-                Box::new(move |result| {
-                    if let Err(e) = result {
-                        eprintln!("revops: A3 receipt record failed ({e:#}): {context}");
-                    }
-                }),
-            ),
+        let launch = match self.result_sink.clone() {
+            Some(result_sink) => {
+                let callback_context = context.clone();
+                store.dispatch_record_trigger_event(
+                    row,
+                    Box::new(move |result| {
+                        if !result_sink.deliver(InitialFeeStoreResult::Receipt {
+                            context: callback_context,
+                            result: result.map_err(|e| format!("{e:#}")),
+                        }) {
+                            eprintln!("revops: A3 receipt result lost: owner ingress closed");
+                        }
+                    }),
+                )
+            }
+            None => {
+                let callback_context = context.clone();
+                store.dispatch_record_trigger_event(
+                    row,
+                    Box::new(move |result| {
+                        if let Err(e) = result {
+                            eprintln!(
+                                "revops: A3 receipt record failed ({e:#}): {callback_context}"
+                            );
+                        }
+                    }),
+                )
+            }
+        };
+        if let Err(e) = launch {
+            self.persistence_failures += 1;
+            eprintln!(
+                "revops: A3 receipt dispatch FAILED (failure #{}): {e:#}: {context}",
+                self.persistence_failures
+            );
         }
     }
 
@@ -3832,7 +3919,7 @@ where
         let mut owner = CycleOwner::new(&cfg, crate::now_unix(), store);
         // F5: off-owner store dispatches route their results back onto
         // this same queue -- the owner never blocks on a store reply.
-        owner.set_self_sender(owner_self_tx);
+        owner.set_initial_fee_result_sink(InitialFeeResultSink::scheduler(owner_self_tx));
         let mut clock = crate::now_unix;
         while let Some(msg) = rx.blocking_recv() {
             match msg {

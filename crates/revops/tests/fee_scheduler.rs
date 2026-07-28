@@ -1359,16 +1359,49 @@ mod seedonce_restart {
     /// `revops-db`'s own actor tests), against an on-disk file so a
     /// "restart" (a brand-new `CycleOwner` + store instance) reopens the
     /// same Rust-owned state.
+    #[derive(Clone, Default)]
+    struct DispatchLaunchFailures {
+        idempotency: Arc<AtomicBool>,
+        commit: Arc<AtomicBool>,
+        receipt: Arc<AtomicBool>,
+    }
+
     struct TestStore {
         path: PathBuf,
         fail_commits: Arc<AtomicBool>,
+        launch_failures: DispatchLaunchFailures,
     }
 
     impl TestStore {
         fn open(path: &Path, fail_commits: Arc<AtomicBool>) -> TestStore {
+            Self::open_with_dispatch_launch_failures(
+                path,
+                fail_commits,
+                DispatchLaunchFailures::default(),
+            )
+        }
+
+        fn open_with_commit_launch_failure(
+            path: &Path,
+            fail_commits: Arc<AtomicBool>,
+            fail_commit_launch: Arc<AtomicBool>,
+        ) -> TestStore {
+            let launch_failures = DispatchLaunchFailures {
+                commit: fail_commit_launch,
+                ..DispatchLaunchFailures::default()
+            };
+            Self::open_with_dispatch_launch_failures(path, fail_commits, launch_failures)
+        }
+
+        fn open_with_dispatch_launch_failures(
+            path: &Path,
+            fail_commits: Arc<AtomicBool>,
+            launch_failures: DispatchLaunchFailures,
+        ) -> TestStore {
             let store = TestStore {
                 path: path.to_path_buf(),
                 fail_commits,
+                launch_failures,
             };
             store.conn(); // create + init schema
             store
@@ -1454,11 +1487,15 @@ mod seedonce_restart {
             &self,
             cycle_id: String,
             on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
-        ) {
+        ) -> anyhow::Result<()> {
+            if self.launch_failures.idempotency.load(Ordering::SeqCst) {
+                anyhow::bail!("injected idempotency dispatch thread spawn failure");
+            }
             on_done(fee_runway::cycle_exists_with_generation(
                 &self.conn(),
                 &cycle_id,
             ));
+            Ok(())
         }
 
         fn dispatch_commit_fee_cycle_guarded(
@@ -1466,43 +1503,49 @@ mod seedonce_restart {
             commit: FeeCycleCommit,
             expected_prior_generation: u64,
             on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
-        ) {
+        ) -> anyhow::Result<()> {
+            if self.launch_failures.commit.load(Ordering::SeqCst) {
+                anyhow::bail!("injected store dispatch thread spawn failure");
+            }
             if self.fail_commits.load(Ordering::SeqCst) {
                 on_done(Err(anyhow::anyhow!("injected commit failure")));
-                return;
+                return Ok(());
             }
             on_done(fee_runway::commit_fee_cycle_guarded(
                 &self.conn(),
                 &commit,
                 expected_prior_generation,
             ));
+            Ok(())
         }
 
         fn dispatch_record_trigger_event(
             &self,
             event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
-        ) {
+        ) -> anyhow::Result<()> {
+            if self.launch_failures.receipt.load(Ordering::SeqCst) {
+                anyhow::bail!("injected receipt dispatch thread spawn failure");
+            }
             on_done(RunwayStateStore::record_trigger_event(self, event));
+            Ok(())
         }
     }
 
-    /// F5 test plumbing: wire an owner's self-sender to a local receiver
+    /// F5 test plumbing: wire an owner's result-only sink to a local receiver
     /// (the production loop's stand-in) ...
-    struct TestOwnerReceiver(std::sync::Mutex<tokio::sync::mpsc::Receiver<CycleMsg>>);
+    struct TestOwnerReceiver(revops::fee_scheduler::A3ResultReceiver);
 
     impl TestOwnerReceiver {
         fn try_recv(&self) -> Result<CycleMsg, tokio::sync::mpsc::error::TryRecvError> {
-            self.0.lock().unwrap().try_recv()
+            self.0.try_recv().map(CycleMsg::InitialFeeStoreResult)
         }
     }
 
     fn self_channel(owner: &mut CycleOwner) -> TestOwnerReceiver {
-        let (tx, bounded_rx) = revops::fee_scheduler::SchedulerIngress::bounded_channel(
-            revops::fee_scheduler::OWNER_QUEUE_CAPACITY,
-        );
-        owner.set_self_sender(tx);
-        TestOwnerReceiver(std::sync::Mutex::new(bounded_rx))
+        TestOwnerReceiver(
+            owner.attach_a3_result_receiver_for_tests(revops::fee_scheduler::OWNER_QUEUE_CAPACITY),
+        )
     }
 
     /// ... and pump every off-owner store result message back into the
@@ -3856,9 +3899,9 @@ mod seedonce_restart {
             &self,
             cycle_id: String,
             on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
-        ) {
+        ) -> anyhow::Result<()> {
             self.inner
-                .dispatch_cycle_exists_with_generation(cycle_id, on_done);
+                .dispatch_cycle_exists_with_generation(cycle_id, on_done)
         }
 
         fn dispatch_commit_fee_cycle_guarded(
@@ -3866,20 +3909,21 @@ mod seedonce_restart {
             commit: FeeCycleCommit,
             expected_prior_generation: u64,
             on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
-        ) {
+        ) -> anyhow::Result<()> {
             let _ = &self.path;
             self.parked
                 .lock()
                 .unwrap()
                 .push((commit, expected_prior_generation, on_done));
+            Ok(())
         }
 
         fn dispatch_record_trigger_event(
             &self,
             event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
-        ) {
-            self.inner.dispatch_record_trigger_event(event, on_done);
+        ) -> anyhow::Result<()> {
+            self.inner.dispatch_record_trigger_event(event, on_done)
         }
     }
 
@@ -4381,6 +4425,138 @@ mod seedonce_restart {
         );
     }
 
+    #[test]
+    fn commit_dispatch_launch_failure_is_terminal_inline_without_a_pending_leak() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let fail_launch = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open_with_commit_launch_failure(
+            &store_path,
+            Arc::new(AtomicBool::new(false)),
+            fail_launch.clone(),
+        );
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+        let prepared = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        );
+        let event_key = prepared.event_key.clone();
+        owner.handle_new_channel(prepared);
+        let idempotency = match rx.try_recv().expect("idempotency answer was dispatched") {
+            CycleMsg::InitialFeeStoreResult(result) => result,
+            _ => panic!("unexpected owner message"),
+        };
+        assert_eq!(owner.initial_fee_pending(), 1);
+        fail_launch.store(true, Ordering::SeqCst);
+        let mut clock = || NOW + 10;
+        owner.handle_initial_fee_store_result(idempotency, &mut clock);
+
+        assert_eq!(
+            owner.persistence_failures(),
+            1,
+            "one failed launch has one terminal failure"
+        );
+        assert_eq!(
+            owner.initial_fee_pending(),
+            0,
+            "inline launch failure must remove the pending commit"
+        );
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "launch failure must not invoke the commit callback"
+        );
+        assert!(
+            !fee_runway::cycle_exists(
+                &Connection::open(&store_path).expect("reopen store"),
+                &event_key,
+            )
+            .expect("query cycle"),
+            "failed launch must not write a commit"
+        );
+    }
+
+    #[test]
+    fn idempotency_dispatch_launch_failure_is_terminal_inline_without_a_pending_leak() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let launch_failures = DispatchLaunchFailures::default();
+        launch_failures.idempotency.store(true, Ordering::SeqCst);
+        let store = TestStore::open_with_dispatch_launch_failures(
+            &store_path,
+            Arc::new(AtomicBool::new(false)),
+            launch_failures,
+        );
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        owner.handle_new_channel(new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 20,
+        ));
+
+        assert_eq!(owner.persistence_failures(), 1);
+        assert_eq!(owner.initial_fee_pending(), 0);
+        match rx
+            .try_recv()
+            .expect("the refusal receipt launches after the idempotency launch failure")
+        {
+            CycleMsg::InitialFeeStoreResult(
+                revops::fee_scheduler::InitialFeeStoreResult::Receipt { result: Ok(()), .. },
+            ) => {}
+            _ => panic!("expected only the successful refusal receipt result"),
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn receipt_dispatch_launch_failure_is_counted_inline_once_without_a_callback() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let launch_failures = DispatchLaunchFailures::default();
+        launch_failures.receipt.store(true, Ordering::SeqCst);
+        let store = TestStore::open_with_dispatch_launch_failures(
+            &store_path,
+            Arc::new(AtomicBool::new(false)),
+            launch_failures,
+        );
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        owner.handle_new_channel_refused(
+            peer_a(),
+            CHANNEL.to_string(),
+            NOW + 30,
+            "injected preparation refusal".to_string(),
+        );
+
+        assert_eq!(owner.persistence_failures(), 1);
+        assert_eq!(owner.initial_fee_pending(), 0);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "failed receipt launch must never invoke its callback"
+        );
+    }
+
     /// F5 (same-channel pending/race, fail-closed): once a cycle has
     /// drained the trigger queue, a NEW occurrence for a channel whose
     /// store result is STILL in flight would pass the offer as `Enqueued`
@@ -4767,8 +4943,9 @@ mod seedonce_restart {
             &self,
             _cycle_id: String,
             on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
-        ) {
+        ) -> anyhow::Result<()> {
             drop(on_done);
+            Ok(())
         }
 
         fn dispatch_commit_fee_cycle_guarded(
@@ -4776,16 +4953,18 @@ mod seedonce_restart {
             _commit: FeeCycleCommit,
             _expected_prior_generation: u64,
             on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
-        ) {
+        ) -> anyhow::Result<()> {
             drop(on_done);
+            Ok(())
         }
 
         fn dispatch_record_trigger_event(
             &self,
             _event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
-        ) {
+        ) -> anyhow::Result<()> {
             drop(on_done);
+            Ok(())
         }
     }
 
