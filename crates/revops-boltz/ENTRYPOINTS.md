@@ -25,12 +25,14 @@ plus new code in `crates/revops` — must supply):
 
 1. ~~A real `BoltzCli` implementation~~ **DONE**: `process::ProcessBoltzCli`
    shells out to `boltzcli --datadir <dir> [sudo -n -u <user>] <args>` with
-   a real `std::process::Command`, poll-based timeout enforcement (kill on
-   timeout), and stdout/stderr capture — ports py `_base_cmd`/`_run`
-   (boltz_manager.py:437-467). `process::base_argv` is the pure, tested
-   half; `ProcessBoltzCli::run`'s actual spawn/wait/kill is, by the HARD
-   RULES, untested (no test may spawn a real subprocess) and rests on
-   review + matching the tested `base_argv` shape.
+   a real `std::process::Command`, poll-based timeout enforcement (kill and
+   reap on timeout), and stdout/stderr capture — ports py `_base_cmd`/`_run`
+   (boltz_manager.py:437-467). `process::base_argv` has pure unit coverage;
+   `ProcessBoltzCli::run` now has sandbox integration coverage using only
+   test-owned temporary fake executables and datadirs. No test invokes a real
+   `boltzcli`, service, node, network, or production file. This proves the
+   subprocess transport boundary but does not make it reachable from the
+   plugin entrypoint.
 2. **Journal file I/O**: `open`/`read`/atomic `tmp+rename` writes for
    `cl_revenue_ops_swap_journal.json` and
    `cl_revenue_ops_ignored_external_swaps.json` under the boltzd datadir (py

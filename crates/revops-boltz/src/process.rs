@@ -5,16 +5,13 @@
 //! <dir>` base, then the caller's argv tail, executed with a timeout and
 //! trimmed stdout/stderr capture.
 //!
-//! Split deliberately into two halves per the crate-wide rule that no test
-//! may ever spawn a real process:
-//! - [`base_argv`] is PURE (config + args in, `Vec<String>` out) and is the
-//!   only part of this module exercised by this crate's tests.
+//! Split deliberately into a pure argv builder and a subprocess boundary:
+//! - [`base_argv`] is PURE (config + args in, `Vec<String>` out) and has
+//!   focused unit coverage.
 //! - [`ProcessBoltzCli::run`] performs the actual `std::process::Command`
-//!   spawn/wait/kill-on-timeout. Nothing in this crate's test suite calls
-//!   it (there is no `boltzcli` binary in a test/CI sandbox, and the HARD
-//!   RULES forbid a test from spawning a real subprocess regardless) — its
-//!   correctness rests on matching [`base_argv`] (tested) plus review, the
-//!   same boundary `cli.rs`'s module docs describe for this exact seam.
+//!   spawn/wait/kill-on-timeout. Integration tests exercise this exact path
+//!   only with test-owned temporary fake executables and datadirs; they never
+//!   invoke a real `boltzcli`, service, node, network, or production file.
 
 use crate::cli::BoltzCli;
 use crate::error::CliError;
@@ -103,7 +100,7 @@ fn run_with_timeout(argv: &[String], timeout_secs: u64) -> Result<String, CliErr
         Ok(c) => c,
         Err(e) => {
             return Err(CliError::NotFound {
-                message: e.to_string(),
+                message: format!("{program}: {e}"),
             })
         }
     };
@@ -207,8 +204,8 @@ mod tests {
         }
     }
 
-    // --- base_argv: the only part of this module a test may exercise;
-    // NOTHING below spawns a process. ---
+    // --- Pure base_argv unit coverage. The real process boundary is covered
+    // separately by sandbox-only integration tests with fake executables. ---
 
     #[test]
     fn base_argv_without_sudo_matches_python_shape() {
