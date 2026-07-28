@@ -2162,6 +2162,156 @@ mod seedonce_restart {
         h.assert_seed_indivisible("after bootstrap following refused A3-first events");
     }
 
+    /// F-R2: the failed-forward guard must refuse in the PRE-HYDRATION
+    /// (`NotStarted`) window too, not only `PendingSeedCommit` — and the
+    /// refusal must be the BOOTSTRAP guard's (receipt names it), because
+    /// on a virgin owner the nudge would otherwise fall through to its
+    /// own no-posterior skip and mask a guard deletion.
+    #[test]
+    fn failed_forward_before_first_hydration_is_refused_by_the_bootstrap_guard() {
+        let mut h = seedonce_harness_with_one_channel();
+
+        let latest_ff_detail = |h: &SeedOnceHarness| -> Option<String> {
+            h.store_conn()
+                .query_row(
+                    "SELECT detail FROM rust_fee_trigger_events \
+                     WHERE trigger_type = 'failed_forward' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok()
+        };
+
+        h.owner
+            .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 5));
+        assert_eq!(h.generation(), 0, "no generation movement pre-hydration");
+        assert_eq!(h.state_row_count(), 0, "no state adoption/creation");
+        let requests: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_fee_requests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(requests, 0, "no action of any kind");
+        let detail = latest_ff_detail(&h).expect("a refusal receipt was recorded");
+        assert!(
+            detail.contains("bootstrap"),
+            "the refusal must come from the BOOTSTRAP guard (NotStarted), got: {detail}"
+        );
+
+        // Same across a restart.
+        h.restart();
+        h.owner
+            .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 6));
+        assert_eq!(h.generation(), 0);
+        let detail = latest_ff_detail(&h).expect("post-restart refusal receipt");
+        assert!(detail.contains("bootstrap"), "post-restart: {detail}");
+
+        // The scheduled bootstrap then completes the seed exactly once.
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(h.generation(), 1);
+        assert_eq!(h.seeded_event_count(), 1);
+        h.assert_seed_indivisible("after bootstrap following pre-hydration nudges");
+    }
+
+    /// Python re-review F-R1: the hydrate-time seed-binding invariant
+    /// must be ENFORCED, not just implemented — a generation>0 store
+    /// whose provenance fails derived verification refuses hydration
+    /// outright: no reseed, no state adoption, no generation movement.
+    /// The fixture is the deployment note's exact scenario: a store this
+    /// binary did NOT create (a legit bootstrap whose provenance is then
+    /// corrupted the way a legacy/pre-correction DB looks), attempted
+    /// after restart.
+    fn corrupted_provenance_store_refuses_hydration(corrupt: impl Fn(&Connection)) {
+        let mut h = seedonce_harness_with_one_channel();
+        let outcome = h.run_cycle();
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(h.generation(), 1);
+
+        corrupt(&h.store_conn());
+        let seed_rows_before: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_fee_seed_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        h.restart();
+        for attempt in 1..=2 {
+            let outcome = h.run_cycle();
+            assert_eq!(
+                outcome,
+                CycleOutcome::SkippedStateUnavailable,
+                "attempt {attempt}: hydration must refuse a generation>0 store with \
+                 unverifiable seed provenance, got {outcome:?}"
+            );
+            assert!(
+                h.state().fee_states.is_empty(),
+                "attempt {attempt}: no state adoption from an unverifiable store"
+            );
+        }
+        assert_eq!(h.generation(), 1, "no generation movement");
+        let seed_rows_after: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_fee_seed_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(seed_rows_after, seed_rows_before, "no reseed of any kind");
+    }
+
+    #[test]
+    fn hydration_refuses_generation_store_with_legacy_unbound_seed_row() {
+        corrupted_provenance_store_refuses_hydration(|conn| {
+            conn.execute(
+                "UPDATE rust_fee_seed_events SET bound_cycle_id = NULL, \
+                 bound_generation = NULL WHERE outcome = 'seeded'",
+                [],
+            )
+            .expect("unbind the seeded row (legacy pre-correction shape)");
+        });
+    }
+
+    #[test]
+    fn hydration_refuses_generation_store_with_refusal_only_provenance() {
+        corrupted_provenance_store_refuses_hydration(|conn| {
+            conn.execute(
+                "UPDATE rust_fee_seed_events SET outcome = 'seed_refused' \
+                 WHERE outcome = 'seeded'",
+                [],
+            )
+            .expect("turn the success row into a refusal-only store");
+        });
+    }
+
+    /// F-R4 runtime leg: a refusal recorded AFTER the bound success is
+    /// conflicting provenance — autonomous hydration refuses it exactly
+    /// like every other invalid nonvirgin store.
+    #[test]
+    fn hydration_refuses_generation_store_with_refusal_after_success() {
+        corrupted_provenance_store_refuses_hydration(|conn| {
+            conn.execute(
+                "INSERT INTO rust_fee_seed_events
+                     (seeded_at, outcome, source_db_path, source_max_last_update,
+                      row_count, payload_sha256, source_commit)
+                 VALUES (1, 'seed_refused', '/prod', 0, 1, 'ab', 'c')",
+                [],
+            )
+            .expect("record a refusal after the bound success");
+        });
+    }
+
+    #[test]
+    fn hydration_refuses_generation_store_with_dangling_seed_binding() {
+        corrupted_provenance_store_refuses_hydration(|conn| {
+            conn.execute(
+                "UPDATE rust_fee_seed_events SET bound_cycle_id = 'ghost-cycle' \
+                 WHERE outcome = 'seeded'",
+                [],
+            )
+            .expect("point the binding at a cycle that does not exist");
+        });
+    }
+
     /// Audit test 7: the autonomous decision consumes ONLY Rust-owned
     /// evidence and mutates nothing outside the Rust observer store. The
     /// Python mempool table is DROPPED outright: any code path that so

@@ -1001,7 +1001,7 @@ fn refresh_commit_failure_rolls_back_and_leaves_the_connection_reusable() {
 fn cycle_commit_busy_at_boundary_rolls_back_seed_and_state_together() {
     use revops_db::fee_runway::{
         commit_fee_cycle, current_state_generation, latest_seed_event, FeeCycleCommit,
-        FeeSeedEventRow, FeeStateRow,
+        FeeSeedEventRow, FeeStateRow, PreparedFeeActionRow, ShadowCycleOutcomeRow,
     };
 
     let (_dir, writer, reader) = commit_seam_pair();
@@ -1015,6 +1015,28 @@ fn cycle_commit_busy_at_boundary_rolls_back_seed_and_state_together() {
             channel_id: "700x1x0".to_string(),
             v2_state_json: "{}".to_string(),
             last_update: 1_800_000_000,
+        }],
+        // F-R3: the contract's full row set — request and shadow-outcome
+        // rows are inserted BEFORE the boundary and must roll back with
+        // everything else on COMMIT failure.
+        requests: vec![PreparedFeeActionRow {
+            channel_id: "700x1x0".to_string(),
+            idempotency_key: Some("boundary-idem".to_string()),
+            old_fee_ppm: 100,
+            new_fee_ppm: 150,
+            feebase_msat: 0,
+            htlcmin_msat: Some(1000),
+            htlcmax_msat: None,
+            message: "boundary".to_string(),
+            at: 1_800_000_000,
+        }],
+        outcomes: vec![ShadowCycleOutcomeRow {
+            cycle_ts: 1_800_000_000,
+            channel_id: "700x1x0".to_string(),
+            would_broadcast: true,
+            has_algorithm_values: true,
+            disposition: Some("broadcast".to_string()),
+            skip_gate_comparable: true,
         }],
         pending_seed: Some(FeeSeedEventRow {
             seeded_at: 1_800_000_000,
@@ -1039,22 +1061,40 @@ fn cycle_commit_busy_at_boundary_rolls_back_seed_and_state_together() {
     // EVERYTHING rolls back together: generation, cycle, state, seed.
     assert_eq!(current_state_generation(&writer).unwrap(), 0);
     assert!(latest_seed_event(&writer).unwrap().is_none());
-    for (table, expect) in [("rust_fee_cycles", 0i64), ("rust_fee_state", 0)] {
+    for table in [
+        "rust_fee_cycles",
+        "rust_fee_state",
+        "rust_fee_requests",
+        "rust_fee_shadow_outcomes",
+        "rust_fee_ledger",
+    ] {
         let count: i64 = writer
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .unwrap();
-        assert_eq!(
-            count, expect,
-            "{table} must be untouched after boundary failure"
-        );
+        assert_eq!(count, 0, "{table} must be untouched after boundary failure");
     }
 
-    // And the connection is reusable: the SAME commit then succeeds whole.
+    // And the connection is reusable: the SAME commit then succeeds WHOLE
+    // — every row class present exactly once.
     assert_eq!(commit_fee_cycle(&writer, &commit).unwrap(), 1);
     assert_eq!(
         latest_seed_event(&writer).unwrap().unwrap().outcome,
         "seeded"
     );
+    for table in [
+        "rust_fee_requests",
+        "rust_fee_shadow_outcomes",
+        "rust_fee_state",
+        "rust_fee_cycles",
+    ] {
+        let count: i64 = writer
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "{table}: the retried commit lands every row class"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,6 +1247,56 @@ fn verified_seed_binding_matrix_rejects_every_invalid_row_class() {
     )
     .unwrap();
     assert_invalid(&conn, "dangling bound cycle", "does not exist");
+
+    // F-R4 control: refusals BEFORE the one atomic success are legitimate
+    // retry history — the bound success still verifies.
+    let conn = fresh();
+    record_seed_refusal(
+        &conn,
+        &FeeSeedEventRow {
+            outcome: "seed_refused".to_string(),
+            ..seed_row()
+        },
+    )
+    .unwrap();
+    record_seed_refusal(
+        &conn,
+        &FeeSeedEventRow {
+            outcome: "seed_refused".to_string(),
+            seeded_at: 1_800_000_001,
+            ..seed_row()
+        },
+    )
+    .unwrap();
+    commit_fee_cycle(
+        &conn,
+        &FeeCycleCommit {
+            pending_seed: Some(seed_row()),
+            ..plain_commit("after-retries-cycle")
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        verified_seed_binding(&conn).unwrap(),
+        SeedBindingState::VerifiedBound {
+            cycle_id: "after-retries-cycle".to_string()
+        },
+        "refusals BEFORE the success are retry recovery, not a conflict"
+    );
+
+    // F-R4: ANY refusal AFTER the successful bound row is conflicting/
+    // corrupt provenance — the derived state must be Invalid even though
+    // a perfectly bound success row exists.
+    record_seed_refusal(
+        &conn,
+        &FeeSeedEventRow {
+            outcome: "seed_refused".to_string(),
+            seeded_at: 1_800_000_500,
+            ..seed_row()
+        },
+    )
+    .unwrap();
+    assert_invalid(&conn, "refusal recorded after the bound success", "AFTER");
 
     // Seeded row on a generation-0 store.
     let conn = fresh();

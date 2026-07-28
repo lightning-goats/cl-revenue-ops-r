@@ -1394,6 +1394,29 @@ pub fn verified_seed_binding(conn: &Connection) -> Result<SeedBindingState> {
             })
         };
     }
+    // F-R4: refusals BEFORE the one atomic success are legitimate retry
+    // history; ANY refusal recorded AFTER the successful bound row is
+    // conflicting/corrupt provenance (the success no longer describes the
+    // store's terminal seed fact) and must never verify.
+    if let [(success_id, _, _)] = seeded.as_slice() {
+        let later_refusals: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rust_fee_seed_events
+                 WHERE outcome = 'seed_refused' AND id > ?1",
+                params![success_id],
+                |r| r.get(0),
+            )
+            .context("count post-success refusal rows")?;
+        if later_refusals > 0 {
+            return Ok(SeedBindingState::Invalid {
+                reason: format!(
+                    "{later_refusals} refusal row(s) recorded AFTER the successful bound \
+                     seed — conflicting provenance (refusals may only precede the one \
+                     atomic success)"
+                ),
+            });
+        }
+    }
     let (bound_cycle_id, bound_generation) = match seeded.as_slice() {
         [] => {
             return Ok(SeedBindingState::Invalid {
