@@ -28,7 +28,7 @@
 use revops_db::budget::{BudgetDb, BudgetError, ReserveRequest};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -355,19 +355,26 @@ fn cross_category_contention_never_overshoots_shared_budget() {
 // ---------------------------------------------------------------------------
 
 /// Deliberately weakened oracle: flips the reservation to `'spent'` as its
-/// own autocommit statement, sleeps (the dip window), THEN inserts the
-/// settlement event as a second, separate autocommit statement. During the
-/// sleep the reservation is neither an active hold NOR a committed event —
+/// own autocommit statement, exposes the dip window to the test, THEN inserts
+/// the settlement event as a second, separate autocommit statement. During the
+/// exposed window the reservation is neither an active hold NOR a committed event —
 /// exactly the "spent without its event" state `budget.rs`'s single
 /// `BEGIN IMMEDIATE` (UPDATE + INSERT in one transaction) exists to make
 /// impossible.
-fn naive_non_atomic_settle(conn: &Connection, rid: &str, amount: i64) {
+fn naive_non_atomic_settle(
+    conn: &Connection,
+    rid: &str,
+    amount: i64,
+    dip_open: mpsc::SyncSender<()>,
+    close_dip: mpsc::Receiver<()>,
+) {
     conn.execute(
         "UPDATE spend_reservations SET status = 'spent' WHERE reservation_id = ?1 AND status = 'active'",
         [rid],
     )
     .unwrap();
-    thread::sleep(Duration::from_millis(50));
+    dip_open.send(()).unwrap();
+    close_dip.recv().unwrap();
     conn.execute(
         "INSERT INTO spend_events (event_id, category, amount_sats, timestamp) \
          VALUES (?1, 'misc', ?2, ?3)",
@@ -387,15 +394,17 @@ fn naive_non_atomic_settle_allows_budget_dip_window() {
     assert!(ok);
     drop(seed_db);
 
+    let (dip_open_tx, dip_open_rx) = mpsc::sync_channel(0);
+    let (close_dip_tx, close_dip_rx) = mpsc::sync_channel(0);
     let settle_path = path.clone();
     let settle = thread::spawn(move || {
         let conn = side_conn(&settle_path);
-        naive_non_atomic_settle(&conn, "pre-1", 700);
+        naive_non_atomic_settle(&conn, "pre-1", 700, dip_open_tx, close_dip_rx);
     });
-    // Give the settle thread a head start into its dip window before the
-    // racers start attempting reservations against the (briefly) emptied
-    // budget.
-    thread::sleep(Duration::from_millis(10));
+    // Start racers only after the first autocommit has opened the invalid
+    // accounting window, and keep that window open until their decisions are
+    // complete. This proves the foil without relying on scheduler timing.
+    dip_open_rx.recv().unwrap();
 
     const RACERS: usize = 4;
     let barrier = Arc::new(Barrier::new(RACERS));
@@ -413,20 +422,20 @@ fn naive_non_atomic_settle_allows_budget_dip_window() {
         })
         .collect();
 
-    settle.join().unwrap();
     let grants: usize = racers
         .into_iter()
         .map(|h| h.join().unwrap())
         .filter(|&ok| ok)
         .count();
+    close_dip_tx.send(()).unwrap();
+    settle.join().unwrap();
 
     let conn = side_conn(&path);
     let total = committed_total(&conn, SINCE);
     assert!(
         total > 1000,
         "a non-atomic settle should let concurrent reservations overshoot the budget \
-         during its dip window (total={total}, race_grants={grants}); if this ever \
-         stops overshooting, widen the sleep in naive_non_atomic_settle"
+         during its dip window (total={total}, race_grants={grants})"
     );
 }
 
