@@ -81,6 +81,22 @@ reds on any unannounced addition/removal.
 See "Task 49 — Wave 2 reachability" under Lens 0 below for the per-RPC detail;
 this task made ten Python-equivalent entry points **reachable**, no more.
 
+**Measured at Task 52 refresh (`main` @ `546238b`, 2026-07-27):** 2,253
+passing workspace tests, 0 failed (counted by summing every `test result:`
+line of `cargo test --workspace`, not taken from a report). RPC surface
+UNCHANGED since Task 49: **20 total / 19 Python-equivalent** registered
+methods — `main.rs` contains exactly 20 `.rpcmethod(` sites and the
+`manifest.rs` guard still asserts total 20 (`manifest.rs:343-355`). New
+`rpc_*` builder modules that exist as source but are NOT registered
+(`rpc_planner_candidates.rs`, `rpc_capex_status.rs`, `rpc_lnplus_status.rs`)
+are **compiled** only in the five-state model and add nothing to either
+count. Merged since the sections below were last written: Task 44 A3
+(`accee49` — new-channel initial fee, shadow-only, independently reviewed;
+§2 A3 below), Task 47 CapacityPlanner orchestration (`650d832`), the LN+
+wiring layer (`4cece2c`), Tasks 49+50 (RPC Batch A + corrections, already
+reflected above), and Task 54's Boltz subprocess transport proof
+(`546238b`). Lens-4 and §2 corrections below carry the detail.
+
 The original fee-subsystem section (§1 below) remains accurate as the record of
 what was audited for the *fee cutover specifically* on 2026-07-27 and is kept
 verbatim; treat "cutover scope" language inside it as historical, superseded by
@@ -165,36 +181,65 @@ which wakes the peer's channels. Only the producer is missing.
 
 ### A3 — new-channel initial fee (py `set_initial_fee`:8584)
 
-**Audit refinement (2026-07-27):** A3 is NOT one job. It splits into two halves
-with very different risk and very different timing, and only one of them can be
-done before cutover.
+**CLOSED for shadow by Task 44 A3 (`main` @ `accee49`, 2026-07-27),
+independently reviewed (hexmem task 44, review pass at the pre-integration
+identical tree `dca2098`).** The A3a/A3b split below is kept as the honest
+historical record of how the work was scoped; every checkbox is now marked
+from the specific evidence named, not from source presence.
 
-**A3a — persistent prior seed (audit F5). Shadow-safe, do this first.**
-Pure state mutation, exactly the class A1 is in: on a new channel with a network
-gossip prior, seed the PERSISTENT thompson state's `prior_mean_fee` /
-`prior_std_fee` and record one durable nudge at
-`INITIAL_PRIOR_NUDGE_WEIGHT` (0.3, already ported at `market.rs:331`).
+**A3a — persistent prior seed. DONE.**
 Python's own audit note quantifies the defect when this is missing: the
 persistent state stays at the default prior (200/100), so the first regular fee
 cycle samples from the default and *walks the fee away from the best available
 evidence by up to ~460 ppm/cycle*.
-- [ ] seed persistent prior + durable nudge on new-channel observation
-- [ ] tests + revert tripwire
+- [x] seed persistent prior + durable nudge on new-channel observation —
+      `dynamic_initial_fee` (`fee_scheduler.rs`) seeds the SEPARATE persistent
+      `ChannelFeeState` with the gossip prior mean/std and exactly one
+      `record_posterior_nudge` at `INITIAL_PRIOR_NUDGE_WEIGHT` (0.3,
+      `market.rs:331`) at the EVENT timestamp, while sampling a fresh
+      throwaway state (py 8711-8765's load-bearing split)
+- [x] tests + revert tripwire —
+      `dynamic_with_gossip_seeds_persistent_prior_and_nudge`;
+      `throwaway_and_persistent_states_diverge_and_throwaway_wins` (scripted
+      entropy proves the sample comes from the throwaway, not the nudged
+      persistent state); a fee-state-only insert is not durable under the
+      serializer, so the commit always writes the complete fee+cycle pair
 
-**A3b — the initial broadcast. LIVE-ONLY, structurally blocked in shadow.**
-Ends in `set_channel_fee`, i.e. a real `setchannel`. Rust must NOT broadcast in
-shadow, so this path cannot be exercised before cutover; the shadow-correct
-behaviour is to compute and RECORD the would-be initial fee, never send it.
-- [ ] producer: `channel_state_changed` → CHANNELD_NORMAL (today `notify.rs` is
-      deliberately closure-events-only)
-- [ ] channel resolution via `listpeerchannels` (match by SCID or funding
-      channel_id; single-NORMAL-channel fallback)
-- [ ] decision branches: PASSIVE skip / STATIC target / DYNAMIC prior sample
-- [ ] `_select_best_fee_prior` → `_get_network_fee_prior` (an UNCACHED
-      `listchannels` RPC — must stay off the per-cycle locked path)
-- [ ] shadow: record the would-be fee; live: broadcast through the guarded
-      adapter only
-- [ ] tests + revert tripwire
+**A3b — producer → decision → recorded would-be broadcast. Shadow half DONE;
+live dispatch remains structurally blocked (correctly).**
+- [x] producer: `notify::new_channel_signal` — exact 4-state opening →
+      `CHANNELD_NORMAL` matrix (py 7153-7165), nested/flat envelopes, pure
+      parse (no RPC/DB/RNG); `main.rs` routes it through async
+      `prepare_new_channel` to a prepared owner message
+- [x] channel resolution via `listpeerchannels` —
+      `fee_evidence::resolve_new_channel`: normalize `:`→`x`, exact
+      SCID/funding-`channel_id` match, exactly-one-NORMAL fallback,
+      multi-NORMAL ambiguity REFUSES (6 resolution tests)
+- [x] decision branches: PASSIVE skip / STATIC target / DYNAMIC prior sample —
+      `decide_initial_fee`, including STATIC-without-target falling through to
+      DYNAMIC; reason identities `channel_open`/`policy_static` exact
+- [x] `_select_best_fee_prior` → network prior — reuses the already-ported
+      `market::network_fee_prior` off-owner in `prepare_new_channel` (uncached
+      `listchannels` prefetch, never on the owner thread)
+- [x] shadow: record the would-be fee — prepared action through the SAME
+      `RecordingFeeExecutor`/governed boundary as the per-cycle path; receipts
+      prefixed `SHADOW MODE, NOT APPLIED`; disposition
+      `new_channel_would_broadcast`; zero mutation (action_surface 3/3)
+- [x] tests + revert tripwire — end-to-end
+      `new_channel_end_to_end_commits_atomically_and_survives_restart` with a
+      mutation demonstration (receipt-only owner handler reds it); atomic
+      commit with generation CAS (`commit_fee_cycle_guarded`) proven against
+      BOTH interleaving schedules (stale commit refused; late callback never
+      installs over a newer owner epoch, memory == DB); event-key idempotency
+      across restart; strict fresh-`listconfigs` refusal (F8); durable typed
+      refusals; owner never blocks on the store (wedged-store proof); T8b
+      epoch guards byte-identical and green
+- [ ] live: broadcast through the guarded adapter only — STILL OPEN, and
+      structurally blocked as designed: the scheduler starts only in
+      autonomous shadow and `State::live_broadcaster` is unused by it; live
+      A3 dispatch must arrive with the whole-plugin live scheduler through
+      `LiveBatchAuthorization` + `ClnFeeBroadcaster`, with no second
+      `setchannel` call site
 
 ### Already wired
 
@@ -239,7 +284,7 @@ missing evidence.
 | background-scheduler-loops | `fee_scheduler.rs` (fee loop only) | `[~]` fee loop only; flow/rebalance/planner/boltz loops absent |
 | core-cycle-functions | `fee_scheduler.rs`, `revops-fees/cycle.rs` | `[~]` fee cycle only |
 | **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders | `[~]` **19 of 69 Python-equivalent registered** (was 9/69), **20 total Rust RPC methods** including the Rust-only `revops-fee-runway-status`; measured via `crates/revops/tests/manifest.rs`'s method-count guard |
-| notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[~]` all 4 subscribed; `channel_state_changed` deliberately narrower (closure events only, see A3b) |
+| notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[x]` all 4 subscribed (Python subscribes to exactly the same 4); `channel_state_changed` now parses BOTH closure events and the opening→NORMAL matrix (Task 44 A3 — the "closure events only" narrowing is gone); per-notification EFFECT parity is tracked in §2, not by this row |
 | spend-budget-and-capex-rpcs | `revenue-r-spend-ledger` (Task 49) | `[~]` spend-ledger reads reachable; capex RPCs not registered |
 | boltz-swap-rpcs-and-auto-cycle | — | `[ ]` |
 
@@ -494,16 +539,23 @@ tier-1 project in its own right, not a follow-up.
 | Component | Rust | Status |
 |---|---|---|
 | CapexBudgetEngine | `revops-capital/capex.rs` | `[x]` full port |
-| CapacityPlanner (~4200 LOC) | `revops-capital/planner/` (pure subset) | `[~]` |
-| BoltzCliManager (~2670 LOC) | `revops-boltz` (kernels only) | `[~]` |
+| CapacityPlanner (~4200 LOC) | `revops-capital/planner/` (planning half incl. Task 47 orchestration) | `[~]` no execution call sites, no caller |
+| BoltzCliManager (~2670 LOC) | `revops-boltz` (kernels + Task 54 subprocess transport) | `[~]` transport-proven, not reachable |
 | BoltzAutoCycle (~1400 LOC) | `revops-boltz/autocycle.rs` (kernels only) | `[~]` |
-| LNPlusSwapAutomation (~2099 LOC) | `revops-lnplus` (4,386 LOC) | `[~]` kernels, no transport |
+| LNPlusSwapAutomation (~2099 LOC) | `revops-lnplus` (6,218 src LOC incl. wiring layer) | `[~]` no concrete wire transport, no caller |
 
-Verified by search: `boltz` and `lnplus` appear in Rust **only** as arbiter
-policy strings, budget-bucket names, config options, and one
-`lnplus_contract_protection` helper in `revops-analytics/protection.rs`. There
-is no manager, no planner, no automation. ~10,400 Python LOC with no Rust
-counterpart. This is the largest single parity gap in the plugin.
+**Task 52 refresh correction (2026-07-27): the paragraph this replaces
+("`boltz` and `lnplus` appear in Rust only as arbiter policy strings … no
+manager, no planner, no automation … ~10,400 Python LOC with no Rust
+counterpart") described the tree BEFORE the `revops-boltz`, `revops-lnplus`,
+and `revops-capital` crates landed and was left stale here.** Current truth,
+measured at `546238b`: the three crates total ~16,900 src LOC and 536 crate
+tests (LN+ 6,218 src / 210 tests; Boltz 5,651 src / 222 tests; Capital 5,035
+src / 104 tests — counted by `cargo test -p` + `wc`, not recollection). The
+largest remaining gap in this lens is therefore NO LONGER absent code — it is
+**callers, concrete transports, and governed execution**: no plugin loop
+spawns any of them, no capital/LN+/Boltz RPC is registered, and nothing here
+can currently touch a node, a wire, or a sat.
 
 **LN+ update 2026-07-27.** `revops-lnplus`: 4,386 src + 2,838 test LOC, 133
 tests, clippy clean, no live HTTP/SQL anywhere (verified by search before
@@ -518,9 +570,33 @@ free-text does NOT match; terminal 422 withdrawal shapes classify as
 `BreakerCause::is_reverifiable()` is true for EXACTLY the two ghost causes and
 false for missed deadlines, remote divergence, ambiguous funded-channel matches
 and LN+ outages (verified by reading the match arms).
-NOT ported: the real HTTPS + signmessage transport, `CapacityPlanner`
-integration (blocked — see below), the Phase-2F governed reservation path,
-`revops-db` schema for the LN+ tables, and the concurrency guards. **No caller.**
+NOT ported as of that update: the real HTTPS + signmessage transport,
+`CapacityPlanner` integration (blocked — see below), the Phase-2F governed
+reservation path, `revops-db` schema for the LN+ tables, and the concurrency
+guards. **No caller.**
+
+**LN+ wiring-layer update (Task 52 refresh, 2026-07-27, `4cece2c`).** Three of
+the five NOT-ported items above have since narrowed; measured at `546238b` the
+crate is 6,218 src + 4,860 test LOC, 210 tests:
+- **Transport:** `http.rs`'s `LnPlusApiClient` now ports the COMPLETE
+  `LNPlusClient` logic (endpoints, `_request` size-cap/error/JSON handling,
+  `_unwrap_list_envelope`, signmessage auth flow, structured-422 parse) —
+  but generic over an `HttpTransport` trait with **no concrete implementation
+  shipped, by design**: no HTTP client crate exists anywhere in the workspace
+  dependency graph, so "no test may make a live HTTP request" is true by
+  construction. Wiring it live means adding `ureq` and a ~15-line trait impl
+  (the file's own doc names the exact shape). Five-state: **effective against
+  a fake transport; not transport-proven, not reachable.**
+- **DB schema:** `sqlite_db.rs`'s `SqliteLnPlusDb` implements the
+  `lnplus_swaps`/`lnplus_peers` schema and queries INSIDE the crate
+  (superseding the old "blocked on `revops-db` tables" note) and COMPOSES
+  with the already-reviewed `revops_db::budget::BudgetDb` for the unified
+  budget rail rather than re-implementing it.
+- **Lifecycle:** `loop_drivers.rs` carries the evaluator/watcher passes.
+- **Still true:** nothing in `crates/revops/src/main.rs` spawns any LN+
+  loop or registers any LN+ RPC (`rpc_lnplus_status.rs` is a compiled-only,
+  UNREGISTERED builder). **No plugin caller**, and `CapacityPlanner`
+  integration + the governed reservation path remain open.
 
 **Capital update 2026-07-27.** `revops-capital`: 2,031 src LOC, 39 tests over
 108 fixture scenarios. Methodology worth noting — the fixtures were generated by
@@ -533,9 +609,25 @@ now documented and pinned.
   efficiency, fleet priority, envelope scale-down, CB-4 fail-closed).
 - `CapacityPlanner`: a curated PURE SUBSET only (~2k of ~4.2k LOC) — portfolio
   gate, close-fee, dead-capital stage machine, EV, gates, scoring.
-  NOT ported: `execute_cycle`, the 5 candidate-discovery strategies,
-  `_execute_open`/`_close`/`_defibrillation` (real RPC call sites),
-  `_identify_winners`/`_losers`, `_score_candidate`. **No caller.**
+  NOT ported as of that update: `execute_cycle`, the 5 candidate-discovery
+  strategies, `_execute_open`/`_close`/`_defibrillation` (real RPC call
+  sites), `_identify_winners`/`_losers`, `_score_candidate`. **No caller.**
+
+**CapacityPlanner orchestration update (Task 52 refresh, 2026-07-27; Task 47,
+merged at `650d832`).** Most of the NOT-ported list above has since landed as
+PURE planning code; measured at `546238b` the crate is 5,035 src LOC / 104
+tests. Now present in `revops-capital/src/planner/`: `cycle.rs::plan_cycle`
+(the pure planning half of `execute_cycle`, evidence-in/`CyclePlan`-out) and
+`discover_peers`; SIX discovery strategies in `discovery.rs`
+(`discover_from_winners`/`_neighbors`/`_graph`/`_route_pairs`/`_demand_flow`
+plus the Task-47-review `_neighbors_capital_efficiency`);
+`winners.rs::identify_winners`; `losers.rs::identify_losers`;
+`candidate_score.rs::score_candidate`; plus `sizing`/`recycle`/`dedup`.
+**Still NOT ported:** `_execute_open`/`_close`/`_defibrillation` — the real
+RPC call sites that spend and move sats — and any loop/RPC caller:
+`rpc_planner_candidates.rs` and `rpc_capex_status.rs` exist as compiled-only,
+UNREGISTERED builders. Five-state: **compiled + oracle-tested kernels;
+nothing reachable.**
 
 **Boltz update 2026-07-27.** `revops-boltz` landed: 2,698 src LOC, 124 tests,
 clippy clean. Verified independently before merge (LOC, test counts, and the
@@ -552,13 +644,32 @@ reverted. The known ambiguous-outcome sites (subprocess timeout on create, py
 fallthrough `cl-revenue-ops.py:10208`) are explicit `Unknown`/`Unverified`
 variants so they cannot collapse into "definitely succeeded".
 
-NOT ported — which is why this is `[~]` and not `[x]`: per-command `boltzcli`
-argv glue, CLN first-hop pinning / external-pay, the autocycle plan BUILDERS
-(they depend on `CapacityPlanner`, unported), and governor-facade integration.
+NOT ported as of that update — which is why this is `[~]` and not `[x]`:
+per-command `boltzcli` argv glue, CLN first-hop pinning / external-pay, the
+autocycle plan BUILDERS (they depend on `CapacityPlanner`, unported), and
+governor-facade integration.
 
 **It has no caller.** Recorded here explicitly rather than left for a later
 audit. Wiring needs a subprocess `BoltzCli` adapter, `CapexBudgetEngine`, and a
 Boltz loop/RPC surface — none of which exist yet.
+
+**Boltz subprocess-transport update (Task 52 refresh, 2026-07-27; Task 54,
+merged at `546238b`).** Measured at `546238b` the crate is 5,651 src LOC /
+222 tests. `process.rs`'s `ProcessBoltzCli` (the subprocess `BoltzCli`
+adapter named as missing above) is now **transport-proven** under the
+five-state model: `tests/process_fake_executable.rs` drives the REAL
+spawn/wait/kill path against sandboxed, test-owned fake executables —
+argv/datadir propagation, trimmed stdout on exit 0, stderr-preferred /
+stdout-fallback errors with exact exit codes, NotFound mapping, configured
+and overridden timeouts, timeout kill AND reap of the exact child (PID
+evidence, no survivor), no deadlock on large simultaneous stdout+stderr, and
+a real `ProcessBoltzCli` create-timeout classifying through the command
+layer as the typed ambiguous/`Unknown` outcome (never retryable). The old
+`ENTRYPOINTS.md` claim that `run` "is, by the HARD RULES, untested" is
+superseded — the rule is now sandbox-only execution, not no-subprocess.
+Per its own report: **this proves the transport boundary but does not make
+it reachable from the plugin entrypoint** — still no Boltz loop, RPC, or
+caller.
 
 Note carried from the fee audit: the `lnplus_obligation` selector exists as pure
 fns with **no production feed**; a future porter must include opening-state rows
@@ -625,8 +736,13 @@ analysis and not a shape Python could ever legitimately return itself.
 
 Ranked by size, from this audit:
 
-1. **Capital allocation (~10,400 LOC)** — capacity planner, capex budget, Boltz
-   manager + auto-cycle, LN+ swap automation. Nothing exists.
+1. **Capital allocation (~10,400 Python LOC)** — capacity planner, capex
+   budget, Boltz manager + auto-cycle, LN+ swap automation. (Task 52 refresh:
+   "Nothing exists" is stale — substantial pure kernels, planning
+   orchestration, the Boltz subprocess transport, and the LN+ wiring layer
+   now exist per Lens 4 above. What does NOT exist is any caller, concrete
+   wire transport, execution call site, or registered RPC — so this remains
+   the item where real sats are furthest from being safely governable.)
 2. **Operator RPC surface (50 of 69 Python-equivalent methods remaining,
    post-Task-49)** — everything except the 19 now registered (status/history/
    report/dashboard/fee-debug/fee-wake plus Task 49's ten Batch A methods).
@@ -637,7 +753,9 @@ Ranked by size, from this audit:
    loop, no RPC, no sendpay call site) and the non-fee governed-execution call
    sites. Same shape as A1–A3, at much larger scale and touching real payments.
 4. **Retention/pruning** — forwards pruning and the 8 runway tables.
-5. **Remaining fee-path items** — A3a, A3b, `note_fee_applied`.
+5. **Remaining fee-path items** — the A3 LIVE-broadcast half (shadow half
+   closed by Task 44 at `accee49`; see §2 A3) and `note_fee_applied` — both
+   land with the whole-plugin live scheduler, not before.
 
 **Round-2 correction (P1): the paragraph below is HISTORICAL, describing the
 fee-only cutover boundary as it stood before the 2026-07-27 operator-approved
