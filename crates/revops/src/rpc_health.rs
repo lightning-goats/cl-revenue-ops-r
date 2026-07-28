@@ -145,6 +145,9 @@ pub fn build_health_with_loops(
                         "generation": row.generation,
                         "terminal_generation": row.terminal_generation,
                         "terminal_status": row.terminal_status.as_str(),
+                        "runtime_status": row.runtime_status.as_str(),
+                        "last_suspended_at": row.last_suspended_at,
+                        "last_suspension_reason": row.last_suspension_reason,
                         "last_started_at": row.last_started_at,
                         "last_passed_at": row.last_passed_at,
                         "last_error_at": row.last_error_at,
@@ -169,6 +172,9 @@ fn current_loop_status(row: &revops_db::loop_health::LoopHealthRow) -> &'static 
     use revops_db::loop_health::WiringStatus;
     if row.wiring_status == WiringStatus::NotWired {
         return "not_wired";
+    }
+    if row.runtime_status == revops_db::loop_health::RuntimeStatus::Suspended {
+        return "suspended";
     }
     if row.generation > row.terminal_generation {
         return "incomplete";
@@ -391,6 +397,30 @@ mod tests {
         passed.terminal_status = TerminalStatus::Passed;
         let pass_value = build_health_with_loops(100, None, None, None, Ok(&[passed]));
         assert_eq!(pass_value["loops"][0]["current_status"], "passed");
+    }
+
+    #[test]
+    fn durable_suspension_takes_precedence_over_a_later_terminal_pass() {
+        use revops_db::loop_health::{
+            LoopHealthRow, LoopId, RuntimeStatus, TerminalStatus, WiringStatus,
+        };
+        let mut row = LoopHealthRow::new(LoopId::Fee, WiringStatus::Ready, 100);
+        row.generation = 1;
+        row.terminal_generation = 1;
+        row.terminal_status = TerminalStatus::Passed;
+        row.last_passed_at = Some(102);
+        row.runtime_status = RuntimeStatus::Suspended;
+        row.last_suspended_at = Some(101);
+        row.last_suspension_reason = Some("backpressure persistence failed".to_string());
+        let value = build_health_with_loops(103, None, None, None, Ok(&[row]));
+        assert_eq!(value["loops"][0]["terminal_status"], "passed");
+        assert_eq!(value["loops"][0]["runtime_status"], "suspended");
+        assert_eq!(value["loops"][0]["current_status"], "suspended");
+        assert_eq!(value["loops"][0]["last_suspended_at"], 101);
+        assert_eq!(
+            value["loops"][0]["last_suspension_reason"],
+            "backpressure persistence failed"
+        );
     }
 
     #[test]

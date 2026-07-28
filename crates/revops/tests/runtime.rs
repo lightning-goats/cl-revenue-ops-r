@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use revops::loop_health::{Admission, LoopHandle, LoopHealthPersistence, ObserverPass, RequestKey};
 use revops::runtime::{ObserverRuntime, REQUIRED_LOOPS};
-use revops_db::loop_health::{LoopHealthRow, LoopId, WiringStatus};
+use revops_db::loop_health::{LoopHealthRow, LoopId, RuntimeStatus, WiringStatus};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -15,6 +15,9 @@ struct MemoryStore {
     fail_begin: AtomicBool,
     fail_terminal: AtomicBool,
     fail_backpressure: AtomicBool,
+    fail_suspend_attempts: AtomicUsize,
+    suspend_attempts: AtomicUsize,
+    actor_unavailable: AtomicBool,
     writes: Mutex<Vec<&'static str>>,
 }
 
@@ -143,6 +146,36 @@ impl LoopHealthPersistence for MemoryStore {
             row.updated_at = now;
             Ok(())
         })
+    }
+    fn suspend<'a>(
+        &'a self,
+        id: LoopId,
+        now: i64,
+        reason: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.writes.lock().unwrap().push("suspend");
+            self.suspend_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_suspend_attempts
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(anyhow!("suspension marker unavailable"));
+            }
+            let mut rows = self.rows.lock().unwrap();
+            let row = rows.get_mut(&id).unwrap();
+            row.runtime_status = RuntimeStatus::Suspended;
+            row.last_suspended_at = Some(now);
+            row.last_suspension_reason = Some(reason.to_string());
+            row.updated_at = now;
+            Ok(())
+        })
+    }
+    fn is_available(&self) -> bool {
+        !self.actor_unavailable.load(Ordering::SeqCst)
     }
 }
 
@@ -300,6 +333,16 @@ async fn begin_failure_prevents_execution_and_terminal_failure_suspends() {
     assert!(handle.is_suspended());
     assert_eq!(handle.abandoned_pending(), 1);
     assert_eq!(store.row(LoopId::Fee).dropped_total, 1);
+    assert_eq!(
+        store.row(LoopId::Fee).runtime_status,
+        RuntimeStatus::Suspended
+    );
+    assert!(store
+        .row(LoopId::Fee)
+        .last_suspension_reason
+        .as_deref()
+        .unwrap()
+        .contains("begin"));
     let store = Arc::new(MemoryStore::default());
     let pass = Arc::new(BlockingPass::new());
     store.fail_terminal.store(true, Ordering::SeqCst);
@@ -312,6 +355,12 @@ async fn begin_failure_prevents_execution_and_terminal_failure_suspends() {
     let row = store.row(LoopId::Fee);
     assert!(row.last_started_at.is_some());
     assert_eq!(row.last_passed_at, None);
+    assert_eq!(row.runtime_status, RuntimeStatus::Suspended);
+    assert!(row
+        .last_suspension_reason
+        .as_deref()
+        .unwrap()
+        .contains("terminal"));
 }
 
 #[tokio::test]
@@ -376,4 +425,63 @@ async fn backpressure_write_failure_is_fail_closed_not_a_clean_admission() {
     assert_eq!(handle.abandoned_pending(), 2);
     pass.permits.add_permits(1);
     handle.wait_idle().await;
+}
+
+#[tokio::test]
+async fn transient_backpressure_failure_retries_suspension_and_late_finish_cannot_mask_it() {
+    let store = Arc::new(MemoryStore::default());
+    let pass = Arc::new(BlockingPass::new());
+    let handle = one_loop(store.clone(), pass.clone()).await;
+    handle.request(RequestKey::from("running")).await.unwrap();
+    pass.started.notified().await;
+    store.fail_backpressure.store(true, Ordering::SeqCst);
+    store.fail_suspend_attempts.store(2, Ordering::SeqCst);
+    let request_handle = handle.clone();
+    let request = tokio::spawn(async move {
+        request_handle
+            .request(RequestKey::from("running"))
+            .await
+            .unwrap_err()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while store.suspend_attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durable suspension write must be attempted");
+    pass.permits.add_permits(1);
+    let error = request.await.unwrap();
+    assert!(format!("{error:#}").contains("counter unavailable"));
+    handle.wait_idle().await;
+    let row = store.row(LoopId::Fee);
+    assert_eq!(store.suspend_attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(row.runtime_status, RuntimeStatus::Suspended);
+    assert!(
+        row.last_passed_at.is_some(),
+        "the concurrent pass really finished"
+    );
+    assert!(row
+        .last_suspension_reason
+        .as_deref()
+        .unwrap()
+        .contains("backpressure"));
+}
+
+#[tokio::test]
+async fn suspension_retry_stops_only_when_store_actor_is_provably_unavailable() {
+    let store = Arc::new(MemoryStore::default());
+    let pass = Arc::new(BlockingPass::new());
+    store.fail_begin.store(true, Ordering::SeqCst);
+    store.fail_suspend_attempts.store(10, Ordering::SeqCst);
+    store.actor_unavailable.store(true, Ordering::SeqCst);
+    let handle = one_loop(store.clone(), pass.clone()).await;
+    handle
+        .request(RequestKey::from("never-runs"))
+        .await
+        .unwrap();
+    handle.wait_idle().await;
+    assert!(handle.is_suspended());
+    assert_eq!(pass.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.suspend_attempts.load(Ordering::SeqCst), 1);
 }

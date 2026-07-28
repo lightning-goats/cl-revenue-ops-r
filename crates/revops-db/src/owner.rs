@@ -169,6 +169,12 @@ enum Command {
         now: i64,
         reply: oneshot::Sender<Result<()>>,
     },
+    SuspendLoop {
+        id: crate::loop_health::LoopId,
+        now: i64,
+        reason: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ListLoopHealth(oneshot::Sender<Result<Vec<crate::loop_health::LoopHealthRow>>>),
 }
 
@@ -898,6 +904,27 @@ impl ObserverHandle {
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
+    pub async fn suspend_loop(
+        &self,
+        id: crate::loop_health::LoopId,
+        now: i64,
+        reason: String,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SuspendLoop {
+                id,
+                now,
+                reason,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
     pub async fn list_loop_health(&self) -> Result<Vec<crate::loop_health::LoopHealthRow>> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -1196,6 +1223,14 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                     let _ = reply.send(crate::loop_health::increment_loop_backpressure(
                         &conn, id, coalesced, dropped, now,
                     ));
+                }
+                Command::SuspendLoop {
+                    id,
+                    now,
+                    reason,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::suspend_loop(&conn, id, now, &reason));
                 }
                 Command::ListLoopHealth(reply) => {
                     let _ = reply.send(crate::loop_health::list_loop_health(&conn));

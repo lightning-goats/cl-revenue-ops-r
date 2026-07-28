@@ -69,6 +69,13 @@ pub trait LoopHealthPersistence: Send + Sync + 'static {
         dropped: u64,
         now: i64,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn suspend<'a>(
+        &'a self,
+        id: LoopId,
+        now: i64,
+        reason: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn is_available(&self) -> bool;
 }
 
 #[derive(Clone)]
@@ -137,6 +144,17 @@ impl LoopHealthPersistence for LoopHealthStore {
                 .await
         })
     }
+    fn suspend<'a>(
+        &'a self,
+        id: LoopId,
+        now: i64,
+        reason: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move { self.handle.suspend_loop(id, now, reason.to_string()).await })
+    }
+    fn is_available(&self) -> bool {
+        !self.handle.is_closed()
+    }
 }
 
 #[derive(Default)]
@@ -191,7 +209,9 @@ impl LoopHandle {
                     .backpressure(self.shared.id, coalesced, dropped, crate::now_unix())
                     .await
                 {
+                    let reason = format!("backpressure persistence failed: {error:#}");
                     let abandoned = self.suspend();
+                    persist_suspension(&self.shared, &reason).await;
                     if abandoned > 0 {
                         if let Err(drop_error) = self
                             .shared
@@ -284,8 +304,10 @@ async fn owner_task(shared: Arc<Shared>, pass: Arc<dyn ObserverPass>) {
                     "revops: {:?} loop begin persistence failed: {error:#}; suspending",
                     shared.id
                 );
+                let reason = format!("begin persistence failed: {error:#}");
                 let abandoned = suspend_shared(&shared) + 1;
                 shared.abandoned_pending.fetch_add(1, Ordering::SeqCst);
+                persist_suspension(&shared, &reason).await;
                 persist_abandoned(&shared, abandoned).await;
                 continue;
             }
@@ -319,7 +341,9 @@ async fn owner_task(shared: Arc<Shared>, pass: Arc<dyn ObserverPass>) {
                 "revops: {:?} loop terminal persistence failed: {error:#}; suspending",
                 shared.id
             );
+            let reason = format!("terminal persistence failed: {error:#}");
             let abandoned = suspend_shared(&shared);
+            persist_suspension(&shared, &reason).await;
             persist_abandoned(&shared, abandoned).await;
         } else {
             shared
@@ -344,6 +368,34 @@ fn suspend_shared(shared: &Shared) -> u64 {
     shared.idle.notify_waiters();
     shared.work.notify_waiters();
     abandoned
+}
+
+async fn persist_suspension(shared: &Shared, reason: &str) {
+    let mut retry_delay = std::time::Duration::from_millis(10);
+    loop {
+        match shared
+            .store
+            .suspend(shared.id, crate::now_unix(), reason)
+            .await
+        {
+            Ok(()) => return,
+            Err(error) if !shared.store.is_available() => {
+                eprintln!(
+                    "revops: {:?} loop suspension marker unavailable because store actor is closed: {error:#}",
+                    shared.id
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!(
+                    "revops: {:?} loop suspension marker failed, retrying: {error:#}",
+                    shared.id
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(1));
+            }
+        }
+    }
 }
 
 async fn persist_abandoned(shared: &Shared, abandoned: u64) {
