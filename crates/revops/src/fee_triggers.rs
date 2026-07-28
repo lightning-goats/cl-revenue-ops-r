@@ -88,6 +88,12 @@ pub enum FeeTrigger {
     /// accounting gap (the runway design spec's queue list names
     /// `forward_event` alongside the other five surfaces).
     ForwardEvent { channel_id: String },
+    /// Task 44 / A3: `_handle_channel_open`'s new-channel initial-fee
+    /// producer (py 7152-7165), offered to the SAME bounded/coalescing
+    /// discipline every other out-of-cycle trigger uses. Channel-scoped: a
+    /// second opening-to-NORMAL signal for the SAME channel before the
+    /// first is processed coalesces rather than queueing twice.
+    NewChannel { channel_id: String },
 }
 
 impl FeeTrigger {
@@ -100,6 +106,7 @@ impl FeeTrigger {
             FeeTrigger::WakeAll => "wake_all",
             FeeTrigger::VegasSpike => "vegas_spike",
             FeeTrigger::ForwardEvent { .. } => "forward_event",
+            FeeTrigger::NewChannel { .. } => "new_channel",
         }
     }
 
@@ -108,7 +115,8 @@ impl FeeTrigger {
         match self {
             FeeTrigger::FailedForward { channel_id }
             | FeeTrigger::PolicyChanged { channel_id }
-            | FeeTrigger::ForwardEvent { channel_id } => Some(channel_id.as_str()),
+            | FeeTrigger::ForwardEvent { channel_id }
+            | FeeTrigger::NewChannel { channel_id } => Some(channel_id.as_str()),
             FeeTrigger::FixedInterval | FeeTrigger::WakeAll | FeeTrigger::VegasSpike => None,
         }
     }

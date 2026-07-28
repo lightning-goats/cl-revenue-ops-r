@@ -313,6 +313,10 @@ pub fn seed_once_from_python(
 /// single-owner actor: writable, Rust-owned, structurally never the
 /// production DB); tests substitute a direct-connection double that calls
 /// the same `revops_db::fee_runway` functions.
+/// F5: an off-owner store dispatch's completion callback -- invoked
+/// exactly once, from whatever thread performs the store work.
+pub type StoreDispatchCallback<T> = Box<dyn FnOnce(anyhow::Result<T>) + Send + 'static>;
+
 pub trait RunwayStateStore: Send {
     fn load_latest_state(&self) -> anyhow::Result<revops_db::fee_runway::FeeStateSnapshot>;
     fn commit_fee_cycle(
@@ -358,6 +362,82 @@ pub trait RunwayStateStore: Send {
         &self,
         event: revops_db::fee_runway::FeeTriggerEventRow,
     ) -> anyhow::Result<()>;
+    /// Task 44 / A3, live-review finding F3: has a commit with this exact
+    /// (stable, content-derived) `cycle_id` already been durably
+    /// committed? See `revops_db::fee_runway::cycle_exists`'s doc comment.
+    fn cycle_exists(&self, cycle_id: &str) -> anyhow::Result<bool>;
+
+    // -- Task 44 / A3, live-review finding F5: non-blocking dispatch --
+    //
+    // The single owner thread must NEVER block on a store (SQLite-actor)
+    // reply on the new-channel path. These three deliver their result by
+    // invoking `on_done` from whatever thread performs the work; the
+    // CALL itself must return without waiting on the store. `on_done`
+    // must be invoked at most once; a production implementation that can
+    // fail to start the work must still deliver that failure through
+    // `on_done` (never silently drop it) so the owner's pending
+    // bookkeeping can fail closed instead of leaking. (A direct-connection
+    // test double doing its own local work inline before returning is
+    // acceptable -- the contract protects the owner from a SHARED
+    // single-owner actor stalling, which a private connection cannot.)
+
+    /// [`revops_db::fee_runway::cycle_exists_with_generation`], dispatched
+    /// off-owner (F7: the answer carries the CURRENT state generation so
+    /// the later commit can be bound to the exact state the decision was
+    /// computed against).
+    fn dispatch_cycle_exists_with_generation(
+        &self,
+        cycle_id: String,
+        on_done: StoreDispatchCallback<(bool, u64)>,
+    );
+
+    /// [`revops_db::fee_runway::commit_fee_cycle_guarded`], dispatched
+    /// off-owner (F7: a compare-and-set on the state generation -- a
+    /// store that advanced past `expected_prior_generation` yields an
+    /// in-band `GenerationConflict` with NOTHING written).
+    fn dispatch_commit_fee_cycle_guarded(
+        &self,
+        commit: revops_db::fee_runway::FeeCycleCommit,
+        expected_prior_generation: u64,
+        on_done: StoreDispatchCallback<revops_db::fee_runway::GuardedCommitOutcome>,
+    );
+
+    /// [`Self::record_trigger_event`], dispatched off-owner.
+    fn dispatch_record_trigger_event(
+        &self,
+        event: revops_db::fee_runway::FeeTriggerEventRow,
+        on_done: StoreDispatchCallback<()>,
+    );
+}
+
+/// Run `work` on a freshly spawned thread and hand its result to
+/// `on_done` (invoked exactly once). If the thread cannot be spawned the
+/// failure is delivered through `on_done` on the CALLING thread -- still
+/// without blocking on any store reply, and never silently dropped.
+fn spawn_store_dispatch<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    on_done: StoreDispatchCallback<T>,
+) {
+    use std::sync::{Arc, Mutex};
+    // The callback must survive a failed `spawn` (whose closure is
+    // consumed either way), so both paths draw it from a shared slot.
+    let slot = Arc::new(Mutex::new(Some(on_done)));
+    let thread_slot = slot.clone();
+    let spawned = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            if let Some(cb) = thread_slot.lock().expect("dispatch slot poisoned").take() {
+                cb(work());
+            }
+        });
+    if let Err(e) = spawned {
+        if let Some(cb) = slot.lock().expect("dispatch slot poisoned").take() {
+            cb(Err(anyhow::anyhow!(
+                "store dispatch thread `{name}` failed to spawn: {e}"
+            )));
+        }
+    }
 }
 
 impl RunwayStateStore for revops_db::owner::ObserverHandle {
@@ -414,6 +494,56 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         event: revops_db::fee_runway::FeeTriggerEventRow,
     ) -> anyhow::Result<()> {
         self.blocking_record_fee_trigger_event(event)
+    }
+
+    fn cycle_exists(&self, cycle_id: &str) -> anyhow::Result<bool> {
+        self.blocking_cycle_exists(cycle_id.to_string())
+    }
+
+    // F5: `ObserverHandle` is a cheap `Clone` over the actor's command
+    // channel, so each dispatch clones it onto a short-lived thread that
+    // performs the blocking wait THERE -- the owner thread returns
+    // immediately. New-channel events are rare (a channel reaching
+    // NORMAL), so a thread per dispatch is well within budget.
+
+    fn dispatch_cycle_exists_with_generation(
+        &self,
+        cycle_id: String,
+        on_done: StoreDispatchCallback<(bool, u64)>,
+    ) {
+        let handle = self.clone();
+        spawn_store_dispatch(
+            "revops-a3-cycle-exists",
+            move || handle.blocking_cycle_exists_with_generation(cycle_id),
+            on_done,
+        );
+    }
+
+    fn dispatch_commit_fee_cycle_guarded(
+        &self,
+        commit: revops_db::fee_runway::FeeCycleCommit,
+        expected_prior_generation: u64,
+        on_done: StoreDispatchCallback<revops_db::fee_runway::GuardedCommitOutcome>,
+    ) {
+        let handle = self.clone();
+        spawn_store_dispatch(
+            "revops-a3-commit",
+            move || handle.blocking_commit_fee_cycle_guarded(commit, expected_prior_generation),
+            on_done,
+        );
+    }
+
+    fn dispatch_record_trigger_event(
+        &self,
+        event: revops_db::fee_runway::FeeTriggerEventRow,
+        on_done: StoreDispatchCallback<()>,
+    ) {
+        let handle = self.clone();
+        spawn_store_dispatch(
+            "revops-a3-receipt",
+            move || handle.blocking_record_fee_trigger_event(event),
+            on_done,
+        );
     }
 }
 

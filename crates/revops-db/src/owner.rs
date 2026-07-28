@@ -45,6 +45,22 @@ enum Command {
     // -- Task 10 fix round 1 (I-5): scalar-only siblings that avoid
     // materialising full-row results just to answer a single number --
     CurrentStateGeneration(oneshot::Sender<Result<u64>>),
+    // -- Task 44 / A3, live-review finding F3: cross-restart event
+    // idempotency check --
+    CycleExists {
+        cycle_id: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    // -- Task 44 / A3, live-review finding F7: generation-bound A3 commit --
+    CycleExistsWithGeneration {
+        cycle_id: String,
+        reply: oneshot::Sender<Result<(bool, u64)>>,
+    },
+    CommitFeeCycleGuarded {
+        commit: FeeCycleCommit,
+        expected_prior_generation: u64,
+        reply: oneshot::Sender<Result<fee_runway::GuardedCommitOutcome>>,
+    },
     MempoolSampleStats {
         since: i64,
         reply: oneshot::Sender<Result<fee_runway::MempoolSampleStats>>,
@@ -241,6 +257,59 @@ impl ObserverHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::LoadLatestFeeState(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 44 / A3, live-review finding F3: has `cycle_id` already been
+    /// durably committed? See [`fee_runway::cycle_exists`]'s doc comment.
+    pub async fn cycle_exists(&self, cycle_id: String) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::CycleExists { cycle_id, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::cycle_exists`] for the
+    /// scheduler's `std::thread`.
+    pub fn blocking_cycle_exists(&self, cycle_id: String) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CycleExists { cycle_id, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 44 / A3, live-review F7: [`fee_runway::cycle_exists_with_generation`]
+    /// (idempotency answer + the current state generation, one consistent
+    /// read).
+    pub fn blocking_cycle_exists_with_generation(&self, cycle_id: String) -> Result<(bool, u64)> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CycleExistsWithGeneration { cycle_id, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 44 / A3, live-review F7: [`fee_runway::commit_fee_cycle_guarded`]
+    /// (the generation compare-and-set commit the A3 path uses).
+    pub fn blocking_commit_fee_cycle_guarded(
+        &self,
+        commit: FeeCycleCommit,
+        expected_prior_generation: u64,
+    ) -> Result<fee_runway::GuardedCommitOutcome> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CommitFeeCycleGuarded {
+                commit,
+                expected_prior_generation,
+                reply,
+            })
             .context("observer actor gone (blocking)")?;
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
@@ -818,6 +887,26 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::CurrentStateGeneration(reply) => {
                     let result = fee_runway::current_state_generation(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::CycleExists { cycle_id, reply } => {
+                    let result = fee_runway::cycle_exists(&conn, &cycle_id);
+                    let _ = reply.send(result);
+                }
+                Command::CycleExistsWithGeneration { cycle_id, reply } => {
+                    let result = fee_runway::cycle_exists_with_generation(&conn, &cycle_id);
+                    let _ = reply.send(result);
+                }
+                Command::CommitFeeCycleGuarded {
+                    commit,
+                    expected_prior_generation,
+                    reply,
+                } => {
+                    let result = fee_runway::commit_fee_cycle_guarded(
+                        &conn,
+                        &commit,
+                        expected_prior_generation,
+                    );
                     let _ = reply.send(result);
                 }
                 Command::MempoolSampleStats { since, reply } => {

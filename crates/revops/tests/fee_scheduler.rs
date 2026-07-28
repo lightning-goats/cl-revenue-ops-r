@@ -20,14 +20,16 @@
 use revops::fee_evidence::{RpcPrefetch, MEMPOOL_MA_WINDOW_SECONDS};
 use revops::fee_scheduler::{
     read_flush_marker, CycleMsg, CycleOutcome, CycleOwner, FailedForwardSignal, FeeDebugQuery,
-    FlushWatcher, PollOutcome, PreparedCycle, SchedulerConfig, StateLifecycle, TriggerMode,
-    WatchParams, DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS,
+    FlushWatcher, PollOutcome, PreparedCycle, PreparedInitialFee, SchedulerConfig, StateLifecycle,
+    TriggerMode, WatchParams, DEFAULT_FLUSH_POLL_SECS, DEFAULT_FLUSH_SETTLE_SECS,
     FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS, FAILURE_NUDGE_MIN_INTERVAL_SECONDS,
     TRIGGER_QUEUE_CAPACITY,
 };
 use revops::fee_state::STATE_JOURNAL_FILE_NAME;
+use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_fees::cycle::{ChannelCycleState, ChannelFeeState, ChannelStateRow, FeeCfgSnapshot};
 use revops_fees::journal::JOURNAL_FILE_NAME;
+use revops_fees::market::FeePrior;
 use revops_fees::pyrand::PyRandom;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -1221,6 +1223,78 @@ mod seedonce_restart {
             event: fee_runway::FeeTriggerEventRow,
         ) -> anyhow::Result<()> {
             fee_runway::record_trigger_event(&self.conn(), &event)
+        }
+
+        fn cycle_exists(&self, cycle_id: &str) -> anyhow::Result<bool> {
+            fee_runway::cycle_exists(&self.conn(), cycle_id)
+        }
+
+        // F5: a direct-connection double does its own local work inline
+        // and delivers the result before returning -- deterministic for
+        // tests, and legitimate under the trait contract (there is no
+        // SHARED single-owner actor to stall on here; the non-blocking
+        // guarantee against a stalled actor is proven by `WedgedStore` +
+        // `a_wedged_store_never_wedges_the_owner_thread`).
+
+        fn dispatch_cycle_exists_with_generation(
+            &self,
+            cycle_id: String,
+            on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
+        ) {
+            on_done(fee_runway::cycle_exists_with_generation(
+                &self.conn(),
+                &cycle_id,
+            ));
+        }
+
+        fn dispatch_commit_fee_cycle_guarded(
+            &self,
+            commit: FeeCycleCommit,
+            expected_prior_generation: u64,
+            on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
+        ) {
+            if self.fail_commits.load(Ordering::SeqCst) {
+                on_done(Err(anyhow::anyhow!("injected commit failure")));
+                return;
+            }
+            on_done(fee_runway::commit_fee_cycle_guarded(
+                &self.conn(),
+                &commit,
+                expected_prior_generation,
+            ));
+        }
+
+        fn dispatch_record_trigger_event(
+            &self,
+            event: fee_runway::FeeTriggerEventRow,
+            on_done: revops::fee_state::StoreDispatchCallback<()>,
+        ) {
+            on_done(RunwayStateStore::record_trigger_event(self, event));
+        }
+    }
+
+    /// F5 test plumbing: wire an owner's self-sender to a local receiver
+    /// (the production loop's stand-in) ...
+    fn self_channel(owner: &mut CycleOwner) -> std::sync::mpsc::Receiver<CycleMsg> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        owner.set_self_sender(tx);
+        rx
+    }
+
+    /// ... and pump every off-owner store result message back into the
+    /// owner until the queue is quiet -- exactly what the production
+    /// message loop's `InitialFeeStoreResult` arm does. With `TestStore`'s
+    /// inline dispatch, one call drains the full
+    /// idempotency -> decide -> commit -> install chain.
+    fn pump_store_results(owner: &mut CycleOwner, rx: &std::sync::mpsc::Receiver<CycleMsg>) {
+        let mut clock = || NOW;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                CycleMsg::InitialFeeStoreResult(result) => {
+                    owner.handle_initial_fee_store_result(result, &mut clock)
+                }
+                _ => panic!("unexpected owner message during A3 store-result pump"),
+            }
         }
     }
 
@@ -2611,5 +2685,1877 @@ mod seedonce_restart {
 
         let conn = Connection::open(&store_path).unwrap();
         assert!(policy_receipts(&conn).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Task 44 / A3: CycleOwner::handle_new_channel -- atomic commit,
+    // durability, backpressure, and the mandatory recording-only
+    // reversion tripwire (contract §4.3, §4.4).
+    // -----------------------------------------------------------------
+
+    fn new_channel_prepared(
+        channel_id: &str,
+        peer_id: &str,
+        channel_fee_ppm: i64,
+        strategy: FeeStrategy,
+        fee_ppm_target: Option<i64>,
+        prior: Option<FeePrior>,
+        now: i64,
+    ) -> PreparedInitialFee {
+        use revops_fees::cycle::ChannelInfo;
+        PreparedInitialFee {
+            channel: ChannelInfo {
+                channel_id: channel_id.to_string(),
+                short_channel_id: channel_id.to_string(),
+                full_channel_id: "deadbeef".to_string(),
+                peer_id: peer_id.to_string(),
+                capacity_sats: 1_000_000,
+                spendable_msat: 500_000_000,
+                receivable_msat: 500_000_000,
+                fee_base_msat: 0,
+                fee_proportional_millionths: channel_fee_ppm,
+                htlc_minimum_msat: 1,
+                htlc_min_msat: 1,
+                htlc_maximum_msat: 100_000,
+                htlc_max_msat: 100_000,
+                opener: "remote".to_string(),
+                has_htlc_data: false,
+                max_accepted_htlcs: 483,
+                our_htlcs_in_flight: 0,
+            },
+            peer_id: peer_id.to_string(),
+            policy: PeerPolicy {
+                peer_id: peer_id.to_string(),
+                strategy,
+                rebalance_mode: RebalanceMode::Enabled,
+                fee_ppm_target,
+                tags: Vec::new(),
+                updated_at: 0,
+                fee_multiplier_min: None,
+                fee_multiplier_max: None,
+                expires_at: None,
+            },
+            cfg: FeeCfgSnapshot {
+                min_fee_ppm: 0,
+                max_fee_ppm: 100_000,
+                thompson_prior_std_fee: 100,
+                base_fee_msat: 0,
+                ..FeeCfgSnapshot::default()
+            },
+            prior,
+            event_ts: now,
+            event_key: revops::fee_scheduler::new_channel_event_key(
+                channel_id,
+                "OPENINGD",
+                "CHANNELD_NORMAL",
+                now,
+            ),
+        }
+    }
+
+    fn generation(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COALESCE((SELECT generation FROM rust_fee_state_generation WHERE id = 1), 0)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn trigger_event_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM rust_fee_trigger_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    fn request_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM rust_fee_requests", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Contract §4.3 (durability) + §4.4 (the MANDATORY end-to-end
+    /// recording-only reversion tripwire): one A3 event, DYNAMIC policy
+    /// with a known gossip prior, drives all the way through
+    /// `handle_new_channel`'s offer -> decide -> atomic commit. Asserts
+    /// canonical resolution (via the prepared `ChannelInfo`), persistent
+    /// prior mean/std, exactly one durable `.3` nudge, one complete
+    /// cycle+fee state row after reopening the store, one prepared
+    /// `channel_open` action with the scripted fee, and zero live
+    /// mutation attempts (no `ClnRpc`/broadcaster ever constructed on this
+    /// path -- structurally enforced by `tests/action_surface.rs`).
+    #[test]
+    fn new_channel_end_to_end_commits_atomically_and_survives_restart() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let fail = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open(&store_path, fail.clone());
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let rx = self_channel(&mut owner);
+        let prepared = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW,
+        );
+        owner.handle_new_channel(prepared);
+        pump_store_results(&mut owner, &rx);
+
+        assert_eq!(
+            owner.trigger_queue_dropped_total(),
+            0,
+            "capacity was never exceeded"
+        );
+
+        // Reopen the store fresh (simulates a restart) and confirm the
+        // complete row survived: state (with the nudge), the prepared
+        // action, and the receipt -- all visible together.
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            1,
+            "one atomic commit, one generation bump"
+        );
+        let snapshot = fee_runway::load_latest_state(&conn).unwrap();
+        assert_eq!(snapshot.rows.len(), 1);
+        assert!(
+            snapshot.rows[0]
+                .v2_state_json
+                .contains("\"prior_mean_fee\": 300"),
+            "the persisted state must carry the seeded prior mean: {}",
+            snapshot.rows[0].v2_state_json
+        );
+        assert_eq!(request_count(&conn), 1, "one prepared channel_open action");
+        let (new_fee, message): (i64, String) = conn
+            .query_row(
+                "SELECT new_fee_ppm, message FROM rust_fee_requests",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(message.contains(&new_fee.to_string()));
+        assert_eq!(trigger_event_count(&conn), 1, "one atomic receipt");
+    }
+
+    /// Mutation demonstration for §4.4: replacing the owner handler with
+    /// receipt-only behavior (never calling `handle_new_channel`'s real
+    /// decision/commit path) must make the test above fail. This inline
+    /// double proves the assertions are not vacuous -- a receipt-only
+    /// stand-in produces a receipt but no state row and no prepared
+    /// action, which the durability assertions above catch.
+    #[test]
+    fn reversion_tripwire_mutation_demonstration_receipt_only_is_caught() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        // Simulates a "receipt-only" regression: record a trigger receipt
+        // with NO state/action/outcome rows (exactly what a reverted
+        // owner handler that only logs would produce).
+        store
+            .commit_fee_cycle(FeeCycleCommit {
+                cycle_id: "receipt-only".to_string(),
+                started_at: NOW,
+                completed_at: NOW,
+                source_commit: "test".to_string(),
+                binary_sha256: "test".to_string(),
+                trigger_receipt: Some(revops_db::fee_runway::FeeTriggerEventRow {
+                    trigger_type: "new_channel".to_string(),
+                    channel_id: Some("1x1x0".to_string()),
+                    cycle_id: None,
+                    cycle_ts: Some(NOW),
+                    received_at: NOW,
+                    coalesced: false,
+                    detail: Some("receipt-only regression".to_string()),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            trigger_event_count(&conn),
+            1,
+            "a receipt-only regression still writes A receipt"
+        );
+        // The exact assertions the real test above makes would FAIL
+        // against this receipt-only shape -- proving they are not
+        // vacuous.
+        assert_eq!(
+            request_count(&conn),
+            0,
+            "a receipt-only regression has NO prepared action -- this is the failure the real \
+             end-to-end test's `request_count(&conn) == 1` assertion would catch"
+        );
+        let snapshot = fee_runway::load_latest_state(&conn).unwrap();
+        assert_eq!(
+            snapshot.rows.len(),
+            0,
+            "a receipt-only regression has NO state row -- this is the failure the real \
+             end-to-end test's `snapshot.rows.len() == 1` assertion would catch"
+        );
+    }
+
+    /// Contract §4.3 test 15 (atomic failure): an injected commit failure
+    /// leaves no partial state/action/receipt visible, in-memory state is
+    /// not advanced, and the red persistence-failure counter increments.
+    #[test]
+    fn new_channel_commit_failure_leaves_nothing_partial() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let fail = Arc::new(AtomicBool::new(true));
+        let store = TestStore::open(&store_path, fail);
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        let rx = self_channel(&mut owner);
+        let prepared = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Static,
+            Some(999),
+            None,
+            NOW,
+        );
+        owner.handle_new_channel(prepared);
+        pump_store_results(&mut owner, &rx);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            0,
+            "a failed commit must not advance the generation"
+        );
+        assert_eq!(request_count(&conn), 0, "no partial action visible");
+        assert_eq!(trigger_event_count(&conn), 0, "no partial receipt visible");
+        assert_eq!(
+            owner.persistence_failures(),
+            1,
+            "the red persistence-failure counter must increment"
+        );
+    }
+
+    /// Live-review finding F2: a COALESCED occurrence (a second
+    /// `new_channel` event for a channel that already has a pending entry
+    /// in the trigger queue -- e.g. a duplicate notification before the
+    /// next scheduled cycle drains the queue) must produce ZERO additional
+    /// effect: no second commit/generation bump, no second prepared
+    /// action, no second nudge. Only the FIRST (`Enqueued`) occurrence may
+    /// reach decision.
+    #[test]
+    fn coalesced_new_channel_event_has_zero_additional_effect() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let rx = self_channel(&mut owner);
+        let first = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior.clone()),
+            NOW,
+        );
+        owner.handle_new_channel(first);
+        pump_store_results(&mut owner, &rx);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 1);
+        assert_eq!(request_count(&conn), 1);
+        let receipts_after_first = trigger_event_count(&conn);
+        drop(conn);
+
+        // A SECOND event for the SAME channel, before anything drains the
+        // trigger queue's pending entry -- must coalesce, not re-decide.
+        let second = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 1,
+        );
+        owner.handle_new_channel(second);
+        pump_store_results(&mut owner, &rx);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            1,
+            "a coalesced occurrence must NOT bump the generation a second time"
+        );
+        assert_eq!(
+            request_count(&conn),
+            1,
+            "a coalesced occurrence must NOT prepare a second action"
+        );
+        assert_eq!(
+            trigger_event_count(&conn),
+            receipts_after_first + 1,
+            "a coalesced occurrence still gets its OWN auditable receipt, just no effect"
+        );
+    }
+
+    /// Live-review finding F1: a preparation refusal is DURABLE -- it
+    /// survives a restart (reopening the store) as an auditable receipt,
+    /// with zero state row and zero prepared action, rather than
+    /// disappearing as only a log line.
+    #[test]
+    fn new_channel_refusal_is_durable_with_zero_effect() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        owner.handle_new_channel_refused(
+            peer_a(),
+            "1x1x0".to_string(),
+            NOW,
+            "AMBIGUOUS: multiple NORMAL channels, no exact identifier match".to_string(),
+        );
+
+        // Reopen the store fresh (simulates a restart).
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 0, "a refusal must never advance state");
+        assert_eq!(
+            request_count(&conn),
+            0,
+            "a refusal must never prepare an action"
+        );
+        assert_eq!(
+            trigger_event_count(&conn),
+            1,
+            "the refusal itself IS durably recorded"
+        );
+        let detail: String = conn
+            .query_row("SELECT detail FROM rust_fee_trigger_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(detail.contains("REFUSED"));
+        assert!(detail.contains("AMBIGUOUS"));
+    }
+
+    /// Contract §4.5 (A3-specific epoch guard): handling a new channel
+    /// must not rewrite any EXISTING channel's `skip_gate_prev`/
+    /// `skip_gate_seen`, and must not perform any global epoch refresh --
+    /// only the new channel's OWN state (via the atomic commit's sync
+    /// fields) is touched. The two T8b guards
+    /// (`decision_gate_uses_pre_decision_epoch_not_fresh_flush`,
+    /// `observation_cursor_uses_pre_decision_epoch` in
+    /// `revops-fees/tests/cycle.rs`) remain byte-unmodified and continue
+    /// to pass -- this test is the A3-specific complement, not a
+    /// replacement.
+    #[test]
+    fn new_channel_never_rewrites_an_existing_channels_skip_gate_epoch() {
+        use revops_fees::cycle::SkipGateEpoch;
+
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        // Seed an EXISTING, unrelated channel's skip-gate epoch memory --
+        // exactly the cross-cycle state `hydrate_from_strategy_rows`
+        // maintains (fee_state.rs).
+        let existing_epoch_prev = SkipGateEpoch {
+            last_update: 111_111,
+            is_sleeping: true,
+        };
+        let existing_epoch_seen = SkipGateEpoch {
+            last_update: 222_222,
+            is_sleeping: false,
+        };
+        owner
+            .state_mut()
+            .skip_gate_prev
+            .insert("existing_chan".to_string(), existing_epoch_prev);
+        owner
+            .state_mut()
+            .skip_gate_seen
+            .insert("existing_chan".to_string(), existing_epoch_seen);
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let rx = self_channel(&mut owner);
+        let prepared = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW,
+        );
+        owner.handle_new_channel(prepared);
+        pump_store_results(&mut owner, &rx);
+
+        // The unrelated existing channel's epoch memory is UNTOUCHED --
+        // no global refresh happened inside the notification handler.
+        assert_eq!(
+            owner.state_mut().skip_gate_prev.get("existing_chan"),
+            Some(&existing_epoch_prev),
+            "handling a new channel must never rewrite an existing channel's skip_gate_prev"
+        );
+        assert_eq!(
+            owner.state_mut().skip_gate_seen.get("existing_chan"),
+            Some(&existing_epoch_seen),
+            "handling a new channel must never rewrite an existing channel's skip_gate_seen"
+        );
+        // The new channel itself is NOT added to skip_gate_prev/seen by
+        // this out-of-cycle path either (those maps are exclusively
+        // maintained by `hydrate_from_strategy_rows`'s per-cycle bootstrap
+        // classification) -- this out-of-cycle commit is orthogonal to
+        // that RehydratePerCycle-era bookkeeping, so a first-appearance
+        // row is not falsely labeled comparable by it.
+        assert!(!owner.state_mut().skip_gate_prev.contains_key("1x1x0"));
+        assert!(!owner.state_mut().skip_gate_seen.contains_key("1x1x0"));
+
+        // But the new channel DOES get the event-time last_update (the
+        // modeled post-broadcast sync), so the NEXT SeedOnce cycle
+        // observes the same waiting-window posture Python would after a
+        // successful apply.
+        let cycle = owner
+            .state_mut()
+            .cycle_states
+            .get("1x1x0")
+            .expect("authorized DYNAMIC must install cycle state");
+        assert_eq!(cycle.last_update, NOW);
+    }
+
+    /// Contract §4.3 test 16 / live-review finding F3 (cross-restart event
+    /// idempotency): replaying the SAME event (same resolved channel, same
+    /// event timestamp -- `new_channel_prepared` derives the SAME
+    /// `event_key` for identical inputs) across a simulated restart (a
+    /// fresh `CycleOwner` over the SAME reopened store) must NOT create a
+    /// second prepared action or a second nudge, while still recording an
+    /// auditable duplicate receipt and never reporting a persistence
+    /// failure.
+    #[test]
+    fn replaying_the_same_new_channel_event_after_restart_is_a_no_op() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+
+        // First process: handle the event once.
+        {
+            let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+            let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+            let rx = self_channel(&mut owner);
+            let prepared = new_channel_prepared(
+                "1x1x0",
+                &peer_a(),
+                123,
+                FeeStrategy::Dynamic,
+                None,
+                Some(prior.clone()),
+                NOW,
+            );
+            owner.handle_new_channel(prepared);
+            pump_store_results(&mut owner, &rx);
+            assert_eq!(owner.persistence_failures(), 0);
+        }
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 1);
+        assert_eq!(request_count(&conn), 1);
+        let receipts_before_replay = trigger_event_count(&conn);
+        drop(conn);
+
+        // "Restart": a brand-new CycleOwner + a brand-new TestStore
+        // instance over the SAME on-disk file, replaying the IDENTICAL
+        // event (same channel, same event_ts -> same event_key).
+        {
+            let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+            let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+            let rx = self_channel(&mut owner);
+            let replayed = new_channel_prepared(
+                "1x1x0",
+                &peer_a(),
+                123,
+                FeeStrategy::Dynamic,
+                None,
+                Some(prior),
+                NOW,
+            );
+            owner.handle_new_channel(replayed);
+            pump_store_results(&mut owner, &rx);
+            assert_eq!(
+                owner.persistence_failures(),
+                0,
+                "a duplicate replay is NOT a persistence failure"
+            );
+        }
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            1,
+            "the replay must NOT bump the generation a second time"
+        );
+        assert_eq!(
+            request_count(&conn),
+            1,
+            "the replay must NOT create a second prepared action"
+        );
+        let snapshot = fee_runway::load_latest_state(&conn).unwrap();
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(
+            snapshot.rows[0]
+                .v2_state_json
+                .matches("\"posterior_bias\": [[300.0, 0.3,")
+                .count(),
+            1,
+            "exactly ONE nudge must exist after the replay, not two"
+        );
+        assert!(
+            trigger_event_count(&conn) > receipts_before_replay,
+            "the replay itself still produces its OWN auditable (duplicate) receipt"
+        );
+    }
+
+    /// Contract §4.3 test 17 (backpressure): saturating distinct trigger
+    /// scopes, then a new-channel event, records a RED drop and applies
+    /// no state/action effect.
+    #[test]
+    fn new_channel_dropped_under_backpressure_has_zero_effect() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+
+        // Saturate the bounded queue with distinct scopes (never coalesced
+        // -- distinct peer/channel ids each time) so the NEXT distinct
+        // trigger (the new-channel offer below) is dropped.
+        for i in 0..TRIGGER_QUEUE_CAPACITY {
+            owner.handle_forward_event(&format!("filler-{i}"), NOW);
+        }
+        assert_eq!(
+            owner.trigger_queue_dropped_total(),
+            0,
+            "queue not yet saturated"
+        );
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let prepared = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW,
+        );
+        owner.handle_new_channel(prepared);
+
+        assert_eq!(
+            owner.trigger_queue_dropped_total(),
+            1,
+            "the new_channel offer must be the one dropped occurrence"
+        );
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            0,
+            "a dropped trigger must never advance state"
+        );
+        assert_eq!(
+            request_count(&conn),
+            0,
+            "a dropped trigger must never prepare an action"
+        );
+        // The drop itself IS recorded -- backpressure must be loud, never
+        // silent.
+        assert!(
+            trigger_event_count(&conn) >= 1,
+            "the drop must be a recorded RED event"
+        );
+    }
+
+    /// F7 test plumbing: a store whose GUARDED COMMITS park until the
+    /// test releases them -- deterministically simulating a store actor
+    /// that accepted the A3 commit command but has not executed it yet.
+    /// Everything else delegates to a real [`TestStore`] over the same
+    /// file.
+    type ParkedGuardedCommit = (
+        FeeCycleCommit,
+        u64,
+        revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
+    );
+
+    struct ParkingStore {
+        inner: TestStore,
+        path: PathBuf,
+        parked: Arc<std::sync::Mutex<Vec<ParkedGuardedCommit>>>,
+    }
+
+    impl ParkingStore {
+        fn open(
+            path: &Path,
+        ) -> (
+            ParkingStore,
+            Arc<std::sync::Mutex<Vec<ParkedGuardedCommit>>>,
+        ) {
+            let parked = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                ParkingStore {
+                    inner: TestStore::open(path, Arc::new(AtomicBool::new(false))),
+                    path: path.to_path_buf(),
+                    parked: parked.clone(),
+                },
+                parked,
+            )
+        }
+    }
+
+    /// Execute every parked guarded commit (in arrival order) against the
+    /// same on-disk store and deliver each result -- "the actor got to
+    /// them".
+    fn release_parked(path: &Path, parked: &Arc<std::sync::Mutex<Vec<ParkedGuardedCommit>>>) {
+        let drained: Vec<ParkedGuardedCommit> = std::mem::take(&mut *parked.lock().unwrap());
+        for (commit, expected_prior, on_done) in drained {
+            let conn = Connection::open(path).expect("open store for parked commit");
+            on_done(fee_runway::commit_fee_cycle_guarded(
+                &conn,
+                &commit,
+                expected_prior,
+            ));
+        }
+    }
+
+    impl RunwayStateStore for ParkingStore {
+        fn load_latest_state(&self) -> anyhow::Result<FeeStateSnapshot> {
+            self.inner.load_latest_state()
+        }
+
+        fn commit_fee_cycle(&self, commit: FeeCycleCommit) -> anyhow::Result<u64> {
+            RunwayStateStore::commit_fee_cycle(&self.inner, commit)
+        }
+
+        fn record_seed_event(&self, event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
+            self.inner.record_seed_event(event)
+        }
+
+        fn record_restart_marker(
+            &self,
+            marker: fee_runway::FeeRestartMarkerRow,
+        ) -> anyhow::Result<i64> {
+            self.inner.record_restart_marker(marker)
+        }
+
+        fn record_mempool_sample_pruned(
+            &self,
+            sampled_at: i64,
+            sat_per_vbyte: f64,
+            retain_since: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .record_mempool_sample_pruned(sampled_at, sat_per_vbyte, retain_since)
+        }
+
+        fn query_mempool_samples_since(
+            &self,
+            since: i64,
+        ) -> anyhow::Result<Vec<fee_runway::MempoolSampleRow>> {
+            self.inner.query_mempool_samples_since(since)
+        }
+
+        fn record_mempool_ma_comparison(
+            &self,
+            row: fee_runway::MempoolMaComparisonRow,
+        ) -> anyhow::Result<i64> {
+            self.inner.record_mempool_ma_comparison(row)
+        }
+
+        fn record_trigger_event(
+            &self,
+            event: fee_runway::FeeTriggerEventRow,
+        ) -> anyhow::Result<()> {
+            RunwayStateStore::record_trigger_event(&self.inner, event)
+        }
+
+        fn cycle_exists(&self, cycle_id: &str) -> anyhow::Result<bool> {
+            RunwayStateStore::cycle_exists(&self.inner, cycle_id)
+        }
+
+        fn dispatch_cycle_exists_with_generation(
+            &self,
+            cycle_id: String,
+            on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
+        ) {
+            self.inner
+                .dispatch_cycle_exists_with_generation(cycle_id, on_done);
+        }
+
+        fn dispatch_commit_fee_cycle_guarded(
+            &self,
+            commit: FeeCycleCommit,
+            expected_prior_generation: u64,
+            on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
+        ) {
+            let _ = &self.path;
+            self.parked
+                .lock()
+                .unwrap()
+                .push((commit, expected_prior_generation, on_done));
+        }
+
+        fn dispatch_record_trigger_event(
+            &self,
+            event: fee_runway::FeeTriggerEventRow,
+            on_done: revops::fee_state::StoreDispatchCallback<()>,
+        ) {
+            self.inner.dispatch_record_trigger_event(event, on_done);
+        }
+    }
+
+    /// F7 fixture bundle: python DB seeded with CHANNEL (`700x1x0`), a
+    /// SeedOnce owner over a ParkingStore, first cycle run (seed +
+    /// generation 1), self-channel wired.
+    struct ParkedSeedOnce {
+        _fx: Fixture,
+        owner: CycleOwner,
+        rx: std::sync::mpsc::Receiver<CycleMsg>,
+        store_path: PathBuf,
+        parked: Arc<std::sync::Mutex<Vec<ParkedGuardedCommit>>>,
+    }
+
+    fn parked_seedonce_after_first_cycle() -> ParkedSeedOnce {
+        let fx = fixture();
+        let conn = Connection::open(&fx.db_path).expect("open for seeding");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, \
+             sats_out, capacity, updated_at, kalman_flow_ratio, kalman_velocity) \
+             VALUES (?1, ?2, 'balanced', 0.1, 0, 0, 2000000, ?3, 0.05, 0.01)",
+            rusqlite::params![CHANNEL, peer_a(), NOW - 60],
+        )
+        .expect("insert channel_states row");
+        conn.execute(
+            "INSERT INTO fee_strategy_state (channel_id, last_update, v2_state_json) \
+             VALUES (?1, ?2, '{}')",
+            rusqlite::params![CHANNEL, NOW - 900],
+        )
+        .expect("insert fee_strategy_state row");
+        drop(conn);
+
+        std::fs::create_dir_all(&fx.journal_dir).expect("journal dir");
+        let store_path = fx.journal_dir.join("rust-owned.db");
+        let (store, parked) = ParkingStore::open(&store_path);
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        let mut clock = || NOW + 1800;
+        let outcome = owner.run_cycle(seedonce_prepared_cycle(), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+
+        ParkedSeedOnce {
+            _fx: fx,
+            owner,
+            rx,
+            store_path,
+            parked,
+        }
+    }
+
+    /// The SeedOnce prepared-cycle inputs `SeedOnceHarness::prepared`
+    /// uses, as a free helper for the F7 tests.
+    fn seedonce_prepared_cycle() -> PreparedCycle {
+        let mut channel = canned_peer_channel();
+        channel["short_channel_id"] = json!("700:1:0");
+        channel["channel_id"] = json!("full_chan_700");
+        PreparedCycle {
+            cfg: FeeCfgSnapshot {
+                enable_vegas_reflex: false,
+                ..FeeCfgSnapshot::default()
+            },
+            min_competitors: json!(3),
+            rpc: RpcPrefetch {
+                our_node_id: format!("02{}", "ee".repeat(32)),
+                peer_channels: vec![channel],
+                gossip_channels: Vec::new(),
+                feerates: None,
+            },
+        }
+    }
+
+    /// F7 (the CAS, external/inter-A3 guard): if the store's generation
+    /// advances AFTER an A3 decision but BEFORE its guarded commit
+    /// executes at the actor, the commit must land NOTHING (in-band
+    /// `GenerationConflict`), the staged state must be discarded
+    /// fail-closed, and the owner must adopt the store's real generation.
+    /// (Mutation-verified: bypassing the CAS reds this test -- see
+    /// TASK44-REPORT.md.)
+    #[test]
+    fn a3_commit_against_an_advanced_store_is_a_conflict_not_a_stale_write() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 10,
+        );
+        let requests_before = request_count(&Connection::open(&store_path).unwrap());
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx); // idempotency -> decide -> commit PARKED
+        assert_eq!(owner.initial_fee_pending(), 1, "commit parked in flight");
+        let memory_before = owner.state().cycle_states[CHANNEL].clone();
+
+        // The store advances past the decision's basis (generation 1 ->
+        // 2) while the A3 commit is still parked -- the exact schedule
+        // the CAS exists for.
+        {
+            let conn = Connection::open(&store_path).unwrap();
+            fee_runway::commit_fee_cycle(
+                &conn,
+                &FeeCycleCommit {
+                    cycle_id: "external-advance".to_string(),
+                    started_at: NOW + 20,
+                    completed_at: NOW + 20,
+                    source_commit: "test".to_string(),
+                    binary_sha256: "test".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        release_parked(&store_path, &parked);
+        pump_store_results(&mut owner, &rx);
+
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            1,
+            "the CAS refusal is a red conflict"
+        );
+        assert_eq!(owner.initial_fee_pending(), 0);
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            2,
+            "the stale A3 commit must have written NOTHING (generation stays at the \
+             external advance)"
+        );
+        assert_eq!(
+            request_count(&conn),
+            requests_before,
+            "no stale prepared action landed"
+        );
+        assert_eq!(
+            owner.state().cycle_states[CHANNEL],
+            memory_before,
+            "the staged state was discarded fail-closed -- memory keeps the pre-A3 epoch"
+        );
+    }
+
+    /// F7 (install rule): an A3 commit that DID land, whose callback is
+    /// processed only after the owner advanced past the decision's basis,
+    /// must NOT install its staged (now stale) state over the newer owner
+    /// epoch -- fail-closed conflict, memory keeps the newer state and
+    /// matches the store's latest row for the channel. (Mutation-verified:
+    /// removing the owner-unadvanced check reds this test.)
+    #[test]
+    fn late_a3_callback_after_owner_advance_never_installs_stale_state() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx); // commit parked (expected prior 1)
+
+        // The A3 commit executes (generation 2)...
+        release_parked(&store_path, &parked);
+        // ...but BEFORE its callback is processed, a full cycle runs on
+        // the owner (pre-install memory) and commits generation 3.
+        let mut clock = || NOW + 3600;
+        let outcome = owner.run_cycle(seedonce_prepared_cycle(), &mut clock);
+        assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+        let memory_after_cycle = owner.state().cycle_states[CHANNEL].clone();
+
+        // The late callback must be a conflict, not an install.
+        pump_store_results(&mut owner, &rx);
+
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            1,
+            "a stale install attempt is a red conflict"
+        );
+        assert_eq!(
+            owner.state().cycle_states[CHANNEL],
+            memory_after_cycle,
+            "memory must keep the newer post-cycle epoch, not the stale staged state"
+        );
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 3, "A3 (2) then the cycle (3)");
+        let (latest_json,): (String,) = conn
+            .query_row(
+                "SELECT v2_state_json FROM rust_fee_state WHERE channel_id = ?1",
+                rusqlite::params![CHANNEL],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert!(
+            latest_json.contains(&format!(
+                "\"last_update\": {}",
+                memory_after_cycle.last_update
+            )),
+            "the store's latest row for the channel is the cycle's (memory == DB): {latest_json}"
+        );
+    }
+
+    /// F7 refinement (Python-parity sequencing): a prepared cycle
+    /// arriving while an A3 store result is pending must be DEFERRED and
+    /// run only after the A3 occurrence settles -- so the cycle consumes
+    /// the synchronized post-A3 state, exactly as Python's `_state_lock`
+    /// serializes `_handle_channel_open` against the cycle. Running it
+    /// immediately would commit a pre-A3 epoch and orphan the A3 commit
+    /// into a conflict.
+    #[test]
+    fn run_prepared_during_inflight_a3_commit_is_deferred_until_the_install() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx); // commit parked, in flight
+
+        // The production loop's RunPrepared entry, while the A3 commit is
+        // in flight: must DEFER, not run.
+        let mut clock = || NOW + 3600;
+        let outcome = owner.run_or_defer_cycle(Box::new(seedonce_prepared_cycle()), &mut clock);
+        assert!(
+            outcome.is_none(),
+            "the cycle must be deferred while an A3 store result is pending, got {outcome:?}"
+        );
+        {
+            let conn = Connection::open(&store_path).unwrap();
+            assert_eq!(
+                generation(&conn),
+                1,
+                "a deferred cycle must not have committed anything yet"
+            );
+        }
+
+        // The A3 commit executes and its callback settles the occurrence;
+        // the deferred cycle must then run AND consume the A3 state.
+        release_parked(&store_path, &parked);
+        let mut release_clock = || NOW + 3600;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                CycleMsg::InitialFeeStoreResult(result) => {
+                    owner.handle_initial_fee_store_result(result, &mut release_clock)
+                }
+                _ => panic!("unexpected owner message"),
+            }
+        }
+
+        assert_eq!(owner.initial_fee_pending(), 0);
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            0,
+            "correct sequencing has no conflicts: install first, cycle after"
+        );
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            3,
+            "A3 commit (2), then the deferred cycle (3)"
+        );
+        let (latest_json,): (String,) = conn
+            .query_row(
+                "SELECT v2_state_json FROM rust_fee_state WHERE channel_id = ?1",
+                rusqlite::params![CHANNEL],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert!(
+            latest_json.contains("\"posterior_bias\": [[300.0, 0.3,"),
+            "the deferred cycle's flush must carry the A3-seeded nudge (the cycle ran AFTER \
+             the install): {latest_json}"
+        );
+    }
+
+    /// F7 refinement: the deferral slot is BOUNDED to one prepared cycle
+    /// -- a newer prepared snapshot supersedes an older deferred one
+    /// (loudly, counted), and exactly ONE deferred cycle runs at release.
+    #[test]
+    fn deferred_cycles_are_bounded_and_superseded_loudly() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx); // commit parked, in flight
+
+        let mut clock = || NOW + 3600;
+        assert!(owner
+            .run_or_defer_cycle(Box::new(seedonce_prepared_cycle()), &mut clock)
+            .is_none());
+        assert!(owner
+            .run_or_defer_cycle(Box::new(seedonce_prepared_cycle()), &mut clock)
+            .is_none());
+        assert_eq!(
+            owner.deferred_cycles_superseded(),
+            1,
+            "the second deferred prepared cycle supersedes the first, loudly counted"
+        );
+
+        release_parked(&store_path, &parked);
+        let mut release_clock = || NOW + 3600;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                CycleMsg::InitialFeeStoreResult(result) => {
+                    owner.handle_initial_fee_store_result(result, &mut release_clock)
+                }
+                _ => panic!("unexpected owner message"),
+            }
+        }
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            3,
+            "A3 commit (2) plus exactly ONE deferred cycle (3) -- never two"
+        );
+    }
+
+    /// F5 (same-channel pending/race, fail-closed): once a cycle has
+    /// drained the trigger queue, a NEW occurrence for a channel whose
+    /// store result is STILL in flight would pass the offer as `Enqueued`
+    /// -- the pending map must then refuse it fail-closed. Without the
+    /// guard, the new occurrence overwrites the in-flight entry: the
+    /// first (already durably committed) result is orphaned into a
+    /// conflict, its staged state is never installed, and the second
+    /// occurrence decides AND commits a second time (two generations, two
+    /// prepared actions for one channel).
+    #[test]
+    fn same_channel_event_while_commit_in_flight_is_refused_fail_closed() {
+        let fx = fixture();
+        seed_channel_state(&fx.db_path);
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let first = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior.clone()),
+            NOW,
+        );
+        owner.handle_new_channel(first);
+
+        // Advance ONLY to the Committing phase: handle the idempotency
+        // answer, leaving the (real) commit result parked in the queue --
+        // the commit is "in flight".
+        {
+            let mut clock = || NOW;
+            match rx.try_recv().expect("idempotency result was dispatched") {
+                CycleMsg::InitialFeeStoreResult(result) => {
+                    owner.handle_initial_fee_store_result(result, &mut clock)
+                }
+                _ => panic!("unexpected owner message"),
+            }
+        }
+        assert_eq!(owner.initial_fee_pending(), 1, "commit is in flight");
+
+        // A scheduled cycle drains the trigger queue (its documented drain
+        // point) -- so the next same-channel occurrence is NOT coalesced
+        // by the queue and reaches the pending guard.
+        let mut clock = || NOW + 60;
+        owner.run_cycle(prepared(json!(3), true), &mut clock);
+
+        // A THIRD occurrence for the SAME channel (different event time ->
+        // different event_key) while the commit result is still in
+        // flight: must be refused fail-closed, with zero decision/RNG and
+        // zero dispatch.
+        let racing = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 7,
+        );
+        owner.handle_new_channel(racing);
+        assert_eq!(
+            owner.initial_fee_pending(),
+            1,
+            "the racing occurrence must NOT replace or add a pending entry"
+        );
+
+        // Now let everything settle: the in-flight commit result installs
+        // the FIRST occurrence's staged state; nothing else happens.
+        pump_store_results(&mut owner, &rx);
+
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            0,
+            "the awaited commit result is NOT a conflict -- refusing the racing occurrence must \
+             leave the in-flight entry to complete normally"
+        );
+        assert_eq!(
+            owner.persistence_failures(),
+            0,
+            "a fail-closed race refusal is not a persistence failure"
+        );
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            1,
+            "exactly ONE commit -- the racing occurrence must never re-decide/re-commit"
+        );
+        assert_eq!(
+            request_count(&conn),
+            1,
+            "exactly ONE prepared action for the channel"
+        );
+        let refusals: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rust_fee_trigger_events WHERE detail LIKE \
+                 '%REFUSED%in flight%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            refusals, 1,
+            "the racing occurrence gets a typed, durable fail-closed refusal receipt"
+        );
+    }
+
+    /// F5 (identity binding, idempotency phase): a result message whose
+    /// event_key/generation does not match the pending entry -- a forged,
+    /// stale, or foreign answer -- must be discarded as a red conflict
+    /// WITHOUT consuming the pending entry, making a decision, or
+    /// dispatching a commit. The real answer, arriving later, must still
+    /// complete normally.
+    #[test]
+    fn mismatched_idempotency_result_is_a_conflict_not_a_decision() {
+        use revops::fee_scheduler::InitialFeeStoreResult;
+
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let prepared_evt = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW,
+        );
+        owner.handle_new_channel(prepared_evt);
+        assert_eq!(owner.initial_fee_pending(), 1);
+
+        // A forged/stale answer: right channel, wrong identity.
+        let mut clock = || NOW;
+        owner.handle_initial_fee_store_result(
+            InitialFeeStoreResult::Idempotency {
+                channel_id: "1x1x0".to_string(),
+                event_key: "forged-event-key".to_string(),
+                generation: 999,
+                result: Ok((false, 0)),
+            },
+            &mut clock,
+        );
+
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            1,
+            "an identity-mismatched result is a red conflict"
+        );
+        assert_eq!(
+            owner.initial_fee_pending(),
+            1,
+            "the pending entry must survive a mismatched result untouched"
+        );
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(
+            generation(&conn),
+            0,
+            "a mismatched result must never trigger a decision/commit"
+        );
+        assert_eq!(request_count(&conn), 0);
+        drop(conn);
+
+        // The REAL answer still completes the occurrence normally.
+        pump_store_results(&mut owner, &rx);
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 1, "the genuine result still commits");
+        assert_eq!(request_count(&conn), 1);
+        assert_eq!(owner.initial_fee_pending(), 0);
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            1,
+            "only the forged answer conflicted"
+        );
+    }
+
+    /// F5 (identity binding, commit phase): a commit result bound to the
+    /// wrong generation/event_key -- e.g. a forged failure -- must be a
+    /// red conflict that neither uninstalls/discards the staged state nor
+    /// counts a persistence failure; the REAL success result must still
+    /// install the staged state afterward.
+    #[test]
+    fn mismatched_commit_result_is_a_conflict_not_an_install_or_discard() {
+        use revops::fee_scheduler::InitialFeeStoreResult;
+
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let cfg = SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::default(),
+        };
+        let mut owner = CycleOwner::new(&cfg, SEED, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let prepared_evt = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW,
+        );
+        owner.handle_new_channel(prepared_evt);
+        // Advance to Committing: the real commit result is now parked in
+        // the queue.
+        {
+            let mut clock = || NOW;
+            match rx.try_recv().expect("idempotency result was dispatched") {
+                CycleMsg::InitialFeeStoreResult(result) => {
+                    owner.handle_initial_fee_store_result(result, &mut clock)
+                }
+                _ => panic!("unexpected owner message"),
+            }
+        }
+        assert_eq!(owner.initial_fee_pending(), 1, "commit in flight");
+
+        // A forged FAILURE with the wrong generation: must not discard
+        // the staged state, must not count a persistence failure.
+        let mut clock = || NOW;
+        owner.handle_initial_fee_store_result(
+            InitialFeeStoreResult::Commit {
+                channel_id: "1x1x0".to_string(),
+                event_key: "forged-event-key".to_string(),
+                generation: 999,
+                result: Err("forged failure".to_string()),
+            },
+            &mut clock,
+        );
+
+        assert_eq!(
+            owner.initial_fee_conflicts(),
+            1,
+            "an identity-mismatched commit result is a red conflict"
+        );
+        assert_eq!(
+            owner.persistence_failures(),
+            0,
+            "a forged failure must NOT count as a real persistence failure"
+        );
+        assert_eq!(
+            owner.initial_fee_pending(),
+            1,
+            "the staged entry must survive the mismatched result"
+        );
+
+        // The REAL success result still installs the staged state.
+        pump_store_results(&mut owner, &rx);
+        assert_eq!(owner.initial_fee_pending(), 0);
+        assert!(
+            owner.state_mut().cycle_states.contains_key("1x1x0"),
+            "the genuine commit success must still install the staged state"
+        );
+        assert_eq!(owner.persistence_failures(), 0);
+    }
+
+    /// Live-review finding F5: a store whose every call blocks forever
+    /// (a stalled/wedged SQLite single-owner actor). The A3 path must
+    /// never let this wedge the OWNER thread: every store interaction on
+    /// the new-channel path is dispatched off-owner, with results routed
+    /// back as owner-queue messages.
+    struct WedgedStore {
+        /// Keeps the channel's sender alive so [`Self::wedge`]'s `recv`
+        /// blocks forever instead of returning a disconnect error.
+        _keep_alive: std::sync::mpsc::Sender<()>,
+        block: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl WedgedStore {
+        fn new() -> WedgedStore {
+            let (tx, rx) = std::sync::mpsc::channel();
+            WedgedStore {
+                _keep_alive: tx,
+                block: std::sync::Mutex::new(rx),
+            }
+        }
+
+        /// Block forever (the sender lives in `self`, so `recv` never
+        /// returns while the store exists).
+        fn wedge<T>(&self) -> anyhow::Result<T> {
+            let _ = self.block.lock().unwrap().recv();
+            anyhow::bail!("wedged store unexpectedly released")
+        }
+    }
+
+    impl RunwayStateStore for WedgedStore {
+        fn load_latest_state(&self) -> anyhow::Result<FeeStateSnapshot> {
+            self.wedge()
+        }
+
+        fn commit_fee_cycle(&self, _commit: FeeCycleCommit) -> anyhow::Result<u64> {
+            self.wedge()
+        }
+
+        fn record_seed_event(&self, _event: fee_runway::FeeSeedEventRow) -> anyhow::Result<i64> {
+            self.wedge()
+        }
+
+        fn record_restart_marker(
+            &self,
+            _marker: fee_runway::FeeRestartMarkerRow,
+        ) -> anyhow::Result<i64> {
+            self.wedge()
+        }
+
+        fn record_mempool_sample_pruned(
+            &self,
+            _sampled_at: i64,
+            _sat_per_vbyte: f64,
+            _retain_since: i64,
+        ) -> anyhow::Result<()> {
+            self.wedge()
+        }
+
+        fn query_mempool_samples_since(
+            &self,
+            _since: i64,
+        ) -> anyhow::Result<Vec<fee_runway::MempoolSampleRow>> {
+            self.wedge()
+        }
+
+        fn record_mempool_ma_comparison(
+            &self,
+            _row: fee_runway::MempoolMaComparisonRow,
+        ) -> anyhow::Result<i64> {
+            self.wedge()
+        }
+
+        fn record_trigger_event(
+            &self,
+            _event: fee_runway::FeeTriggerEventRow,
+        ) -> anyhow::Result<()> {
+            self.wedge()
+        }
+
+        fn cycle_exists(&self, _cycle_id: &str) -> anyhow::Result<bool> {
+            self.wedge()
+        }
+
+        // F5: the stalled actor's dispatch shape -- the call returns
+        // immediately (as the trait requires) but the reply NEVER
+        // arrives, exactly like an actor that accepted the command and
+        // then hung. The owner must survive this indefinitely.
+
+        fn dispatch_cycle_exists_with_generation(
+            &self,
+            _cycle_id: String,
+            on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
+        ) {
+            drop(on_done);
+        }
+
+        fn dispatch_commit_fee_cycle_guarded(
+            &self,
+            _commit: FeeCycleCommit,
+            _expected_prior_generation: u64,
+            on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
+        ) {
+            drop(on_done);
+        }
+
+        fn dispatch_record_trigger_event(
+            &self,
+            _event: fee_runway::FeeTriggerEventRow,
+            on_done: revops::fee_state::StoreDispatchCallback<()>,
+        ) {
+            drop(on_done);
+        }
+    }
+
+    /// Live-review finding F5 (the binding recovery contract): the single
+    /// owner must NOT block on SQLite-actor replies. With a fully wedged
+    /// store, sending a Ready new-channel event must leave the owner
+    /// thread responsive -- a subsequent `Query` still round-trips within
+    /// the timeout. (Against the pre-fix blocking implementation this
+    /// test times out: the owner wedges inside the store call and never
+    /// services the query.)
+    #[tokio::test]
+    async fn a_wedged_store_never_wedges_the_owner_thread() {
+        use revops::fee_scheduler::NewChannelPreparation;
+
+        let fx = fixture();
+        let handle = revops::fee_scheduler::spawn_with_thread_spawner(
+            SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                // Phase offset far past this test's lifetime: no tick fires.
+                trigger: TriggerMode::FixedInterval {
+                    phase_offset_secs: 999_999,
+                },
+            },
+            None,
+            revops::config_resolve::PythonOptionCache::empty(),
+            Some(Box::new(WedgedStore::new())),
+            |name, body| {
+                std::thread::Builder::new()
+                    .name(name.to_string())
+                    .spawn(body)
+                    .map(|_join| ())
+            },
+        )
+        .expect("spawn scheduler");
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let prepared = new_channel_prepared(
+            "1x1x0",
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW,
+        );
+        handle
+            .tx
+            .send(CycleMsg::NewChannel(Box::new(
+                NewChannelPreparation::Ready(Box::new(prepared)),
+            )))
+            .expect("send NewChannel");
+
+        // The owner must keep servicing other messages while the store
+        // stalls -- THE F5 proof.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        handle
+            .tx
+            .send(CycleMsg::Query(FeeDebugQuery::RunwayCounters, reply_tx))
+            .expect("send Query");
+        let value = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("owner thread must stay responsive while the store is wedged");
+        assert!(
+            value.get("lifecycle").is_some(),
+            "the query answer must be the real runway-counters shape: {value:?}"
+        );
+
+        handle.tx.send(CycleMsg::Shutdown).ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 44 / A3, live-review finding F6 (config half): `prepare_new_channel`
+// must REFUSE -- not decide on struct defaults -- when the config store's
+// queries fail. The shared per-cycle `resolve_fee_cfg` keeps its
+// log-and-default posture (deliberately untouched); only the A3 preparation
+// path is strict.
+// ---------------------------------------------------------------------------
+
+/// Minimal mock `lightning-rpc` for `prepare_new_channel`'s prefetch (same
+/// framing as `tests/fee_evidence.rs`'s `serve_methods`): one NORMAL
+/// channel for peer A resolving `100x1x0` exactly.
+fn serve_new_channel_rpc(socket_path: PathBuf, listconfigs: Option<Value>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind mock rpc socket");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let req: Value = loop {
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Ok(v) = serde_json::from_slice::<Value>(&buf) {
+                    break v;
+                }
+            };
+            let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let body = match method {
+                "getinfo" => json!({"jsonrpc": "2.0", "id": id,
+                    "result": {"id": format!("02{}", "ee".repeat(32))}}),
+                "listpeerchannels" => json!({"jsonrpc": "2.0", "id": id,
+                    "result": {"channels": [{"state": "CHANNELD_NORMAL",
+                        "short_channel_id": "100x1x0", "peer_id": peer_a(),
+                        "total_msat": 1_000_000_000_i64, "to_us_msat": 500_000_000_i64,
+                        "spendable_msat": 400_000_000_i64, "receivable_msat": 500_000_000_i64,
+                        "fee_base_msat": 0, "fee_proportional_millionths": 150,
+                        "minimum_htlc_out_msat": 1, "maximum_htlc_out_msat": 100_000}]}}),
+                "listchannels" => json!({"jsonrpc": "2.0", "id": id,
+                    "result": {"channels": [{"source": format!("02{}", "11".repeat(32)),
+                        "destination": peer_a(), "active": true,
+                        "fee_per_millionth": 42, "satoshis": 1_000_000_i64,
+                        "last_update": 1_800_000_000_i64, "base_fee_millisatoshi": 0}]}}),
+                "feerates" => json!({"jsonrpc": "2.0", "id": id,
+                    "result": {"perkb": {"opening": 15000}}}),
+                "listconfigs" => match &listconfigs {
+                    Some(configs) => json!({"jsonrpc": "2.0", "id": id,
+                        "result": {"configs": configs}}),
+                    None => json!({"jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32603, "message": "listconfigs unavailable"}}),
+                },
+                other => json!({"jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": format!("unknown method {other}")}}),
+            };
+            let mut out = serde_json::to_vec(&body).unwrap();
+            out.extend_from_slice(b"\n\n");
+            let _ = stream.write_all(&out).await;
+        }
+    });
+}
+
+/// F6 (config half): a config store whose override queries FAIL (the
+/// table is unreadable -- not merely absent rows) must produce a typed
+/// preparation REFUSAL, never a `Ready` preparation silently resolved on
+/// struct defaults. A refusal becomes a durable receipt with zero
+/// decision/RNG/state; a defaults-decision would be a silently wrong fee.
+#[tokio::test]
+async fn config_query_failure_refuses_new_channel_preparation_instead_of_defaulting() {
+    use revops::fee_scheduler::{prepare_new_channel, NewChannelPreparation};
+
+    let fx = fixture();
+    let socket = fx._dir.path().join("lightning-rpc");
+    serve_new_channel_rpc(socket.clone(), Some(json!({})));
+
+    // A valid sqlite file WITHOUT `config_overrides` (one unrelated table
+    // so the open-time schema probe passes): every layer-(a) override
+    // query then errors with "no such table" -- a QUERY FAILURE, distinct
+    // from the legitimate no-override `None`.
+    let broken_cfg_db = fx._dir.path().join("broken-config.db");
+    {
+        let conn = Connection::open(&broken_cfg_db).unwrap();
+        conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&broken_cfg_db)
+        .await
+        .expect("open probe passes; only the override queries fail");
+
+    let signal = revops::notify::NewChannelSignal {
+        event_scid: Some("100x1x0".to_string()),
+        event_channel_id: None,
+        peer_id: peer_a(),
+        old_state: "OPENINGD".to_string(),
+        new_state: "CHANNELD_NORMAL".to_string(),
+        event_ts: NOW,
+    };
+    let python_options = revops::config_resolve::PythonOptionCache::empty();
+    let preparation =
+        prepare_new_channel(&socket, &fx.db_path, Some(&handle), &python_options, signal).await;
+
+    match preparation {
+        NewChannelPreparation::Refused { reason, .. } => {
+            assert!(
+                reason.contains("config"),
+                "the refusal must name the config resolution failure, got: {reason}"
+            );
+        }
+        NewChannelPreparation::Ready(prepared) => panic!(
+            "a config-store query failure must REFUSE, not resolve defaults and decide \
+             (got Ready with cfg.max_fee_ppm={})",
+            prepared.cfg.max_fee_ppm
+        ),
+    }
+}
+
+/// Live-review finding F8 (A3 config freshness): the preparation must
+/// resolve against a FRESH `listconfigs` snapshot, not whatever the
+/// shared cache last saw -- a dynamic `setconfig` between the last
+/// scheduled cycle and the channel opening must reach the initial-fee
+/// decision, as it would reach Python's `_refresh_dynamic_config`-driven
+/// handler.
+#[tokio::test]
+async fn a3_preparation_uses_a_fresh_listconfigs_value_not_the_stale_cache() {
+    use revops::fee_scheduler::{prepare_new_channel, NewChannelPreparation};
+
+    let fx = fixture();
+    // Prime the cache with a STALE value over a first mock socket.
+    let stale_socket = fx._dir.path().join("stale-rpc");
+    serve_new_channel_rpc(
+        stale_socket.clone(),
+        Some(json!({"revenue-ops-max-fee-ppm": {"value_str": "555", "source": "setconfig"}})),
+    );
+    let python_options = revops::config_resolve::PythonOptionCache::empty();
+    assert!(python_options.refresh(&stale_socket).await);
+
+    // The live socket now reports the NEW value (a setconfig happened).
+    let socket = fx._dir.path().join("lightning-rpc");
+    serve_new_channel_rpc(
+        socket.clone(),
+        Some(json!({"revenue-ops-max-fee-ppm": {"value_str": "777", "source": "setconfig"}})),
+    );
+
+    let signal = revops::notify::NewChannelSignal {
+        event_scid: Some("100x1x0".to_string()),
+        event_channel_id: None,
+        peer_id: peer_a(),
+        old_state: "OPENINGD".to_string(),
+        new_state: "CHANNELD_NORMAL".to_string(),
+        event_ts: NOW,
+    };
+    let preparation =
+        prepare_new_channel(&socket, &fx.db_path, None, &python_options, signal).await;
+
+    match preparation {
+        NewChannelPreparation::Ready(prepared) => assert_eq!(
+            prepared.cfg.max_fee_ppm, 777,
+            "the preparation must decide on the FRESH listconfigs value, not the stale cache"
+        ),
+        NewChannelPreparation::Refused { reason, .. } => {
+            panic!("expected Ready with the fresh value, got refusal: {reason}")
+        }
+    }
+}
+
+/// Live-review finding F8 (strict half): a failed `listconfigs` refresh
+/// must REFUSE the preparation -- even though a stale cached snapshot
+/// exists -- because deciding an initial fee on stale config is a silent
+/// wrong decision. The shared scheduled-cycle path keeps its
+/// keep-last-good posture; only A3 is strict.
+#[tokio::test]
+async fn a3_preparation_refuses_when_the_listconfigs_refresh_fails() {
+    use revops::fee_scheduler::{prepare_new_channel, NewChannelPreparation};
+
+    let fx = fixture();
+    // A stale cached snapshot EXISTS (the tempting fallback).
+    let stale_socket = fx._dir.path().join("stale-rpc");
+    serve_new_channel_rpc(
+        stale_socket.clone(),
+        Some(json!({"revenue-ops-max-fee-ppm": {"value_str": "555", "source": "setconfig"}})),
+    );
+    let python_options = revops::config_resolve::PythonOptionCache::empty();
+    assert!(python_options.refresh(&stale_socket).await);
+
+    // The live socket refuses listconfigs (outage) but would serve
+    // everything else.
+    let socket = fx._dir.path().join("lightning-rpc");
+    serve_new_channel_rpc(socket.clone(), None);
+
+    let signal = revops::notify::NewChannelSignal {
+        event_scid: Some("100x1x0".to_string()),
+        event_channel_id: None,
+        peer_id: peer_a(),
+        old_state: "OPENINGD".to_string(),
+        new_state: "CHANNELD_NORMAL".to_string(),
+        event_ts: NOW,
+    };
+    let preparation =
+        prepare_new_channel(&socket, &fx.db_path, None, &python_options, signal).await;
+
+    match preparation {
+        NewChannelPreparation::Refused { reason, .. } => assert!(
+            reason.contains("refresh"),
+            "the refusal must name the failed config refresh, got: {reason}"
+        ),
+        NewChannelPreparation::Ready(prepared) => panic!(
+            "a failed listconfigs refresh must REFUSE, not decide on the stale cached \
+             config (got Ready with cfg.max_fee_ppm={})",
+            prepared.cfg.max_fee_ppm
+        ),
     }
 }

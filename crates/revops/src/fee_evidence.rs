@@ -255,7 +255,7 @@ fn sql_placeholders(n: usize) -> String {
 /// CHANNELD_NORMAL rows keyed by canonical scid (falling back to the full
 /// channel id), with `updates.local` fee/HTLC precedence and F4 HTLC
 /// slot-usage fields.
-fn build_channels_info(peer_channels: &[Value]) -> BTreeMap<String, ChannelInfo> {
+pub(crate) fn build_channels_info(peer_channels: &[Value]) -> BTreeMap<String, ChannelInfo> {
     let mut channels = BTreeMap::new();
     for channel in peer_channels.iter().filter(|c| c.is_object()) {
         if json_str(channel, "state", "") != "CHANNELD_NORMAL" {
@@ -372,6 +372,129 @@ fn build_channels_info(peer_channels: &[Value]) -> BTreeMap<String, ChannelInfo>
         );
     }
     channels
+}
+
+// ---------------------------------------------------------------------------
+// Task 44 / A3: new-channel resolution, network prior, and out-of-cycle
+// policy read -- the async-preparation half of the initial-fee path
+// (contract §3.1 stage 2). No RNG draw, no state mutation, no owner-thread
+// work: everything here is read-only evidence gathering the owner later
+// consumes as frozen input.
+// ---------------------------------------------------------------------------
+
+/// What [`resolve_new_channel`] found -- py `_set_initial_fee_authorized`'s
+/// channel-resolution block (fee_controller.py:8617-8652).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChannelResolution {
+    Resolved(Box<ChannelInfo>),
+    /// The peer had more than one NORMAL channel and neither event
+    /// identifier matched any of them exactly -- Python's fallback only
+    /// applies when there is EXACTLY one, so this is refused rather than
+    /// guessed.
+    Ambiguous,
+    /// No exact match and the peer has zero NORMAL channels (or no peer
+    /// scope to fall back on at all).
+    NotFound,
+}
+
+/// `_set_initial_fee_authorized`'s channel resolution (py 8617-8652):
+/// normalize `:` to `x` in the event's short_channel_id and funding
+/// channel_id (already done by [`crate::notify::new_channel_signal`]),
+/// prefer an exact match against either normalized identifier, and fall
+/// back to the peer's channel ONLY when it has exactly one NORMAL channel.
+/// `peer_channels` is the raw `listpeerchannels` `channels` array (an
+/// UNCACHED, out-of-cycle fetch -- see [`prefetch_rpc`]'s doc comment;
+/// A3's async prep issues its OWN fresh prefetch, never reusing a stale
+/// per-cycle snapshot).
+pub(crate) fn resolve_new_channel(
+    peer_channels: &[Value],
+    event_scid: Option<&str>,
+    event_channel_id: Option<&str>,
+    peer_id: &str,
+) -> ChannelResolution {
+    let channels = build_channels_info(peer_channels);
+
+    for candidate in [event_scid, event_channel_id].into_iter().flatten() {
+        if let Some(info) = channels.get(candidate) {
+            return ChannelResolution::Resolved(Box::new(info.clone()));
+        }
+        if let Some(info) = channels.values().find(|c| {
+            !c.full_channel_id.is_empty() && normalize_scid(&c.full_channel_id) == candidate
+        }) {
+            return ChannelResolution::Resolved(Box::new(info.clone()));
+        }
+    }
+
+    let peer_normal: Vec<&ChannelInfo> =
+        channels.values().filter(|c| c.peer_id == peer_id).collect();
+    match peer_normal.len() {
+        1 => ChannelResolution::Resolved(Box::new(peer_normal[0].clone())),
+        0 => ChannelResolution::NotFound,
+        _ => ChannelResolution::Ambiguous,
+    }
+}
+
+/// The announcing peer's OWN gossip channels (`source == peer_id`) from
+/// the single prefetched `listchannels` array -- the input
+/// `revops_fees::market::network_fee_prior` filters/weights (py
+/// `_get_network_fee_prior_live`, fee_controller.py:3179-3231). Deliberately
+/// NOT `group_gossip_by_destination`'s output: that groups by the OTHER
+/// endpoint (`destination`), which answers "who points at this peer",
+/// not "what does this peer itself announce".
+pub(crate) fn peer_own_gossip_channels(
+    gossip_channels: &[Value],
+    peer_id: &str,
+) -> Vec<revops_fees::market::GossipChannel> {
+    gossip_channels
+        .iter()
+        .filter(|c| c.is_object())
+        .filter(|c| json_str(c, "source", "") == peer_id)
+        .map(|c| {
+            let capacity_sats = get_non_null(c, "satoshis")
+                .map(parse_msat)
+                .or_else(|| {
+                    get_non_null(c, "amount_msat")
+                        .map(|v| base_to_sats_floor(parse_msat(v).max(0) as u64) as i64)
+                })
+                .unwrap_or(0);
+            let base_fee_msat = get_non_null(c, "base_fee_millisatoshi")
+                .or_else(|| get_non_null(c, "fee_base_msat"))
+                .map(parse_msat)
+                .unwrap_or(0);
+            revops_fees::market::GossipChannel {
+                source: peer_id.to_string(),
+                destination: json_str(c, "destination", ""),
+                fee_ppm: json_i64(c, "fee_per_millionth", 0),
+                base_fee_msat,
+                capacity_sats,
+                last_update_ts: json_i64(c, "last_update", 0),
+            }
+        })
+        .collect()
+}
+
+/// Out-of-cycle policy read (py `policy_manager.get_policy(peer_id)`),
+/// opened as a fresh short-lived read-only connection off the tokio
+/// runtime (`spawn_blocking`) so this async-preparation call never blocks
+/// the owner thread OR the tokio reactor on local file IO. `Err` is a
+/// genuine read failure (DB open/query error) -- the caller must treat it
+/// as a typed refusal (contract §4.1 test 4), never silently default.
+pub(crate) async fn resolve_peer_policy_async(
+    db_path: std::path::PathBuf,
+    peer_id: String,
+    now: i64,
+) -> Result<PeerPolicy> {
+    tokio::task::spawn_blocking(move || {
+        let conn = revops_db::open_read_only(&db_path)
+            .with_context(|| format!("open {} read-only", db_path.display()))?;
+        let policies = read_policies(&conn, now)?;
+        Ok(policies
+            .get(&peer_id)
+            .cloned()
+            .unwrap_or_else(|| PeerPolicy::default_for(&peer_id)))
+    })
+    .await
+    .context("policy read task panicked")?
 }
 
 /// The `listpeerchannels`-shaped rows the node-drain-bias aggregate
@@ -688,7 +811,7 @@ fn read_flow_windows(conn: &Connection, since: i64) -> Result<HashMap<String, Fl
 /// (`get_policy` -> `_delete_expired_policy`) is NOT performed here --
 /// read-only surface; the returned VALUE (the default policy) is
 /// identical.
-fn read_policies(conn: &Connection, now: i64) -> Result<HashMap<String, PeerPolicy>> {
+pub(crate) fn read_policies(conn: &Connection, now: i64) -> Result<HashMap<String, PeerPolicy>> {
     let mut stmt = conn.prepare("SELECT * FROM peer_policies")?;
     let raw_rows = stmt.query_map([], |row| {
         Ok((
@@ -1395,5 +1518,101 @@ impl FeeEvidence for EvidenceSnapshot {
     }
     fn node_channels(&self) -> Result<Vec<NodeChannel>, DecisionInputError> {
         Ok(Self::node_channels(self))
+    }
+}
+
+#[cfg(test)]
+mod new_channel_resolution_tests {
+    use super::*;
+
+    fn normal_channel(scid: &str, channel_id: &str, peer_id: &str) -> Value {
+        json!({
+            "state": "CHANNELD_NORMAL",
+            "short_channel_id": scid,
+            "channel_id": channel_id,
+            "peer_id": peer_id,
+        })
+    }
+
+    /// Contract §4.1 test 3: exact normalized SCID match wins even when
+    /// the peer has other NORMAL channels.
+    #[test]
+    fn resolve_new_channel_exact_scid_match() {
+        let channels = vec![
+            normal_channel("1x1x0", "aa", "peerA"),
+            normal_channel("2x2x0", "bb", "peerA"),
+        ];
+        let r = resolve_new_channel(&channels, Some("2x2x0"), None, "peerA");
+        match r {
+            ChannelResolution::Resolved(info) => assert_eq!(info.channel_id, "2x2x0"),
+            other => panic!("expected exact match, got {other:?}"),
+        }
+    }
+
+    /// Funding `channel_id` match (when the event carried only that).
+    #[test]
+    fn resolve_new_channel_funding_channel_id_match() {
+        let channels = vec![normal_channel("1x1x0", "abcd1234", "peerA")];
+        let r = resolve_new_channel(&channels, None, Some("abcd1234"), "peerA");
+        match r {
+            ChannelResolution::Resolved(info) => assert_eq!(info.channel_id, "1x1x0"),
+            other => panic!("expected funding channel_id match, got {other:?}"),
+        }
+    }
+
+    /// Exactly-one-NORMAL-channel fallback when neither identifier
+    /// matches exactly.
+    #[test]
+    fn resolve_new_channel_exactly_one_normal_fallback() {
+        let channels = vec![normal_channel("1x1x0", "aa", "peerA")];
+        let r = resolve_new_channel(&channels, Some("nomatch"), None, "peerA");
+        match r {
+            ChannelResolution::Resolved(info) => assert_eq!(info.channel_id, "1x1x0"),
+            other => panic!("expected exactly-one fallback, got {other:?}"),
+        }
+    }
+
+    /// Multiple NORMAL channels with no exact match is refused as
+    /// ambiguous -- never guessed.
+    #[test]
+    fn resolve_new_channel_multiple_normal_is_ambiguous() {
+        let channels = vec![
+            normal_channel("1x1x0", "aa", "peerA"),
+            normal_channel("2x2x0", "bb", "peerA"),
+        ];
+        let r = resolve_new_channel(&channels, Some("nomatch"), None, "peerA");
+        assert_eq!(r, ChannelResolution::Ambiguous);
+    }
+
+    /// Non-NORMAL rows are ignored entirely -- a NORMAL fallback is not
+    /// pulled from a CHANNELD_AWAITING_LOCKIN row.
+    #[test]
+    fn resolve_new_channel_ignores_non_normal_rows() {
+        let channels = vec![
+            json!({"state": "CHANNELD_AWAITING_LOCKIN", "short_channel_id": "1x1x0", "peer_id": "peerA"}),
+        ];
+        let r = resolve_new_channel(&channels, Some("1x1x0"), None, "peerA");
+        assert_eq!(r, ChannelResolution::NotFound);
+    }
+
+    /// No NORMAL channel for the peer at all.
+    #[test]
+    fn resolve_new_channel_not_found() {
+        let channels: Vec<Value> = vec![];
+        let r = resolve_new_channel(&channels, Some("1x1x0"), None, "peerA");
+        assert_eq!(r, ChannelResolution::NotFound);
+    }
+
+    /// `peer_own_gossip_channels` filters by `source`, not `destination`.
+    #[test]
+    fn peer_own_gossip_channels_filters_by_source() {
+        let raw = vec![
+            json!({"source": "peerA", "destination": "us", "fee_per_millionth": 100, "satoshis": 1_000_000, "last_update": 5}),
+            json!({"source": "us", "destination": "peerA", "fee_per_millionth": 200, "satoshis": 500_000, "last_update": 6}),
+        ];
+        let out = peer_own_gossip_channels(&raw, "peerA");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].fee_ppm, 100);
+        assert_eq!(out[0].capacity_sats, 1_000_000);
     }
 }

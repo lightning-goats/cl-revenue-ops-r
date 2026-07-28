@@ -93,6 +93,17 @@ struct State {
     /// presence here proves every construction gate passed.
     #[allow(dead_code)]
     live_broadcaster: Option<ClnFeeBroadcaster>,
+    /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
+    /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
+    /// -- so the `channel_state_changed` subscription's async preparation
+    /// half can issue its own fresh RPC prefetch without re-deriving this
+    /// path per notification.
+    socket_path: PathBuf,
+    /// Task 44 / A3: the expanded production DB path (same value the
+    /// fee-cycle scheduler's `SchedulerConfig.db_path` uses), for the
+    /// async preparation half's out-of-cycle policy read. `None` under
+    /// the exact same conditions the scheduler itself would not start.
+    production_db_path: Option<PathBuf>,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
@@ -808,6 +819,46 @@ async fn main() -> Result<()> {
                         &CHANNEL_STATE_CHANGED_DROP_LOGGED,
                         "channel_state_changed",
                     ),
+                }
+                // Task 44 / A3: the new-channel initial-fee producer (py
+                // `_handle_channel_open`, cl-revenue-ops.py:7152-7165) --
+                // pure parse here, async preparation off the owner thread,
+                // then ONE message to the owner (contract §3.1's
+                // three-stage boundary). A `None` scheduler (dry-run off,
+                // or it failed to start) is a silent no-op, same as every
+                // other trigger source that predates the scheduler
+                // existing.
+                if let Some(signal) = notify::new_channel_signal(&v, revops::now_unix()) {
+                    let s = p.state();
+                    match (s.scheduler.get(), s.production_db_path.as_ref()) {
+                        (Some(handle), Some(db_path)) => {
+                            let socket_path = s.socket_path.clone();
+                            let db_path = db_path.clone();
+                            let db = s.db.clone();
+                            let python_options = s.python_options.clone();
+                            let tx = handle.tx.clone();
+                            tokio::spawn(async move {
+                                let preparation = revops::fee_scheduler::prepare_new_channel(
+                                    &socket_path,
+                                    &db_path,
+                                    db.as_ref(),
+                                    &python_options,
+                                    signal,
+                                )
+                                .await;
+                                let _ = tx.send(revops::fee_scheduler::CycleMsg::NewChannel(
+                                    Box::new(preparation),
+                                ));
+                            });
+                        }
+                        _ => {
+                            // No scheduler (dry-run off) or no production
+                            // DB path -- same silent-no-op posture every
+                            // other trigger source has for a `None`
+                            // scheduler; A3 cannot prepare without a
+                            // production DB to read policy from either.
+                        }
+                    }
                 }
                 Ok(())
             },
@@ -2067,6 +2118,8 @@ async fn main() -> Result<()> {
         scheduler: std::sync::OnceLock::new(),
         mode_label: resolved_mode_label,
         live_broadcaster,
+        socket_path: init_socket_path.clone(),
+        production_db_path: production_db_path_expanded.clone(),
     });
 
     let plugin = configured.start(state).await?;

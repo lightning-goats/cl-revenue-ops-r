@@ -147,6 +147,7 @@ fn sample_commit(cycle_id: &str, at: i64) -> FeeCycleCommit {
             disposition: Some("broadcast".to_string()),
             skip_gate_comparable: true,
         }],
+        trigger_receipt: None,
     }
 }
 

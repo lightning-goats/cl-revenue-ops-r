@@ -49,6 +49,7 @@ use revops_db::actor::DbHandle;
 use revops_db::queries;
 use revops_fees::cycle::FeeCfgSnapshot;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// `revenue-r-config` suffixes with NO Python option counterpart at all --
 /// layer (b) (`python_option_values`) must never be consulted for these,
@@ -68,7 +69,11 @@ fn is_db_override_only(suffix: &str) -> bool {
 /// skip, though none of `FeeCfgSnapshot`'s 22 fields are immutable today),
 /// or there is no DB handle at all (e.g. tests, or a plugin that hasn't
 /// finished init).
-async fn db_layer(db: Option<&DbHandle>, suffix: &str) -> Option<String> {
+async fn db_layer(
+    db: Option<&DbHandle>,
+    suffix: &str,
+    db_query_failures: &AtomicU64,
+) -> Option<String> {
     if config_resolve::is_immutable_key(suffix) {
         return None;
     }
@@ -78,6 +83,11 @@ async fn db_layer(db: Option<&DbHandle>, suffix: &str) -> Option<String> {
         Ok(v) => v,
         Err(e) => {
             eprintln!("revops: fee_config db_override query failed for {field}: {e}");
+            // Task 44 / A3 live-review F6: observable to callers that must
+            // refuse rather than default (the A3 preparation path); the
+            // shared per-cycle resolution deliberately keeps this
+            // log-and-default posture.
+            db_query_failures.fetch_add(1, Ordering::Relaxed);
             None
         }
     }?;
@@ -109,9 +119,10 @@ fn python_layer(
 async fn resolve_raw(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
 ) -> Option<OptValue> {
-    match db_layer(db, suffix).await {
+    match db_layer(db, suffix, db_query_failures).await {
         Some(raw) => Some(OptValue::String(raw)),
         None => python_layer(suffix, python_option_values),
     }
@@ -120,11 +131,12 @@ async fn resolve_raw(
 async fn resolve_int(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
     default: i64,
 ) -> i64 {
     let field = config_resolve::db_override_key(suffix);
-    match resolve_raw(db, python_option_values, suffix).await {
+    match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
         Some(raw) => config_types::typed_value(&field, &raw)
             .as_i64()
             .unwrap_or(default),
@@ -135,11 +147,12 @@ async fn resolve_int(
 async fn resolve_float(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
     default: f64,
 ) -> f64 {
     let field = config_resolve::db_override_key(suffix);
-    match resolve_raw(db, python_option_values, suffix).await {
+    match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
         Some(raw) => config_types::typed_value(&field, &raw)
             .as_f64()
             .unwrap_or(default),
@@ -150,6 +163,7 @@ async fn resolve_float(
 async fn resolve_bool(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
     default: bool,
 ) -> bool {
@@ -160,7 +174,7 @@ async fn resolve_bool(
     // the field's PYTHON STARTUP cast -- the two disagree on '1'/'yes'/
     // 'on' for strict fields, and e.g. vegas-reflex=1 flipping the wrong
     // way desyncs the shared per-cycle RNG stream from the oracle.
-    if let Some(raw) = db_layer(db, suffix).await {
+    if let Some(raw) = db_layer(db, suffix, db_query_failures).await {
         return config_types::typed_value(&field, &OptValue::String(raw))
             .as_bool()
             .unwrap_or(default);
@@ -183,11 +197,12 @@ async fn resolve_bool(
 async fn resolve_lowercase_string(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
     default: String,
 ) -> String {
     let field = config_resolve::db_override_key(suffix);
-    if let Some(raw) = db_layer(db, suffix).await {
+    if let Some(raw) = db_layer(db, suffix, db_query_failures).await {
         return config_types::typed_value(&field, &OptValue::String(raw))
             .as_str()
             .map(str::to_string)
@@ -206,10 +221,11 @@ async fn resolve_lowercase_string(
 async fn resolve_string_opt(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
     default: Option<String>,
 ) -> Option<String> {
-    match resolve_raw(db, python_option_values, suffix).await {
+    match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
         Some(raw) => {
             let field = config_resolve::db_override_key(suffix);
             config_types::typed_value(&field, &raw)
@@ -231,13 +247,26 @@ async fn resolve_string_opt(
 async fn resolve_raw_json(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
+    db_query_failures: &AtomicU64,
     suffix: &str,
     default: serde_json::Value,
 ) -> serde_json::Value {
-    match resolve_raw(db, python_option_values, suffix).await {
+    match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
         Some(raw) => option_value_to_json(Some(&raw)),
         None => default,
     }
+}
+
+/// [`resolve_fee_cfg`] plus the count of layer-(a) DB override QUERY
+/// failures observed during resolution (Task 44 / A3 live-review F6). A
+/// missing override row is a legitimate fall-through (`None` -> layer (b)
+/// -> default) and is NOT counted; only a failed query is. The A3
+/// preparation path refuses on any failure rather than deciding on
+/// defaults; the shared per-cycle path ([`resolve_fee_cfg`]) keeps its
+/// log-and-default posture unchanged.
+pub struct FeeCfgResolution {
+    pub cfg: FeeCfgSnapshot,
+    pub db_query_failures: u64,
 }
 
 /// Resolve a live `FeeCfgSnapshot` for the current cycle. See the module
@@ -247,15 +276,49 @@ pub async fn resolve_fee_cfg(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
 ) -> FeeCfgSnapshot {
+    resolve_fee_cfg_observed(db, python_option_values).await.cfg
+}
+
+/// [`resolve_fee_cfg`]'s observing form -- identical resolution, plus the
+/// F6 failure count (see [`FeeCfgResolution`]).
+pub async fn resolve_fee_cfg_observed(
+    db: Option<&DbHandle>,
+    python_option_values: &HashMap<String, OptValue>,
+) -> FeeCfgResolution {
+    let db_query_failures = &AtomicU64::new(0);
     let default = FeeCfgSnapshot::default();
     let mut cfg = FeeCfgSnapshot {
-        min_fee_ppm: resolve_int(db, python_option_values, "min-fee-ppm", default.min_fee_ppm)
-            .await,
-        max_fee_ppm: resolve_int(db, python_option_values, "max-fee-ppm", default.max_fee_ppm)
-            .await,
+        min_fee_ppm: resolve_int(
+            db,
+            python_option_values,
+            db_query_failures,
+            "min-fee-ppm",
+            default.min_fee_ppm,
+        )
+        .await,
+        max_fee_ppm: resolve_int(
+            db,
+            python_option_values,
+            db_query_failures,
+            "max-fee-ppm",
+            default.max_fee_ppm,
+        )
+        .await,
+        // Task 44 / A3: no CLN option is registered for this yet (nothing
+        // upstream of the initial-fee path needed it before A3) -- DB
+        // override only, else the py-config-matching default.
+        thompson_prior_std_fee: resolve_int(
+            db,
+            python_option_values,
+            db_query_failures,
+            "thompson-prior-std-fee",
+            default.thompson_prior_std_fee,
+        )
+        .await,
         min_fee_ppm_saturated: resolve_int(
             db,
             python_option_values,
+            db_query_failures,
             "min-fee-ppm-saturated",
             default.min_fee_ppm_saturated,
         )
@@ -263,6 +326,7 @@ pub async fn resolve_fee_cfg(
         fee_interval: resolve_int(
             db,
             python_option_values,
+            db_query_failures,
             "fee-interval",
             default.fee_interval,
         )
@@ -270,6 +334,7 @@ pub async fn resolve_fee_cfg(
         flow_interval: resolve_int(
             db,
             python_option_values,
+            db_query_failures,
             "flow-interval",
             default.flow_interval,
         )
@@ -277,6 +342,7 @@ pub async fn resolve_fee_cfg(
         htlc_congestion_threshold: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "htlc-congestion-threshold",
             default.htlc_congestion_threshold,
         )
@@ -284,6 +350,7 @@ pub async fn resolve_fee_cfg(
         market_fee_mode: resolve_lowercase_string(
             db,
             python_option_values,
+            db_query_failures,
             "market-fee-mode",
             default.market_fee_mode.clone(),
         )
@@ -291,6 +358,7 @@ pub async fn resolve_fee_cfg(
         drain_fee_discount_max: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "drain-fee-discount-max",
             default.drain_fee_discount_max,
         )
@@ -298,6 +366,7 @@ pub async fn resolve_fee_cfg(
         high_liquidity_threshold: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "high-liquidity-threshold",
             default.high_liquidity_threshold,
         )
@@ -305,6 +374,7 @@ pub async fn resolve_fee_cfg(
         fee_profile: resolve_lowercase_string(
             db,
             python_option_values,
+            db_query_failures,
             "fee-profile",
             default.fee_profile.clone(),
         )
@@ -312,6 +382,7 @@ pub async fn resolve_fee_cfg(
         base_fee_msat: resolve_int(
             db,
             python_option_values,
+            db_query_failures,
             "base-fee-msat",
             default.base_fee_msat,
         )
@@ -319,6 +390,7 @@ pub async fn resolve_fee_cfg(
         enable_vegas_reflex: resolve_bool(
             db,
             python_option_values,
+            db_query_failures,
             "vegas-reflex",
             default.enable_vegas_reflex,
         )
@@ -326,6 +398,7 @@ pub async fn resolve_fee_cfg(
         enable_dynamic_htlcmax: resolve_raw_json(
             db,
             python_option_values,
+            db_query_failures,
             "enable-dynamic-htlcmax",
             default.enable_dynamic_htlcmax.clone(),
         )
@@ -333,6 +406,7 @@ pub async fn resolve_fee_cfg(
         htlcmax_source_pct: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "htlcmax-source-pct",
             default.htlcmax_source_pct,
         )
@@ -340,6 +414,7 @@ pub async fn resolve_fee_cfg(
         htlcmax_sink_pct: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "htlcmax-sink-pct",
             default.htlcmax_sink_pct,
         )
@@ -347,14 +422,23 @@ pub async fn resolve_fee_cfg(
         htlcmax_balanced_pct: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "htlcmax-balanced-pct",
             default.htlcmax_balanced_pct,
         )
         .await,
-        paused: resolve_bool(db, python_option_values, "paused", default.paused).await,
+        paused: resolve_bool(
+            db,
+            python_option_values,
+            db_query_failures,
+            "paused",
+            default.paused,
+        )
+        .await,
         node_drain_bias_enabled: resolve_bool(
             db,
             python_option_values,
+            db_query_failures,
             "node-drain-bias-enabled",
             default.node_drain_bias_enabled,
         )
@@ -362,6 +446,7 @@ pub async fn resolve_fee_cfg(
         node_drain_bias_max: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "node-drain-bias-max",
             default.node_drain_bias_max,
         )
@@ -369,6 +454,7 @@ pub async fn resolve_fee_cfg(
         receivable_ratio_target: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "receivable-ratio-target",
             default.receivable_ratio_target,
         )
@@ -376,6 +462,7 @@ pub async fn resolve_fee_cfg(
         receivable_ratio_floor: resolve_float(
             db,
             python_option_values,
+            db_query_failures,
             "receivable-ratio-floor",
             default.receivable_ratio_floor,
         )
@@ -383,6 +470,7 @@ pub async fn resolve_fee_cfg(
         econ_governor_fees_enabled: resolve_bool(
             db,
             python_option_values,
+            db_query_failures,
             "econ-governor-fees-enabled",
             default.econ_governor_fees_enabled,
         )
@@ -390,6 +478,7 @@ pub async fn resolve_fee_cfg(
         authority_level: resolve_string_opt(
             db,
             python_option_values,
+            db_query_failures,
             "authority-level",
             default.authority_level.clone(),
         )
@@ -414,7 +503,10 @@ pub async fn resolve_fee_cfg(
         cfg.receivable_ratio_floor = cfg.receivable_ratio_target;
     }
 
-    cfg
+    FeeCfgResolution {
+        cfg,
+        db_query_failures: db_query_failures.load(Ordering::Relaxed),
+    }
 }
 
 /// Per-cycle resolution of the `neighbor_median_min_competitors` key
@@ -432,7 +524,11 @@ pub async fn resolve_neighbor_median_min_competitors(
     python_option_values: &HashMap<String, OptValue>,
 ) -> serde_json::Value {
     let suffix = "neighbor-median-min-competitors";
-    match resolve_raw(db, python_option_values, suffix).await {
+    // Per-cycle caller: log-and-default posture, failures not surfaced
+    // (the A3-strict F6 rule applies only to `resolve_fee_cfg_observed`'s
+    // preparation-path caller).
+    let db_query_failures = &AtomicU64::new(0);
+    match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
         Some(raw) => {
             let field = config_resolve::db_override_key(suffix);
             config_types::typed_value(&field, &raw)

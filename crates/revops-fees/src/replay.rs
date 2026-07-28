@@ -1504,6 +1504,15 @@ fn decode_cfg(configuration: &WireObject) -> Result<FeeCfgSnapshot, ReplayError>
             field(configuration, "max_fee_ppm", p)?,
             &format!("{p}.max_fee_ppm"),
         )?,
+        // Task 44 / A3: absent in every pre-existing oracle fixture (this
+        // field did not exist before A3) -- optional, falls back to the
+        // py-config-matching default rather than making old fixtures
+        // unreplayable.
+        thompson_prior_std_fee: configuration
+            .get("thompson_prior_std_fee")
+            .map(|v| integer(v, &format!("{p}.thompson_prior_std_fee")))
+            .transpose()?
+            .unwrap_or(100),
         min_fee_ppm_saturated: integer(
             field(configuration, "min_fee_ppm_saturated", p)?,
             &format!("{p}.min_fee_ppm_saturated"),

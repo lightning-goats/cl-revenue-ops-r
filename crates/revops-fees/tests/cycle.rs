@@ -247,6 +247,7 @@ fn parse_cfg(v: &OValue) -> FeeCfgSnapshot {
     FeeCfgSnapshot {
         min_fee_ppm: geti(v, "min_fee_ppm"),
         max_fee_ppm: geti(v, "max_fee_ppm"),
+        thompson_prior_std_fee: geti(v, "thompson_prior_std_fee"),
         min_fee_ppm_saturated: geti(v, "min_fee_ppm_saturated"),
         fee_interval: geti(v, "fee_interval"),
         flow_interval: geti(v, "flow_interval"),
@@ -958,6 +959,10 @@ fn default_cfg_matches_python_config_defaults() {
     // ~/bin/cl_revenue_ops-port modules/config.py, branch `port` == `main`.
     assert_eq!(cfg.min_fee_ppm, 10, "config.py:596 min_fee_ppm");
     assert_eq!(cfg.max_fee_ppm, 2000, "config.py:605 max_fee_ppm");
+    assert_eq!(
+        cfg.thompson_prior_std_fee, 100,
+        "config.py:785 thompson_prior_std_fee"
+    );
     assert_eq!(
         cfg.min_fee_ppm_saturated, 0,
         "config.py:604 min_fee_ppm_saturated"

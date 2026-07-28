@@ -343,6 +343,93 @@ pub fn failed_forward_signal(
     })
 }
 
+// ---- Task 44 / A3: new-channel initial-fee producer, pure parser ----
+//
+// `_handle_channel_open`'s producer gate (cl-revenue-ops.py:7152-7165):
+// fires ONLY on the exact opening-to-NORMAL transition matrix. Everything
+// else about the initial-fee path (RPC resolution, DTS decision, atomic
+// commit) is later-stage work (`fee_scheduler.rs`); this function performs
+// NO RPC, DB access, state mutation, or RNG draw -- it is pure evidence
+// extraction from one notification payload.
+
+/// The four opening states py 7155-7160 recognizes as "this channel was
+/// still opening" immediately before `new_state == CHANNELD_NORMAL`.
+const OPENING_STATES: [&str; 4] = [
+    "DUALOPEND_AWAITING_LOCKIN",
+    "DUALOPEND_OPEN_INIT",
+    "CHANNELD_AWAITING_LOCKIN",
+    "OPENINGD",
+];
+
+/// Frozen evidence extracted from one `channel_state_changed` notification
+/// that crossed the opening-to-NORMAL transition matrix. Carries only raw
+/// (normalized-SCID-shape) identifiers -- channel RESOLUTION (exact match
+/// vs exactly-one-NORMAL fallback, py 8617-8652) is async-preparation-stage
+/// work, not this parser's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewChannelSignal {
+    /// Normalized (`:` -> `x`) `short_channel_id`, if the event carried one.
+    pub event_scid: Option<String>,
+    /// Normalized (`:` -> `x`) funding `channel_id`, if the event carried
+    /// one (py's `channel_id` fallback identifier).
+    pub event_channel_id: Option<String>,
+    pub peer_id: String,
+    pub old_state: String,
+    pub new_state: String,
+    /// The notification's own clock read (never drain time -- see
+    /// `fee_scheduler.rs`'s owner-thread nudge/epoch discipline).
+    pub event_ts: i64,
+}
+
+/// `_handle_channel_open`'s producer gate (py 7152-7165), as a pure parse:
+/// `None` unless new_state == CHANNELD_NORMAL, old_state is one of the four
+/// opening states, AND both a peer id and at least one channel identifier
+/// (short_channel_id or funding channel_id) are present. Accepts either the
+/// nested `{"channel_state_changed": {...}}` envelope or a flat payload,
+/// exactly like [`try_on_channel_state_changed`]'s existing closure-event
+/// parse.
+pub fn new_channel_signal(event: &Value, now: i64) -> Option<NewChannelSignal> {
+    let inner = event.get("channel_state_changed").unwrap_or(event);
+
+    let new_state = inner.get("new_state").and_then(|v| v.as_str())?;
+    if new_state != "CHANNELD_NORMAL" {
+        return None;
+    }
+    let old_state = inner.get("old_state").and_then(|v| v.as_str())?;
+    if !OPENING_STATES.contains(&old_state) {
+        return None;
+    }
+
+    let peer_id = inner
+        .get("peer_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+
+    let event_scid = inner
+        .get("short_channel_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(normalize_scid);
+    let event_channel_id = inner
+        .get("channel_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(normalize_scid);
+    if event_scid.is_none() && event_channel_id.is_none() {
+        // py: `channel_id` unresolved -> warn and return (7143-7150).
+        return None;
+    }
+
+    Some(NewChannelSignal {
+        event_scid,
+        event_channel_id,
+        peer_id: peer_id.to_string(),
+        old_state: old_state.to_string(),
+        new_state: new_state.to_string(),
+        event_ts: now,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +811,102 @@ mod tests {
             s.amount_msat, 0,
             "a missing in_msat is a zero boost, not a panic"
         );
+    }
+
+    // ---- Task 44 / A3: new_channel_signal (py 7152-7165) ----
+
+    fn opening_event(old_state: &str, new_state: &str) -> serde_json::Value {
+        json!({
+            "channel_state_changed": {
+                "peer_id": "03aa",
+                "short_channel_id": "931308:1256:1",
+                "old_state": old_state,
+                "new_state": new_state,
+            }
+        })
+    }
+
+    /// Contract §4.1 test 1: each of the four opening states to
+    /// CHANNELD_NORMAL produces a signal.
+    #[test]
+    fn new_channel_signal_fires_for_every_opening_state() {
+        for old_state in OPENING_STATES {
+            let e = opening_event(old_state, "CHANNELD_NORMAL");
+            let s = new_channel_signal(&e, 1_000)
+                .unwrap_or_else(|| panic!("{old_state} -> CHANNELD_NORMAL must signal"));
+            assert_eq!(s.old_state, old_state);
+            assert_eq!(s.new_state, "CHANNELD_NORMAL");
+            assert_eq!(s.peer_id, "03aa");
+            assert_eq!(s.event_scid.as_deref(), Some("931308x1256x1"));
+            assert_eq!(s.event_ts, 1_000);
+        }
+    }
+
+    /// Contract §4.1 test 1: NORMAL-to-NORMAL, unrelated old states,
+    /// pre-confirmation targets, closures, missing peer, and missing
+    /// channel id must never signal.
+    #[test]
+    fn new_channel_signal_is_none_off_the_transition_matrix() {
+        // NORMAL-to-NORMAL.
+        assert!(
+            new_channel_signal(&opening_event("CHANNELD_NORMAL", "CHANNELD_NORMAL"), 1).is_none()
+        );
+        // Unrelated old state.
+        assert!(new_channel_signal(
+            &opening_event("CHANNELD_SHUTTING_DOWN", "CHANNELD_NORMAL"),
+            1
+        )
+        .is_none());
+        // A real opening state but new_state is itself still pre-confirmation.
+        assert!(
+            new_channel_signal(&opening_event("OPENINGD", "CHANNELD_AWAITING_LOCKIN"), 1).is_none()
+        );
+        // Closure, not an open.
+        assert!(
+            new_channel_signal(&opening_event("CHANNELD_NORMAL", "CLOSINGD_COMPLETE"), 1).is_none()
+        );
+        // Missing peer_id.
+        let mut e = opening_event("OPENINGD", "CHANNELD_NORMAL");
+        e["channel_state_changed"]
+            .as_object_mut()
+            .unwrap()
+            .remove("peer_id");
+        assert!(new_channel_signal(&e, 1).is_none());
+        // Missing every channel identifier.
+        let mut e2 = opening_event("OPENINGD", "CHANNELD_NORMAL");
+        e2["channel_state_changed"]
+            .as_object_mut()
+            .unwrap()
+            .remove("short_channel_id");
+        assert!(new_channel_signal(&e2, 1).is_none());
+    }
+
+    /// Contract §4.1 test 2: nested and flat envelopes resolve identically.
+    #[test]
+    fn new_channel_signal_accepts_nested_and_flat_envelopes() {
+        let nested = opening_event("OPENINGD", "CHANNELD_NORMAL");
+        let flat = json!({
+            "peer_id": "03aa",
+            "short_channel_id": "931308:1256:1",
+            "old_state": "OPENINGD",
+            "new_state": "CHANNELD_NORMAL",
+        });
+        assert_eq!(new_channel_signal(&nested, 5), new_channel_signal(&flat, 5),);
+    }
+
+    /// A funding `channel_id` (no `short_channel_id`) is still enough
+    /// evidence to signal -- resolution (which identifier wins) is the
+    /// async-preparation stage's job, not this parser's.
+    #[test]
+    fn new_channel_signal_accepts_channel_id_only() {
+        let e = json!({
+            "peer_id": "03aa",
+            "channel_id": "931308:1256:1",
+            "old_state": "DUALOPEND_AWAITING_LOCKIN",
+            "new_state": "CHANNELD_NORMAL",
+        });
+        let s = new_channel_signal(&e, 1).expect("channel_id alone is enough evidence");
+        assert_eq!(s.event_scid, None);
+        assert_eq!(s.event_channel_id.as_deref(), Some("931308x1256x1"));
     }
 }

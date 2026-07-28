@@ -113,6 +113,11 @@ pub const REBALANCE_FLOOR_WINDOW_DAYS: i64 = floors::REBALANCE_FLOOR_WINDOW_DAYS
 pub struct FeeCfgSnapshot {
     pub min_fee_ppm: i64,
     pub max_fee_ppm: i64,
+    /// `thompson_prior_std_fee` (py config.py:785, default 100): the
+    /// configured prior uncertainty (ppm) a fresh DTS throwaway state's
+    /// `prior_std_fee` starts from before any gossip prior is applied
+    /// (Task 44 / A3, `fee_controller.py:8713`).
+    pub thompson_prior_std_fee: i64,
     /// `min_fee_ppm_saturated` (E-2 class-aware floor; 0 disables).
     pub min_fee_ppm_saturated: i64,
     pub fee_interval: i64,
@@ -178,6 +183,8 @@ impl Default for FeeCfgSnapshot {
             min_fee_ppm: 10,
             // py config.py:605: `max_fee_ppm: int = 2000`.
             max_fee_ppm: 2000,
+            // py config.py:785: `thompson_prior_std_fee: int = 100`.
+            thompson_prior_std_fee: 100,
             // py config.py:604: `min_fee_ppm_saturated: int = 0`.
             min_fee_ppm_saturated: 0,
             // py config.py:506: `fee_interval: int = 1800`.

@@ -153,6 +153,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use cln_plugin::options::Value as OptValue;
+use revops_analytics::policy::{FeeStrategy, PeerPolicy};
 use revops_db::actor::DbHandle;
 use revops_db::fee_runway::{
     FeeCycleCommit, FeeRestartMarkerRow, GovernorAuditRow, PreparedFeeActionRow,
@@ -160,16 +161,20 @@ use revops_db::fee_runway::{
 };
 use revops_fees::cycle::{
     handle_policy_change, maybe_wake_for_vegas_spike, run_fee_cycle, wake_all_sleeping_channels,
-    ChannelStateRow, ControllerState, CycleDeps, DecisionClock, FeeCfgSnapshot, FixedDecisionClock,
-    StateSink,
+    ChannelCycleState, ChannelFeeState, ChannelInfo, ChannelStateRow, ControllerState, CycleDeps,
+    DecisionClock, FeeCfgSnapshot, FixedDecisionClock, StateSink,
 };
 use revops_fees::execution::{
-    FeeExecutor, GovernedFeeAuthorizer, PureFeeExecutor, RecordingFeeExecutor,
+    decide_set_channel_fee, FeeAuthorizationRequest, FeeAuthorizer, FeeExecutor,
+    GovernedFeeAuthorizer, GovernedTrace, PreparedFeeAction, PureFeeExecutor, RecordingFeeExecutor,
+    SetFeeRequest,
 };
 use revops_fees::journal::{FeeDecision, Journal};
+use revops_fees::market::{FeePrior, INITIAL_PRIOR_NUDGE_WEIGHT};
 use revops_fees::profiles::fee_profile;
 use revops_fees::pyjson::OValue as PyOValue;
-use revops_fees::pyrand::PyRandom;
+use revops_fees::pyrand::{DecisionEntropy, PyRandom};
+use revops_fees::thompson::GaussianThompsonState;
 
 use crate::config_resolve::PythonOptionCache;
 use crate::fee_config;
@@ -526,10 +531,104 @@ pub enum CycleMsg {
     ForwardEvent {
         channel_id: String,
     },
+    /// Task 44 / A3: a fully-prepared new-channel initial-fee decision,
+    /// frozen by the async preparation stage (contract §3.1 stage 2/3).
+    /// The owner offers a channel-scoped trigger to the bounded/coalescing
+    /// discipline BEFORE applying any effect -- a dropped occurrence must
+    /// never mutate state or create a would-broadcast action.
+    NewChannel(Box<NewChannelPreparation>),
+    /// Task 44 / A3 (live-review finding F5): an off-owner store
+    /// operation for the new-channel path completed; its result is routed
+    /// back onto the owner's OWN queue so the owner never blocks on a
+    /// store (SQLite-actor) reply. Because both new events and results
+    /// arrive as messages on the same single-consumer loop, the pending
+    /// map is the only synchronization the path needs.
+    InitialFeeStoreResult(InitialFeeStoreResult),
     /// A `revenue-r-fee-debug` query; the owner thread answers over the
     /// included reply channel without ever blocking on IO.
     Query(FeeDebugQuery, mpsc::Sender<serde_json::Value>),
     Shutdown,
+}
+
+/// Task 44 / A3, live-review finding F5: one off-owner store operation's
+/// result. `Idempotency`/`Commit` are BOUND to both the event identity
+/// (`event_key`, the stable content-derived key) and the owner's own
+/// dispatch `generation` for that pending occurrence -- the owner
+/// installs/acts ONLY when both match its pending entry; any mismatch is
+/// a fail-closed conflict (counted red, never a silent install).
+#[derive(Debug)]
+pub enum InitialFeeStoreResult {
+    /// `dispatch_cycle_exists_with_generation`'s answer for a pending
+    /// occurrence: (already-committed?, current state generation) -- the
+    /// generation is the basis the coming decision's guarded commit will
+    /// CAS against (F7).
+    Idempotency {
+        channel_id: String,
+        event_key: String,
+        generation: u64,
+        result: Result<(bool, u64), String>,
+    },
+    /// `dispatch_commit_fee_cycle_guarded`'s answer for a pending
+    /// occurrence (F7): `Committed` or an in-band `GenerationConflict`
+    /// (the store advanced past the decision's basis; nothing was
+    /// written).
+    Commit {
+        channel_id: String,
+        event_key: String,
+        generation: u64,
+        result: Result<revops_db::fee_runway::GuardedCommitOutcome, String>,
+    },
+    /// `dispatch_record_trigger_event`'s answer for a stand-alone A3
+    /// receipt (a refusal/dropped/coalesced/duplicate occurrence -- no
+    /// staged state depends on it). A failure is loud and counted; there
+    /// is nothing to roll back.
+    Receipt {
+        context: String,
+        result: Result<(), String>,
+    },
+}
+
+/// One in-flight A3 occurrence's owner-side bookkeeping, keyed by
+/// channel_id in `CycleOwner::pending_initial_fees`. While an entry
+/// exists for a channel, further A3 events for that channel are refused
+/// fail-closed (live-review finding F5's same-channel race rule).
+enum PendingInitialFee {
+    /// Waiting for the off-owner `dispatch_cycle_exists` answer; the
+    /// frozen preparation is parked here -- NO decision or RNG draw has
+    /// happened yet.
+    CheckingIdempotency {
+        event_key: String,
+        generation: u64,
+        prepared: Box<PreparedInitialFee>,
+    },
+    /// Waiting for the off-owner `dispatch_commit_fee_cycle_guarded`
+    /// answer; `staged` (clones -- nothing is installed yet) installs
+    /// ONLY on a successful, identity-matched `Committed` result whose
+    /// generation is exactly `expected_prior_generation + 1` (F7).
+    Committing {
+        event_key: String,
+        generation: u64,
+        /// The state generation the decision was computed against -- the
+        /// guarded commit's CAS basis.
+        expected_prior_generation: u64,
+        staged: Option<Box<(ChannelFeeState, ChannelCycleState)>>,
+    },
+}
+
+impl PendingInitialFee {
+    fn event_key(&self) -> &str {
+        match self {
+            PendingInitialFee::CheckingIdempotency { event_key, .. }
+            | PendingInitialFee::Committing { event_key, .. } => event_key,
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        match self {
+            PendingInitialFee::CheckingIdempotency { generation, .. }
+            | PendingInitialFee::Committing { generation, .. } => *generation,
+        }
+    }
 }
 
 /// The async half's per-cycle output: everything the owner thread needs
@@ -567,6 +666,146 @@ pub async fn prepare_cycle(
         min_competitors,
         rpc,
     })
+}
+
+/// Task 44 / A3's async preparation half (contract §3.1 stage 2): resolve
+/// the canonical NORMAL channel, the peer's policy, the current fee
+/// config, and the optional gossip-derived prior -- ALL off the owner
+/// thread, using a fresh (uncached) RPC prefetch. Live-review finding F1:
+/// ALWAYS returns a value the caller sends to the owner -- a refusal
+/// (timeout, malformed evidence, ambiguity, missing peer/channel, or a
+/// policy/config read failure) is [`NewChannelPreparation::Refused`], not
+/// a swallowed `None`, so it becomes a durable receipt rather than only a
+/// log line (contract §4.1 test 4: the owner effect is "a refusal
+/// receipt, no decision/state/action", not "nothing at all"). No RNG draw
+/// happens here.
+pub async fn prepare_new_channel(
+    socket_path: &Path,
+    db_path: &Path,
+    db: Option<&DbHandle>,
+    python_options: &PythonOptionCache,
+    signal: crate::notify::NewChannelSignal,
+) -> NewChannelPreparation {
+    let peer_id = signal.peer_id.clone();
+    let now = signal.event_ts;
+    let channel_hint = signal
+        .event_scid
+        .clone()
+        .or_else(|| signal.event_channel_id.clone())
+        .unwrap_or_default();
+    let refused = |reason: String| NewChannelPreparation::Refused {
+        peer_id: peer_id.clone(),
+        channel_hint: channel_hint.clone(),
+        event_ts: now,
+        reason,
+    };
+
+    // Live-review finding F8 (A3 config freshness): refresh `listconfigs`
+    // NOW, before any evidence is frozen, so a dynamic `setconfig` since
+    // the last scheduled cycle reaches this decision (Python's handler
+    // reads config the cycle's `_refresh_dynamic_config` keeps current).
+    // A3 is STRICT: a failed refresh REFUSES -- even though a stale
+    // cached snapshot exists -- because an initial fee decided on stale
+    // config is a silently wrong decision, not a degraded one. The shared
+    // scheduled-cycle path (`dispatch_cycle`) keeps its keep-last-good
+    // posture; only this caller is strict.
+    if !python_options.refresh(socket_path).await {
+        let reason = "config refresh (listconfigs) failed; refusing rather than deciding on a \
+                      stale cached config snapshot"
+            .to_string();
+        eprintln!("revops: A3 new-channel prep REFUSED for peer {peer_id}: {reason}");
+        return refused(reason);
+    }
+    let python_option_values = &python_options.snapshot();
+
+    let rpc = match prefetch_rpc(socket_path).await {
+        Ok(rpc) => rpc,
+        Err(e) => {
+            let reason = format!("RPC prefetch (listpeerchannels/listchannels) failed: {e:#}");
+            eprintln!("revops: A3 new-channel prep REFUSED for peer {peer_id}: {reason}");
+            return refused(reason);
+        }
+    };
+
+    let channel = match crate::fee_evidence::resolve_new_channel(
+        &rpc.peer_channels,
+        signal.event_scid.as_deref(),
+        signal.event_channel_id.as_deref(),
+        &peer_id,
+    ) {
+        crate::fee_evidence::ChannelResolution::Resolved(info) => *info,
+        crate::fee_evidence::ChannelResolution::Ambiguous => {
+            let reason = "AMBIGUOUS: multiple NORMAL channels, no exact identifier match \
+                          (refusing rather than guessing)"
+                .to_string();
+            eprintln!("revops: A3 new-channel prep REFUSED for peer {peer_id}: {reason}");
+            return refused(reason);
+        }
+        crate::fee_evidence::ChannelResolution::NotFound => {
+            let reason = format!(
+                "NOT FOUND: no matching/single-fallback NORMAL channel (scid={:?} \
+                 channel_id={:?})",
+                signal.event_scid, signal.event_channel_id
+            );
+            eprintln!("revops: A3 new-channel prep REFUSED for peer {peer_id}: {reason}");
+            return refused(reason);
+        }
+    };
+
+    let policy = match crate::fee_evidence::resolve_peer_policy_async(
+        db_path.to_path_buf(),
+        peer_id.clone(),
+        now,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            let reason = format!("policy read failed: {e:#}");
+            eprintln!("revops: A3 new-channel prep REFUSED for peer {peer_id}: {reason}");
+            return refused(reason);
+        }
+    };
+
+    // Live-review finding F6 (config half): the A3 path is STRICT --
+    // any config-store QUERY failure (not a legitimately absent override
+    // row) refuses the preparation rather than deciding on struct
+    // defaults. The shared per-cycle `resolve_fee_cfg` deliberately keeps
+    // its log-and-default posture; only this caller observes and refuses.
+    let resolution = fee_config::resolve_fee_cfg_observed(db, python_option_values).await;
+    if resolution.db_query_failures > 0 {
+        let reason = format!(
+            "config resolution failed: {} config-store override query failure(s); refusing \
+             rather than deciding on defaults",
+            resolution.db_query_failures
+        );
+        eprintln!("revops: A3 new-channel prep REFUSED for peer {peer_id}: {reason}");
+        return refused(reason);
+    }
+    let cfg = resolution.cfg;
+
+    let peer_gossip = crate::fee_evidence::peer_own_gossip_channels(&rpc.gossip_channels, &peer_id);
+    let candidates: Vec<FeePrior> = revops_fees::market::network_fee_prior(&peer_gossip)
+        .into_iter()
+        .collect();
+    let prior = revops_fees::market::select_best_fee_prior(&candidates);
+
+    let event_key = new_channel_event_key(
+        &channel.channel_id,
+        &signal.old_state,
+        &signal.new_state,
+        now,
+    );
+
+    NewChannelPreparation::Ready(Box::new(PreparedInitialFee {
+        channel,
+        peer_id,
+        policy,
+        cfg,
+        prior,
+        event_ts: now,
+        event_key,
+    }))
 }
 
 /// What one `run_cycle` call did -- the loud-logging skip taxonomy the
@@ -617,6 +856,381 @@ fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
         CycleOutcome::PersistenceFailed => {
             "ran but PersistenceFailed: atomic commit failed, generation not advanced".to_string()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 44 / A3: new-channel initial fee -- prepared message + pure decision
+// ---------------------------------------------------------------------------
+
+/// The async preparation stage's typed result (live-review finding F1):
+/// EVERY occurrence -- ready or refused -- is sent to the owner and
+/// produces a durable receipt. A refusal is never just a log line; it is
+/// auditable evidence that this event was seen and why it went no
+/// further.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NewChannelPreparation {
+    Ready(Box<PreparedInitialFee>),
+    /// Timeout, malformed RPC evidence, ambiguous/missing channel
+    /// resolution, or a policy/config read failure. `channel_hint` is the
+    /// best-effort identifier for the receipt (the raw event scid/
+    /// channel_id -- never guessed/resolved, since resolution is exactly
+    /// what failed).
+    Refused {
+        peer_id: String,
+        channel_hint: String,
+        event_ts: i64,
+        reason: String,
+    },
+}
+
+/// Frozen evidence for one new-channel initial-fee decision, produced by
+/// the async preparation stage (contract §3.1 stage 2) and handed to the
+/// owner thread as [`CycleMsg::NewChannel`]. Everything here is already
+/// resolved: no RPC, no DB read, no RNG draw happens after this point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedInitialFee {
+    pub channel: ChannelInfo,
+    pub peer_id: String,
+    pub policy: PeerPolicy,
+    pub cfg: FeeCfgSnapshot,
+    /// `_select_best_fee_prior` (py 7924-7948): `None` when no gossip-
+    /// derived prior exists for this peer.
+    pub prior: Option<FeePrior>,
+    /// The notification's own clock read -- travels through to the DTS
+    /// nudge timestamp and the modeled broadcast-sync epoch. NEVER the
+    /// drain/dispatch clock.
+    pub event_ts: i64,
+    /// Live-review finding F3: a STABLE identity for this exact
+    /// opening-to-NORMAL event, derived ONLY from the event's own content
+    /// (resolved channel id, the old->new state transition, and the
+    /// event's own timestamp) -- NEVER wall-clock-at-processing or a
+    /// process id. The SAME notification replayed after a restart
+    /// recomputes this SAME key, which [`CycleOwner::handle_new_channel`]
+    /// uses both as an explicit pre-decision idempotency check and as the
+    /// atomic commit's `cycle_id` (a `PRIMARY KEY`, so even a raced
+    /// duplicate is rejected by the transaction itself).
+    pub event_key: String,
+}
+
+/// Build the stable, content-only event identity (contract finding F3).
+/// `resolved_channel_id` is the CANONICAL post-resolution id (not the raw
+/// event scid/channel_id) so a duplicate delivery that resolves through a
+/// different raw identifier for the SAME channel still collapses to the
+/// SAME key.
+pub fn new_channel_event_key(
+    resolved_channel_id: &str,
+    old_state: &str,
+    new_state: &str,
+    event_ts: i64,
+) -> String {
+    format!("rust-a3-{resolved_channel_id}-{old_state}-{new_state}-{event_ts}")
+}
+
+/// The typed terminal outcome of one new-channel initial-fee decision
+/// (contract §3.1 stage 3's outcome taxonomy). Receipt text must be
+/// derived from this, never from message receipt alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitialFeeOutcome {
+    /// PASSIVE policy: no fee action, no DTS state creation or seed.
+    Passive,
+    /// A prepared action exists but the governor did not authorize it. A
+    /// gossip-derived prior seed may still be present in `fee_state`
+    /// (Python seeds before authorization runs).
+    GovernorDenied { reason_code: String },
+    /// The governor authorized the request; `action` carries the exact
+    /// broadcast parameters that WOULD be sent (shadow mode never sends
+    /// them).
+    WouldBroadcast { reason_code: String },
+}
+
+/// The pure result of [`decide_initial_fee`]: candidate persistent state
+/// (staged, not yet installed -- the caller installs only after a
+/// successful atomic commit) plus the typed outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitialFeeDecision {
+    /// `Some` exactly when persistent state changed (a prior seed/nudge,
+    /// or a successful-broadcast state sync) -- `None` means nothing about
+    /// this channel's persistent state needs to be written at all (e.g.
+    /// PASSIVE, or a DYNAMIC decision with no gossip prior that was then
+    /// governor-denied).
+    pub fee_state: Option<ChannelFeeState>,
+    pub cycle_state: Option<ChannelCycleState>,
+    pub action: Option<PreparedFeeAction>,
+    pub governed_trace: Option<GovernedTrace>,
+    pub outcome: InitialFeeOutcome,
+    /// `"channel_open"` | `"policy_static"` -- the exact reason code
+    /// (contract §4.2 test 12).
+    pub reason_code: &'static str,
+}
+
+/// `_set_initial_fee_authorized`'s decision core (py 8617-8772), as a pure
+/// function: policy precedence, the throwaway/persistent DTS split, the
+/// existing execution clamp, and governed authorization. Draws from `rng`
+/// ONLY on the DYNAMIC path (never PASSIVE, never STATIC-with-target) --
+/// the ONE long-lived `PyRandom` the owner thread holds. `existing_fee`/
+/// `existing_cycle` are the channel's CURRENT persistent rows, if any
+/// (`None` for a brand-new channel, the overwhelmingly common case).
+pub fn decide_initial_fee(
+    prepared: &PreparedInitialFee,
+    existing_fee: Option<&ChannelFeeState>,
+    existing_cycle: Option<&ChannelCycleState>,
+    authorizer: &dyn FeeAuthorizer,
+    rng: &mut dyn DecisionEntropy,
+) -> InitialFeeDecision {
+    let now = prepared.event_ts;
+
+    if prepared.policy.strategy == FeeStrategy::Passive {
+        return InitialFeeDecision {
+            fee_state: None,
+            cycle_state: None,
+            action: None,
+            governed_trace: None,
+            outcome: InitialFeeOutcome::Passive,
+            reason_code: "policy_passive",
+        };
+    }
+
+    let (target, reason, reason_code, seeded_fee_state, seeded_cycle_state) =
+        if prepared.policy.strategy == FeeStrategy::Static {
+            if let Some(fee_ppm_target) = prepared.policy.fee_ppm_target {
+                (
+                    fee_ppm_target,
+                    "Initial fee: STATIC policy",
+                    "policy_static",
+                    existing_fee.cloned(),
+                    existing_cycle.cloned(),
+                )
+            } else {
+                dynamic_initial_fee(prepared, existing_fee, existing_cycle, rng)
+            }
+        } else {
+            dynamic_initial_fee(prepared, existing_fee, existing_cycle, rng)
+        };
+
+    finalize_initial_fee(
+        prepared,
+        target,
+        reason,
+        reason_code,
+        seeded_fee_state,
+        seeded_cycle_state,
+        authorizer,
+        now,
+    )
+}
+
+/// The DYNAMIC arm (py 8711-8765): the throwaway/persistent DTS split.
+/// Returns the sampled target plus the (possibly gossip-seeded) candidate
+/// persistent rows -- `existing_fee`/`existing_cycle` UNCHANGED (cloned
+/// verbatim) when there is no gossip prior, matching contract §4.2 test 9
+/// ("no prior seed/nudge is created before action handling").
+fn dynamic_initial_fee(
+    prepared: &PreparedInitialFee,
+    existing_fee: Option<&ChannelFeeState>,
+    existing_cycle: Option<&ChannelCycleState>,
+    rng: &mut dyn DecisionEntropy,
+) -> (
+    i64,
+    &'static str,
+    &'static str,
+    Option<ChannelFeeState>,
+    Option<ChannelCycleState>,
+) {
+    let now = prepared.event_ts;
+
+    // A FRESH, throwaway state for the initial sample -- never the
+    // channel's persistent state (contract §2.2, test 11: sampling the
+    // newly nudged persistent state would apply bias Python's initial
+    // draw never sees).
+    let mut throwaway = GaussianThompsonState {
+        prior_std_fee: prepared.cfg.thompson_prior_std_fee as f64,
+        ..GaussianThompsonState::default()
+    };
+
+    let (seeded_fee_state, seeded_cycle_state) = if let Some(prior) = &prepared.prior {
+        throwaway.prior_mean_fee = prior.mean as f64;
+        throwaway.prior_std_fee = prior.std as f64;
+
+        // The SEPARATE persistent state: create-or-load, seed the SAME
+        // prior mean/std, and record ONE durable nudge at the event
+        // timestamp (never drain time) -- py 8726-8745.
+        let mut fee_state = existing_fee.cloned().unwrap_or_default();
+        fee_state.thompson.prior_mean_fee = prior.mean as f64;
+        fee_state.thompson.prior_std_fee = prior.std as f64;
+        dynamics::record_posterior_nudge(
+            &mut fee_state.thompson,
+            prior.mean as f64,
+            INITIAL_PRIOR_NUDGE_WEIGHT,
+            now,
+        );
+        // `build_cycle_commit`/the generic serializer only persists a
+        // channel present in BOTH maps (fee_scheduler.rs:1325-1339) -- a
+        // fresh cycle-state row is required for this seed to be durable,
+        // even though Python's own seed touches only `ChannelFeeState`.
+        let cycle_state = existing_cycle.cloned().unwrap_or_default();
+        (Some(fee_state), Some(cycle_state))
+    } else {
+        (None, None)
+    };
+
+    // Sample the THROWAWAY state, not the persistent one (test 11). Uses
+    // the entropy-fallible form (not the panicking `sample_fee`
+    // convenience wrapper) so this function can accept the injected
+    // `&mut dyn DecisionEntropy` a test's counting/fake stream provides;
+    // the owner's real `PyRandom` stream never returns an error for a
+    // static, non-empty label, matching `sample_fee`'s own doc rationale.
+    let sampled_fee = revops_fees::thompson::sampling::sample_fee_with_entropy(
+        &mut throwaway,
+        prepared.cfg.min_fee_ppm,
+        prepared.cfg.max_fee_ppm,
+        None,
+        rng,
+        now,
+    )
+    .expect("PyRandom (or a test double honoring the same label contract) with a static, non-empty label cannot fail");
+
+    (
+        sampled_fee,
+        "Initial fee: channel open",
+        "channel_open",
+        seeded_fee_state,
+        seeded_cycle_state,
+    )
+}
+
+/// The shared `set_channel_fee` boundary (py 8173-8524, execution-layer
+/// slice): the existing pure clamp, then governed authorization. On
+/// authorization, models Python's successful state synchronization
+/// (`last_fee_ppm`/`last_broadcast_fee_ppm`/`last_broadcast_at`/
+/// `last_update`, all at the event timestamp) so the next scheduled cycle
+/// observes the same waiting-window posture Python's real apply would
+/// leave behind. On denial, the (possibly prior-seeded) candidate state is
+/// returned UNCHANGED by the sync fields -- a gossip seed persists, but no
+/// action and no post-broadcast sync (contract §3.3).
+#[allow(clippy::too_many_arguments)]
+fn finalize_initial_fee(
+    prepared: &PreparedInitialFee,
+    target_fee_ppm: i64,
+    reason: &'static str,
+    reason_code: &'static str,
+    seeded_fee_state: Option<ChannelFeeState>,
+    seeded_cycle_state: Option<ChannelCycleState>,
+    authorizer: &dyn FeeAuthorizer,
+    now: i64,
+) -> InitialFeeDecision {
+    // py `_set_channel_fee_inner` (fee_controller.py:8352): the pre-action
+    // fee is ALWAYS read from the live CLN-announced policy
+    // (`channel_info["fee_proportional_millionths"]`), never from
+    // Rust-owned Thompson/posterior state. A brand-new channel is not at 0
+    // ppm -- it carries CLN's default policy (or whatever `fundchannel`
+    // set) -- and that is what the governor request and the post-decision
+    // bookkeeping must see. Persisted state is Thompson/posterior evidence
+    // only, never a fee-delta source.
+    let old_fee_ppm = prepared.channel.fee_proportional_millionths;
+
+    // Policy is already resolved by the caller (PASSIVE returned early;
+    // STATIC/DYNAMIC already picked `target_fee_ppm`) -- pass `None` here
+    // so the shared clamp kernel does not re-apply policy precedence.
+    let req = SetFeeRequest {
+        channel_id: prepared.channel.channel_id.clone(),
+        fee_ppm: target_fee_ppm,
+        enforce_limits: true,
+        effective_min_fee_ppm: None,
+        htlcmin_msat: None,
+        htlcmax_msat: None,
+        base_fee_msat: prepared.cfg.base_fee_msat,
+    };
+
+    let auth_request = FeeAuthorizationRequest {
+        channel_id: prepared.channel.channel_id.clone(),
+        // py 8415: the governor sees the CLAMPED target, computed against
+        // `req.fee_ppm` -- resolve it via the SAME pure kernel the
+        // executor below uses, so the governor and the executor never
+        // disagree about what fee is being authorized.
+        fee_ppm: decide_set_channel_fee(&req, &prepared.cfg, None).clamped_fee_ppm,
+        old_fee_ppm: Some(old_fee_ppm),
+        reason: reason.to_string(),
+        reason_code: Some(reason_code.to_string()),
+        now,
+    };
+    let auth = authorizer.authorize(&auth_request).unwrap_or_else(|e| {
+        revops_fees::execution::FeeAuthorizationResult {
+            authorized: false,
+            reason_code: format!("internal_error ({e})"),
+            trace: None,
+        }
+    });
+
+    // Reuse the SAME capability-free `RecordingFeeExecutor` shadow mode
+    // already uses per-cycle (contract §5: "prefer reusing... unchanged")
+    // -- it owns the one broadcast-request-typed construction path
+    // (`execution.rs`, the action_surface allowlisted module), so this
+    // caller never names that type directly.
+    let exec_request = revops_fees::execution::FeeExecutionRequest {
+        decision: req,
+        wire_request: PyOValue::Null,
+        authorized: auth.authorized,
+        old_fee_ppm,
+        expected_base_fee_msat: prepared.cfg.base_fee_msat,
+    };
+    let recorder = RecordingFeeExecutor::default();
+    let decision = match recorder.execute(&exec_request, &prepared.cfg, None) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("revops: A3 initial-fee execution kernel failed: {e}");
+            return InitialFeeDecision {
+                fee_state: seeded_fee_state,
+                cycle_state: seeded_cycle_state,
+                action: None,
+                governed_trace: auth.trace,
+                outcome: InitialFeeOutcome::GovernorDenied {
+                    reason_code: format!("internal_error ({e})"),
+                },
+                reason_code,
+            };
+        }
+    };
+
+    if !auth.authorized {
+        return InitialFeeDecision {
+            fee_state: seeded_fee_state,
+            cycle_state: seeded_cycle_state,
+            action: None,
+            governed_trace: auth.trace,
+            outcome: InitialFeeOutcome::GovernorDenied {
+                reason_code: auth.reason_code,
+            },
+            reason_code,
+        };
+    }
+
+    let action = recorder.recorded_actions().pop();
+
+    // Model Python's successful synchronization (py 8446-8458, 8484-8524):
+    // both state objects observe the SAME applied fee at the SAME event
+    // timestamp.
+    let mut fee_state = seeded_fee_state.unwrap_or_default();
+    fee_state.last_fee_ppm = decision.clamped_fee_ppm;
+    fee_state.last_broadcast_fee_ppm = decision.clamped_fee_ppm;
+    fee_state.set_last_broadcast_at(now);
+    fee_state.last_update = now;
+
+    let mut cycle_state = seeded_cycle_state.unwrap_or_default();
+    cycle_state.last_fee_ppm = decision.clamped_fee_ppm;
+    cycle_state.last_broadcast_fee_ppm = decision.clamped_fee_ppm;
+    cycle_state.set_last_broadcast_at(now);
+    cycle_state.last_update = now;
+
+    InitialFeeDecision {
+        fee_state: Some(fee_state),
+        cycle_state: Some(cycle_state),
+        action,
+        governed_trace: auth.trace,
+        outcome: InitialFeeOutcome::WouldBroadcast {
+            reason_code: auth.reason_code,
+        },
+        reason_code,
     }
 }
 
@@ -730,6 +1344,42 @@ pub struct CycleOwner {
     /// [`CycleOutcome`] (via [`describe_cycle_outcome`]), paired with
     /// `last_cycle_at`.
     last_cycle_outcome: Option<String>,
+    /// Task 44 / A3, live-review finding F5: the owner's OWN queue
+    /// sender, so off-owner store dispatches can route their results back
+    /// as [`CycleMsg::InitialFeeStoreResult`] messages. Production wiring
+    /// (`spawn_with_thread_spawner`) always sets this; a bare test-driven
+    /// owner without one fails the A3 path CLOSED (a commit whose result
+    /// could never return must not be dispatched).
+    self_tx: Option<mpsc::Sender<CycleMsg>>,
+    /// F5: in-flight A3 occurrences, keyed by channel_id. An entry's
+    /// presence is the same-channel fail-closed race guard; its staged
+    /// clones install only on a successful identity-matched commit
+    /// result.
+    pending_initial_fees: HashMap<String, PendingInitialFee>,
+    /// F5: monotonically increasing dispatch generation -- binds each
+    /// result message to the exact pending occurrence that dispatched it,
+    /// so a stale/foreign result can never be mistaken for the awaited
+    /// one.
+    initial_fee_dispatch_seq: u64,
+    /// F5's red counter: result messages whose identity (channel, event
+    /// key, generation, or phase) did not match the pending entry --
+    /// each one a fail-closed discard, never an install. Never reset.
+    initial_fee_conflicts: u64,
+    /// F7: the owner's view of the persisted Rust-store state generation
+    /// (`None` until first established by hydration, a scheduled commit,
+    /// or an A3 idempotency answer). Every A3 guarded commit CASes
+    /// against this basis.
+    state_generation: Option<u64>,
+    /// F7 refinement (Python-parity sequencing): a full prepared cycle
+    /// that arrived while an A3 store result was pending -- deferred so
+    /// the cycle runs AFTER the A3 install/refusal and therefore sees the
+    /// synchronized state, exactly as Python's `_state_lock` serializes
+    /// the two. Bounded to ONE entry: a newer prepared snapshot
+    /// supersedes an older deferred one (loudly, counted).
+    deferred_cycle: Option<Box<PreparedCycle>>,
+    /// F7: deferred prepared cycles that were superseded by a newer one
+    /// before they could run (each one loud, never silent). Never reset.
+    deferred_cycles_superseded: u64,
 }
 
 impl CycleOwner {
@@ -788,7 +1438,35 @@ impl CycleOwner {
             last_profile: "active".to_string(),
             last_cycle_at: None,
             last_cycle_outcome: None,
+            self_tx: None,
+            pending_initial_fees: HashMap::new(),
+            initial_fee_dispatch_seq: 0,
+            initial_fee_conflicts: 0,
+            state_generation: None,
+            deferred_cycle: None,
+            deferred_cycles_superseded: 0,
         }
+    }
+
+    /// F5: wire the owner's own queue sender (see the `self_tx` field
+    /// doc). `spawn_with_thread_spawner` calls this before entering the
+    /// message loop; tests driving an owner directly call it with their
+    /// own receiver's sender and pump the resulting
+    /// [`CycleMsg::InitialFeeStoreResult`] messages back in.
+    pub fn set_self_sender(&mut self, tx: mpsc::Sender<CycleMsg>) {
+        self.self_tx = Some(tx);
+    }
+
+    /// F5's red conflict counter (see the `initial_fee_conflicts` field
+    /// doc).
+    pub fn initial_fee_conflicts(&self) -> u64 {
+        self.initial_fee_conflicts
+    }
+
+    /// F5: how many A3 occurrences are currently in flight (pending an
+    /// off-owner store result).
+    pub fn initial_fee_pending(&self) -> usize {
+        self.pending_initial_fees.len()
     }
 
     /// The owned controller state (read-only view; T7's debug RPC and the
@@ -1074,15 +1752,22 @@ impl CycleOwner {
                 .store
                 .as_ref()
                 .expect("SeedOnce hydration guarantees a store");
-            if let Err(e) = store.commit_fee_cycle(commit) {
-                self.persistence_failures += 1;
-                eprintln!(
-                    "revops: FEE CYCLE PERSISTENCE FAILED (failure #{}): {e:#}; generation NOT \
-                     advanced; this cycle's state evolution is uncommitted (a restart resumes \
-                     from the last committed generation)",
-                    self.persistence_failures
-                );
-                return (CycleOutcome::PersistenceFailed, None);
+            match store.commit_fee_cycle(commit) {
+                Ok(generation) => {
+                    // F7: keep the owner's persisted-generation view
+                    // current -- the A3 guarded commit CASes against it.
+                    self.state_generation = Some(generation);
+                }
+                Err(e) => {
+                    self.persistence_failures += 1;
+                    eprintln!(
+                        "revops: FEE CYCLE PERSISTENCE FAILED (failure #{}): {e:#}; generation \
+                         NOT advanced; this cycle's state evolution is uncommitted (a restart \
+                         resumes from the last committed generation)",
+                        self.persistence_failures
+                    );
+                    return (CycleOutcome::PersistenceFailed, None);
+                }
             }
             committed_cycle_id = Some(cycle_id);
         }
@@ -1299,6 +1984,11 @@ impl CycleOwner {
             clear_hydrated_state(&mut self.state);
             return Err(format!("restart marker record failed: {e:#}"));
         }
+        // F7: hydration establishes the owner's view of the persisted
+        // state generation -- the basis every A3 guarded commit CASes
+        // against. Set only HERE (hydration success), on a scheduled
+        // SeedOnce commit, and on an A3 install.
+        self.state_generation = Some(stored.generation);
         Ok(())
     }
 
@@ -1404,6 +2094,12 @@ impl CycleOwner {
             governor,
             ledger: Vec::new(),
             outcomes,
+            // Regular scheduled cycles keep using the existing separate
+            // (non-atomic) `record_trigger_event` path for the
+            // `FixedInterval` receipt -- see `FeeCycleCommit::
+            // trigger_receipt`'s doc comment for why that is fine here and
+            // NOT fine for A3's out-of-cycle commit.
+            trigger_receipt: None,
         }
     }
 
@@ -1803,6 +2499,790 @@ impl CycleOwner {
         );
     }
 
+    /// Live-review finding F1: a preparation REFUSAL (timeout, malformed
+    /// evidence, ambiguity, missing peer/channel, or a policy/config read
+    /// failure) is not just logged -- it is offered to the SAME
+    /// channel-scoped trigger discipline (so backpressure accounting stays
+    /// unified across ready/refused occurrences) and produces a durable
+    /// receipt, so the refusal survives a restart and can never be
+    /// silently re-read as "nothing happened". No RNG draw, no state row,
+    /// no action -- ever.
+    pub fn handle_new_channel_refused(
+        &mut self,
+        peer_id: String,
+        channel_hint: String,
+        event_ts: i64,
+        reason: String,
+    ) {
+        let trigger = FeeTrigger::NewChannel {
+            channel_id: if channel_hint.is_empty() {
+                peer_id.clone()
+            } else {
+                channel_hint.clone()
+            },
+        };
+        let outcome = self.trigger_queue.offer(trigger.clone(), event_ts);
+        let coalesced = matches!(outcome, TriggerOutcome::Coalesced);
+        if matches!(outcome, TriggerOutcome::Dropped) {
+            eprintln!(
+                "revops: TRIGGER DROPPED (bounded queue at capacity): new_channel REFUSAL for \
+                 peer {peer_id} at {event_ts} ({reason})"
+            );
+        } else {
+            eprintln!(
+                "revops: A3 NEW-CHANNEL PREPARATION REFUSED for peer {peer_id} \
+                 (channel_hint={channel_hint:?}) at {event_ts}: {reason}"
+            );
+        }
+        self.dispatch_a3_receipt(
+            &trigger,
+            event_ts,
+            coalesced,
+            None,
+            format!(
+                "REFUSED (no decision, no state, no action): {reason}{}",
+                if matches!(outcome, TriggerOutcome::Dropped) {
+                    " [ALSO DROPPED: bounded trigger queue at capacity]"
+                } else {
+                    ""
+                }
+            ),
+            "new_channel preparation-refusal receipt",
+        );
+    }
+
+    /// [`CycleMsg::NewChannel`]'s handler -- Task 44 / A3's owner-thread
+    /// decision + atomic out-of-cycle commit.
+    ///
+    /// STRICTLY offer-first (contract §3.1, pre-audit hazard fix): the
+    /// trigger is offered to the bounded/coalescing discipline BEFORE any
+    /// decision, RNG draw, or state mutation runs. A Dropped occurrence
+    /// returns with ZERO effect. This is deliberately NOT
+    /// [`Self::handle_failed_forward`]'s ordering -- that legacy path
+    /// applies its effect BEFORE offering, which means a Dropped outcome
+    /// there still leaves a mutated in-memory nudge; that is a recorded
+    /// follow-up finding against A1/A2, not A3's to inherit or fix here
+    /// (contract §6: no changes to A1/A2 behavior).
+    pub fn handle_new_channel(&mut self, prepared: PreparedInitialFee) {
+        let channel_id = prepared.channel.channel_id.clone();
+        let now = prepared.event_ts;
+        let trigger = FeeTrigger::NewChannel {
+            channel_id: channel_id.clone(),
+        };
+
+        let outcome = self.trigger_queue.offer(trigger.clone(), now);
+        // Live-review finding F2: ONLY a newly `Enqueued` occurrence may
+        // reach decision/effect. `Coalesced` means "an earlier occurrence
+        // for this exact channel is already pending" -- treating it as
+        // "informational, keep going" would draw the single owner RNG
+        // stream a second time and could create a duplicate nudge/action
+        // for the same channel. Both `Dropped` and `Coalesced` are
+        // therefore zero-RNG, zero-mutation, receipt-only outcomes; the
+        // ONLY difference between them is the log/detail text.
+        if !matches!(outcome, TriggerOutcome::Enqueued) {
+            let (headline, detail): (&str, String) = if matches!(outcome, TriggerOutcome::Dropped) {
+                (
+                    "DROPPED (bounded queue at capacity)",
+                    "DROPPED: bounded trigger queue at capacity (backpressure); no decision was \
+                     made"
+                        .to_string(),
+                )
+            } else {
+                (
+                    "COALESCED (an earlier occurrence for this channel is already pending)",
+                    "COALESCED: an earlier new_channel occurrence for this channel is already \
+                     pending; this occurrence made NO decision and drew NO entropy -- the \
+                     pending occurrence's outcome covers it"
+                        .to_string(),
+                )
+            };
+            eprintln!("revops: TRIGGER {headline}: new_channel channel {channel_id} at {now}");
+            // Stand-alone receipts outside the atomic commit -- by
+            // definition neither has an effect to be atomic with
+            // (contract's pre-audit hazard fix, point 2, extended to
+            // Coalesced by live-review finding F2). Dispatched off-owner
+            // (F5): a receipt write must not block the owner either.
+            self.dispatch_a3_receipt(
+                &trigger,
+                now,
+                matches!(outcome, TriggerOutcome::Coalesced),
+                None,
+                detail,
+                "new_channel dropped/coalesced receipt",
+            );
+            return;
+        }
+
+        // F5 (same-channel pending/race, fail-closed): while ANY store
+        // operation for this channel is still in flight, a further
+        // occurrence -- one the drained trigger queue no longer coalesces
+        // -- must be refused rather than processed. Refusing is safe (the
+        // in-flight occurrence's own outcome governs the channel, and a
+        // genuinely new event replays later); processing would overwrite
+        // the in-flight bookkeeping, orphan its result into a conflict,
+        // and double-decide the channel.
+        if self.pending_initial_fees.contains_key(&channel_id) {
+            eprintln!(
+                "revops: A3 NEW-CHANNEL REFUSED (fail-closed): a store operation for channel \
+                 {channel_id} is already in flight; this occurrence at {now} made no decision \
+                 and drew no entropy"
+            );
+            self.dispatch_a3_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "REFUSED: a store operation for this channel is already in flight \
+                 (fail-closed); no decision was made, no entropy was drawn",
+                "new_channel in-flight race refusal receipt",
+            );
+            return;
+        }
+
+        // Live-review finding F6: an unavailable Rust-owned store must be
+        // rejected BEFORE decision/RNG -- not discovered only after a
+        // decision (and an RNG draw) already happened, with the result
+        // then silently discarded. No store means this occurrence can
+        // never be durable, so it must never consume entropy or touch
+        // state either.
+        if self.store.is_none() {
+            self.persistence_failures += 1;
+            eprintln!(
+                "revops: A3 NEW-CHANNEL REFUSED (failure #{}): no Rust-owned store is \
+                 configured; channel {channel_id} at {now} -- no decision was made, no entropy \
+                 was drawn",
+                self.persistence_failures
+            );
+            self.dispatch_a3_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "REFUSED: no Rust-owned store configured; no decision was made",
+                "new_channel no-store refusal receipt",
+            );
+            return;
+        }
+
+        // F5: without a self-sender the off-owner store results could
+        // never return to the owner, so the occurrence must fail CLOSED
+        // before any decision/RNG -- never dispatch work whose outcome is
+        // undeliverable. Production wiring always sets one.
+        let Some(self_tx) = self.self_tx.clone() else {
+            self.persistence_failures += 1;
+            eprintln!(
+                "revops: A3 NEW-CHANNEL REFUSED (failure #{}): owner has no self-sender for \
+                 commit-result routing; channel {channel_id} at {now} -- no decision was made, \
+                 no entropy was drawn",
+                self.persistence_failures
+            );
+            self.dispatch_a3_receipt(
+                &trigger,
+                now,
+                false,
+                None,
+                "REFUSED: owner has no self-sender for commit-result routing; no decision was \
+                 made",
+                "new_channel no-self-sender refusal receipt",
+            );
+            return;
+        };
+
+        // Live-review finding F3: cross-restart event idempotency. Checked
+        // BEFORE decision/RNG -- a replay of the SAME event (same
+        // resolved channel, same transition, same event timestamp,
+        // possibly after a restart) must consume ZERO entropy and create
+        // ZERO duplicate state/action. `event_key` is derived purely from
+        // the event's own content (never wall-clock-at-processing or a
+        // process id), so a genuine replay recomputes the SAME key.
+        //
+        // F5: the check itself is dispatched OFF-owner; the frozen
+        // preparation parks in `pending_initial_fees` until the answer
+        // comes back as an identity-bound message. No decision, RNG draw,
+        // or state mutation has happened yet.
+        self.initial_fee_dispatch_seq += 1;
+        let generation = self.initial_fee_dispatch_seq;
+        let event_key = prepared.event_key.clone();
+        self.pending_initial_fees.insert(
+            channel_id.clone(),
+            PendingInitialFee::CheckingIdempotency {
+                event_key: event_key.clone(),
+                generation,
+                prepared: Box::new(prepared),
+            },
+        );
+        let store = self.store.as_ref().expect("checked store.is_none() above");
+        let reply_key = event_key.clone();
+        store.dispatch_cycle_exists_with_generation(
+            event_key,
+            Box::new(move |result| {
+                let _ = self_tx.send(CycleMsg::InitialFeeStoreResult(
+                    InitialFeeStoreResult::Idempotency {
+                        channel_id,
+                        event_key: reply_key,
+                        generation,
+                        result: result.map_err(|e| format!("{e:#}")),
+                    },
+                ));
+            }),
+        );
+    }
+
+    /// [`CycleMsg::InitialFeeStoreResult`]'s handler (live-review finding
+    /// F5): the owner-side continuation for each off-owner store
+    /// operation. Runs on the owner thread like every other `CycleMsg`,
+    /// so no lock is ever needed -- the pending map is only touched here
+    /// and in [`Self::handle_new_channel`]. `clock` serves the F7
+    /// sequencing rule: once the pending map clears, a prepared cycle
+    /// deferred behind the in-flight A3 occurrence runs immediately (and
+    /// reads ITS OWN fresh clock), so the next cycle always sees the
+    /// synchronized post-A3 state, mirroring Python's `_state_lock`
+    /// serialization.
+    pub fn handle_initial_fee_store_result(
+        &mut self,
+        result: InitialFeeStoreResult,
+        clock: &mut dyn FnMut() -> i64,
+    ) {
+        match result {
+            InitialFeeStoreResult::Receipt { context, result } => {
+                if let Err(e) = result {
+                    // Nothing staged depends on a stand-alone receipt;
+                    // its loss is loud and counted, never silent
+                    // (finding F1's durability posture -- the refusal
+                    // stays enforced in-process either way).
+                    self.persistence_failures += 1;
+                    eprintln!(
+                        "revops: A3 receipt record FAILED (failure #{}): {e}: {context}",
+                        self.persistence_failures
+                    );
+                }
+            }
+            InitialFeeStoreResult::Idempotency {
+                channel_id,
+                event_key,
+                generation,
+                result,
+            } => self.handle_idempotency_result(channel_id, event_key, generation, result),
+            InitialFeeStoreResult::Commit {
+                channel_id,
+                event_key,
+                generation,
+                result,
+            } => self.handle_commit_result(channel_id, event_key, generation, result),
+        }
+        // F7 sequencing: the A3 occurrence(s) settled -- run the cycle
+        // that was deferred behind them, on this same owner thread, so it
+        // consumes the just-synchronized state.
+        if self.pending_initial_fees.is_empty() {
+            if let Some(deferred) = self.deferred_cycle.take() {
+                eprintln!(
+                    "revops: running the prepared cycle deferred behind an in-flight A3 \
+                     commit (the cycle now sees the synchronized post-A3 state)"
+                );
+                let _ = self.run_cycle(*deferred, clock);
+            }
+        }
+    }
+
+    /// Phase-B continuation: the off-owner idempotency answer for a
+    /// parked preparation. Only an identity-matched answer may unpark it;
+    /// only `Ok(false)` (genuinely new) proceeds to decision/RNG.
+    fn handle_idempotency_result(
+        &mut self,
+        channel_id: String,
+        event_key: String,
+        generation: u64,
+        result: Result<(bool, u64), String>,
+    ) {
+        // Exact identity binding (the binding recovery contract): the
+        // result must match the awaited occurrence's phase AND event_key
+        // AND dispatch generation. Anything else -- stale, forged,
+        // foreign -- is discarded as a red conflict WITHOUT touching the
+        // pending entry, whose genuine result is still owed.
+        let expected = match self.pending_initial_fees.get(&channel_id) {
+            Some(PendingInitialFee::CheckingIdempotency { .. }) => {
+                let entry = &self.pending_initial_fees[&channel_id];
+                entry.event_key() == event_key && entry.generation() == generation
+            }
+            _ => false,
+        };
+        if !expected {
+            self.initial_fee_conflicts += 1;
+            eprintln!(
+                "revops: A3 CONFLICT (conflict #{}): idempotency result for channel \
+                 {channel_id} (event_key={event_key}, dispatch generation {generation}) matches \
+                 no awaited occurrence; discarded fail-closed",
+                self.initial_fee_conflicts
+            );
+            return;
+        }
+        let Some(PendingInitialFee::CheckingIdempotency {
+            event_key: _matched_key,
+            generation: _matched_generation,
+            prepared,
+        }) = self.pending_initial_fees.remove(&channel_id)
+        else {
+            unreachable!("matched CheckingIdempotency above");
+        };
+        let now = prepared.event_ts;
+        let trigger = FeeTrigger::NewChannel {
+            channel_id: channel_id.clone(),
+        };
+        match result {
+            Ok((true, _store_generation)) => {
+                eprintln!(
+                    "revops: A3 NEW-CHANNEL DUPLICATE (event_key={}): an identical event was \
+                     already committed; no second decision, no second entropy draw, no second \
+                     action",
+                    prepared.event_key
+                );
+                self.dispatch_a3_receipt(
+                    &trigger,
+                    now,
+                    false,
+                    None,
+                    format!(
+                        "DUPLICATE (event_key={}): an identical event was already durably \
+                         committed; no decision was made, no entropy was drawn",
+                        prepared.event_key
+                    ),
+                    "new_channel duplicate receipt",
+                );
+            }
+            Ok((false, store_generation)) => {
+                // F7: the CAS basis. The owner's own tracked view wins
+                // when it exists -- it is CURRENT as of this message
+                // (any interleaved scheduled commit already updated it),
+                // while the answer's generation was read at dispatch
+                // time and may be one epoch stale. With no tracked view
+                // yet (e.g. RehydratePerCycle before any A3 commit, or
+                // SeedOnce before first hydration) adopt the store's.
+                // Either way the guarded commit re-checks atomically.
+                let expected_prior = match self.state_generation {
+                    Some(tracked) => {
+                        if tracked != store_generation {
+                            eprintln!(
+                                "revops: A3 note: idempotency answer read generation \
+                                 {store_generation} but the owner has since advanced to \
+                                 {tracked}; deciding against {tracked} (the guarded commit \
+                                 CASes on it)"
+                            );
+                        }
+                        tracked
+                    }
+                    None => {
+                        self.state_generation = Some(store_generation);
+                        store_generation
+                    }
+                };
+                self.decide_and_dispatch_commit(prepared, generation, expected_prior)
+            }
+            Err(e) => {
+                // Fail CLOSED: an unreadable idempotency check must never
+                // be treated as "probably new" -- that could silently
+                // duplicate an action. Refuse instead (live-review F6's
+                // "red typed refusal" posture, extended to this check).
+                self.persistence_failures += 1;
+                eprintln!(
+                    "revops: A3 NEW-CHANNEL REFUSED (failure #{}): idempotency check failed \
+                     ({e}) for event_key={}; refusing rather than risking a duplicate",
+                    self.persistence_failures, prepared.event_key
+                );
+                self.dispatch_a3_receipt(
+                    &trigger,
+                    now,
+                    false,
+                    None,
+                    format!(
+                        "REFUSED: idempotency check failed ({e}); no decision was made, no \
+                         entropy was drawn"
+                    ),
+                    "new_channel idempotency-failure refusal receipt",
+                );
+            }
+        }
+    }
+
+    /// Phase-C continuation: the off-owner atomic-commit answer. Staged
+    /// clones install ONLY here, only on `Ok`, only when the result's
+    /// identity matches the pending entry.
+    fn handle_commit_result(
+        &mut self,
+        channel_id: String,
+        event_key: String,
+        generation: u64,
+        result: Result<revops_db::fee_runway::GuardedCommitOutcome, String>,
+    ) {
+        use revops_db::fee_runway::GuardedCommitOutcome;
+        // Exact identity binding, same rule as the idempotency phase: a
+        // generation/event_key mismatch at result-time is a CONFLICT --
+        // discarded fail-closed (no install, no discard of the staged
+        // state, no persistence-failure count), because the awaited
+        // occurrence's genuine result is still owed.
+        let expected = match self.pending_initial_fees.get(&channel_id) {
+            Some(PendingInitialFee::Committing { .. }) => {
+                let entry = &self.pending_initial_fees[&channel_id];
+                entry.event_key() == event_key && entry.generation() == generation
+            }
+            _ => false,
+        };
+        if !expected {
+            self.initial_fee_conflicts += 1;
+            eprintln!(
+                "revops: A3 CONFLICT (conflict #{}): commit result for channel {channel_id} \
+                 (event_key={event_key}, dispatch generation {generation}) matches no awaited \
+                 occurrence; discarded fail-closed -- nothing was installed",
+                self.initial_fee_conflicts
+            );
+            return;
+        }
+        let Some(PendingInitialFee::Committing {
+            event_key: _matched_key,
+            generation: _matched_generation,
+            expected_prior_generation,
+            staged,
+        }) = self.pending_initial_fees.remove(&channel_id)
+        else {
+            unreachable!("matched Committing above");
+        };
+        match result {
+            Ok(GuardedCommitOutcome::Committed(committed_generation)) => {
+                // F7 install rule: the commit must be exactly the next
+                // generation after the decision's basis, AND the owner
+                // must not have advanced past that basis in the meantime
+                // (the RunPrepared deferral makes an advance structurally
+                // impossible, so this is a fail-closed invariant check,
+                // not an expected path).
+                let owner_unadvanced = self.state_generation == Some(expected_prior_generation);
+                if owner_unadvanced && committed_generation == expected_prior_generation + 1 {
+                    self.state_generation = Some(committed_generation);
+                    if let Some(staged) = staged {
+                        let (fee, cycle) = *staged;
+                        self.state.fee_states.insert(channel_id.clone(), fee);
+                        self.state.cycle_states.insert(channel_id, cycle);
+                    }
+                } else {
+                    self.initial_fee_conflicts += 1;
+                    eprintln!(
+                        "revops: A3 CONFLICT (conflict #{}): commit for channel {channel_id} \
+                         landed as generation {committed_generation} against decision basis \
+                         {expected_prior_generation} (owner now at {:?}); staged state \
+                         DISCARDED fail-closed -- the store row stands as recorded evidence, \
+                         the in-memory state keeps the newer epoch",
+                        self.initial_fee_conflicts, self.state_generation
+                    );
+                    // Adopt the store's actual generation so the next
+                    // occurrence CASes against reality instead of
+                    // conflicting forever.
+                    if self
+                        .state_generation
+                        .is_some_and(|g| g < committed_generation)
+                    {
+                        self.state_generation = Some(committed_generation);
+                    }
+                }
+            }
+            Ok(GuardedCommitOutcome::GenerationConflict { expected, found }) => {
+                self.initial_fee_conflicts += 1;
+                eprintln!(
+                    "revops: A3 CONFLICT (conflict #{}): guarded commit for channel \
+                     {channel_id} refused by the store -- state generation advanced from \
+                     {expected} to {found} after the decision; NOTHING was written, staged \
+                     state DISCARDED fail-closed",
+                    self.initial_fee_conflicts
+                );
+                // The store is authoritative about its own generation.
+                self.state_generation = Some(found);
+            }
+            Err(e) => {
+                self.persistence_failures += 1;
+                eprintln!(
+                    "revops: A3 NEW-CHANNEL COMMIT FAILED (failure #{}): {e}; NO state was \
+                     installed, NO action is authoritative, and this receipt does not claim an \
+                     applied fee",
+                    self.persistence_failures
+                );
+            }
+        }
+    }
+
+    /// The decision + atomic-commit build for one genuinely-new (offer
+    /// Enqueued, idempotency-cleared) occurrence -- the only place on the
+    /// A3 path that draws the single owner RNG. The commit is dispatched
+    /// OFF-owner (F5); the staged clones install in
+    /// [`Self::handle_commit_result`] on success only.
+    fn decide_and_dispatch_commit(
+        &mut self,
+        prepared: Box<PreparedInitialFee>,
+        generation: u64,
+        expected_prior_generation: u64,
+    ) {
+        let prepared = *prepared;
+        let channel_id = prepared.channel.channel_id.clone();
+        let now = prepared.event_ts;
+        let trigger = FeeTrigger::NewChannel {
+            channel_id: channel_id.clone(),
+        };
+
+        let existing_fee = self.state.fee_states.get(&channel_id).cloned();
+        let existing_cycle = self.state.cycle_states.get(&channel_id).cloned();
+
+        let governed = self.governor.governed_deps(&prepared.cfg);
+        let authorizer = GovernedFeeAuthorizer::new(&governed);
+        let decision = decide_initial_fee(
+            &prepared,
+            existing_fee.as_ref(),
+            existing_cycle.as_ref(),
+            &authorizer,
+            &mut self.rng,
+        );
+
+        // Live-review finding F4: the receipt/outcome text must state
+        // exactly what happened and must NEVER be readable as a completed
+        // live broadcast. `decision.reason_code` is the FEE reason
+        // identity (`channel_open` / `policy_static`); the governor's own
+        // `reason_code` (inside `GovernorDenied`/carried in
+        // `governed_trace`) is separate authorization metadata and is
+        // named explicitly as such, never substituted for the fee reason.
+        let detail = match &decision.outcome {
+            InitialFeeOutcome::Passive => {
+                "PASSIVE policy: no fee action, no DTS state created".to_string()
+            }
+            InitialFeeOutcome::GovernorDenied {
+                reason_code: governor_reason_code,
+            } => format!(
+                "SHADOW MODE, NOT APPLIED: fee_reason={} governor_denied \
+                 (governor_reason_code={governor_reason_code}); no action, no post-broadcast \
+                 state sync (a gossip-derived prior seed may still be recorded)",
+                decision.reason_code
+            ),
+            InitialFeeOutcome::WouldBroadcast {
+                reason_code: governor_reason_code,
+            } => format!(
+                "SHADOW MODE, NOT APPLIED: would-broadcast RECORDED ONLY \
+                 (fee_reason={}, governor_reason_code={governor_reason_code}); no live \
+                 mutation, no live broadcast call was made",
+                decision.reason_code
+            ),
+        };
+
+        let has_state_row = decision.fee_state.is_some() && decision.cycle_state.is_some();
+        // Only the one Enqueued occurrence reaches this point (Dropped/
+        // Coalesced returned before any dispatch) -- this receipt is
+        // never coalesced.
+        let receipt = build_receipt(&trigger, now, false, None, detail);
+
+        let mut commit = FeeCycleCommit {
+            // Live-review finding F3: STABLE, content-derived identity --
+            // never PID/wall-clock-at-processing. `rust_fee_cycles.
+            // cycle_id` is a PRIMARY KEY, so even a raced duplicate
+            // (idempotency check above passed, but a second copy of the
+            // SAME event reaches this point before the first commits) is
+            // rejected by the transaction itself, not just by the earlier
+            // advisory check.
+            cycle_id: prepared.event_key.clone(),
+            started_at: now,
+            completed_at: now,
+            source_commit: source_commit().to_string(),
+            binary_sha256: binary_sha256().to_string(),
+            trigger_receipt: Some(receipt),
+            ..FeeCycleCommit::default()
+        };
+
+        if let (Some(fee), Some(cycle)) = (&decision.fee_state, &decision.cycle_state) {
+            commit.state_rows.push(revops_db::fee_runway::FeeStateRow {
+                channel_id: channel_id.clone(),
+                v2_state_json: serialize_state_envelope(cycle, fee),
+                last_update: cycle.last_update,
+            });
+        }
+        if let Some(action) = &decision.action {
+            commit.requests.push(PreparedFeeActionRow {
+                channel_id: channel_id.clone(),
+                idempotency_key: decision
+                    .governed_trace
+                    .as_ref()
+                    .map(|t| t.idempotency_key.clone()),
+                old_fee_ppm: action.old_fee_ppm,
+                new_fee_ppm: action.decision.clamped_fee_ppm,
+                feebase_msat: action.expected_base_fee_msat,
+                htlcmin_msat: action.request.htlcmin.map(|v| v as i64),
+                htlcmax_msat: action.request.htlcmax.map(|v| v as i64),
+                message: action.decision.message.clone(),
+                at: now,
+            });
+        }
+        if let Some(trace) = &decision.governed_trace {
+            commit.governor.push(GovernorAuditRow {
+                channel_id: channel_id.clone(),
+                authorized: trace.authorized,
+                reason_code: trace.reason_code.clone(),
+                intent_id: trace.intent_id.clone(),
+                idempotency_key: trace.idempotency_key.clone(),
+                at: now,
+            });
+        }
+        commit.outcomes.push(ShadowCycleOutcomeRow {
+            cycle_ts: now,
+            channel_id: channel_id.clone(),
+            would_broadcast: decision.action.is_some(),
+            has_algorithm_values: has_state_row,
+            disposition: Some(
+                match &decision.outcome {
+                    InitialFeeOutcome::Passive => "new_channel_passive",
+                    InitialFeeOutcome::GovernorDenied { .. } => "new_channel_governor_denied",
+                    // F4: "would_broadcast", never "broadcast" -- shadow
+                    // mode never applies a live fee change.
+                    InitialFeeOutcome::WouldBroadcast { .. } => "new_channel_would_broadcast",
+                }
+                .to_string(),
+            ),
+            skip_gate_comparable: false,
+        });
+
+        // Stage on clones, install ONLY after a successful atomic commit
+        // (contract §3.2) -- and, per F5, the commit itself runs
+        // OFF-owner: the staged pair parks in the pending map and
+        // installs in [`Self::handle_commit_result`] when (and only when)
+        // the identity-bound success message comes back. A commit failure
+        // must never leave mutated in-memory state installed.
+        let staged = match (decision.fee_state, decision.cycle_state) {
+            (Some(fee), Some(cycle)) => Some(Box::new((fee, cycle))),
+            _ => None,
+        };
+        self.pending_initial_fees.insert(
+            channel_id.clone(),
+            PendingInitialFee::Committing {
+                event_key: prepared.event_key.clone(),
+                generation,
+                expected_prior_generation,
+                staged,
+            },
+        );
+        // Both were verified in `handle_new_channel` before the
+        // idempotency dispatch and are never unset; fail closed anyway
+        // rather than panic the owner thread if that invariant ever
+        // breaks.
+        let (Some(self_tx), Some(store)) = (self.self_tx.clone(), self.store.as_ref()) else {
+            self.pending_initial_fees.remove(&channel_id);
+            self.persistence_failures += 1;
+            eprintln!(
+                "revops: A3 NEW-CHANNEL COMMIT NOT DISPATCHED (failure #{}): store or \
+                 self-sender vanished mid-flight for channel {channel_id}; nothing was \
+                 committed, nothing was installed",
+                self.persistence_failures
+            );
+            return;
+        };
+        let event_key = prepared.event_key.clone();
+        store.dispatch_commit_fee_cycle_guarded(
+            commit,
+            expected_prior_generation,
+            Box::new(move |result| {
+                let _ = self_tx.send(CycleMsg::InitialFeeStoreResult(
+                    InitialFeeStoreResult::Commit {
+                        channel_id,
+                        event_key,
+                        generation,
+                        result: result.map_err(|e| format!("{e:#}")),
+                    },
+                ));
+            }),
+        );
+    }
+
+    /// [`CycleMsg::RunPrepared`]'s owner-side entry. F7 sequencing rule
+    /// (Python-parity): while ANY A3 store result is pending, the full
+    /// cycle is DEFERRED -- Python's `_state_lock` serializes
+    /// `_handle_channel_open` against the cycle, so the cycle must see
+    /// the synchronized post-A3 state, never a pre-install epoch it
+    /// would commit over the in-flight A3 commit (orphaning it into a
+    /// CAS conflict). Returns `None` when deferred; the deferred cycle
+    /// runs from [`Self::handle_initial_fee_store_result`] the moment the
+    /// pending map clears. Bounded to ONE slot: a newer prepared
+    /// snapshot supersedes an older deferred one (the newer inputs are
+    /// strictly fresher evidence for the SAME per-cycle evaluation),
+    /// loudly and counted -- never an unbounded queue, never silent.
+    pub fn run_or_defer_cycle(
+        &mut self,
+        prepared: Box<PreparedCycle>,
+        clock: &mut dyn FnMut() -> i64,
+    ) -> Option<CycleOutcome> {
+        if self.pending_initial_fees.is_empty() {
+            return Some(self.run_cycle(*prepared, clock));
+        }
+        if self.deferred_cycle.is_some() {
+            self.deferred_cycles_superseded += 1;
+            eprintln!(
+                "revops: DEFERRED CYCLE SUPERSEDED (#{}): a newer prepared cycle arrived while \
+                 an A3 store result is still pending; the older deferred inputs are dropped \
+                 (the newer snapshot covers the same evaluation)",
+                self.deferred_cycles_superseded
+            );
+        } else {
+            eprintln!(
+                "revops: prepared cycle DEFERRED behind {} in-flight A3 store result(s); it \
+                 runs as soon as they settle",
+                self.pending_initial_fees.len()
+            );
+        }
+        self.deferred_cycle = Some(prepared);
+        None
+    }
+
+    /// F7: deferred prepared cycles superseded by a newer one (red
+    /// counter; see the field doc).
+    pub fn deferred_cycles_superseded(&self) -> u64 {
+        self.deferred_cycles_superseded
+    }
+
+    /// F5: A3's stand-alone receipts (refusals, dropped/coalesced,
+    /// duplicates) are dispatched off-owner like every other A3 store
+    /// interaction -- a receipt write against a stalled store must not
+    /// wedge the owner either. The write's own failure comes back as an
+    /// [`InitialFeeStoreResult::Receipt`] (loud + counted) when a
+    /// self-sender is wired; without one it is logged from the dispatch
+    /// thread. Without a store this is a no-op, exactly like
+    /// [`Self::record_trigger_receipt`]'s posture (the refusal stays
+    /// loudly logged by the caller and enforced in-process).
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_a3_receipt(
+        &self,
+        trigger: &FeeTrigger,
+        received_at: i64,
+        coalesced: bool,
+        cycle: Option<(&str, i64)>,
+        detail: impl Into<String>,
+        context: &str,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let row = build_receipt(trigger, received_at, coalesced, cycle, detail);
+        let context = context.to_string();
+        match self.self_tx.clone() {
+            Some(tx) => store.dispatch_record_trigger_event(
+                row,
+                Box::new(move |result| {
+                    let _ = tx.send(CycleMsg::InitialFeeStoreResult(
+                        InitialFeeStoreResult::Receipt {
+                            context,
+                            result: result.map_err(|e| format!("{e:#}")),
+                        },
+                    ));
+                }),
+            ),
+            None => store.dispatch_record_trigger_event(
+                row,
+                Box::new(move |result| {
+                    if let Err(e) = result {
+                        eprintln!("revops: A3 receipt record failed ({e:#}): {context}");
+                    }
+                }),
+            ),
+        }
+    }
+
     /// Total triggers ever dropped for backpressure (Task 6's red
     /// counter, alongside [`Self::persistence_failures`]).
     pub fn trigger_queue_dropped_total(&self) -> u64 {
@@ -1859,6 +3339,18 @@ impl CycleOwner {
                 "trigger_queue": {
                     "pending": self.trigger_queue.pending_len(),
                     "dropped_total": self.trigger_queue.dropped_total(),
+                },
+                // Task 44 / A3, live-review finding F5: in-flight
+                // occurrences awaiting an off-owner store result, and the
+                // red identity-mismatch conflict counter.
+                "initial_fee": {
+                    "pending": self.pending_initial_fees.len(),
+                    "conflicts": self.initial_fee_conflicts,
+                    // F7 observability: the CAS basis and the deferral
+                    // bookkeeping.
+                    "state_generation": self.state_generation,
+                    "deferred_cycle_pending": self.deferred_cycle.is_some(),
+                    "deferred_cycles_superseded": self.deferred_cycles_superseded,
                 },
                 "last_cycle": {
                     "at": self.last_cycle_at,
@@ -1928,15 +3420,20 @@ where
     // FIRST: if it fails, the trigger task is never started and the
     // caller gets `Err` instead of a dead-letter handle.
     let owner_wake = wake_tx.clone();
+    let owner_self_tx = tx.clone();
     let owner_body: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
         let mut owner = CycleOwner::new(&cfg, crate::now_unix(), store);
+        // F5: off-owner store dispatches route their results back onto
+        // this same queue -- the owner never blocks on a store reply.
+        owner.set_self_sender(owner_self_tx);
         let mut clock = crate::now_unix;
         while let Ok(msg) = rx.recv() {
             match msg {
                 CycleMsg::RunPrepared(prepared) => {
-                    // Outcome logging happens inside run_cycle; the
-                    // loop must survive every outcome.
-                    let _ = owner.run_cycle(*prepared, &mut clock);
+                    // Outcome logging happens inside the owner; the loop
+                    // must survive every outcome. (F7: while an A3 store
+                    // result is pending the cycle is deferred, not run.)
+                    let _ = owner.run_or_defer_cycle(prepared, &mut clock);
                 }
                 CycleMsg::RunCycleNow => {
                     // Only the async half can prefetch; hand over.
@@ -1969,6 +3466,18 @@ where
                 }
                 CycleMsg::ForwardEvent { channel_id } => {
                     owner.handle_forward_event(&channel_id, crate::now_unix());
+                }
+                CycleMsg::NewChannel(preparation) => match *preparation {
+                    NewChannelPreparation::Ready(prepared) => owner.handle_new_channel(*prepared),
+                    NewChannelPreparation::Refused {
+                        peer_id,
+                        channel_hint,
+                        event_ts,
+                        reason,
+                    } => owner.handle_new_channel_refused(peer_id, channel_hint, event_ts, reason),
+                },
+                CycleMsg::InitialFeeStoreResult(result) => {
+                    owner.handle_initial_fee_store_result(result, &mut clock);
                 }
                 CycleMsg::Query(query, reply) => {
                     // Never block the owner thread on a slow/uncooperative
@@ -2313,6 +3822,408 @@ mod decision_clock_tests {
         assert!(
             !include_str!("fee_scheduler.rs").contains(&exported_bypass),
             "downstream crates must not be able to inject a semantic decision clock"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 44 / A3: decide_initial_fee -- precedence and state tests (contract
+// §4.2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod initial_fee_decision_tests {
+    use super::*;
+    use revops_analytics::policy::RebalanceMode;
+    use revops_fees::pyrand::DecisionInputError;
+
+    const EVENT_TS: i64 = 1_800_000_000;
+
+    fn wide_cfg() -> FeeCfgSnapshot {
+        FeeCfgSnapshot {
+            min_fee_ppm: 0,
+            max_fee_ppm: 100_000,
+            thompson_prior_std_fee: 100,
+            base_fee_msat: 0,
+            ..FeeCfgSnapshot::default()
+        }
+    }
+
+    fn channel_info(fee_proportional_millionths: i64) -> ChannelInfo {
+        ChannelInfo {
+            channel_id: "1x1x0".to_string(),
+            short_channel_id: "1x1x0".to_string(),
+            full_channel_id: "deadbeef".to_string(),
+            peer_id: "02peer".to_string(),
+            capacity_sats: 1_000_000,
+            spendable_msat: 500_000_000,
+            receivable_msat: 500_000_000,
+            fee_base_msat: 0,
+            fee_proportional_millionths,
+            htlc_minimum_msat: 1,
+            htlc_min_msat: 1,
+            htlc_maximum_msat: 100_000,
+            htlc_max_msat: 100_000,
+            opener: "remote".to_string(),
+            has_htlc_data: false,
+            max_accepted_htlcs: 483,
+            our_htlcs_in_flight: 0,
+        }
+    }
+
+    fn policy(strategy: FeeStrategy, fee_ppm_target: Option<i64>) -> PeerPolicy {
+        PeerPolicy {
+            peer_id: "02peer".to_string(),
+            strategy,
+            rebalance_mode: RebalanceMode::Enabled,
+            fee_ppm_target,
+            tags: Vec::new(),
+            updated_at: 0,
+            fee_multiplier_min: None,
+            fee_multiplier_max: None,
+            expires_at: None,
+        }
+    }
+
+    fn prepared(
+        policy: PeerPolicy,
+        prior: Option<FeePrior>,
+        channel_fee_ppm: i64,
+    ) -> PreparedInitialFee {
+        PreparedInitialFee {
+            channel: channel_info(channel_fee_ppm),
+            peer_id: "02peer".to_string(),
+            policy,
+            cfg: wide_cfg(),
+            prior,
+            event_ts: EVENT_TS,
+            event_key: format!("test-event-key-{EVENT_TS}"),
+        }
+    }
+
+    struct AlwaysAuthorize;
+    impl FeeAuthorizer for AlwaysAuthorize {
+        fn authorize(
+            &self,
+            request: &FeeAuthorizationRequest,
+        ) -> Result<revops_fees::execution::FeeAuthorizationResult, DecisionInputError> {
+            Ok(revops_fees::execution::FeeAuthorizationResult {
+                authorized: true,
+                reason_code: "".to_string(),
+                trace: Some(GovernedTrace {
+                    authorized: true,
+                    reason_code: "".to_string(),
+                    intent_id: "test-intent".to_string(),
+                    idempotency_key: format!("test-{}", request.channel_id),
+                }),
+            })
+        }
+    }
+
+    struct AlwaysDeny;
+    impl FeeAuthorizer for AlwaysDeny {
+        fn authorize(
+            &self,
+            _request: &FeeAuthorizationRequest,
+        ) -> Result<revops_fees::execution::FeeAuthorizationResult, DecisionInputError> {
+            Ok(revops_fees::execution::FeeAuthorizationResult {
+                authorized: false,
+                reason_code: "governor_test_denied".to_string(),
+                trace: Some(GovernedTrace {
+                    authorized: false,
+                    reason_code: "governor_test_denied".to_string(),
+                    intent_id: "test-intent".to_string(),
+                    idempotency_key: "test-key".to_string(),
+                }),
+            })
+        }
+    }
+
+    /// Counts every entropy draw, delegating to a real seeded `PyRandom` --
+    /// proves RNG consumption (or its absence) without inspecting
+    /// `PyRandom`'s private internal state.
+    struct CountingEntropy {
+        inner: PyRandom,
+        draws: usize,
+    }
+    impl CountingEntropy {
+        fn seeded(seed: u64) -> Self {
+            CountingEntropy {
+                inner: PyRandom::seed_from_u64(seed),
+                draws: 0,
+            }
+        }
+    }
+    impl DecisionEntropy for CountingEntropy {
+        fn random(&mut self, label: &str) -> Result<f64, DecisionInputError> {
+            self.draws += 1;
+            DecisionEntropy::random(&mut self.inner, label)
+        }
+        fn gauss(&mut self, label: &str, mu: f64, sigma: f64) -> Result<f64, DecisionInputError> {
+            self.draws += 1;
+            DecisionEntropy::gauss(&mut self.inner, label, mu, sigma)
+        }
+    }
+
+    /// Contract §4.2 test 6: PASSIVE consumes no RNG, creates no state row,
+    /// no action, and an explicit skipped outcome.
+    #[test]
+    fn passive_skips_with_no_rng_no_state_no_action() {
+        let mut rng = CountingEntropy::seeded(1);
+        let p = prepared(policy(FeeStrategy::Passive, None), None, 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng);
+        assert_eq!(rng.draws, 0, "PASSIVE must never draw entropy");
+        assert_eq!(out.fee_state, None);
+        assert_eq!(out.cycle_state, None);
+        assert_eq!(out.action, None);
+        assert_eq!(out.outcome, InitialFeeOutcome::Passive);
+    }
+
+    /// Contract §4.2 test 7: STATIC with a target sends that EXACT target
+    /// (after the ordinary safety clamp), consumes no RNG, seeds no DTS
+    /// prior/nudge, and carries `policy_static`.
+    #[test]
+    fn static_with_target_uses_exact_target_no_rng() {
+        let mut rng = CountingEntropy::seeded(2);
+        let p = prepared(policy(FeeStrategy::Static, Some(777)), None, 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng);
+        assert_eq!(rng.draws, 0, "STATIC-with-target must never draw entropy");
+        assert_eq!(out.reason_code, "policy_static");
+        let action = out
+            .action
+            .expect("authorized STATIC must prepare an action");
+        assert_eq!(action.request.feeppm, 777);
+        assert!(
+            out.fee_state.unwrap().thompson.posterior_bias.is_empty(),
+            "STATIC must never seed/nudge the DTS prior"
+        );
+    }
+
+    /// Contract §4.2 test 8: STATIC without a target falls through to
+    /// DYNAMIC and consumes DYNAMIC's entropy (at least one draw).
+    #[test]
+    fn static_without_target_falls_through_to_dynamic() {
+        let mut rng = CountingEntropy::seeded(3);
+        let p = prepared(policy(FeeStrategy::Static, None), None, 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng);
+        assert!(
+            rng.draws > 0,
+            "STATIC-without-target must fall through to DYNAMIC's sample"
+        );
+        assert_eq!(out.reason_code, "channel_open");
+    }
+
+    /// Contract §4.2 test 9: DYNAMIC without gossip samples a fresh
+    /// default-mean/configured-std throwaway state; no prior seed/nudge
+    /// exists before action handling (no persistent state row at all,
+    /// since nothing changed).
+    #[test]
+    fn dynamic_without_gossip_samples_default_throwaway() {
+        let mut rng = CountingEntropy::seeded(4);
+        let p = prepared(policy(FeeStrategy::Dynamic, None), None, 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng);
+        assert!(rng.draws > 0);
+        assert_eq!(out.reason_code, "channel_open");
+        // The only fee_state present is the POST-broadcast sync (created
+        // fresh, default posterior/prior) -- never touched by a gossip
+        // seed/nudge (posterior_bias stays empty).
+        let fs = out
+            .fee_state
+            .expect("authorized broadcast still creates a sync row");
+        assert!(fs.thompson.posterior_bias.is_empty());
+        assert_eq!(
+            fs.thompson.prior_mean_fee, 200.0,
+            "default prior, no gossip"
+        );
+    }
+
+    /// Contract §4.2 test 10: DYNAMIC with gossip installs the exact
+    /// mean/std in persistent state and records exactly one `.3` nudge at
+    /// the event timestamp.
+    #[test]
+    fn dynamic_with_gossip_seeds_persistent_prior_and_nudge() {
+        let mut rng = CountingEntropy::seeded(5);
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let p = prepared(policy(FeeStrategy::Dynamic, None), Some(prior), 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng);
+        let fs = out
+            .fee_state
+            .expect("gossip-backed DYNAMIC must produce a fee_state row");
+        assert_eq!(fs.thompson.prior_mean_fee, 300.0);
+        assert_eq!(fs.thompson.prior_std_fee, 40.0);
+        assert_eq!(fs.thompson.posterior_bias.len(), 1, "exactly one nudge");
+        let (target, weight, ts) = fs.thompson.posterior_bias[0];
+        assert_eq!(target, 300.0);
+        assert_eq!(weight, INITIAL_PRIOR_NUDGE_WEIGHT);
+        assert_eq!(
+            ts, EVENT_TS,
+            "the nudge is stamped with EVENT time, never drain time"
+        );
+        // A cycle_state row must also exist (the generic serializer needs
+        // both maps populated for this channel to be durable).
+        assert!(out.cycle_state.is_some());
+    }
+
+    /// Contract §4.2 test 11 (the load-bearing one): scripted entropy so
+    /// sampling the throwaway state yields a DIFFERENT fee than sampling
+    /// the newly nudged persistent state would -- and `decide_initial_fee`
+    /// must produce the THROWAWAY result, never the persistent one.
+    #[test]
+    fn throwaway_and_persistent_states_diverge_and_throwaway_wins() {
+        const SEED: u64 = 777;
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+
+        // (a) What decide_initial_fee actually produces.
+        let mut rng_a = CountingEntropy::seeded(SEED);
+        let p = prepared(policy(FeeStrategy::Dynamic, None), Some(prior.clone()), 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng_a);
+        let action = out
+            .action
+            .clone()
+            .expect("authorized DYNAMIC must prepare an action");
+        let produced_fee = action.request.feeppm as i64;
+
+        // (b) A truly fresh throwaway sampled independently, same seed --
+        // must match (a) exactly: proves (a) sampled the throwaway.
+        let mut rng_b = CountingEntropy::seeded(SEED);
+        let mut throwaway = GaussianThompsonState {
+            prior_mean_fee: 300.0,
+            prior_std_fee: 40.0,
+            ..GaussianThompsonState::default()
+        };
+        let throwaway_fee = revops_fees::thompson::sampling::sample_fee_with_entropy(
+            &mut throwaway,
+            0,
+            100_000,
+            None,
+            &mut rng_b,
+            EVENT_TS,
+        )
+        .unwrap();
+        assert_eq!(
+            produced_fee, throwaway_fee,
+            "decide_initial_fee must sample the THROWAWAY state"
+        );
+
+        // (c) The persistent (nudged) state, sampled with the SAME seed --
+        // must DIFFER from (a)/(b): the nudge's posterior_bias shift only
+        // applies to the persistent object, proving throwaway and
+        // persistent really are distinct draws.
+        let mut rng_c = CountingEntropy::seeded(SEED);
+        let mut persistent = ChannelFeeState::default();
+        persistent.thompson.prior_mean_fee = 300.0;
+        persistent.thompson.prior_std_fee = 40.0;
+        dynamics::record_posterior_nudge(
+            &mut persistent.thompson,
+            300.0,
+            INITIAL_PRIOR_NUDGE_WEIGHT,
+            EVENT_TS,
+        );
+        let persistent_fee = revops_fees::thompson::sampling::sample_fee_with_entropy(
+            &mut persistent.thompson,
+            0,
+            100_000,
+            None,
+            &mut rng_c,
+            EVENT_TS,
+        )
+        .unwrap();
+        assert_ne!(
+            produced_fee, persistent_fee,
+            "sampling the nudged PERSISTENT state must differ from the throwaway result -- \
+             this is exactly the attractive-but-wrong reuse contract §2.2 forbids"
+        );
+    }
+
+    /// Contract §4.2 test 12: the target traverses the existing pure
+    /// execution clamp and carries the exact reason identity.
+    #[test]
+    fn clamp_and_reason_contract() {
+        let mut rng = CountingEntropy::seeded(6);
+        let mut cfg = wide_cfg();
+        cfg.min_fee_ppm = 100;
+        cfg.max_fee_ppm = 200;
+        let p = PreparedInitialFee {
+            cfg,
+            ..prepared(policy(FeeStrategy::Static, Some(50)), None, 500)
+        };
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng);
+        assert_eq!(out.reason_code, "policy_static");
+        let action = out
+            .action
+            .expect("authorized STATIC must prepare an action");
+        assert_eq!(
+            action.request.feeppm, 100,
+            "50 must clamp up to the configured floor"
+        );
+        assert!(action.decision.clamp_log.is_some());
+    }
+
+    /// Contract §4.2 test 13: governor denial preserves the prior-seed
+    /// ordering (Python seeds before authorization), but records no action
+    /// and no post-broadcast state sync.
+    #[test]
+    fn governor_denial_keeps_seed_but_no_action_or_sync() {
+        let mut rng = CountingEntropy::seeded(7);
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let p = prepared(policy(FeeStrategy::Dynamic, None), Some(prior), 500);
+        let out = decide_initial_fee(&p, None, None, &AlwaysDeny, &mut rng);
+        assert_eq!(
+            out.outcome,
+            InitialFeeOutcome::GovernorDenied {
+                reason_code: "governor_test_denied".to_string()
+            }
+        );
+        assert_eq!(
+            out.action, None,
+            "a denied decision must never carry a prepared action"
+        );
+        let fs = out
+            .fee_state
+            .expect("the gossip prior seed persists despite denial (py ordering)");
+        assert_eq!(fs.thompson.prior_mean_fee, 300.0);
+        assert_eq!(fs.thompson.posterior_bias.len(), 1);
+        // No post-broadcast sync: last_fee_ppm/last_broadcast_fee_ppm/
+        // last_update were never touched by a denied decision.
+        assert_eq!(fs.last_fee_ppm, 0);
+        assert_eq!(fs.last_update, 0);
+    }
+
+    /// A brand-new channel is not at 0 ppm -- the pre-action fee the
+    /// governor/action see must come from the live CLN-announced policy
+    /// (`ChannelInfo.fee_proportional_millionths`), never from absent
+    /// persisted state.
+    #[test]
+    fn old_fee_ppm_comes_from_channel_info_not_persisted_state() {
+        let mut rng = CountingEntropy::seeded(8);
+        // Control: a channel whose CLN-announced fee is 0 (the vacuous
+        // case that could pass even with the bug).
+        let p_zero = prepared(policy(FeeStrategy::Static, Some(500)), None, 0);
+        let out_zero = decide_initial_fee(&p_zero, None, None, &AlwaysAuthorize, &mut rng);
+        assert_eq!(out_zero.action.unwrap().old_fee_ppm, 0);
+
+        // The real case: CLN-announced fee is nonzero and there is NO
+        // persisted state at all -- old_fee_ppm must still be the real
+        // channel_info value, not 0.
+        let mut rng2 = CountingEntropy::seeded(9);
+        let p = prepared(policy(FeeStrategy::Static, Some(500)), None, 321);
+        let out = decide_initial_fee(&p, None, None, &AlwaysAuthorize, &mut rng2);
+        assert_eq!(
+            out.action.unwrap().old_fee_ppm,
+            321,
+            "old_fee_ppm must come from ChannelInfo.fee_proportional_millionths, not persisted state"
         );
     }
 }

@@ -482,6 +482,20 @@ pub struct FeeCycleCommit {
     pub governor: Vec<GovernorAuditRow>,
     pub ledger: Vec<LedgerAuditRow>,
     pub outcomes: Vec<ShadowCycleOutcomeRow>,
+    /// Task 44 / A3: the ONE trigger receipt this commit's decision is
+    /// bound to, when this commit is an out-of-cycle
+    /// `commit_initial_fee_event` rather than a scheduled cycle. Inserted
+    /// inside the SAME transaction as every other row below -- unlike
+    /// [`super::super::fee_state`]'s (crate `revops`) separate, NON-atomic
+    /// `record_trigger_event`, a receipt claiming an effect must never be
+    /// visible without its state/action/outcome, and vice versa (contract
+    /// §3.2: "complete state, action, outcome, and receipt become visible
+    /// atomically"). Regular per-cycle commits leave this `None` -- their
+    /// trigger receipt (the `FixedInterval` dispatch) is written separately
+    /// by the existing non-atomic path, which is fine there because a
+    /// scheduled cycle's receipt never claims a specific effect the way an
+    /// out-of-cycle one does.
+    pub trigger_receipt: Option<FeeTriggerEventRow>,
 }
 
 /// The latest persisted controller state: the generation it was written
@@ -654,6 +668,29 @@ fn commit_fee_cycle_locked(conn: &Connection, commit: &FeeCycleCommit) -> Result
     )
     .context("bump fee state generation")?;
 
+    // Task 44 / A3: the trigger receipt, INSIDE this same transaction --
+    // see `FeeCycleCommit::trigger_receipt`'s doc comment. A commit that
+    // fails after this point rolls the receipt back along with everything
+    // else; one that never reaches `COMMIT` never left a receipt claiming
+    // an effect that did not durably happen.
+    if let Some(receipt) = &commit.trigger_receipt {
+        conn.execute(
+            "INSERT INTO rust_fee_trigger_events
+                 (trigger_type, channel_id, cycle_id, cycle_ts, received_at, coalesced, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                receipt.trigger_type,
+                receipt.channel_id,
+                commit.cycle_id,
+                receipt.cycle_ts,
+                receipt.received_at,
+                receipt.coalesced,
+                receipt.detail,
+            ],
+        )
+        .context("insert atomic trigger receipt row")?;
+    }
+
     conn.execute_batch("COMMIT")
         .context("commit fee cycle transaction")?;
     Ok(next_generation as u64)
@@ -702,6 +739,93 @@ pub fn load_latest_state(conn: &Connection) -> Result<FeeStateSnapshot> {
 /// that only wants one integer doesn't force a full-table read on the
 /// single-owner actor the cycle loop writes through (head-of-line
 /// blocking risk on a busy store).
+/// Task 44 / A3, live-review finding F3: has a commit with this EXACT
+/// (stable, content-derived) `cycle_id` already been durably committed?
+/// The out-of-cycle new-channel commit path uses this to distinguish a
+/// genuinely new event from a replay of the SAME event after a restart
+/// (the replayed event recomputes an IDENTICAL `cycle_id`, since it is
+/// derived only from the event's own content -- channel id, transition,
+/// and event timestamp -- never wall-clock-at-processing or a process id).
+pub fn cycle_exists(conn: &Connection, cycle_id: &str) -> Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rust_fee_cycles WHERE cycle_id = ?1",
+            params![cycle_id],
+            |r| r.get(0),
+        )
+        .context("check cycle_id existence")?;
+    Ok(count > 0)
+}
+
+/// Task 44 / A3 (live-review F7): [`cycle_exists`] plus the CURRENT state
+/// generation, read together inside one transaction so the pair is a
+/// consistent point-in-time observation. The generation lets the
+/// scheduler bind its later commit to the exact state it decided against
+/// (via [`commit_fee_cycle_guarded`]'s compare-and-set) -- this read
+/// alone is advisory; the CAS is the guard.
+pub fn cycle_exists_with_generation(conn: &Connection, cycle_id: &str) -> Result<(bool, u64)> {
+    conn.execute_batch("BEGIN")
+        .context("begin cycle_exists_with_generation read transaction")?;
+    let result = (|| {
+        let exists = cycle_exists(conn, cycle_id)?;
+        let generation = current_state_generation(conn)?;
+        Ok((exists, generation))
+    })();
+    let _ = conn.execute_batch("COMMIT");
+    result
+}
+
+/// Task 44 / A3 (live-review F7): the outcome of a guarded
+/// (compare-and-set) commit -- either the commit landed (with its new
+/// generation), or the store's generation no longer matched what the
+/// decision was computed against and NOTHING was written. A conflict is
+/// an in-band, expected-shape outcome (the caller fails closed and
+/// discards its staged state), distinct from an `Err` (the commit could
+/// not even be attempted/completed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedCommitOutcome {
+    Committed(u64),
+    GenerationConflict { expected: u64, found: u64 },
+}
+
+/// [`commit_fee_cycle`]'s guarded form (Task 44 / A3, live-review F7):
+/// inside the SAME `BEGIN IMMEDIATE` transaction, first compare the
+/// current state generation against `expected_prior_generation`; on
+/// mismatch roll back having written NOTHING and report the conflict
+/// in-band. The out-of-cycle A3 commit uses this so a decision computed
+/// against state generation N can never land on top of a store that has
+/// since advanced past N.
+pub fn commit_fee_cycle_guarded(
+    conn: &Connection,
+    commit: &FeeCycleCommit,
+    expected_prior_generation: u64,
+) -> Result<GuardedCommitOutcome> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("begin guarded fee cycle commit transaction")?;
+    let found = match current_state_generation(conn) {
+        Ok(g) => g,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    };
+    if found != expected_prior_generation {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Ok(GuardedCommitOutcome::GenerationConflict {
+            expected: expected_prior_generation,
+            found,
+        });
+    }
+    let result = commit_fee_cycle_locked(conn, commit);
+    match result {
+        Ok(generation) => Ok(GuardedCommitOutcome::Committed(generation)),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 pub fn current_state_generation(conn: &Connection) -> Result<u64> {
     let generation: i64 = conn
         .query_row(
