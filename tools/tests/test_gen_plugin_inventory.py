@@ -283,7 +283,9 @@ def test_rust_only_methods_are_separate_and_placeholders_are_not_effective():
         "revops-fee-runway-status",
     }
     by_name = {entry["name"]: entry for entry in inventory["python_rpcs"]}
-    assert sum(entry["state"]["reachable"] for entry in by_name.values()) == 20
+    # Task 61 4E raised this from 20: the four LN+ operator RPCs are now
+    # genuinely registered and reachable.
+    assert sum(entry["state"]["reachable"] for entry in by_name.values()) == 24
     for name in (
         "revenue-analyze",
         "revenue-capacity-report",

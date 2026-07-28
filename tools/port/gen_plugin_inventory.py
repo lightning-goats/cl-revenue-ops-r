@@ -170,6 +170,14 @@ FULL_EFFECTIVE_RPCS = {
 # registrations must be classified here before inventory generation succeeds.
 CLASSIFIED_REACHABLE_RPCS = {
     "revenue-analyze",
+    # Task 61 4E: the four LN+ operator RPCs through the LN+ owner's
+    # serialization lock (completion acks). Classified PARTIAL, review
+    # pending — full-effective requires the independent Python review;
+    # never self-declared.
+    "revenue-lnplus-abandon",
+    "revenue-lnplus-backfill",
+    "revenue-lnplus-breaker-clear",
+    "revenue-lnplus-status",
     "revenue-capacity-report",
     "revenue-config",
     "revenue-dashboard",
@@ -210,7 +218,6 @@ EXTRA_COMPILED_RPCS = {
     "revenue-boltz-status",
     "revenue-capex-status",
     "revenue-econ-reconcile",
-    "revenue-lnplus-status",
     "revenue-rebalance-debug",
     "revenue-total-cost-budget",
 }
@@ -455,10 +462,22 @@ def loop_state(name: str) -> dict[str, Any]:
             "soak": "passed",
             "owner_task": "fee-port-reviewed",
         }
+    if name == "lnplus-watcher":
+        # Task 61 4D/4E: the REAL LN+ observer pass is spawned behind
+        # LoopId::LnPlus (watcher-only; evaluator waits on the Task 62
+        # planner-evidence rail). PARTIAL, review pending — never
+        # self-declared full.
+        return {
+            "compiled": True,
+            "reachable": True,
+            "effective": "partial",
+            "review": "pending",
+            "soak": "pending",
+            "owner_task": "hexmem-61",
+        }
     owners = {
         "rebalance-check": "hexmem-60",
         "capacity-planner": "hexmem-62",
-        "lnplus-watcher": "hexmem-61",
         "boltz-auto-cycle": "hexmem-63",
         "flow-analysis": "task-8-core-parity",
         "startup-snapshot": "task-8-core-parity",
@@ -469,7 +488,6 @@ def loop_state(name: str) -> dict[str, Any]:
         in {
             "rebalance-check",
             "capacity-planner",
-            "lnplus-watcher",
             "boltz-auto-cycle",
             "flow-analysis",
         },
