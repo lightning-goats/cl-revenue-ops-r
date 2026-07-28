@@ -2439,10 +2439,16 @@ mod seedonce_restart {
     fn seed_nudgeable_channel(owner: &mut CycleOwner, channel_id: &str, fee_ppm: i64) {
         let mut fee_state = ChannelFeeState::default();
         fee_state.last_fee_ppm = fee_ppm;
+        let mut cycle_state = ChannelCycleState::default();
+        cycle_state.last_fee_ppm = fee_ppm;
         owner
             .state_mut()
             .fee_states
             .insert(channel_id.to_string(), fee_state);
+        owner
+            .state_mut()
+            .cycle_states
+            .insert(channel_id.to_string(), cycle_state);
     }
 
     fn nudges(owner: &CycleOwner, channel_id: &str) -> usize {
@@ -2571,6 +2577,11 @@ mod seedonce_restart {
         // within NUDGE_DEDUP_TOLERANCE of an existing target instead of
         // appending, and both nudges imply the same 400 ppm. The observable
         // proof that it fired is the refreshed timestamp.
+        // A scheduled cycle drains the pending trigger before a later
+        // occurrence is admitted. Clear that separate gate here so this
+        // assertion measures ONLY the rate-limit boundary.
+        owner.drain_pending_triggers_for_test();
+
         let before = owner.state().fee_states["1x1x0"].thompson.posterior_bias[0].2;
         owner.handle_failed_forward(&failed_forward(
             "1x1x0",
@@ -2585,6 +2596,167 @@ mod seedonce_restart {
         );
     }
 
+    fn applied_failed_forward_receipts(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM rust_fee_trigger_events \
+             WHERE trigger_type = 'failed_forward' AND detail LIKE '%APPLIED%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn failed_forward_cycle_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM rust_fee_cycles WHERE cycle_id LIKE 'rust-a1-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Task 53 RED: the queue gate must run before the nudge. Saturating
+    /// distinct scopes makes this occurrence Dropped, so both halves of
+    /// the controller state must remain byte-for-byte equivalent.
+    #[test]
+    fn failed_forward_dropped_by_backpressure_leaves_state_byte_identical() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+        let before_fee = owner.state().fee_states["1x1x0"].clone();
+        let before_cycle = owner.state().cycle_states["1x1x0"].clone();
+
+        for i in 0..TRIGGER_QUEUE_CAPACITY {
+            owner.handle_forward_event(&format!("task53-filler-{i}"), NOW);
+        }
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+
+        assert_eq!(owner.state().fee_states["1x1x0"], before_fee);
+        assert_eq!(owner.state().cycle_states["1x1x0"], before_cycle);
+        assert_eq!(owner.trigger_queue_dropped_total(), 1);
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(applied_failed_forward_receipts(&conn), 0);
+    }
+
+    /// Task 53 RED: a second same-channel occurrence is Coalesced while
+    /// the first trigger is pending and must not refresh or append a
+    /// posterior nudge.
+    #[test]
+    fn coalesced_failed_forward_applies_exactly_one_nudge() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+        owner.handle_failed_forward(&failed_forward(
+            "1x1x0",
+            NOW + FAILURE_NUDGE_MIN_INTERVAL_SECONDS,
+        ));
+
+        let bias = &owner.state().fee_states["1x1x0"].thompson.posterior_bias;
+        assert_eq!(bias.len(), 1);
+        assert_eq!(bias[0].2, NOW, "coalesced occurrence must have zero effect");
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(applied_failed_forward_receipts(&conn), 1);
+    }
+
+    /// Task 53 RED: the first accepted event must durably advance the
+    /// Rust-owned generation and publish its APPLIED receipt in that
+    /// same transaction, not merely mutate memory.
+    #[test]
+    fn accepted_failed_forward_commits_state_and_receipt_atomically_once() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 1);
+        assert_eq!(failed_forward_cycle_count(&conn), 1);
+        assert_eq!(applied_failed_forward_receipts(&conn), 1);
+        let persisted: String = conn
+            .query_row(
+                "SELECT v2_state_json FROM rust_fee_state WHERE channel_id = '1x1x0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(persisted.contains("[400.0, 0.1,"), "{persisted}");
+    }
+
+    /// Task 53 RED: a failed atomic state transition may leave neither an
+    /// installed in-memory nudge nor a receipt claiming APPLIED.
+    #[test]
+    fn failed_forward_commit_failure_leaves_no_state_or_success_receipt() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let fail_commits = Arc::new(AtomicBool::new(true));
+        let store = TestStore::open(&store_path, Arc::clone(&fail_commits));
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED,
+            Some(Box::new(store)),
+        );
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+        let before = owner.state().fee_states["1x1x0"].clone();
+
+        owner.handle_failed_forward(&failed_forward("1x1x0", NOW));
+
+        assert_eq!(owner.state().fee_states["1x1x0"], before);
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(generation(&conn), 0);
+        assert_eq!(failed_forward_cycle_count(&conn), 0);
+        assert_eq!(applied_failed_forward_receipts(&conn), 0);
+    }
+
+    /// Task 53 RED: replaying identical content through a new owner over
+    /// the same store must be recognized by the stable event key. The
+    /// replay may be auditable, but it may not claim or apply a second
+    /// nudge.
+    #[test]
+    fn replayed_failed_forward_is_idempotent_across_owner_restart() {
+        let fx = fixture();
+        let (mut owner, store_path) = owner_with_any_store(&fx, StateLifecycle::RehydratePerCycle);
+        seed_nudgeable_channel(&mut owner, "1x1x0", 500);
+        let signal = failed_forward("1x1x0", NOW);
+        owner.handle_failed_forward(&signal);
+        let fee = owner.state().fee_states["1x1x0"].clone();
+        let cycle = owner.state().cycle_states["1x1x0"].clone();
+        drop(owner);
+
+        let store = TestStore::open(&store_path, Arc::new(AtomicBool::new(false)));
+        let mut restarted = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::default(),
+            },
+            SEED + 1,
+            Some(Box::new(store)),
+        );
+        restarted
+            .state_mut()
+            .fee_states
+            .insert("1x1x0".to_string(), fee);
+        restarted
+            .state_mut()
+            .cycle_states
+            .insert("1x1x0".to_string(), cycle);
+        restarted.handle_failed_forward(&signal);
+
+        let conn = Connection::open(&store_path).unwrap();
+        assert_eq!(failed_forward_cycle_count(&conn), 1);
+        assert_eq!(applied_failed_forward_receipts(&conn), 1);
+    }
     // -----------------------------------------------------------------
     // Task 44 / A2: the policy-change PRODUCER. The effect was already
     // ported (handle_policy_change wakes the peer's channels); nothing

@@ -145,7 +145,7 @@
 //! `std::sync::mpsc::Receiver::recv` would otherwise stall a tokio worker
 //! thread).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use revops_fees::thompson::dynamics;
 use std::path::{Path, PathBuf};
@@ -1255,7 +1255,47 @@ pub struct FailedForwardSignal {
     pub event_ts: i64,
 }
 
-/// What [`CycleOwner::apply_failure_nudge`] actually did, so the trigger
+/// Stable content identity for one failed-forward effect. Length-prefixed
+/// fields keep optional/free-text boundaries unambiguous; SHA-256 keeps the
+/// database cycle key bounded even when CLN supplies a long failreason.
+pub fn failed_forward_event_key(signal: &FailedForwardSignal) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    };
+    field(signal.channel_id.as_bytes());
+    field(&signal.amount_msat.to_be_bytes());
+    match signal.failcode {
+        Some(code) => {
+            field(&[1]);
+            field(&code.to_be_bytes());
+        }
+        None => field(&[0]),
+    }
+    match signal.failreason.as_deref() {
+        Some(reason) => {
+            field(&[1]);
+            field(reason.as_bytes());
+        }
+        None => field(&[0]),
+    }
+    field(&signal.event_ts.to_be_bytes());
+
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("rust-a1-{hex}")
+}
+
+/// A failure nudge evaluated against cloned state. The owner installs the
+/// clone only after the state row and effect receipt commit atomically.
+struct StagedFailureNudge {
+    outcome: NudgeOutcome,
+    fee_state: Option<ChannelFeeState>,
+}
+/// What [`CycleOwner::stage_failure_nudge`] decided, so the trigger
 /// receipt records the truth rather than a hopeful summary. Every skip
 /// names the guard that fired.
 #[derive(Debug, Clone, PartialEq)]
@@ -1288,6 +1328,9 @@ pub struct CycleOwner {
     /// py `_last_failure_nudge_ts` (3011): when this channel last took a
     /// failure nudge, for the per-window rate limit.
     last_failure_nudge_ts: HashMap<String, i64>,
+    // Task 53: channels whose pending trigger already committed one nudge.
+    // Cleared exactly when the bounded trigger queue drains for a cycle.
+    applied_failure_nudges_pending: HashSet<String>,
     /// Task 44 / A2: last seen `peer_policies.updated_at` per peer, so a
     /// change can be detected whoever made it (see
     /// [`Self::detect_policy_changes`]).
@@ -1424,6 +1467,7 @@ impl CycleOwner {
             lifecycle: cfg.lifecycle,
             last_fee_apply_ts: HashMap::new(),
             last_failure_nudge_ts: HashMap::new(),
+            applied_failure_nudges_pending: HashSet::new(),
             last_policy_updated_at: HashMap::new(),
             hydrated_once: false,
             seed_refused: false,
@@ -1530,6 +1574,7 @@ impl CycleOwner {
         // skipped/failed cycle still means the NEXT cycle re-evaluates
         // from current state, so there is nothing left to keep pending).
         self.trigger_queue.drain_all();
+        self.applied_failure_nudges_pending.clear();
 
         let (outcome, cycle_id) = self.run_cycle_body(prepared, now, decision_clock);
 
@@ -2313,26 +2358,14 @@ impl CycleOwner {
     pub fn handle_failed_forward(&mut self, signal: &FailedForwardSignal) {
         let channel_id = signal.channel_id.as_str();
         let now = signal.event_ts;
-
-        let applied = self.apply_failure_nudge(signal);
-
         let trigger = FeeTrigger::FailedForward {
             channel_id: channel_id.to_string(),
         };
-        let detail = match applied {
-            NudgeOutcome::Applied {
-                implied_fee,
-                weight,
-            } => format!(
-                "failed-forward posterior nudge APPLIED: target {implied_fee} ppm, weight \
-                 {weight:.4} -- did not itself run a cycle"
-            ),
-            NudgeOutcome::Skipped(reason) => {
-                format!("failed-forward nudge NOT applied ({reason}) -- did not itself run a cycle")
-            }
-        };
-        let outcome = self.trigger_queue.offer(trigger.clone(), now);
-        if matches!(outcome, TriggerOutcome::Dropped) {
+
+        // Task 53: admission is the first operation. A bounded-queue
+        // refusal must be byte-identical at the owner-state boundary.
+        let queue_outcome = self.trigger_queue.offer(trigger.clone(), now);
+        if matches!(queue_outcome, TriggerOutcome::Dropped) {
             eprintln!(
                 "revops: TRIGGER DROPPED (bounded queue at capacity): failed_forward channel \
                  {channel_id} at {now}"
@@ -2342,71 +2375,224 @@ impl CycleOwner {
                 now,
                 false,
                 None,
-                "DROPPED: bounded trigger queue at capacity (backpressure)",
+                "DROPPED: bounded trigger queue at capacity (backpressure); no nudge evaluated",
             );
             return;
         }
-        self.record_trigger_receipt(
-            &trigger,
-            now,
-            matches!(outcome, TriggerOutcome::Coalesced),
-            None,
-            &detail,
+
+        let coalesced = matches!(queue_outcome, TriggerOutcome::Coalesced);
+        if coalesced && self.applied_failure_nudges_pending.contains(channel_id) {
+            self.record_trigger_receipt(
+                &trigger,
+                now,
+                true,
+                None,
+                "COALESCED: an earlier pending occurrence already committed one nudge; this \
+                 occurrence made no state change",
+            );
+            return;
+        }
+
+        let event_key = failed_forward_event_key(signal);
+        let cycle_exists = match self.store.as_ref() {
+            Some(store) => store.cycle_exists(&event_key),
+            None => {
+                self.persistence_failures += 1;
+                eprintln!(
+                    "revops: failed_forward persistence failure #{}: no Rust-owned store; \
+                     channel {channel_id} at {now} was not evaluated",
+                    self.persistence_failures
+                );
+                return;
+            }
+        };
+        match cycle_exists {
+            Ok(true) => {
+                self.record_trigger_receipt(
+                    &trigger,
+                    now,
+                    coalesced,
+                    None,
+                    format!(
+                        "DUPLICATE: failed-forward event {event_key} already committed; no \
+                         second nudge"
+                    ),
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                self.persistence_failures += 1;
+                eprintln!(
+                    "revops: failed_forward idempotency read failure #{} for channel \
+                     {channel_id} at {now}: {e:#}; no nudge evaluated",
+                    self.persistence_failures
+                );
+                self.record_trigger_receipt(
+                    &trigger,
+                    now,
+                    coalesced,
+                    None,
+                    "PERSISTENCE FAILED: idempotency read failed; no nudge evaluated",
+                );
+                return;
+            }
+        }
+
+        let staged = self.stage_failure_nudge(signal);
+        let (implied_fee, weight) = match staged.outcome {
+            NudgeOutcome::Applied {
+                implied_fee,
+                weight,
+            } => (implied_fee, weight),
+            NudgeOutcome::Skipped(reason) => {
+                self.record_trigger_receipt(
+                    &trigger,
+                    now,
+                    coalesced,
+                    None,
+                    format!(
+                        "failed-forward nudge NOT applied ({reason}) -- did not itself run a cycle"
+                    ),
+                );
+                return;
+            }
+        };
+        let fee_state = staged
+            .fee_state
+            .expect("an applied failed-forward nudge always carries staged fee state");
+        let Some(cycle_state) = self.state.cycle_states.get(channel_id).cloned() else {
+            self.record_trigger_receipt(
+                &trigger,
+                now,
+                coalesced,
+                None,
+                "failed-forward nudge NOT applied (no paired cycle state to persist atomically)",
+            );
+            return;
+        };
+
+        let detail = format!(
+            "failed-forward posterior nudge APPLIED: target {implied_fee} ppm, weight \
+             {weight:.4} -- committed atomically with state; did not itself run a cycle"
         );
+        let receipt = build_receipt(&trigger, now, coalesced, Some((&event_key, now)), detail);
+        let commit = FeeCycleCommit {
+            cycle_id: event_key.clone(),
+            started_at: now,
+            completed_at: now,
+            source_commit: source_commit().to_string(),
+            binary_sha256: binary_sha256().to_string(),
+            state_rows: vec![revops_db::fee_runway::FeeStateRow {
+                channel_id: channel_id.to_string(),
+                v2_state_json: serialize_state_envelope(&cycle_state, &fee_state),
+                last_update: cycle_state.last_update,
+            }],
+            trigger_receipt: Some(receipt),
+            ..FeeCycleCommit::default()
+        };
+
+        let commit_result = self
+            .store
+            .as_ref()
+            .expect("store presence checked before staging")
+            .commit_fee_cycle(commit);
+        match commit_result {
+            Ok(generation) => {
+                self.state
+                    .fee_states
+                    .insert(channel_id.to_string(), fee_state);
+                self.last_failure_nudge_ts
+                    .insert(channel_id.to_string(), now);
+                self.applied_failure_nudges_pending
+                    .insert(channel_id.to_string());
+                self.state_generation = Some(generation);
+            }
+            Err(e) => {
+                self.persistence_failures += 1;
+                eprintln!(
+                    "revops: failed_forward atomic commit failure #{} for channel {channel_id} \
+                     at {now}: {e:#}; staged state was not installed",
+                    self.persistence_failures
+                );
+                self.record_trigger_receipt(
+                    &trigger,
+                    now,
+                    coalesced,
+                    None,
+                    "PERSISTENCE FAILED: posterior nudge was not installed; atomic state/receipt \
+                     commit rolled back",
+                );
+            }
+        }
     }
 
-    /// The nudge itself. Split out so every guard can be driven directly
-    /// and the receipt text above cannot claim an application that did not
-    /// happen -- the caller consumes this return value, so the effect
-    /// cannot be deleted without the call site failing to compile.
-    fn apply_failure_nudge(&mut self, signal: &FailedForwardSignal) -> NudgeOutcome {
+    /// Evaluate a nudge against cloned state. Nothing owned by the
+    /// scheduler changes until handle_failed_forward commits the clone
+    /// and its effect receipt in one transaction.
+    fn stage_failure_nudge(&self, signal: &FailedForwardSignal) -> StagedFailureNudge {
         let channel_id = signal.channel_id.as_str();
         let now = signal.event_ts;
 
         if channel_id.is_empty() {
-            return NudgeOutcome::Skipped("no outgoing channel on the event");
+            return StagedFailureNudge {
+                outcome: NudgeOutcome::Skipped("no outgoing channel on the event"),
+                fee_state: None,
+            };
         }
         if !dynamics::is_fee_relevant_failure(signal.failcode, signal.failreason.as_deref()) {
-            return NudgeOutcome::Skipped("not a fee-relevant failure (audit DTS-4b)");
+            return StagedFailureNudge {
+                outcome: NudgeOutcome::Skipped("not a fee-relevant failure (audit DTS-4b)"),
+                fee_state: None,
+            };
         }
         if let Some(applied_ts) = self.last_fee_apply_ts.get(channel_id) {
             if *applied_ts != 0 && now - *applied_ts < FAILURE_NUDGE_GOSSIP_SETTLE_SECONDS {
-                return NudgeOutcome::Skipped(
-                    "inside the gossip-settle window after our own apply",
-                );
+                return StagedFailureNudge {
+                    outcome: NudgeOutcome::Skipped(
+                        "inside the gossip-settle window after our own apply",
+                    ),
+                    fee_state: None,
+                };
             }
         }
         if let Some(last_nudge) = self.last_failure_nudge_ts.get(channel_id) {
             if *last_nudge != 0 && now - *last_nudge < FAILURE_NUDGE_MIN_INTERVAL_SECONDS {
-                return NudgeOutcome::Skipped("rate limited: already nudged this window");
+                return StagedFailureNudge {
+                    outcome: NudgeOutcome::Skipped("rate limited: already nudged this window"),
+                    fee_state: None,
+                };
             }
         }
-        let Some(fee_state) = self.state.fee_states.get_mut(channel_id) else {
-            return NudgeOutcome::Skipped(
-                "no persisted DTS evidence for this channel: a failed forward must never be a \
-                 channel's first posterior evidence",
-            );
+        let Some(mut fee_state) = self.state.fee_states.get(channel_id).cloned() else {
+            return StagedFailureNudge {
+                outcome: NudgeOutcome::Skipped(
+                    "no persisted DTS evidence for this channel: a failed forward must never be a \
+                     channel's first posterior evidence",
+                ),
+                fee_state: None,
+            };
         };
 
-        // py reads `cfs.last_fee_ppm` in the PRODUCER under `_state_lock`
-        // (cl-revenue-ops.py:6932) and skips when it is not positive; Rust
-        // owns that state on this thread, so the read happens here instead.
-        // Same guard, same outcome -- only the order relative to the state
-        // lookup differs, and both orders end in "no nudge".
+        // Python reads cfs.last_fee_ppm in the producer under its state
+        // lock and skips when it is not positive. Rust owns that state on
+        // this thread, so the equivalent read is local.
         let current_fee_ppm = fee_state.last_fee_ppm;
         if current_fee_ppm <= 0 {
-            return NudgeOutcome::Skipped("channel has no positive current fee to imply from");
+            return StagedFailureNudge {
+                outcome: NudgeOutcome::Skipped("channel has no positive current fee to imply from"),
+                fee_state: None,
+            };
         }
         let implied_fee = dynamics::failed_forward_implied_fee(current_fee_ppm);
-        // py: amount_sats = amount_msat / 1000, and the weight helper
-        // reproduces the 0.1 base plus the log10 boost exactly.
         let weight = dynamics::failed_forward_nudge_weight(signal.amount_msat as f64 / 1000.0);
         dynamics::record_posterior_nudge(&mut fee_state.thompson, implied_fee as f64, weight, now);
-        self.last_failure_nudge_ts
-            .insert(channel_id.to_string(), now);
-        NudgeOutcome::Applied {
-            implied_fee,
-            weight,
+        StagedFailureNudge {
+            outcome: NudgeOutcome::Applied {
+                implied_fee,
+                weight,
+            },
+            fee_state: Some(fee_state),
         }
     }
 
@@ -3287,6 +3473,15 @@ impl CycleOwner {
     /// counter, alongside [`Self::persistence_failures`]).
     pub fn trigger_queue_dropped_total(&self) -> u64 {
         self.trigger_queue.dropped_total()
+    }
+
+    // Integration-test seam: a real scheduled cycle drains both pieces
+    // together before evaluating. Tests use this only to isolate cooldown
+    // boundary semantics from pending-trigger coalescing.
+    #[doc(hidden)]
+    pub fn drain_pending_triggers_for_test(&mut self) {
+        self.trigger_queue.drain_all();
+        self.applied_failure_nudges_pending.clear();
     }
 
     /// [`CycleMsg::Query`]'s handler -- the `revenue-r-fee-debug` RPC's
