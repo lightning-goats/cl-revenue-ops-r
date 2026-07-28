@@ -19,8 +19,8 @@ use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
     active_spend_reservations, all_policies, closed_channels_summary, closure_costs_windows,
     config_override, hot_channel_protection_override_peers, last_policy_change_timestamp,
-    lifetime_stats, pnl_summary, policies_by_tag, policy_changes_since, policy_for_peer,
-    spend_ledger_aggregates,
+    lifetime_stats, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
+    policy_changes_since, policy_for_peer, spend_ledger_aggregates,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -314,6 +314,150 @@ async fn config_override_does_not_leak_across_keys() {
         config_override(&handle, "daily_budget_sats").await.unwrap(),
         Some("1000".to_string())
     );
+}
+
+#[tokio::test]
+async fn planner_candidates_match_python_filter_order_limit_and_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("planner-candidates.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        let rows = [
+            (
+                "peer-high",
+                7.0,
+                "gossip",
+                300i64,
+                Some(3_000_000i64),
+                4i64,
+                1i64,
+                Some(r#"{"rank":1}"#),
+            ),
+            ("peer-mid", 3.0, "manual", 200i64, None, 2i64, 0i64, None),
+            (
+                "peer-low",
+                -2.0,
+                "gossip",
+                100i64,
+                Some(1_000_000i64),
+                0i64,
+                5i64,
+                Some(r#"{"rank":3}"#),
+            ),
+        ];
+        for (peer, score, source, evaluated, capacity, successes, failures, metadata) in rows {
+            conn.execute(
+                "INSERT INTO planner_candidates
+                 (peer_id, score, source, last_evaluated,
+                  capacity_recommendation_sats, connect_successes,
+                  connect_failures, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    peer, score, source, evaluated, capacity, successes, failures, metadata
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let all = planner_candidates(&handle, -999.0, None, 2).await.unwrap();
+    assert_eq!(
+        all.iter().map(|r| r.peer_id.as_str()).collect::<Vec<_>>(),
+        vec!["peer-high", "peer-mid"],
+        "Python orders score descending before applying LIMIT"
+    );
+    assert_eq!(all[0].capacity_recommendation_sats, Some(3_000_000));
+    assert_eq!(all[0].connect_successes, 4);
+    assert_eq!(all[0].metadata_json.as_deref(), Some(r#"{"rank":1}"#));
+    assert_eq!(all[1].capacity_recommendation_sats, None);
+    assert_eq!(all[1].metadata_json, None);
+
+    let gossip = planner_candidates(&handle, -2.0, Some("gossip"), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        gossip
+            .iter()
+            .map(|r| (r.peer_id.as_str(), r.score))
+            .collect::<Vec<_>>(),
+        vec![("peer-high", 7.0), ("peer-low", -2.0)],
+        "min_score is inclusive and source filtering happens before ordering"
+    );
+}
+
+#[tokio::test]
+async fn planner_actions_match_python_newest_first_limit_and_null_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("planner-actions.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO planner_actions
+             (action_type, peer_id, channel_id, amount_sats,
+              estimated_cost_sats, actual_cost_sats, status, created_at,
+              completed_at, reason, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "open",
+                "peer-old",
+                Option::<String>::None,
+                Some(1_000_000i64),
+                Some(5_000i64),
+                Option::<i64>::None,
+                "planned",
+                100i64,
+                Option::<i64>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO planner_actions
+             (action_type, peer_id, channel_id, amount_sats,
+              estimated_cost_sats, actual_cost_sats, status, created_at,
+              completed_at, reason, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "close",
+                "peer-new",
+                Some("1x2x3"),
+                Option::<i64>::None,
+                Some(700i64),
+                Some(650i64),
+                "completed",
+                200i64,
+                Some(210i64),
+                Some("underwater"),
+                Some(r#"{"forced":true}"#),
+            ],
+        )
+        .unwrap();
+    }
+
+    let handle = spawn_read_only(&path).await.unwrap();
+    let actions = planner_actions(&handle, None, 1).await.unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].action_type, "close");
+    assert_eq!(actions[0].peer_id, "peer-new");
+    assert_eq!(actions[0].channel_id.as_deref(), Some("1x2x3"));
+    assert_eq!(actions[0].amount_sats, None);
+    assert_eq!(actions[0].actual_cost_sats, Some(650));
+    assert_eq!(actions[0].completed_at, Some(210));
+    assert_eq!(actions[0].reason.as_deref(), Some("underwater"));
+    assert_eq!(
+        actions[0].metadata_json.as_deref(),
+        Some(r#"{"forced":true}"#)
+    );
+
+    let completed = planner_actions(&handle, Some("completed"), 20)
+        .await
+        .unwrap();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].status, "completed");
 }
 
 #[tokio::test]

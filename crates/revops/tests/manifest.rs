@@ -340,11 +340,12 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     for name in BATCH_A_CANONICAL_METHODS {
         assert!(methods.contains(name), "methods: {methods:?}");
     }
-    // Exactly 20 rpc methods total (no leftover revenue-r-* names bleeding
+    // Exactly 24 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
-    // rebalance planner, and Task 49's ten Batch A builders.
+    // rebalance planner, Task 49's ten Batch A builders, and Task 56's four
+    // DB-backed planner read RPCs.
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -352,7 +353,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        20,
+        24,
         "methods: {methods:?}"
     );
 
@@ -2236,4 +2237,186 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         econ_snapshot["error"],
         serde_json::json!("econ shadow not_yet_ported")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task 56: the four planner read RPCs. The pure builders existed before this
+// task, but none was registered and none could reach production evidence.
+// These tests pin the public names, the real read-only DB round-trip, and the
+// deliberate named-parameter-only boundary.
+// ---------------------------------------------------------------------------
+
+const PLANNER_READ_SHADOW_METHODS: &[&str] = &[
+    "revenue-r-planner-candidate-sources",
+    "revenue-r-planner-candidates",
+    "revenue-r-planner-history",
+    "revenue-r-planner-status",
+];
+
+const PLANNER_READ_CANONICAL_METHODS: &[&str] = &[
+    "revenue-planner-candidate-sources",
+    "revenue-planner-candidates",
+    "revenue-planner-history",
+    "revenue-planner-status",
+];
+
+#[test]
+fn manifest_registers_planner_read_quartet_in_both_naming_modes() {
+    for (canonical, expected) in [
+        (false, PLANNER_READ_SHADOW_METHODS),
+        (true, PLANNER_READ_CANONICAL_METHODS),
+    ] {
+        let result = manifest_with(canonical);
+        let methods: Vec<&str> = result["rpcmethods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        for name in expected {
+            assert!(
+                methods.contains(name),
+                "planner read method {name} not registered (canonical={canonical}): {methods:?}"
+            );
+        }
+    }
+}
+
+fn seed_planner_read_tripwires(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).expect("open planner tripwire db");
+    conn.execute(
+        "INSERT INTO planner_candidates
+         (peer_id, score, source, last_evaluated, capacity_recommendation_sats,
+          connect_successes, connect_failures, metadata_json)
+         VALUES ('peer-low', 1.25, 'manual', 100, NULL, 2, 3, NULL)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO planner_candidates
+         (peer_id, score, source, last_evaluated, capacity_recommendation_sats,
+          connect_successes, connect_failures, metadata_json)
+         VALUES ('peer-high', 9.87654, 'gossip', 200, 3000000, 7, 1, '{\"tripwire\":true}')",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO planner_actions
+         (action_type, peer_id, channel_id, amount_sats, estimated_cost_sats,
+          actual_cost_sats, status, created_at, completed_at, reason, metadata_json)
+         VALUES ('open', 'peer-old', NULL, 1000000, 5000, NULL,
+                 'planned', 100, NULL, NULL, NULL)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO planner_actions
+         (action_type, peer_id, channel_id, amount_sats, estimated_cost_sats,
+          actual_cost_sats, status, created_at, completed_at, reason, metadata_json)
+         VALUES ('close', 'peer-new', '123x1x0', NULL, 321, 299,
+                 'completed', 200, 210, 'tripwire-reason', '{\"source\":\"task56\"}')",
+        [],
+    )
+    .unwrap();
+}
+
+#[test]
+fn planner_read_rpcs_round_trip_distinctive_database_rows() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    seed_planner_read_tripwires(&prod_db_path);
+    let db_path = Some(prod_db_path.to_str().unwrap());
+
+    let sources = call_after_init_with_params(
+        false,
+        db_path,
+        home.path(),
+        &[],
+        "revenue-r-planner-candidate-sources",
+        serde_json::json!({}),
+    );
+    assert_eq!(sources["total"], 2, "sources: {sources:?}");
+    assert_eq!(sources["by_source"]["gossip"], 1);
+    assert_eq!(sources["by_source"]["manual"], 1);
+    assert_eq!(sources["candidates"][0]["peer_id"], "peer-high");
+    assert_eq!(sources["candidates"][0]["score"], 9.8765);
+
+    let candidates = call_after_init_with_params(
+        false,
+        db_path,
+        home.path(),
+        &[],
+        "revenue-r-planner-candidates",
+        serde_json::json!({"limit": 1}),
+    );
+    assert_eq!(candidates["count"], 1, "candidates: {candidates:?}");
+    assert_eq!(candidates["candidates"][0]["peer_id"], "peer-high");
+    assert_eq!(
+        candidates["candidates"][0]["metadata_json"],
+        "{\"tripwire\":true}"
+    );
+
+    let history = call_after_init_with_params(
+        false,
+        db_path,
+        home.path(),
+        &[],
+        "revenue-r-planner-history",
+        serde_json::json!({"limit": 1}),
+    );
+    assert_eq!(history["count"], 1, "history: {history:?}");
+    assert_eq!(history["actions"][0]["peer_id"], "peer-new");
+    assert_eq!(history["actions"][0]["completed_at"], 210);
+    assert_eq!(history["actions"][0]["reason"], "tripwire-reason");
+    assert_eq!(
+        history["actions"][0]["metadata_json"],
+        "{\"source\":\"task56\"}"
+    );
+
+    let status = call_after_init_with_params(
+        false,
+        db_path,
+        home.path(),
+        &[
+            ("revops-r-planner-enabled", serde_json::json!(true)),
+            ("revops-r-planner-dry-run", serde_json::json!(true)),
+            ("revops-r-planner-execute-closes", serde_json::json!(true)),
+            (
+                "revops-r-planner-max-closes-per-cycle",
+                serde_json::json!(2),
+            ),
+        ],
+        "revenue-r-planner-status",
+        serde_json::json!({}),
+    );
+    assert_eq!(status["enabled"], true, "status: {status:?}");
+    assert_eq!(status["dry_run"], true);
+    assert_eq!(status["execute_closes"], true);
+    assert_eq!(status["max_closes_per_cycle"], 2);
+    assert_eq!(status["close_execution_effective"], true);
+    assert_eq!(status["candidate_pool_size"], 2);
+    assert_eq!(status["recent_actions"].as_array().unwrap().len(), 2);
+    assert_eq!(status["recent_actions"][0]["peer_id"], "peer-new");
+}
+
+#[test]
+fn planner_read_rpcs_refuse_nonempty_positional_params() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    for method in PLANNER_READ_SHADOW_METHODS {
+        let result = call_after_init_with_params(
+            false,
+            Some(prod_db_path.to_str().unwrap()),
+            home.path(),
+            &[],
+            method,
+            serde_json::json!([1]),
+        );
+        assert_eq!(
+            result["error"],
+            "positional parameters are not supported by this port; use named parameters (a JSON object), e.g. {\"window_hours\": 48}",
+            "{method}: {result:?}"
+        );
+    }
 }

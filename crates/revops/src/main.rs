@@ -589,6 +589,65 @@ async fn resolve_running_node_id(socket_path: &Path) -> anyhow::Result<String> {
         .context("getinfo response missing 'id'")
 }
 
+/// Resolve one Python-equivalent configuration suffix through the same
+/// three layers as `revenue-r-config`: validated DB override, live Python
+/// `listconfigs` snapshot, then this plugin's registered fixture value.
+/// Returning typed JSON here keeps planner-status from inventing a second,
+/// subtly different configuration path.
+async fn resolved_config_json(
+    p: &Plugin<SharedState>,
+    key: &str,
+) -> Result<Option<serde_json::Value>> {
+    let s = p.state();
+    let Some(full_name) = s.config_names.get(key) else {
+        return Ok(None);
+    };
+    let fixture_value = p.option_str(full_name)?;
+    let db_key = revops::config_resolve::db_override_key(key);
+    let field_type = config_types::field_type_for(&db_key);
+    let (db_override, python_value) = match revops::config_resolve::python_option_name(key) {
+        Some(python_name) => {
+            let db_override = if revops::config_resolve::is_immutable_key(key) {
+                None
+            } else {
+                match &s.db {
+                    Some(handle) => queries::config_override(handle, &db_key)
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("revops: config_override query failed for {db_key}: {e}");
+                            None
+                        })
+                        .and_then(|raw| revops::config_resolve::validate_override(&db_key, &raw)),
+                    None => None,
+                }
+            }
+            .map(cln_plugin::options::Value::String);
+            let python_value = s
+                .python_options
+                .snapshot()
+                .get(&python_name)
+                .cloned()
+                .map(|v| match v {
+                    cln_plugin::options::Value::String(raw)
+                        if field_type == Some(config_types::FieldType::Bool) =>
+                    {
+                        cln_plugin::options::Value::Boolean(config_types::python_startup_bool(
+                            &db_key, &raw,
+                        ))
+                    }
+                    other => other,
+                });
+            (db_override, python_value)
+        }
+        None => (None, None),
+    };
+    Ok(
+        revops::config_resolve::resolve_option_value(db_override, python_value, fixture_value)
+            .as_ref()
+            .map(|raw| config_types::convert_value(field_type, raw)),
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let observer_name = opt_name("observer");
@@ -729,6 +788,14 @@ async fn main() -> Result<()> {
     let capacity_report_name = rpc_name("capacity-report");
     let econ_snapshot_name = rpc_name("econ-snapshot");
     let spend_ledger_name = rpc_name("spend-ledger");
+
+    // Task 56: the read-only planner quartet. These builders were already
+    // ported, but were unreachable until their production DB/config seams
+    // were wired here.
+    let planner_candidate_sources_name = rpc_name("planner-candidate-sources");
+    let planner_candidates_name = rpc_name("planner-candidates");
+    let planner_history_name = rpc_name("planner-history");
+    let planner_status_name = rpc_name("planner-status");
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
@@ -1365,6 +1432,141 @@ async fn main() -> Result<()> {
                     "prepared_request_count": prepared_request_count,
                     "mutation_call_count": mutation_call_count,
                 }))
+            },
+        )
+        .rpcmethod(
+            &planner_candidate_sources_name,
+            "planner candidate pool grouped by source (read-only DB evidence)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                match queries::planner_candidates(handle, -999.0, None, 100).await {
+                    Ok(rows) => {
+                        let candidates: Vec<_> = rows
+                            .into_iter()
+                            .map(|row| revops::rpc_planner_candidate_sources::CandidateRow {
+                                peer_id: row.peer_id,
+                                score: row.score,
+                                source: row.source,
+                            })
+                            .collect();
+                        Ok(
+                            revops::rpc_planner_candidate_sources::build_planner_candidate_sources(
+                                &candidates,
+                            ),
+                        )
+                    }
+                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
+                }
+            },
+        )
+        .rpcmethod(
+            &planner_candidates_name,
+            "ranked planner candidates (read-only DB evidence)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let limit = match revops::rpc_planner_candidates::parse_query_limit(
+                    v.get("limit"),
+                    20,
+                    1,
+                    1000,
+                ) {
+                    Ok(limit) => limit,
+                    Err(err) => return Ok(err),
+                };
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                match queries::planner_candidates(handle, -999.0, None, limit).await {
+                    Ok(rows) => Ok(revops::rpc_planner_candidates::build_planner_candidates(
+                        rows.into_iter().map(|row| row.to_json()).collect(),
+                    )),
+                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
+                }
+            },
+        )
+        .rpcmethod(
+            &planner_history_name,
+            "recent planner actions (read-only DB evidence)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let limit = match revops::rpc_planner_candidates::parse_query_limit(
+                    v.get("limit"),
+                    20,
+                    1,
+                    1000,
+                ) {
+                    Ok(limit) => limit,
+                    Err(err) => return Ok(err),
+                };
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                match queries::planner_actions(handle, None, limit).await {
+                    Ok(rows) => Ok(revops::rpc_planner_history::build_planner_history(
+                        rows.into_iter().map(|row| row.to_json()).collect(),
+                    )),
+                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
+                }
+            },
+        )
+        .rpcmethod(
+            &planner_status_name,
+            "planner configuration and recent read-only DB evidence",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let Some(handle) = &p.state().db else {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                };
+                let candidates = match queries::planner_candidates(handle, -999.0, None, 32).await {
+                    Ok(rows) => rows,
+                    Err(e) => return Ok(serde_json::json!({"error": e.to_string()})),
+                };
+                let actions = match queries::planner_actions(handle, None, 5).await {
+                    Ok(rows) => rows,
+                    Err(e) => return Ok(serde_json::json!({"error": e.to_string()})),
+                };
+                let enabled = resolved_config_json(&p, "planner-enabled")
+                    .await?
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let dry_run = resolved_config_json(&p, "planner-dry-run")
+                    .await?
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let execute_closes = resolved_config_json(&p, "planner-execute-closes")
+                    .await?
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let max_closes_per_cycle =
+                    resolved_config_json(&p, "planner-max-closes-per-cycle")
+                        .await?
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0)
+                        .max(0);
+                Ok(revops::rpc_planner_status::build_planner_status(
+                    &revops::rpc_planner_status::PlannerStatusInputs {
+                        enabled,
+                        dry_run,
+                        execute_closes,
+                        max_closes_per_cycle,
+                        candidate_pool_size: candidates.len() as i64,
+                        recent_actions: actions
+                            .into_iter()
+                            .map(|row| row.to_json())
+                            .collect(),
+                    },
+                ))
             },
         )
         .rpcmethod(

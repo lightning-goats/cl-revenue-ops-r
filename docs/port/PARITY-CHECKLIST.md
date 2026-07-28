@@ -45,36 +45,34 @@ zero unauthorized mutation calls). **A row may not be marked complete, and
 none of the four higher states may be claimed, from source presence or LOC
 alone** — only from the specific test/evidence named for that state.
 
-**Round-2 correction (2026-07-27, P1): this section previously conflated
-TOTAL Rust RPC method registrations with PYTHON-EQUIVALENT RPC coverage,
-and used both 9 and 10 as the pre-Task-49 baseline in different places.
-Corrected counts, used consistently everywhere below:**
+**Task 55 revision-2 correction (2026-07-28): prior revisions still
+misclassified three Rust-only methods as Python-equivalent. Exact-name
+comparison against Python's 69 registered names established the pre-Task-56
+surface as 20 total Rust methods, 16 Python-equivalent, and four Rust-only:
+`revenue-ping`, `revops-fee-runway-status`, `revenue-fee-wake`, and
+`revenue-rebalance-plan`. Task 56 adds four genuinely Python-equivalent planner
+read RPCs, so the current guarded surface is **24 total / 20 of 69
+Python-equivalent** (≈29%).**
 
-- **Total Rust RPC methods registered** (everything in
-  `crates/revops/tests/manifest.rs`'s `assert_eq!(result["rpcmethods"]
-  .as_array().unwrap().len(), 20, ...)` guard): **20**. This INCLUDES
-  `revops-fee-runway-status` (`main.rs:701-705`), a Rust-ONLY operational
-  endpoint with **no Python counterpart at all** — it is not part of the
-  69-method Python RPC surface and must never be counted toward
-  Python-equivalent coverage.
-- **Python-equivalent RPCs registered in Rust:** pre-Task-49 baseline
-  **9** of 69 (not 10 — the design-doc snapshot's "10" below double-counted
-  a Rust-only or since-corrected entry; §3's own headline number for the
-  same pre-Task-49 point already said "9 RPCs" correctly). Post-Task-49:
-  **19** of 69 (9 + Task 49's ten Batch A builders = 19; NOT 20 — Batch A's
-  ten builders are all Python-equivalent, but the pre-existing baseline of
-  9 already excluded `revops-fee-runway-status`, so total-20 minus
-  Python-only-1 = Python-equivalent-19). 19/69 ≈ 28%.
+- **Total Rust RPC methods registered:** **24**, guarded by
+  `crates/revops/tests/manifest.rs`'s exact manifest count. Four are the
+  Rust-only operational methods listed above and must never count toward the
+  69-method Python denominator.
+- **Python-equivalent RPCs registered in Rust:** **20 of 69**. The 49 absent
+  exact Python names remain the honest pre-cutover work queue; source-only
+  builders do not count.
 
 **Baseline (design doc snapshot, `main` @ `0eba911`):** 1,986 passing tests,
-9 of 69 Python-equivalent RPCs registered in Rust, 27 RPC builders compiled.
+27 RPC builders compiled. Its claimed 9-of-69 registered-RPC count is retained
+as historical provenance but superseded by Task 55's exact-name inventory; the
+pre-Task-49 equivalent count was 6 (16 current at Task 55 minus Task 49's ten).
 
 **Measured at Task 49 (Wave 2 / RPC Batch A), `main` @ `650d832` +1 commit:**
 27 `rpc_*` builder modules compiled (unchanged — all ten Batch A modules were
 already declared in `lib.rs` before this task; see `crates/revops/RPC_BATCH_A.md`),
 **20 total Rust RPC methods** registered in `crates/revops/src/main.rs` — of
-which **19 are Python-equivalent** (up from 9; the remaining one,
-`revops-fee-runway-status`, is Rust-only with no Python counterpart). The
+which **16 are Python-equivalent** (up from 6); the four Rust-only methods are
+listed in the Task 55 correction above. The
 exact total-20 count is a manifest-test GUARD,
 `crates/revops/tests/manifest.rs`'s `assert_eq!(...len(), 20, ...)`, that
 reds on any unannounced addition/removal.
@@ -84,7 +82,7 @@ this task made ten Python-equivalent entry points **reachable**, no more.
 **Measured at Task 52 refresh (`main` @ `546238b`, 2026-07-27):** 2,253
 passing workspace tests, 0 failed (counted by summing every `test result:`
 line of `cargo test --workspace`, not taken from a report). RPC surface
-UNCHANGED since Task 49: **20 total / 19 Python-equivalent** registered
+UNCHANGED since Task 49: **20 total / 16 Python-equivalent** registered
 methods — `main.rs` contains exactly 20 `.rpcmethod(` sites and the
 `manifest.rs` guard still asserts total 20 (`manifest.rs:343-355`). New
 `rpc_*` builder modules that exist as source but are NOT registered
@@ -262,12 +260,16 @@ counts are close; the RPC surface was **13%**. That gap is the honest shape of
 the port: the *decision kernels* are broadly ported, the *operator surface and
 the capital-deploying subsystems* are not.
 
-**Updated after Task 49 (Wave 2 / RPC Batch A).** Registered Rust RPC methods:
-**20 total**; of those, **19 of 69 Python-equivalent RPCs (≈28%)** — ten more
+**Updated after Task 56 (planner read quartet).** Registered Rust RPC methods:
+**24 total**; of those, **20 of 69 Python-equivalent RPCs (≈29%)** — Task 49
+made ten Python-equivalent builders reachable, and Task 56 made four planner
+read builders reachable against real DB/config evidence. The four Rust-only
+methods (`revenue-ping`, `revops-fee-runway-status`, `revenue-fee-wake`,
+`revenue-rebalance-plan`) are excluded from the 69-method denominator.
+
+The Task 49 milestone itself was **20 total / 16 Python-equivalent** — ten more
 Python-equivalent builders reachable (see "Task 49 — reachability" under Lens
-0 below). The 20th registered method, `revops-fee-runway-status`
-(`main.rs:701-705`), is Rust-only with no Python counterpart and is excluded
-from the 69-method denominator. This is a reachability count only, not a
+0 below). This is a reachability count only, not a
 completeness claim: several of the ten (profitability, analyze,
 capacity-report, econ-snapshot, most of health) return an explicit
 `not_yet_ported` in-band marker (Task 50's F1-F5 fix) because their live
@@ -283,7 +285,7 @@ missing evidence.
 | option-registration-and-config | `options_table.rs`, `config_resolve.rs` (126 options in manifest) | `[x]` |
 | background-scheduler-loops | `fee_scheduler.rs` (fee loop only) | `[~]` fee loop only; flow/rebalance/planner/boltz loops absent |
 | core-cycle-functions | `fee_scheduler.rs`, `revops-fees/cycle.rs` | `[~]` fee cycle only |
-| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders | `[~]` **19 of 69 Python-equivalent registered** (was 9/69), **20 total Rust RPC methods** including the Rust-only `revops-fee-runway-status`; measured via `crates/revops/tests/manifest.rs`'s method-count guard |
+| **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders + Task 56's four planner read handlers | `[~]` **20 of 69 Python-equivalent registered**, **24 total Rust RPC methods** (four Rust-only); measured via `crates/revops/tests/manifest.rs`'s method-count guard and distinctive-row handler tests |
 | notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[x]` all 4 subscribed (Python subscribes to exactly the same 4); `channel_state_changed` now parses BOTH closure events and the opening→NORMAL matrix (Task 44 A3 — the "closure events only" narrowing is gone); per-notification EFFECT parity is tracked in §2, not by this row |
 | spend-budget-and-capex-rpcs | `revenue-r-spend-ledger` (Task 49) | `[~]` spend-ledger reads reachable; capex RPCs not registered |
 | boltz-swap-rpcs-and-auto-cycle | — | `[ ]` |
@@ -292,8 +294,8 @@ missing evidence.
 
 Ten Python-equivalent read-only response builders (already compiled, per the
 baseline above) were registered as real `.rpcmethod()` handlers in `main.rs`,
-taking the Python-equivalent registered count from 9 to 19 (20 total Rust RPC
-methods, including the Rust-only `revops-fee-runway-status`). Per the honest
+taking the corrected Python-equivalent registered count from 6 to 16 (20 total
+Rust RPC methods, including four Rust-only methods). Per the honest
 progress model above, this task's claim is **reachable only** — the manifest
 test proves each method name is present in both naming modes and, where a
 real `revops-db` query exists, that the handler calls it (a distinctive-row
@@ -304,6 +306,21 @@ this checklist entry does not substitute for.
 Evidence: `crates/revops/tests/manifest.rs` (`manifest_batch_a_methods_registered_shadow_mode`,
 `_canonical_mode`, and the `revenue_r_*` caller-tripwire tests below them),
 transcripts in `crates/revops/TASK49-REPORT.md`.
+
+#### Task 56 — planner read RPC reachability, 2026-07-28
+
+Four exact Python method names are now registered in both shadow and canonical
+modes: `revenue-planner-candidate-sources`, `revenue-planner-candidates`,
+`revenue-planner-history`, and `revenue-planner-status`. The first three use
+new read-only `revops-db::queries::{planner_candidates,planner_actions}`
+queries; status uses both queries plus the same DB-override > live Python
+option > fixture-default precedence as `revenue-config`. Distinctive seeded
+candidate/action rows prove the handlers, ordering, limits, null/raw-metadata
+shape, source grouping, recent-actions list, and candidate-pool size. Nonempty
+positional parameters are refused explicitly. Evidence:
+`crates/revops-db/tests/queries.rs` and the `planner_read_*` tests in
+`crates/revops/tests/manifest.rs`. State: **compiled, reachable, effective**;
+transport-proven and promotion-ready remain pending independent verification.
 
 **Round-2 correction (P1): the table below is the CURRENT response contract
 for each of the ten Batch A RPCs** (i.e. it already reflects the Task 50

@@ -587,6 +587,191 @@ pub async fn active_spend_reservations(
         .await
 }
 
+/// One row from Python's `planner_candidates` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannerCandidateRow {
+    pub peer_id: String,
+    pub score: f64,
+    pub source: String,
+    pub last_evaluated: i64,
+    pub capacity_recommendation_sats: Option<i64>,
+    pub connect_successes: i64,
+    pub connect_failures: i64,
+    pub metadata_json: Option<String>,
+}
+
+impl PlannerCandidateRow {
+    /// Python returns `dict(sqlite3.Row)`, including the raw
+    /// `metadata_json` string rather than parsing it.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "peer_id": self.peer_id,
+            "score": self.score,
+            "source": self.source,
+            "last_evaluated": self.last_evaluated,
+            "capacity_recommendation_sats": self.capacity_recommendation_sats,
+            "connect_successes": self.connect_successes,
+            "connect_failures": self.connect_failures,
+            "metadata_json": self.metadata_json,
+        })
+    }
+}
+
+fn decode_planner_candidate(row: &Row) -> rusqlite::Result<PlannerCandidateRow> {
+    Ok(PlannerCandidateRow {
+        peer_id: row.get(0)?,
+        score: row.get(1)?,
+        source: row.get(2)?,
+        last_evaluated: row.get(3)?,
+        capacity_recommendation_sats: row.get(4)?,
+        connect_successes: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+        connect_failures: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+        metadata_json: row.get(7)?,
+    })
+}
+
+/// Port of `Database.get_planner_candidates`: inclusive score floor,
+/// optional truthy source filter, score-descending order, then LIMIT.
+pub async fn planner_candidates(
+    handle: &DbHandle,
+    min_score: f64,
+    source: Option<&str>,
+    limit: i64,
+) -> Result<Vec<PlannerCandidateRow>> {
+    match source.filter(|value| !value.is_empty()) {
+        Some(source) => {
+            handle
+                .query_rows(
+                    concat!(
+                        "SELECT peer_id, score, source, last_evaluated, ",
+                        "capacity_recommendation_sats, connect_successes, ",
+                        "connect_failures, metadata_json FROM planner_candidates ",
+                        "WHERE score >= ?1 AND source = ?2 ",
+                        "ORDER BY score DESC LIMIT ?3"
+                    ),
+                    vec![
+                        SqlValue::Real(min_score),
+                        SqlValue::Text(source.to_string()),
+                        SqlValue::Integer(limit.max(1)),
+                    ],
+                    decode_planner_candidate,
+                )
+                .await
+        }
+        None => {
+            handle
+                .query_rows(
+                    concat!(
+                        "SELECT peer_id, score, source, last_evaluated, ",
+                        "capacity_recommendation_sats, connect_successes, ",
+                        "connect_failures, metadata_json FROM planner_candidates ",
+                        "WHERE score >= ?1 ORDER BY score DESC LIMIT ?2"
+                    ),
+                    vec![SqlValue::Real(min_score), SqlValue::Integer(limit.max(1))],
+                    decode_planner_candidate,
+                )
+                .await
+        }
+    }
+}
+
+/// One row from Python's `planner_actions` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannerActionRow {
+    pub id: i64,
+    pub action_type: String,
+    pub peer_id: String,
+    pub channel_id: Option<String>,
+    pub amount_sats: Option<i64>,
+    pub estimated_cost_sats: Option<i64>,
+    pub actual_cost_sats: Option<i64>,
+    pub status: String,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+    pub reason: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+impl PlannerActionRow {
+    /// Python returns the SQLite row as a dictionary without decoding its
+    /// optional metadata JSON string.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "action_type": self.action_type,
+            "peer_id": self.peer_id,
+            "channel_id": self.channel_id,
+            "amount_sats": self.amount_sats,
+            "estimated_cost_sats": self.estimated_cost_sats,
+            "actual_cost_sats": self.actual_cost_sats,
+            "status": self.status,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+            "reason": self.reason,
+            "metadata_json": self.metadata_json,
+        })
+    }
+}
+
+fn decode_planner_action(row: &Row) -> rusqlite::Result<PlannerActionRow> {
+    Ok(PlannerActionRow {
+        id: row.get(0)?,
+        action_type: row.get(1)?,
+        peer_id: row.get(2)?,
+        channel_id: row.get(3)?,
+        amount_sats: row.get(4)?,
+        estimated_cost_sats: row.get(5)?,
+        actual_cost_sats: row.get(6)?,
+        status: row.get(7)?,
+        created_at: row.get(8)?,
+        completed_at: row.get(9)?,
+        reason: row.get(10)?,
+        metadata_json: row.get(11)?,
+    })
+}
+
+/// Port of `Database.get_planner_actions`: optional truthy status
+/// filter, newest-created first, then LIMIT.
+pub async fn planner_actions(
+    handle: &DbHandle,
+    status: Option<&str>,
+    limit: i64,
+) -> Result<Vec<PlannerActionRow>> {
+    match status.filter(|value| !value.is_empty()) {
+        Some(status) => {
+            handle
+                .query_rows(
+                    concat!(
+                        "SELECT id, action_type, peer_id, channel_id, amount_sats, ",
+                        "estimated_cost_sats, actual_cost_sats, status, created_at, ",
+                        "completed_at, reason, metadata_json FROM planner_actions ",
+                        "WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2"
+                    ),
+                    vec![
+                        SqlValue::Text(status.to_string()),
+                        SqlValue::Integer(limit.max(1)),
+                    ],
+                    decode_planner_action,
+                )
+                .await
+        }
+        None => {
+            handle
+                .query_rows(
+                    concat!(
+                        "SELECT id, action_type, peer_id, channel_id, amount_sats, ",
+                        "estimated_cost_sats, actual_cost_sats, status, created_at, ",
+                        "completed_at, reason, metadata_json FROM planner_actions ",
+                        "ORDER BY created_at DESC LIMIT ?1"
+                    ),
+                    vec![SqlValue::Integer(limit.max(1))],
+                    decode_planner_action,
+                )
+                .await
+        }
+    }
+}
+
 /// Port of `Database.get_lifetime_stats` (modules/database.py:6018-6087).
 ///
 /// Deliberately SEVEN separate statements, mirroring Python's own
