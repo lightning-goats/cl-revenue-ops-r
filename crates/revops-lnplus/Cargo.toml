@@ -23,6 +23,7 @@ thiserror.workspace = true
 # doc for why `reserve_spend`/etc. delegate there instead of duplicating it.
 revops-db = { path = "../revops-db" }
 rusqlite.workspace = true
+ureq = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

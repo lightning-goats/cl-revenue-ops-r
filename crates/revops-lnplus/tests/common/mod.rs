@@ -993,7 +993,7 @@ impl FakeHttpTransport {
     pub fn push_transport_err(&self, msg: &str) {
         self.responses
             .borrow_mut()
-            .push_back(Err(TransportError(msg.to_string())));
+            .push_back(Err(TransportError::before_send(msg)));
     }
 
     pub fn call_count(&self) -> usize {
@@ -1018,7 +1018,7 @@ impl HttpTransport for FakeHttpTransport {
         self.responses
             .borrow_mut()
             .pop_front()
-            .unwrap_or_else(|| Err(TransportError("no fixture queued".to_string())))
+            .unwrap_or_else(|| Err(TransportError::before_send("no fixture queued")))
     }
 }
 

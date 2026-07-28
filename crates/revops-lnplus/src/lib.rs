@@ -66,6 +66,7 @@ pub mod exec_mode;
 pub mod finalize;
 pub mod gated;
 pub mod http;
+pub mod http_ureq;
 pub mod loop_drivers;
 pub mod open;
 pub mod ports;

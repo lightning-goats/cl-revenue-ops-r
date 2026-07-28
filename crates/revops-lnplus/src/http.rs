@@ -77,15 +77,49 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// Task 61 4C: where in the exchange a transport failure happened — the
+/// bit 4B's typed submission outcomes are built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportPhase {
+    /// Provably failed before the request bytes could have reached the
+    /// server (DNS, connect refused, TLS handshake, invalid URL). A
+    /// mutating call that fails here is KNOWN not-submitted.
+    BeforeRequestSent,
+    /// The request may have reached the server (timeout awaiting the
+    /// response, reset mid-exchange, read error). A mutating call that
+    /// fails here has an UNKNOWN outcome — quarantine, never treat as a
+    /// clean failure. When in doubt a transport implementation MUST pick
+    /// this phase (fail toward quarantine).
+    AfterRequestSent,
+}
+
 /// A transport-level failure — DNS, TCP, TLS, timeout — with no HTTP
 /// response at all (py's `urllib.error.URLError`/`OSError`/`TimeoutError`
-/// branch, `_request` lines 116-117).
+/// branch, `_request` lines 116-117), carrying its [`TransportPhase`].
 #[derive(Debug, Clone)]
-pub struct TransportError(pub String);
+pub struct TransportError {
+    pub message: String,
+    pub phase: TransportPhase,
+}
+
+impl TransportError {
+    pub fn before_send(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            phase: TransportPhase::BeforeRequestSent,
+        }
+    }
+    pub fn after_send(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            phase: TransportPhase::AfterRequestSent,
+        }
+    }
+}
 
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.message)
     }
 }
 impl std::error::Error for TransportError {}
@@ -210,10 +244,23 @@ impl<T: HttpTransport, S: Signer> LnPlusApiClient<T, S> {
             }
         };
 
+        // Task 61 4C phase mapping (feeds 4B's typed submission outcomes):
+        //  - transport failure BEFORE the request went out → clean/known;
+        //  - transport failure AFTER it may have gone out → OUTCOME UNKNOWN;
+        //  - a 2xx the client cannot interpret (over-cap, unparseable) →
+        //    OUTCOME UNKNOWN (the server said yes; only our read failed);
+        //  - a structured non-2xx → clean/known refusal.
         let resp = self
             .transport
             .request(method, &url, &headers, body)
-            .map_err(|e| LnPlusError::new(format!("LN+ unreachable on {path}: {e}")))?;
+            .map_err(|e| match e.phase {
+                TransportPhase::BeforeRequestSent => {
+                    LnPlusError::new(format!("LN+ unreachable on {path}: {e}"))
+                }
+                TransportPhase::AfterRequestSent => LnPlusError::unknown_outcome(format!(
+                    "LN+ transport failed after the request may have been sent on {path}: {e}"
+                )),
+            })?;
 
         if !(200..300).contains(&resp.status) {
             let snippet = body_snippet(&resp.body);
@@ -232,21 +279,34 @@ impl<T: HttpTransport, S: Signer> LnPlusApiClient<T, S> {
         }
 
         if resp.body.len() > MAX_RESPONSE_BYTES {
-            return Err(LnPlusError::new(format!(
-                "LN+ response too large on {path}"
+            return Err(LnPlusError::unknown_outcome(format!(
+                "LN+ response too large on {path} — 2xx received but unreadable"
             )));
         }
 
-        serde_json::from_slice(&resp.body)
-            .map_err(|e| LnPlusError::new(format!("LN+ invalid JSON on {path}: {e}")))
+        serde_json::from_slice(&resp.body).map_err(|e| {
+            LnPlusError::unknown_outcome(format!(
+                "LN+ invalid JSON on {path} — 2xx received but unreadable: {e}"
+            ))
+        })
     }
 
     // -- auth ------------------------------------------------------------
 
     /// py `_auth_params` (126-134) + `_validate_challenge` (gate 15,
     /// 136-148, ported to [`crate::validation::validate_challenge`]).
+    ///
+    /// Task 61 4C: any failure HERE — whatever its transport phase — is a
+    /// clean/known failure for the caller's mutating request, which was
+    /// never issued. The unknown flag is stripped so a challenge hiccup
+    /// can never quarantine a mutation that did not happen.
     fn auth_params(&self) -> Result<Vec<(String, String)>, LnPlusError> {
-        let challenge = self.request("get_message", None, HttpMethod::Get)?;
+        let challenge = self
+            .request("get_message", None, HttpMethod::Get)
+            .map_err(|mut e| {
+                e.outcome_unknown = false;
+                e
+            })?;
         let message = challenge.get("message").and_then(Value::as_str);
         validate_challenge(message)?;
         // `validate_challenge` already rejected `None`/empty, so this is
