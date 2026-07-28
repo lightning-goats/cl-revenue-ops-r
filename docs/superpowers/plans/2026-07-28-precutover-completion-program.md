@@ -164,8 +164,10 @@ Owner marks only Task 56 `impl`; Python verifier owns `review`.
 **Files:** `crates/revops/build.rs`, `crates/revops/tests/manifest.rs`, `crates/revops/src/fee_scheduler.rs`, `crates/revops/src/fee_runway.rs`, `crates/revops/tests/fee_scheduler.rs`.
 
 - [x] Implement Task 41's Git-ref/index rerun tracking with a docs-only HEAD-advance regression (reviewed and merged at `7688e40`).
-- [ ] Implement Task 42's first-cycle Rust mempool evidence and commit-coupled seed provenance semantics.
-- [ ] Independently mutation-test Task 42 and merge only after its existing Hexmem review criterion passes (Task 41 is already independently closed).
+- [x] Implement Task 42's first-cycle Rust mempool evidence and commit-coupled
+      seed provenance semantics at `0ca9742`.
+- [x] Independently mutation-test Task 42; its Python review passed all four
+      criteria plus two novel mutations and Hexmem auto-completed 2/2.
 
 ### Task 3: Observer Runtime Framework and Persistent Loop Health — Hexmem Task 57
 
@@ -247,21 +249,58 @@ timeout, authority-bracket, and nonce semantics.
 Task 62 follows Tasks 42, 59, 61, and 60. Defibrillation reuses Task 60's governed
 rebalance facade and channel mutations reuse Task 61's shared outcome semantics.
 
-### Task 7: Boltz Runtime, Full RPC Surface, and Governed Autocycle
+### Task 7: Boltz Runtime, Full RPC Surface, and Governed Autocycle — Hexmem Task 63
 
-**Files:** create `crates/revops/src/boltz_runtime.rs`; modify `crates/revops-boltz`, `crates/revops/src/main.rs`, and fake-executable integration tests.
+**Files:** create `crates/revops/src/boltz_runtime.rs`; modify the Boltz
+process/command/error/driver/budget/journal/execution modules,
+`revops-capital` reservation semantics, `revops-db` owner/schema/store,
+runtime/main/health, manifest/action-surface tests, fake executables, and the
+parity checklist.
 
-- [ ] Register all Boltz status/history/budget/wallet/refund/claim/chainswap/withdraw/deposit/backup/recommendation/cycle RPCs.
-- [ ] Spawn observer-only balance, auto-cycle, and expansion-treasury owners.
-- [ ] Gate process execution behind governed reservations and quarantine ambiguous create/claim/refund outcomes.
+- [ ] Add typed durable attempt, reservation, terminal receipt, quarantine,
+      journal, ignore, cooldown, auto-cycle, and reconciliation state.
+- [ ] Split an allowlisted, bounded, secret-redacting query transport from a
+      live-only non-forgeable action capability; arbitrary argv and the public
+      `ExecutionMode::Armed` value must not authorize execution.
+- [ ] Require fresh governor/conflict/structural-envelope/budget evidence plus a
+      durable attempt and shared-budget reservation before process spawn.
+- [ ] Use one serialized Boltz actor for manual, scheduled, balance, treasury,
+      cooldown, and reconciliation work; an unknown outcome suspends it, retains
+      reservation/quarantine, forbids retry, and cannot report a loop pass.
+- [ ] Register all 22 Python-equivalent Boltz RPCs and prove them end-to-end
+      through test-owned executables, including malformed/timeout/restart cases.
 
-### Task 8: Remaining Core RPC and Configuration Parity
+Task 63 follows Tasks 42, 61, 59, 60, and 62. Its planner-backed balance and
+treasury modes may not use fabricated evidence.
+
+### Task 8: Remaining Core RPC and Configuration Parity — Hexmem Tasks 64–66
 
 **Files:** create focused `rpc_*.rs` builders as needed; modify `crates/revops/src/main.rs`, `crates/revops-db/src/queries.rs`, and manifest tests.
 
-- [ ] Register the remaining policy writes, config get/set/delete, fee debug/cycle/wake/set, ignore/ban operations, econ cycle/reconcile, cleanup, reservation, and profile-preview methods.
-- [ ] Implement one port-wide positional-parameter policy and test every method against the 69-name source inventory.
-- [ ] Replace every `not_yet_ported` response with real evidence or a deliberate cutover-time refusal whose contract cannot collide with a Python success.
+- [ ] **Task 64 (independent):** generate and check in the exact 69-RPC,
+      121-option, eight-loop/shutdown, and external-mutation inventories with
+      Python source provenance; add one 69-entry parameter registry/common
+      decoder; restore the two missing fee-authority/replay-capture options.
+- [ ] **Task 65:** add the one serialized, typed live state-writer capability
+      for config, policy/tags/bans, hot-channel overrides, cleanup, and unified
+      budget administration. Keep it absent from `ObserverRuntime`.
+- [ ] **Task 66:** register the remaining fee/econ/recovery/core methods through
+      result-bearing owners and close every canonical success-shaped partial
+      response. No Python-equivalent RPC counts effective while returning
+      Rust-only vocabulary, null gaps, or `not_yet_ported`.
+- [ ] Require the generated positional/named policy and caller-removal tripwire
+      at all 69 methods; exact set equality replaces count-only assertions.
+
+### Task 8.5: Missing Whole-Plugin Runtime Owners — Hexmem Tasks 67 and 68
+
+- [ ] **Task 67:** port flow-analysis, startup-snapshot, and
+      financial-snapshot owners plus profitability/analyze evidence; expand
+      loop health to eight business/startup identities and bind every pass to
+      the current boot/session, commit, binary, and configuration.
+- [ ] **Task 68:** port datastore status/fee-bounds/rebalance producers, all
+      four subscriptions, hydration/deferred cursors, retention health, and
+      clean shutdown/drain. Require strict store routing, device/inode alias
+      denial, and typed required reads/writes.
 
 ### Task 9: Retention, Store Budget, and Authority-Fetch Hardening — Hexmem Tasks 58 and 59
 
@@ -300,19 +339,40 @@ the rehearsal binary, runbook, and tests.
 - [ ] Prove fake restart, every refusal gate, and restart-storm handling.
 - [ ] Leave Task 51's live `deploy` criterion untouched until Task 45 closes and the operator acknowledges a fresh window.
 
-### Task 11: Whole-Plugin Arm and Preflight Readiness
+Implementation also waits for Tasks 64, 66, 67, 68, and reviewed Task 69; the
+current nullable status and five-loop registry are not valid preflight input.
+
+### Task 11: Whole-Plugin Arm and Preflight Readiness — Hexmem Task 69 Design
 
 **Files:** extend `crates/revops/src/cutover_arm.rs`, `crates/revops/src/main.rs`, and rehearsal tests.
 
-- [ ] Bind the arm to the exact complete subsystem set, node, commit, binary hash, release, mode, times, and nonce.
-- [ ] Validate every loop, budget, reconciliation, quarantine, persistence, and Python-authority-off precondition before atomic consumption.
-- [ ] Exercise all denial and rollback-order paths in copied-state fake rehearsals.
+- [ ] First design and independently review a global epoch-bound positive
+      Python-authority-off proof that survives the canonical RPC namespace
+      transition; missing Python RPCs are never proof.
+- [ ] Define a v2 arm bound to the exact complete subsystem/inventory digest,
+      node, clean commit, binary hash, release, mode, store identities, times,
+      and nonce. Supersets and subsets both deny.
+- [ ] Parse without mutation; validate and revalidate strict evidence; only
+      then burn the durable nonce and atomically consume the arm into one
+      non-cloneable whole-plugin capability and exact sealed runtime set.
+- [ ] Bind every action to store-verified governor/reservation capabilities
+      and its exact canonical request digest, not caller-provided booleans or
+      nonempty strings.
+- [ ] Specify rollback that destroys Rust mutation capability first, preserves
+      ambiguous outcomes/reservations, proves mutation surfaces absent, then
+      restores Python; a consumed arm is never reconstructed.
 
 ### Task 12: Final Code-Complete Audit and Checklist Freeze
 
 **Files:** modify `docs/port/PARITY-CHECKLIST.md`; create a generated 69-RPC/loop/action inventory under `docs/port/`.
 
-- [ ] Recompute compiled, reachable, effective, transport-proven, and promotion-ready counts from source/tests.
+- [ ] Land Task 64's deterministic generated inventory early and keep it red
+      until each owning task supplies real evidence.
+- [ ] Recompute compiled, reachable, effective, transport-proven,
+      review-passed, soak-required, and promotion-ready states from source/tests.
 - [ ] Require 69/69 Python-equivalent RPC registration and all production-equivalent observer loop spawns.
 - [ ] Require fake-boundary coverage for every external mutation type and zero unauthorized action construction in observer mode.
+- [ ] Embed the final inventory digest in the release manifest and arm schema;
+      prohibit count-only, source-presence, placeholder-refusal, nullable-health,
+      and manual-checklist shortcuts.
 - [ ] Mark only soak and actual cutover rows open; publish the reviewed, green code-complete commit without deploying it.
