@@ -98,12 +98,52 @@ impl ShadowMode {
     }
 }
 
+/// Capability proving the passive-observer row passed validation. Its private
+/// field prevents external callers from constructing the passive variant
+/// directly.
+///
+/// ~~~compile_fail,E0451
+/// let forged = revops::fee_mode::PassiveMode { sealed: () };
+/// let _ = revops::fee_mode::ValidatedFeeMode::PassiveObserver(forged);
+/// ~~~
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassiveMode {
+    sealed: (),
+}
+
 /// The live-fee-authority mode capability. Its only field is a private
 /// [`LiveSessionArm`], and its only constructor is [`validate_fee_mode`] --
 /// see the module doc's "`LiveAuthority` cannot be forged".
 #[derive(Debug)]
 pub struct LiveMode {
     arm: LiveSessionArm,
+}
+
+/// Capability proving this process passed validation as either passive
+/// observer or autonomous shadow. All fields are private and the only value
+/// production can obtain is emitted by [`ValidatedFeeMode::into_authority_plan`].
+///
+/// ```compile_fail,E0451
+/// // External code cannot forge observer authority from a boolean.
+/// let forged = revops::fee_mode::ObserverMode { autonomous_shadow: true };
+/// ```
+#[derive(Debug)]
+pub struct ObserverMode {
+    autonomous_shadow: bool,
+}
+
+impl ObserverMode {
+    pub fn autonomous_shadow(&self) -> bool {
+        self.autonomous_shadow
+    }
+}
+
+/// Type-directed authority split. Observer variants carry only the
+/// nonforgeable observer capability; the supplied action factory is invoked
+/// exclusively for a validated live variant.
+pub enum AuthorityPlan<T> {
+    Observer(ObserverMode),
+    Live(T),
 }
 
 impl LiveMode {
@@ -165,9 +205,26 @@ impl LiveMode {
 /// ```
 #[derive(Debug)]
 pub enum ValidatedFeeMode {
-    PassiveObserver,
+    PassiveObserver(PassiveMode),
     AutonomousShadow(ShadowMode),
     LiveAuthority(LiveMode),
+}
+
+impl ValidatedFeeMode {
+    pub fn into_authority_plan<T>(
+        self,
+        action_factory: impl FnOnce(LiveMode) -> T,
+    ) -> AuthorityPlan<T> {
+        match self {
+            Self::PassiveObserver(_) => AuthorityPlan::Observer(ObserverMode {
+                autonomous_shadow: false,
+            }),
+            Self::AutonomousShadow(_) => AuthorityPlan::Observer(ObserverMode {
+                autonomous_shadow: true,
+            }),
+            Self::LiveAuthority(live) => AuthorityPlan::Live(action_factory(live)),
+        }
+    }
 }
 
 /// Every fail-closed reason [`validate_fee_mode`] can return. Each is
@@ -298,7 +355,9 @@ pub fn validate_fee_mode(
             if arm.is_some() {
                 return Err(FeeModeDenyReason::ArmPresentInNonLiveMode);
             }
-            Ok(ValidatedFeeMode::PassiveObserver)
+            Ok(ValidatedFeeMode::PassiveObserver(PassiveMode {
+                sealed: (),
+            }))
         }
         (true, true, false, true) => {
             if arm.is_some() {

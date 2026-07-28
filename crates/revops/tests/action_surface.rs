@@ -69,6 +69,7 @@ const ALLOWED_FILES: &[&str] = &[
 const CLN_FEE_BROADCASTER_ALLOWED_FILES: &[&str] = &[
     "crates/revops/src/fee_execution.rs",
     "crates/revops/src/main.rs",
+    "crates/revops/src/runtime.rs",
     "crates/revops/src/bin/rehearse_fee_cutover.rs",
 ];
 
@@ -190,6 +191,116 @@ fn shadow_constructors_never_mention_cln_fee_broadcaster() {
          (every shadow/autonomous construction path must stay capability-free) -- found it in: \
          {violations:?}"
     );
+}
+
+#[test]
+fn observer_runtime_source_cannot_name_any_action_capability() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/runtime.rs")).unwrap();
+    let observer = source.split("pub struct LiveRuntime").next().unwrap();
+    for forbidden in [
+        "ClnFeeBroadcaster",
+        "PaymentMode::Live",
+        "ExecutionMode::Armed",
+    ] {
+        assert!(
+            !observer.contains(forbidden),
+            "ObserverRuntime construction and fields must not name {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn observer_runtime_requires_nonforgeable_mode_and_concrete_pass_set() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/runtime.rs")).unwrap();
+    assert!(source.contains("pub struct ObserverPassSet"));
+    assert!(
+        !source.contains("pub fee:"),
+        "pass-set fields must stay private"
+    );
+    let public_start_signature = source
+        .split("pub async fn start(")
+        .nth(1)
+        .expect("public observer runtime start")
+        .split(") -> Result<Self>")
+        .next()
+        .expect("public observer runtime start signature");
+    assert!(public_start_signature.contains("mode: ObserverMode"));
+    assert!(public_start_signature.contains("passes: ObserverPassSet"));
+    assert!(
+        !public_start_signature.contains("BTreeMap<LoopId, Arc<dyn ObserverPass>>"),
+        "production observer construction must not accept arbitrary pass implementations"
+    );
+    assert!(source.contains("async fn start_internal("));
+    let loop_source =
+        std::fs::read_to_string(root.join("crates/revops/src/loop_health.rs")).unwrap();
+    assert!(loop_source.contains("pub(crate) trait ObserverPass"));
+    assert!(loop_source.contains("pub(crate) fn spawn_loop("));
+}
+
+#[test]
+fn fee_cadence_activation_occurs_only_after_plugin_start() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
+    assert!(
+        !source.contains("spawn_bounded_fee_trigger("),
+        "main must retain an inert activation handle instead of spawning cadence pre-start"
+    );
+    let started = source
+        .find("configured.start(state).await?")
+        .expect("plugin start call");
+    let activated = source
+        .find("fee_cadence.activate()")
+        .expect("post-start cadence activation");
+    assert!(
+        activated > started,
+        "cadence must activate only after plugin start succeeds"
+    );
+}
+
+#[test]
+fn scheduler_has_no_unbounded_owner_or_wake_ingress() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/fee_scheduler.rs")).unwrap();
+    for forbidden in [
+        "mpsc::channel::<CycleMsg>()",
+        "unbounded_channel::<()>",
+        "UnboundedSender<()>",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "all scheduler producers must share fixed-capacity ingress; found {forbidden}"
+        );
+    }
+    assert!(source.contains("blocking_recv()"));
+    assert!(source.contains("blocking_send(CycleMsg::InitialFeeStoreResult"));
+    assert!(source.contains("pub(crate) fn bounded_channel"));
+    assert!(!source.contains("pub fn bounded_channel"));
+    assert!(source.contains("pub struct A3ResultReceiver"));
+    assert!(source.contains("rx: std::sync::Mutex<tokio_mpsc::Receiver<CycleMsg>>"));
+}
+
+#[test]
+fn production_composition_spawns_only_the_real_fee_pass() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
+    assert_eq!(
+        source.matches("passes.with_fee(").count(),
+        1,
+        "Task 57 production must instantiate exactly one real pass"
+    );
+    for unwired in [
+        "with_rebalance(",
+        "with_planner(",
+        "with_lnplus(",
+        "with_boltz(",
+    ] {
+        assert!(
+            !source.contains(unwired),
+            "{unwired} must remain not_wired without a real pass"
+        );
+    }
 }
 
 /// Sanity check on the scan itself: it must actually find files (a scan

@@ -48,21 +48,9 @@ struct State {
     /// subscription handler and startup hydration treat that as a no-op,
     /// never falling back to the read-only `db` connection above.
     observer_db: Option<revops_db::owner::ObserverHandle>,
-    /// Resolved once at init via [`resolve_journal_dir`] (Task 3): `None`
-    /// when `revops-r-journal-dir` is empty AND `observer-db-path` is also
-    /// unset/unresolved -- there is nothing to derive a dry-run journal
-    /// location from in that case. T6's scheduler consumes this to build
-    /// `SchedulerConfig.journal_dir` (a required `PathBuf`) and skips
-    /// spawning the fee-cycle scheduler entirely when this is `None`.
-    journal_dir: Option<PathBuf>,
-    /// The running fee-cycle scheduler's handle (T6) -- T7's fee-debug
-    /// RPC and wake triggers send through this. Set at most once, AFTER
-    /// `configured.start` (the scheduler spawns post-start, but `State`
-    /// is built pre-start -- hence `OnceLock` rather than an
-    /// `Option` field). Unset whenever the scheduler is off (the resolved
-    /// mode is not autonomous shadow, i.e.
-    /// `revops-r-fee-stateful-shadow=false`, or a missing
-    /// db-path/journal-dir -- each case logged explicitly at init).
+    /// Real fee-owner handle for diagnostic and notification messages. Every
+    /// producer uses the scheduler's bounded ingress; full-cycle cadence also
+    /// routes through `AuthorityRuntime::Observer`'s bounded `LoopHandle`.
     scheduler: std::sync::OnceLock<revops::fee_scheduler::SchedulerHandle>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
@@ -83,16 +71,9 @@ struct State {
     /// Surfaced by the runway status RPC; never changes for the process's
     /// whole lifetime (the mode-matrix options are not `.dynamic()`).
     mode_label: &'static str,
-    /// Task 10: the guarded CLN fee broadcaster, constructed ONLY when
-    /// `mode_label == "live_authority"` -- see `ClnFeeBroadcaster::new`'s
-    /// doc comment for why construction alone (restart quarantine
-    /// reconciliation) is itself a hard startup gate. Resolved pre-start,
-    /// so (unlike `scheduler`) this is a plain field, not a `OnceLock`.
-    /// Unused by the cycle loop in this build (wiring live broadcast
-    /// dispatch into the scheduler is out of this task's scope) -- its
-    /// presence here proves every construction gate passed.
+    /// Whole-plugin authority split. Observer variants hold only observer loop handles; the guarded action adapter exists only inside `LiveRuntime`.
     #[allow(dead_code)]
-    live_broadcaster: Option<ClnFeeBroadcaster>,
+    authority_runtime: revops::runtime::AuthorityRuntime,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -562,7 +543,7 @@ pub fn resolve_startup_mode(
 /// `State::mode_label` for the status/runway RPCs and startup logging.
 pub fn mode_label(mode: &ValidatedFeeMode) -> &'static str {
     match mode {
-        ValidatedFeeMode::PassiveObserver => "passive_observer",
+        ValidatedFeeMode::PassiveObserver(_) => "passive_observer",
         ValidatedFeeMode::AutonomousShadow(_) => "autonomous_shadow",
         ValidatedFeeMode::LiveAuthority(_) => "live_authority",
     }
@@ -827,9 +808,14 @@ async fn main() -> Result<()> {
                 // predates the scheduler existing.
                 if let Some(handle) = p.state().scheduler.get() {
                     let channel_id = notify::forward_trigger_channel_id(&v);
-                    let _ = handle
+                    if handle
                         .tx
-                        .send(revops::fee_scheduler::CycleMsg::ForwardEvent { channel_id });
+                        .send(revops::fee_scheduler::CycleMsg::ForwardEvent { channel_id })
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("revops: forward_event scheduler ingress closed");
+                    }
 
                     // Task 44: the fee-relevant FAILURE path (py
                     // cl-revenue-ops.py:6911-6941). Separate from the
@@ -847,11 +833,16 @@ async fn main() -> Result<()> {
                     // fee a sender pays to traverse us is our policy on the
                     // out channel; the in channel's fee belongs to our peer.
                     if let Some(signal) = notify::failed_forward_signal(&v, revops::now_unix()) {
-                        let _ = handle
+                        if handle
                             .tx
                             .send(revops::fee_scheduler::CycleMsg::FailedForward(Box::new(
                                 signal,
-                            )));
+                            )))
+                            .await
+                            .is_err()
+                        {
+                            eprintln!("revops: failed-forward scheduler ingress closed");
+                        }
                     }
                 }
                 Ok(())
@@ -913,9 +904,15 @@ async fn main() -> Result<()> {
                                     signal,
                                 )
                                 .await;
-                                let _ = tx.send(revops::fee_scheduler::CycleMsg::NewChannel(
-                                    Box::new(preparation),
-                                ));
+                                if tx
+                                    .send(revops::fee_scheduler::CycleMsg::NewChannel(Box::new(
+                                        preparation,
+                                    )))
+                                    .await
+                                    .is_err()
+                                {
+                                    eprintln!("revops: new-channel scheduler ingress closed");
+                                }
                             });
                         }
                         _ => {
@@ -1251,6 +1248,7 @@ async fn main() -> Result<()> {
                 if handle
                     .tx
                     .send(revops::fee_scheduler::CycleMsg::Query(query, reply_tx))
+                    .await
                     .is_err()
                 {
                     return Ok(serde_json::json!({"error": "fee-cycle owner thread not running"}));
@@ -1282,7 +1280,11 @@ async fn main() -> Result<()> {
                                   -- see plugin log)"
                     }));
                 };
-                match handle.tx.send(revops::fee_scheduler::CycleMsg::WakeAll) {
+                match handle
+                    .tx
+                    .send(revops::fee_scheduler::CycleMsg::WakeAll)
+                    .await
+                {
                     Ok(()) => Ok(serde_json::json!({
                         "status": "ok",
                         "message": "wake-all requested; sleeping channels will be evaluated on \
@@ -1318,12 +1320,19 @@ async fn main() -> Result<()> {
                             revops::fee_scheduler::FeeDebugQuery::RunwayCounters,
                             reply_tx,
                         ))
-                        .is_ok()
+                        .await
+                        .is_err()
                     {
-                        if let Ok(Ok(value)) =
-                            tokio::task::spawn_blocking(move || reply_rx.recv()).await
-                        {
-                            counters = value;
+                        return Ok(serde_json::json!({
+                            "error": "fee-cycle owner thread not running"
+                        }));
+                    }
+                    match tokio::task::spawn_blocking(move || reply_rx.recv()).await {
+                        Ok(Ok(value)) => counters = value,
+                        _ => {
+                            return Ok(serde_json::json!({
+                                "error": "fee-cycle owner thread did not respond"
+                            }));
                         }
                     }
                 }
@@ -1579,6 +1588,10 @@ async fn main() -> Result<()> {
                 }
                 let s = p.state();
                 let now = now_unix();
+                let loop_rows: Result<Vec<revops_db::loop_health::LoopHealthRow>, String> = match &s.observer_db {
+                    Some(store) => store.list_loop_health().await.map_err(|error| format!("{error:#}")),
+                    None => Err("Rust-owned observer DB unavailable".to_string()),
+                };
                 // Round-2 correction, P1 (codex re-review): `db=None` is a
                 // REAL, reachable degraded state -- the plugin deliberately
                 // comes up running with `db=None` when the DEFAULT db-path
@@ -1598,7 +1611,7 @@ async fn main() -> Result<()> {
                 // falls back to below (F11) -- reusing it here for the
                 // upfront no-DB case keeps both degraded paths consistent.
                 let Some(handle) = &s.db else {
-                    return Ok(revops::rpc_health::build_health(now, None, None, None));
+                    return Ok(revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone())));
                 };
                 // Task 50 correction round, F11: Python's `revenue_health`
                 // try/excepts EACH section independently (cl-revenue-ops.py:
@@ -1618,14 +1631,12 @@ async fn main() -> Result<()> {
                 // will then show as `null` + gap-listed, per the builder's
                 // contract.
                 match pnl {
-                    Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health(
-                        now,
-                        Some(&pnl_1d),
-                        Some(&pnl_7d),
-                        None,
+                    Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health_with_loops(
+                        now, Some(&pnl_1d), Some(&pnl_7d), None,
+                        loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()),
                     )),
                     Err(e) => {
-                        let mut out = revops::rpc_health::build_health(now, None, None, None);
+                        let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()));
                         out["financials"] = serde_json::json!({"error": e.to_string()});
                         // This is a LIVE failure, not a declared "not
                         // wired yet" gap -- `_gaps` must not carry it (a
@@ -2274,38 +2285,109 @@ async fn main() -> Result<()> {
     };
 
     let resolved_mode_label = mode_label(&mode);
-    let autonomous_shadow = matches!(mode, ValidatedFeeMode::AutonomousShadow(_));
-
-    // Live authority's ONLY job in this task is constructing the guarded
-    // broadcaster -- proving restart quarantine reconciliation succeeds --
-    // BEFORE the plugin ever announces itself started. Wiring live
-    // broadcast dispatch into the cycle loop is out of this task's scope
-    // (see `State::live_broadcaster`'s doc comment).
-    let live_broadcaster = match mode {
-        ValidatedFeeMode::LiveAuthority(live_mode) => {
-            let store = observer_db
-                .clone()
-                .expect("live authority mode gate guarantees observer_db is Some");
-            match ClnFeeBroadcaster::new(
-                init_socket_path.clone(),
-                store,
-                LIVE_BROADCASTER_TIMEOUT_SECONDS,
-                live_mode,
-            )
-            .await
-            {
-                Ok(broadcaster) => Some(broadcaster),
-                Err(e) => {
+    let scheduler = std::sync::OnceLock::new();
+    let authority_plan = mode.into_authority_plan(|live_mode| {
+        let store = observer_db
+            .clone()
+            .expect("live authority mode gate guarantees observer_db is Some");
+        ClnFeeBroadcaster::new(
+            init_socket_path.clone(),
+            store,
+            LIVE_BROADCASTER_TIMEOUT_SECONDS,
+            live_mode,
+        )
+    });
+    let mut fee_cadence = None;
+    let authority_runtime = match authority_plan {
+        revops::fee_mode::AuthorityPlan::Live(broadcaster) => {
+            if let Some(handle) = observer_db.clone() {
+                let store: Arc<dyn revops::loop_health::LoopHealthPersistence> =
+                    Arc::new(revops::loop_health::LoopHealthStore::new(handle));
+                if let Err(error) = revops::runtime::register_unwired_loops(store).await {
                     configured
-                        .disable(&format!(
-                            "live authority gate: restart quarantine reconciliation failed: {e}"
-                        ))
+                        .disable(&format!("loop-health registration failed: {error:#}"))
                         .await?;
                     return Ok(());
                 }
             }
+            let broadcaster = match broadcaster.await {
+                Ok(broadcaster) => broadcaster,
+                Err(error) => {
+                    configured.disable(&format!("live authority gate: restart quarantine reconciliation failed: {error}")).await?;
+                    return Ok(());
+                }
+            };
+            revops::runtime::AuthorityRuntime::Live(revops::runtime::LiveRuntime::new(broadcaster))
         }
-        _ => None,
+        revops::fee_mode::AuthorityPlan::Observer(observer_mode) => {
+            let autonomous_shadow = observer_mode.autonomous_shadow();
+            match observer_db.clone() {
+                None => revops::runtime::AuthorityRuntime::Observer(
+                    revops::runtime::ObserverRuntime::unavailable(observer_mode),
+                ),
+                Some(observer_handle) => {
+                    let store: Arc<dyn revops::loop_health::LoopHealthPersistence> = Arc::new(
+                        revops::loop_health::LoopHealthStore::new(observer_handle.clone()),
+                    );
+                    let mut passes = revops::runtime::ObserverPassSet::empty();
+                    let mut fee_pass = None;
+                    if autonomous_shadow {
+                        match (production_db_path_expanded.as_ref(), journal_dir.as_ref()) {
+                            (Some(prod_db_path), Some(journal_dir)) => {
+                                let cfg = revops::fee_scheduler::SchedulerConfig {
+                                    db_path: prod_db_path.clone(),
+                                    socket_path: init_socket_path.clone(),
+                                    journal_dir: journal_dir.clone(),
+                                    lifecycle: revops::fee_scheduler::StateLifecycle::SeedOnce,
+                                    trigger: revops::fee_scheduler::TriggerMode::ExternalOnly,
+                                };
+                                match revops::fee_scheduler::spawn_owner_for_runtime(cfg, Some(Box::new(observer_handle.clone()) as Box<dyn revops::fee_state::RunwayStateStore>)) {
+                            Ok(handle) => {
+                                let initial_interval = revops::fee_config::resolve_fee_cfg(db.as_ref(), &python_options.snapshot()).await.fee_interval.max(1) as u64;
+                                let pass = Arc::new(revops::fee_scheduler::FeeObserverPass::new(init_socket_path.clone(), db.clone(), python_options.clone(), handle.tx.clone(), initial_interval));
+                                passes = passes.with_fee(pass.clone());
+                                fee_pass = Some(pass);
+                                let _ = scheduler.set(handle);
+                            }
+                            Err(error) => eprintln!("revops: fee-cycle owner FAILED to start: {error:#}; fee loop remains not_wired"),
+                        }
+                            }
+                            (None, _) => {
+                                eprintln!("revops: fee loop not wired: production DB unavailable")
+                            }
+                            (_, None) => eprintln!(
+                                "revops: fee loop not wired: journal directory unavailable"
+                            ),
+                        }
+                    }
+                    let runtime =
+                        match revops::runtime::ObserverRuntime::start(observer_mode, store, passes)
+                            .await
+                        {
+                            Ok(runtime) => runtime,
+                            Err(error) => {
+                                configured
+                                    .disable(&format!(
+                                    "observer runtime loop-health initialization failed: {error:#}"
+                                ))
+                                    .await?;
+                                return Ok(());
+                            }
+                        };
+                    if let (Some(pass), Some(handle)) = (
+                        fee_pass,
+                        runtime.handle(revops_db::loop_health::LoopId::Fee),
+                    ) {
+                        fee_cadence = Some(revops::fee_scheduler::FeeCadenceActivation::new(
+                            handle,
+                            pass,
+                            revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
+                        ));
+                    }
+                    revops::runtime::AuthorityRuntime::Observer(runtime)
+                }
+            }
+        }
     };
 
     let state: SharedState = Arc::new(State {
@@ -2314,90 +2396,19 @@ async fn main() -> Result<()> {
         db_path,
         db,
         observer_db,
-        journal_dir,
         config_names: config_name_map(),
         python_options,
-        scheduler: std::sync::OnceLock::new(),
+        scheduler,
         mode_label: resolved_mode_label,
-        live_broadcaster,
+        authority_runtime,
         socket_path: init_socket_path.clone(),
         production_db_path: production_db_path_expanded.clone(),
     });
 
     let plugin = configured.start(state).await?;
 
-    // Task 10: spawn the single-owner fee-cycle scheduler -- ONLY when the
-    // resolved mode is autonomous shadow AND both required paths resolved;
-    // otherwise say exactly why the fee cycle is off (plan requirement:
-    // never silent). Autonomous shadow is the ONLY row that runs the
-    // scheduler in this build: passive-observer has no dry-run to run, and
-    // live-authority's cycle-execution wiring is out of this task's scope
-    // (see `State::live_broadcaster`'s doc comment).
-    {
-        let s = plugin.state();
-        if !autonomous_shadow {
-            eprintln!(
-                "revops: fee-cycle scheduler off: resolved mode is '{}' (autonomous shadow -- \
-                 {fee_stateful_shadow_name}=true alongside {fee_dryrun_name}=true, \
-                 observer=true, {fee_broadcast_name}=false -- is the only mode that runs the \
-                 fee-cycle scheduler in this build)",
-                s.mode_label
-            );
-        } else {
-            match (production_db_path_expanded.as_ref(), s.journal_dir.as_ref()) {
-                (None, _) => eprintln!(
-                    "revops: fee-cycle scheduler off: autonomous shadow mode resolved but \
-                     {db_path_name} is unset/unusable (no production DB to read evidence from)"
-                ),
-                (_, None) => eprintln!(
-                    "revops: fee-cycle scheduler off: autonomous shadow mode resolved but no \
-                     journal dir resolved (set {journal_dir_name} or {observer_db_name})"
-                ),
-                (Some(prod_db_path), Some(journal_dir)) => {
-                    match revops::fee_scheduler::spawn(
-                        revops::fee_scheduler::SchedulerConfig {
-                            db_path: prod_db_path.clone(),
-                            socket_path: init_socket_path.clone(),
-                            journal_dir: journal_dir.clone(),
-                            // Task 10 (Design Note 1's recorded cutover
-                            // flip): autonomous shadow uses SeedOnce +
-                            // fixed-interval cycles. RehydratePerCycle /
-                            // FlushTriggered remain in `fee_scheduler` for
-                            // strict-replay/legacy dry-run tests only --
-                            // never selected by this live wiring.
-                            lifecycle: revops::fee_scheduler::StateLifecycle::SeedOnce,
-                            trigger: revops::fee_scheduler::TriggerMode::FixedInterval {
-                                phase_offset_secs: revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
-                            },
-                        },
-                        s.db.clone(),
-                        s.python_options.clone(),
-                        // Task 5: the Rust-owned state store (observer-db
-                        // actor) -- REQUIRED for SeedOnce; the mode gate
-                        // already guarantees `observer_db.is_some()` for
-                        // this mode (see `resolve_startup_mode`'s
-                        // mandatory-writable-state check).
-                        s.observer_db
-                            .clone()
-                            .map(|h| Box::new(h) as Box<dyn revops::fee_state::RunwayStateStore>),
-                    ) {
-                        Ok(handle) => {
-                            let _ = s.scheduler.set(handle);
-                            eprintln!(
-                                "revops: fee-cycle scheduler started (autonomous shadow, \
-                                 SeedOnce; journal dir {}, fixed interval, phase offset {}s)",
-                                journal_dir.display(),
-                                revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
-                            );
-                        }
-                        Err(e) => eprintln!(
-                            "revops: fee-cycle scheduler FAILED to start: {e:#}; autonomous \
-                             shadow disabled for this plugin lifetime"
-                        ),
-                    }
-                }
-            }
-        }
+    if let Some(fee_cadence) = fee_cadence {
+        fee_cadence.activate();
     }
 
     // Startup hydration runs as a background task, off the init-handshake
@@ -2848,7 +2859,7 @@ mod tests {
             rust_state_store_configured: false,
         })
         .expect("passive observer needs no Rust state");
-        assert!(matches!(result, ValidatedFeeMode::PassiveObserver));
+        assert!(matches!(result, ValidatedFeeMode::PassiveObserver(_)));
         assert_eq!(mode_label(&result), "passive_observer");
     }
 
@@ -3139,10 +3150,9 @@ mod tests {
             cutover_arm::validate_and_consume(&arm_path, &consumed_dir, &test_identity(owner_uid))
                 .expect("valid arm consumes");
 
-        assert_eq!(
-            mode_label(&ValidatedFeeMode::PassiveObserver),
-            "passive_observer"
-        );
+        let passive = fee_mode::validate_fee_mode(passive_flags(), None, &virgin_state(), None)
+            .expect("passive row valid");
+        assert_eq!(mode_label(&passive), "passive_observer");
         let shadow = fee_mode::validate_fee_mode(shadow_flags(), None, &virgin_state(), None)
             .expect("shadow row valid");
         assert_eq!(mode_label(&shadow), "autonomous_shadow");

@@ -1863,7 +1863,6 @@ fn revenue_r_health_pnl_failure_is_an_in_band_financials_error_not_a_whole_call_
         "boltz",
         "planner",
         "top_routes",
-        "loops",
     ] {
         assert!(
             result.get(field).is_some(),
@@ -1950,6 +1949,30 @@ fn revenue_r_health_with_no_db_returns_honest_shape_not_a_top_level_error() {
 fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
     let home = tempfile::tempdir().expect("tempdir");
     let prod_db_path = copy_fixture_db(home.path());
+    let observer_db_path = home.path().join("observer-health.db");
+    {
+        let conn = revops_db::owner::open_observer_db(&observer_db_path).expect("open observer db");
+        for (index, id) in revops_db::loop_health::REQUIRED_LOOPS
+            .into_iter()
+            .enumerate()
+        {
+            revops_db::loop_health::register_loop(
+                &conn,
+                id,
+                revops_db::loop_health::WiringStatus::NotWired,
+                100 + index as i64,
+            )
+            .unwrap();
+            revops_db::loop_health::increment_loop_backpressure(
+                &conn,
+                id,
+                10 + index as u64,
+                20 + index as u64,
+                200 + index as i64,
+            )
+            .unwrap();
+        }
+    }
     let fwd_ts = now_unix() - 60;
     {
         let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
@@ -1966,7 +1989,10 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
         false,
         Some(prod_db_path.to_str().unwrap()),
         home.path(),
-        &[],
+        &[(
+            "revops-r-observer-db-path",
+            serde_json::json!(observer_db_path.to_str().unwrap()),
+        )],
         "revenue-r-health",
     );
     assert_eq!(
@@ -1994,11 +2020,19 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
         "budget",
         "planner",
         "top_routes",
-        "loops",
     ] {
         assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
     }
     assert!(!gaps.contains(&"financials"), "gaps: {gaps:?}");
+    assert!(
+        !gaps.contains(&"loops"),
+        "durable loop inventory is wired: {gaps:?}"
+    );
+    assert_eq!(result["loops"].as_array().unwrap().len(), 5);
+    assert_eq!(result["loops"][0]["loop_name"], "fee");
+    assert_eq!(result["loops"][0]["coalesced_total"], 10);
+    assert_eq!(result["loops"][4]["dropped_total"], 24);
+    assert_eq!(result["loops"][4]["wiring_status"], "not_wired");
     // Task 50 correction round ("should NOT stay gaps"): boltz is no
     // longer a null+gap -- it's Python's own honest `{"enabled": false}`
     // answer with no Boltz manager wired.

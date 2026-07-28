@@ -34,6 +34,7 @@ use revops_fees::pyrand::PyRandom;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Fixed cycle clock value -- deliberately different from [`SEED`] so a
 /// buggy per-cycle reseed (which would use the cycle clock) lands on a
@@ -1057,13 +1058,18 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     .expect("spawn scheduler");
 
     // Fire-and-forget: must not crash the owner thread.
-    handle.tx.send(CycleMsg::WakeAll).expect("send WakeAll");
+    handle
+        .tx
+        .send(CycleMsg::WakeAll)
+        .await
+        .expect("send WakeAll");
 
     // Query must round-trip through the real reply channel.
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     handle
         .tx
         .send(CycleMsg::Query(FeeDebugQuery::Summary, reply_tx))
+        .await
         .expect("send Query");
     let value = reply_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -1071,7 +1077,215 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     assert!(value.get("last_cycle_decision").is_some(), "{value:?}");
     assert!(value.get("channels").is_some(), "{value:?}");
 
-    handle.tx.send(CycleMsg::Shutdown).ok();
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+}
+
+#[tokio::test]
+async fn run_prepared_acknowledges_only_after_real_owner_outcome() {
+    let fx = fixture();
+    let handle = revops::fee_scheduler::spawn_owner_for_runtime(
+        SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::FixedInterval {
+                phase_offset_secs: 999_999,
+            },
+        },
+        None,
+    )
+    .expect("spawn owner");
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    handle
+        .tx
+        .send(CycleMsg::RunPrepared(
+            Box::new(prepared(json!(3), false)),
+            ack_tx,
+        ))
+        .await
+        .expect("dispatch prepared cycle");
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .expect("owner completion deadline")
+        .expect("owner reply");
+    assert!(
+        outcome.is_ok(),
+        "real owner outcome must be acknowledged: {outcome:?}"
+    );
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+}
+
+type HeldOwnerBody = Box<dyn FnOnce() + Send + 'static>;
+
+fn held_owner(
+    fx: &Fixture,
+) -> (
+    revops::fee_scheduler::SchedulerHandle,
+    Arc<std::sync::Mutex<Option<HeldOwnerBody>>>,
+) {
+    let held = Arc::new(std::sync::Mutex::new(None));
+    let held_for_spawn = held.clone();
+    let handle = revops::fee_scheduler::spawn_with_thread_spawner(
+        SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::ExternalOnly,
+        },
+        None,
+        revops::config_resolve::PythonOptionCache::empty(),
+        None,
+        move |_name, body| {
+            *held_for_spawn.lock().unwrap() = Some(body);
+            Ok(())
+        },
+    )
+    .expect("construct held owner");
+    (handle, held)
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_backpressures_notification_then_rpc_until_drain() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    for i in 0..revops::fee_scheduler::OWNER_QUEUE_CAPACITY {
+        handle
+            .tx
+            .send(CycleMsg::ForwardEvent {
+                channel_id: format!("queued-{i}"),
+            })
+            .await
+            .expect("fill bounded owner ingress");
+    }
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let blocked = handle
+        .tx
+        .send(CycleMsg::Query(FeeDebugQuery::Summary, reply_tx));
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err(),
+        "RPC producer must backpressure while the bounded ingress is saturated"
+    );
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    blocked.await.expect("RPC admitted after owner drains");
+    let value = tokio::task::spawn_blocking(move || reply_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(value.get("channels").is_some());
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_backpressures_cycle_and_acknowledges_only_after_drain() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    for i in 0..revops::fee_scheduler::OWNER_QUEUE_CAPACITY {
+        handle
+            .tx
+            .send(CycleMsg::ForwardEvent {
+                channel_id: format!("queued-{i}"),
+            })
+            .await
+            .unwrap();
+    }
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    let blocked = handle.tx.send(CycleMsg::RunPrepared(
+        Box::new(prepared(json!(3), false)),
+        ack_tx,
+    ));
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err(),
+        "cycle producer must backpressure while owner ingress is saturated"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut ack_rx)
+            .await
+            .is_err(),
+        "queue admission is not cycle completion"
+    );
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    blocked.await.unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .expect("owner completion deadline")
+        .expect("owner reply after drain");
+    assert!(
+        outcome.is_ok(),
+        "real owner outcome after drain: {outcome:?}"
+    );
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_backpressures_wake_until_drain() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    for i in 0..revops::fee_scheduler::OWNER_QUEUE_CAPACITY {
+        handle
+            .tx
+            .send(CycleMsg::ForwardEvent {
+                channel_id: format!("queued-{i}"),
+            })
+            .await
+            .unwrap();
+    }
+    let blocked = handle.tx.send(CycleMsg::RunCycleNow);
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err(),
+        "wake producers must use the same bounded owner ingress, never a bypass sender"
+    );
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    blocked.await.expect("wake admitted after owner drains");
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_reports_closed_owner_and_closes_outstanding_ack() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    handle
+        .tx
+        .send(CycleMsg::RunPrepared(
+            Box::new(prepared(json!(3), false)),
+            ack_tx,
+        ))
+        .await
+        .unwrap();
+    drop(held.lock().unwrap().take());
+    assert!(
+        ack_rx.await.is_err(),
+        "queued ACK must close with owner loss"
+    );
+    let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+    assert!(handle
+        .tx
+        .send(CycleMsg::Query(FeeDebugQuery::Summary, reply_tx))
+        .await
+        .is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,16 +1359,49 @@ mod seedonce_restart {
     /// `revops-db`'s own actor tests), against an on-disk file so a
     /// "restart" (a brand-new `CycleOwner` + store instance) reopens the
     /// same Rust-owned state.
+    #[derive(Clone, Default)]
+    struct DispatchLaunchFailures {
+        idempotency: Arc<AtomicBool>,
+        commit: Arc<AtomicBool>,
+        receipt: Arc<AtomicBool>,
+    }
+
     struct TestStore {
         path: PathBuf,
         fail_commits: Arc<AtomicBool>,
+        launch_failures: DispatchLaunchFailures,
     }
 
     impl TestStore {
         fn open(path: &Path, fail_commits: Arc<AtomicBool>) -> TestStore {
+            Self::open_with_dispatch_launch_failures(
+                path,
+                fail_commits,
+                DispatchLaunchFailures::default(),
+            )
+        }
+
+        fn open_with_commit_launch_failure(
+            path: &Path,
+            fail_commits: Arc<AtomicBool>,
+            fail_commit_launch: Arc<AtomicBool>,
+        ) -> TestStore {
+            let launch_failures = DispatchLaunchFailures {
+                commit: fail_commit_launch,
+                ..DispatchLaunchFailures::default()
+            };
+            Self::open_with_dispatch_launch_failures(path, fail_commits, launch_failures)
+        }
+
+        fn open_with_dispatch_launch_failures(
+            path: &Path,
+            fail_commits: Arc<AtomicBool>,
+            launch_failures: DispatchLaunchFailures,
+        ) -> TestStore {
             let store = TestStore {
                 path: path.to_path_buf(),
                 fail_commits,
+                launch_failures,
             };
             store.conn(); // create + init schema
             store
@@ -1240,11 +1487,15 @@ mod seedonce_restart {
             &self,
             cycle_id: String,
             on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
-        ) {
+        ) -> anyhow::Result<()> {
+            if self.launch_failures.idempotency.load(Ordering::SeqCst) {
+                anyhow::bail!("injected idempotency dispatch thread spawn failure");
+            }
             on_done(fee_runway::cycle_exists_with_generation(
                 &self.conn(),
                 &cycle_id,
             ));
+            Ok(())
         }
 
         fn dispatch_commit_fee_cycle_guarded(
@@ -1252,33 +1503,49 @@ mod seedonce_restart {
             commit: FeeCycleCommit,
             expected_prior_generation: u64,
             on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
-        ) {
+        ) -> anyhow::Result<()> {
+            if self.launch_failures.commit.load(Ordering::SeqCst) {
+                anyhow::bail!("injected store dispatch thread spawn failure");
+            }
             if self.fail_commits.load(Ordering::SeqCst) {
                 on_done(Err(anyhow::anyhow!("injected commit failure")));
-                return;
+                return Ok(());
             }
             on_done(fee_runway::commit_fee_cycle_guarded(
                 &self.conn(),
                 &commit,
                 expected_prior_generation,
             ));
+            Ok(())
         }
 
         fn dispatch_record_trigger_event(
             &self,
             event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
-        ) {
+        ) -> anyhow::Result<()> {
+            if self.launch_failures.receipt.load(Ordering::SeqCst) {
+                anyhow::bail!("injected receipt dispatch thread spawn failure");
+            }
             on_done(RunwayStateStore::record_trigger_event(self, event));
+            Ok(())
         }
     }
 
-    /// F5 test plumbing: wire an owner's self-sender to a local receiver
+    /// F5 test plumbing: wire an owner's result-only sink to a local receiver
     /// (the production loop's stand-in) ...
-    fn self_channel(owner: &mut CycleOwner) -> std::sync::mpsc::Receiver<CycleMsg> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        owner.set_self_sender(tx);
-        rx
+    struct TestOwnerReceiver(revops::fee_scheduler::A3ResultReceiver);
+
+    impl TestOwnerReceiver {
+        fn try_recv(&self) -> Result<CycleMsg, tokio::sync::mpsc::error::TryRecvError> {
+            self.0.try_recv().map(CycleMsg::InitialFeeStoreResult)
+        }
+    }
+
+    fn self_channel(owner: &mut CycleOwner) -> TestOwnerReceiver {
+        TestOwnerReceiver(
+            owner.attach_a3_result_receiver_for_tests(revops::fee_scheduler::OWNER_QUEUE_CAPACITY),
+        )
     }
 
     /// ... and pump every off-owner store result message back into the
@@ -1286,7 +1553,7 @@ mod seedonce_restart {
     /// message loop's `InitialFeeStoreResult` arm does. With `TestStore`'s
     /// inline dispatch, one call drains the full
     /// idempotency -> decide -> commit -> install chain.
-    fn pump_store_results(owner: &mut CycleOwner, rx: &std::sync::mpsc::Receiver<CycleMsg>) {
+    fn pump_store_results(owner: &mut CycleOwner, rx: &TestOwnerReceiver) {
         let mut clock = || NOW;
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -3632,9 +3899,9 @@ mod seedonce_restart {
             &self,
             cycle_id: String,
             on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
-        ) {
+        ) -> anyhow::Result<()> {
             self.inner
-                .dispatch_cycle_exists_with_generation(cycle_id, on_done);
+                .dispatch_cycle_exists_with_generation(cycle_id, on_done)
         }
 
         fn dispatch_commit_fee_cycle_guarded(
@@ -3642,20 +3909,21 @@ mod seedonce_restart {
             commit: FeeCycleCommit,
             expected_prior_generation: u64,
             on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
-        ) {
+        ) -> anyhow::Result<()> {
             let _ = &self.path;
             self.parked
                 .lock()
                 .unwrap()
                 .push((commit, expected_prior_generation, on_done));
+            Ok(())
         }
 
         fn dispatch_record_trigger_event(
             &self,
             event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
-        ) {
-            self.inner.dispatch_record_trigger_event(event, on_done);
+        ) -> anyhow::Result<()> {
+            self.inner.dispatch_record_trigger_event(event, on_done)
         }
     }
 
@@ -3665,7 +3933,7 @@ mod seedonce_restart {
     struct ParkedSeedOnce {
         _fx: Fixture,
         owner: CycleOwner,
-        rx: std::sync::mpsc::Receiver<CycleMsg>,
+        rx: TestOwnerReceiver,
         store_path: PathBuf,
         parked: Arc<std::sync::Mutex<Vec<ParkedGuardedCommit>>>,
     }
@@ -4029,6 +4297,263 @@ mod seedonce_restart {
             generation(&conn),
             3,
             "A3 commit (2) plus exactly ONE deferred cycle (3) -- never two"
+        );
+    }
+
+    #[test]
+    fn deferred_ack_supersession_keeps_newest_pending_then_reports_real_outcome() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path: _,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx);
+
+        let mut clock = || NOW + 3600;
+        let (old_tx, mut old_rx) = tokio::sync::oneshot::channel();
+        owner.run_or_defer_cycle_with_ack(Box::new(seedonce_prepared_cycle()), &mut clock, old_tx);
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let (new_tx, mut new_rx) = tokio::sync::oneshot::channel();
+        owner.run_or_defer_cycle_with_ack(Box::new(seedonce_prepared_cycle()), &mut clock, new_tx);
+        let old = old_rx.try_recv().expect("old deferred ACK is explicit");
+        assert_eq!(
+            old,
+            Err("deferred cycle superseded before execution".to_string())
+        );
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        release_parked(&_fx.journal_dir.join("rust-owned.db"), &parked);
+        pump_store_results(&mut owner, &rx);
+        assert_eq!(
+            new_rx.try_recv().expect("newest deferred ACK is terminal"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn immediate_skips_and_persistence_failures_are_never_acknowledged_as_success() {
+        let fx = fixture();
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::ExternalOnly,
+            },
+            SEED,
+            None,
+        );
+        let (skipped_tx, mut skipped_rx) = tokio::sync::oneshot::channel();
+        let mut clock = || NOW;
+        owner.run_or_defer_cycle_with_ack(
+            Box::new(prepared(json!("unresolvable"), false)),
+            &mut clock,
+            skipped_tx,
+        );
+        let skipped = skipped_rx.try_recv().unwrap().unwrap_err();
+        assert!(skipped.contains("neighbor_median_min_competitors"));
+
+        let mut h = seedonce_harness_with_one_channel();
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        h.fail_commits.store(true, Ordering::SeqCst);
+        let prepared = h.prepared();
+        let (failed_tx, mut failed_rx) = tokio::sync::oneshot::channel();
+        let mut clock = || NOW + 3600;
+        h.owner
+            .run_or_defer_cycle_with_ack(Box::new(prepared), &mut clock, failed_tx);
+        let failed = failed_rx.try_recv().unwrap().unwrap_err();
+        assert!(failed.contains("PersistenceFailed"), "{failed}");
+    }
+
+    #[test]
+    fn owner_loss_closes_a_deferred_ack_that_never_reached_execution() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path: _,
+            parked: _,
+        } = parked_seedonce_after_first_cycle();
+        owner.handle_new_channel(new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        ));
+        pump_store_results(&mut owner, &rx);
+        let (completion, mut acknowledged) = tokio::sync::oneshot::channel();
+        let mut clock = || NOW + 3600;
+        owner.run_or_defer_cycle_with_ack(
+            Box::new(seedonce_prepared_cycle()),
+            &mut clock,
+            completion,
+        );
+        assert!(matches!(
+            acknowledged.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(owner);
+        assert!(
+            matches!(
+                acknowledged.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ),
+            "owner loss must close every still-outstanding deferred ACK"
+        );
+    }
+
+    #[test]
+    fn commit_dispatch_launch_failure_is_terminal_inline_without_a_pending_leak() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let fail_launch = Arc::new(AtomicBool::new(false));
+        let store = TestStore::open_with_commit_launch_failure(
+            &store_path,
+            Arc::new(AtomicBool::new(false)),
+            fail_launch.clone(),
+        );
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+        let prepared = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        );
+        let event_key = prepared.event_key.clone();
+        owner.handle_new_channel(prepared);
+        let idempotency = match rx.try_recv().expect("idempotency answer was dispatched") {
+            CycleMsg::InitialFeeStoreResult(result) => result,
+            _ => panic!("unexpected owner message"),
+        };
+        assert_eq!(owner.initial_fee_pending(), 1);
+        fail_launch.store(true, Ordering::SeqCst);
+        let mut clock = || NOW + 10;
+        owner.handle_initial_fee_store_result(idempotency, &mut clock);
+
+        assert_eq!(
+            owner.persistence_failures(),
+            1,
+            "one failed launch has one terminal failure"
+        );
+        assert_eq!(
+            owner.initial_fee_pending(),
+            0,
+            "inline launch failure must remove the pending commit"
+        );
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "launch failure must not invoke the commit callback"
+        );
+        assert!(
+            !fee_runway::cycle_exists(
+                &Connection::open(&store_path).expect("reopen store"),
+                &event_key,
+            )
+            .expect("query cycle"),
+            "failed launch must not write a commit"
+        );
+    }
+
+    #[test]
+    fn idempotency_dispatch_launch_failure_is_terminal_inline_without_a_pending_leak() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let launch_failures = DispatchLaunchFailures::default();
+        launch_failures.idempotency.store(true, Ordering::SeqCst);
+        let store = TestStore::open_with_dispatch_launch_failures(
+            &store_path,
+            Arc::new(AtomicBool::new(false)),
+            launch_failures,
+        );
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        owner.handle_new_channel(new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 20,
+        ));
+
+        assert_eq!(owner.persistence_failures(), 1);
+        assert_eq!(owner.initial_fee_pending(), 0);
+        match rx
+            .try_recv()
+            .expect("the refusal receipt launches after the idempotency launch failure")
+        {
+            CycleMsg::InitialFeeStoreResult(
+                revops::fee_scheduler::InitialFeeStoreResult::Receipt { result: Ok(()), .. },
+            ) => {}
+            _ => panic!("expected only the successful refusal receipt result"),
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn receipt_dispatch_launch_failure_is_counted_inline_once_without_a_callback() {
+        let fx = fixture();
+        let store_path = fx._dir.path().join("rust-owned.db");
+        let launch_failures = DispatchLaunchFailures::default();
+        launch_failures.receipt.store(true, Ordering::SeqCst);
+        let store = TestStore::open_with_dispatch_launch_failures(
+            &store_path,
+            Arc::new(AtomicBool::new(false)),
+            launch_failures,
+        );
+        let mut owner = owner_with_store(&fx, Some(Box::new(store)));
+        let rx = self_channel(&mut owner);
+
+        owner.handle_new_channel_refused(
+            peer_a(),
+            CHANNEL.to_string(),
+            NOW + 30,
+            "injected preparation refusal".to_string(),
+        );
+
+        assert_eq!(owner.persistence_failures(), 1);
+        assert_eq!(owner.initial_fee_pending(), 0);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "failed receipt launch must never invoke its callback"
         );
     }
 
@@ -4418,8 +4943,9 @@ mod seedonce_restart {
             &self,
             _cycle_id: String,
             on_done: revops::fee_state::StoreDispatchCallback<(bool, u64)>,
-        ) {
+        ) -> anyhow::Result<()> {
             drop(on_done);
+            Ok(())
         }
 
         fn dispatch_commit_fee_cycle_guarded(
@@ -4427,16 +4953,18 @@ mod seedonce_restart {
             _commit: FeeCycleCommit,
             _expected_prior_generation: u64,
             on_done: revops::fee_state::StoreDispatchCallback<fee_runway::GuardedCommitOutcome>,
-        ) {
+        ) -> anyhow::Result<()> {
             drop(on_done);
+            Ok(())
         }
 
         fn dispatch_record_trigger_event(
             &self,
             _event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
-        ) {
+        ) -> anyhow::Result<()> {
             drop(on_done);
+            Ok(())
         }
     }
 
@@ -4494,6 +5022,7 @@ mod seedonce_restart {
             .send(CycleMsg::NewChannel(Box::new(
                 NewChannelPreparation::Ready(Box::new(prepared)),
             )))
+            .await
             .expect("send NewChannel");
 
         // The owner must keep servicing other messages while the store
@@ -4502,6 +5031,7 @@ mod seedonce_restart {
         handle
             .tx
             .send(CycleMsg::Query(FeeDebugQuery::RunwayCounters, reply_tx))
+            .await
             .expect("send Query");
         let value = reply_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -4511,7 +5041,7 @@ mod seedonce_restart {
             "the query answer must be the real runway-counters shape: {value:?}"
         );
 
-        handle.tx.send(CycleMsg::Shutdown).ok();
+        handle.tx.send(CycleMsg::Shutdown).await.ok();
     }
 }
 

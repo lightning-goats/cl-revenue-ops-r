@@ -373,10 +373,10 @@ pub trait RunwayStateStore: Send {
     // reply on the new-channel path. These three deliver their result by
     // invoking `on_done` from whatever thread performs the work; the
     // CALL itself must return without waiting on the store. `on_done`
-    // must be invoked at most once; a production implementation that can
-    // fail to start the work must still deliver that failure through
-    // `on_done` (never silently drop it) so the owner's pending
-    // bookkeeping can fail closed instead of leaking. (A direct-connection
+    // is invoked exactly once only after a successful launch. A launch
+    // failure is returned directly so the calling owner can terminate
+    // its pending state inline without queueing to (and potentially
+    // deadlocking on) its own bounded ingress. (A direct-connection
     // test double doing its own local work inline before returning is
     // acceptable -- the contract protects the owner from a SHARED
     // single-owner actor stalling, which a private connection cannot.)
@@ -389,7 +389,7 @@ pub trait RunwayStateStore: Send {
         &self,
         cycle_id: String,
         on_done: StoreDispatchCallback<(bool, u64)>,
-    );
+    ) -> anyhow::Result<()>;
 
     /// [`revops_db::fee_runway::commit_fee_cycle_guarded`], dispatched
     /// off-owner (F7: a compare-and-set on the state generation -- a
@@ -400,43 +400,99 @@ pub trait RunwayStateStore: Send {
         commit: revops_db::fee_runway::FeeCycleCommit,
         expected_prior_generation: u64,
         on_done: StoreDispatchCallback<revops_db::fee_runway::GuardedCommitOutcome>,
-    );
+    ) -> anyhow::Result<()>;
 
     /// [`Self::record_trigger_event`], dispatched off-owner.
     fn dispatch_record_trigger_event(
         &self,
         event: revops_db::fee_runway::FeeTriggerEventRow,
         on_done: StoreDispatchCallback<()>,
-    );
+    ) -> anyhow::Result<()>;
 }
 
 /// Run `work` on a freshly spawned thread and hand its result to
-/// `on_done` (invoked exactly once). If the thread cannot be spawned the
-/// failure is delivered through `on_done` on the CALLING thread -- still
-/// without blocking on any store reply, and never silently dropped.
+/// `on_done` (invoked exactly once after a successful launch). If the
+/// thread cannot be spawned, return that failure to the calling owner;
+/// never invoke a queueing callback inline on that same owner thread.
 fn spawn_store_dispatch<T: Send + 'static>(
     name: &str,
     work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
     on_done: StoreDispatchCallback<T>,
-) {
-    use std::sync::{Arc, Mutex};
-    // The callback must survive a failed `spawn` (whose closure is
-    // consumed either way), so both paths draw it from a shared slot.
-    let slot = Arc::new(Mutex::new(Some(on_done)));
-    let thread_slot = slot.clone();
-    let spawned = std::thread::Builder::new()
-        .name(name.to_string())
-        .spawn(move || {
-            if let Some(cb) = thread_slot.lock().expect("dispatch slot poisoned").take() {
-                cb(work());
+) -> anyhow::Result<()> {
+    spawn_store_dispatch_with(name, work, on_done, |thread_name, body| {
+        std::thread::Builder::new()
+            .name(thread_name.to_string())
+            .spawn(body)
+            .map(|_join| ())
+    })
+}
+
+fn spawn_store_dispatch_with<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    on_done: StoreDispatchCallback<T>,
+    spawner: impl FnOnce(&str, Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    let body: Box<dyn FnOnce() + Send + 'static> = Box::new(move || on_done(work()));
+    spawner(name, body)
+        .map_err(|e| anyhow::anyhow!("store dispatch thread `{name}` failed to spawn: {e}"))
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::fee_scheduler::{
+        CycleMsg, InitialFeeStoreResult, SchedulerIngress, OWNER_QUEUE_CAPACITY,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn spawn_failure_never_runs_a_queueing_callback_inline_when_ingress_is_full() {
+        let (tx, _rx) = SchedulerIngress::bounded_channel(OWNER_QUEUE_CAPACITY);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build queue-filling runtime");
+        runtime.block_on(async {
+            for _ in 0..OWNER_QUEUE_CAPACITY {
+                tx.send(CycleMsg::WakeAll)
+                    .await
+                    .expect("fill owner ingress");
             }
         });
-    if let Err(e) = spawned {
-        if let Some(cb) = slot.lock().expect("dispatch slot poisoned").take() {
-            cb(Err(anyhow::anyhow!(
-                "store dispatch thread `{name}` failed to spawn: {e}"
-            )));
-        }
+        let callback_called = Arc::new(AtomicBool::new(false));
+        let callback_called_in_thread = callback_called.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let callback_tx = tx;
+            let callback_called = callback_called_in_thread;
+            let result = spawn_store_dispatch_with(
+                "injected-store-launch-failure",
+                || Ok(()),
+                Box::new(move |result| {
+                    callback_called.store(true, Ordering::SeqCst);
+                    let _ = callback_tx.blocking_send(CycleMsg::InitialFeeStoreResult(
+                        InitialFeeStoreResult::Receipt {
+                            context: "must-not-run-inline".to_string(),
+                            result: result.map_err(|e| format!("{e:#}")),
+                        },
+                    ));
+                }),
+                |_name, _body| {
+                    Err(std::io::Error::other(
+                        "injected store dispatch thread spawn failure",
+                    ))
+                },
+            );
+            let _ = done_tx.send(result.is_err());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("spawn failure must return without invoking the full-queue callback"),
+            "spawn failure must be explicit"
+        );
+        assert!(!callback_called.load(Ordering::SeqCst));
     }
 }
 
@@ -510,13 +566,13 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         &self,
         cycle_id: String,
         on_done: StoreDispatchCallback<(bool, u64)>,
-    ) {
+    ) -> anyhow::Result<()> {
         let handle = self.clone();
         spawn_store_dispatch(
             "revops-a3-cycle-exists",
             move || handle.blocking_cycle_exists_with_generation(cycle_id),
             on_done,
-        );
+        )
     }
 
     fn dispatch_commit_fee_cycle_guarded(
@@ -524,26 +580,26 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         commit: revops_db::fee_runway::FeeCycleCommit,
         expected_prior_generation: u64,
         on_done: StoreDispatchCallback<revops_db::fee_runway::GuardedCommitOutcome>,
-    ) {
+    ) -> anyhow::Result<()> {
         let handle = self.clone();
         spawn_store_dispatch(
             "revops-a3-commit",
             move || handle.blocking_commit_fee_cycle_guarded(commit, expected_prior_generation),
             on_done,
-        );
+        )
     }
 
     fn dispatch_record_trigger_event(
         &self,
         event: revops_db::fee_runway::FeeTriggerEventRow,
         on_done: StoreDispatchCallback<()>,
-    ) {
+    ) -> anyhow::Result<()> {
         let handle = self.clone();
         spawn_store_dispatch(
             "revops-a3-receipt",
             move || handle.blocking_record_fee_trigger_event(event),
             on_done,
-        );
+        )
     }
 }
 

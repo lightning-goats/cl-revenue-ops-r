@@ -134,6 +134,48 @@ enum Command {
         now: i64,
         reply: oneshot::Sender<Result<usize>>,
     },
+    RegisterLoop {
+        id: crate::loop_health::LoopId,
+        wiring: crate::loop_health::WiringStatus,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ReconcileIncompleteLoops {
+        now: i64,
+        reply: oneshot::Sender<Result<usize>>,
+    },
+    BeginLoopPass {
+        id: crate::loop_health::LoopId,
+        now: i64,
+        reply: oneshot::Sender<Result<u64>>,
+    },
+    FinishLoopPass {
+        id: crate::loop_health::LoopId,
+        generation: u64,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    FailLoopPass {
+        id: crate::loop_health::LoopId,
+        generation: u64,
+        now: i64,
+        error: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    IncrementLoopBackpressure {
+        id: crate::loop_health::LoopId,
+        coalesced: u64,
+        dropped: u64,
+        now: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SuspendLoop {
+        id: crate::loop_health::LoopId,
+        now: i64,
+        reason: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ListLoopHealth(oneshot::Sender<Result<Vec<crate::loop_health::LoopHealthRow>>>),
 }
 
 /// Cheap, `Clone`-able handle to the observer-db owner task.
@@ -769,6 +811,128 @@ impl ObserverHandle {
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
+
+    pub async fn register_loop(
+        &self,
+        id: crate::loop_health::LoopId,
+        wiring: crate::loop_health::WiringStatus,
+        now: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RegisterLoop {
+                id,
+                wiring,
+                now,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub async fn reconcile_incomplete_loops(&self, now: i64) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReconcileIncompleteLoops { now, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub async fn begin_loop_pass(&self, id: crate::loop_health::LoopId, now: i64) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::BeginLoopPass { id, now, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub async fn finish_loop_pass(
+        &self,
+        id: crate::loop_health::LoopId,
+        generation: u64,
+        now: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::FinishLoopPass {
+                id,
+                generation,
+                now,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub async fn fail_loop_pass(
+        &self,
+        id: crate::loop_health::LoopId,
+        generation: u64,
+        now: i64,
+        error: String,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::FailLoopPass {
+                id,
+                generation,
+                now,
+                error,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub async fn increment_loop_backpressure(
+        &self,
+        id: crate::loop_health::LoopId,
+        coalesced: u64,
+        dropped: u64,
+        now: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::IncrementLoopBackpressure {
+                id,
+                coalesced,
+                dropped,
+                now,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub async fn suspend_loop(
+        &self,
+        id: crate::loop_health::LoopId,
+        now: i64,
+        reason: String,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SuspendLoop {
+                id,
+                now,
+                reason,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+    pub async fn list_loop_health(&self) -> Result<Vec<crate::loop_health::LoopHealthRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListLoopHealth(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
 }
 
 /// Open (creating the file and any missing parent directories if needed)
@@ -1011,6 +1175,65 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 Command::ReconcileQuarantineOnRestart { now, reply } => {
                     let result = fee_runway::reconcile_quarantine_on_restart(&conn, now);
                     let _ = reply.send(result);
+                }
+                Command::RegisterLoop {
+                    id,
+                    wiring,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::register_loop(&conn, id, wiring, now));
+                }
+                Command::ReconcileIncompleteLoops { now, reply } => {
+                    let _ = reply.send(crate::loop_health::reconcile_incomplete_on_restart(
+                        &conn, now,
+                    ));
+                }
+                Command::BeginLoopPass { id, now, reply } => {
+                    let _ = reply.send(crate::loop_health::begin_loop_pass(&conn, id, now));
+                }
+                Command::FinishLoopPass {
+                    id,
+                    generation,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::finish_loop_pass(
+                        &conn, id, generation, now,
+                    ));
+                }
+                Command::FailLoopPass {
+                    id,
+                    generation,
+                    now,
+                    error,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::fail_loop_pass(
+                        &conn, id, generation, now, &error,
+                    ));
+                }
+                Command::IncrementLoopBackpressure {
+                    id,
+                    coalesced,
+                    dropped,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::increment_loop_backpressure(
+                        &conn, id, coalesced, dropped, now,
+                    ));
+                }
+                Command::SuspendLoop {
+                    id,
+                    now,
+                    reason,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::suspend_loop(&conn, id, now, &reason));
+                }
+                Command::ListLoopHealth(reply) => {
+                    let _ = reply.send(crate::loop_health::list_loop_health(&conn));
                 }
             }
         }

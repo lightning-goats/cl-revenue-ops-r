@@ -43,7 +43,7 @@ Excluded until separately gated: Task 45 and later soak observations, deployment
 - Consumes: existing `rpc_planner_candidate_sources`, `rpc_planner_candidates`, `rpc_planner_history`, and `rpc_planner_status` response builders.
 - Guarantees: Python SQL ordering/filter/limit semantics, JSON metadata pass-through, read-only production DB access, explicit refusal of nonempty positional parameters, and semantic equality of `[]` and `{}` no-argument calls.
 
-- [ ] **Step 1: Add failing DB-query tests**
+- [x] **Step 1: Add failing DB-query tests**
 
 ```rust
 #[tokio::test]
@@ -59,13 +59,13 @@ async fn planner_actions_match_python_newest_first_limit_and_null_shape() {
 }
 ```
 
-- [ ] **Step 2: Run the DB tests and observe RED**
+- [x] **Step 2: Run the DB tests and observe RED**
 
 Run: `cargo test -p revops-db planner_ -- --nocapture`
 
 Expected: compilation failure because the typed planner query interfaces do not exist.
 
-- [ ] **Step 3: Implement typed read-only planner queries**
+- [x] **Step 3: Implement typed read-only planner queries**
 
 ```rust
 pub async fn planner_candidates(
@@ -81,15 +81,15 @@ pub async fn planner_actions(
 ) -> Result<Vec<PlannerActionRow>>;
 ```
 
-Use the exact Python projections and `ORDER BY score DESC LIMIT ?` / `ORDER BY created_at DESC LIMIT ?` queries. Decode nullable cells without dropping a whole row, and preserve `metadata_json` as parsed JSON at the RPC boundary.
+Use the exact Python projections and `ORDER BY score DESC LIMIT ?` / `ORDER BY created_at DESC LIMIT ?` queries. Decode nullable cells without dropping a whole row, and preserve `metadata_json` as the raw JSON string Python's `dict(sqlite3.Row)` returns.
 
-- [ ] **Step 4: Verify DB tests GREEN**
+- [x] **Step 4: Verify DB tests GREEN**
 
 Run: `cargo test -p revops-db planner_ -- --nocapture`
 
 Expected: all planner query tests pass with zero failures.
 
-- [ ] **Step 5: Add failing manifest and caller-tripwire tests**
+- [x] **Step 5: Add failing manifest and caller-tripwire tests**
 
 ```rust
 const PLANNER_READ_METHODS: &[&str] = &[
@@ -109,13 +109,13 @@ fn planner_read_rpcs_round_trip_distinctive_database_rows() {}
 fn planner_read_rpcs_refuse_nonempty_positional_params() {}
 ```
 
-- [ ] **Step 6: Run manifest tests and observe RED**
+- [x] **Step 6: Run manifest tests and observe RED**
 
 Run: `cargo test -p revops --test manifest planner_read_ -- --nocapture`
 
 Expected: the four method names are absent or method-not-found.
 
-- [ ] **Step 7: Register the four handlers with real queries**
+- [x] **Step 7: Register the four handlers with real queries**
 
 ```rust
 .rpcmethod(&planner_candidates_name, "capacity planner candidate pool", |p, v| async move {
@@ -125,13 +125,13 @@ Expected: the four method names are absent or method-not-found.
 
 Repeat the same pattern for candidate sources, history, and status. Do not return success-shaped empty data when the DB query fails; return an in-band error matching the existing registered-handler convention.
 
-- [ ] **Step 8: Verify focused RPC tests GREEN and mutation-test the tripwire**
+- [x] **Step 8: Verify focused RPC tests GREEN and mutation-test the tripwire**
 
 Run: `cargo test -p revops --test manifest planner_read_ -- --nocapture`
 
 Then temporarily remove one query call, confirm the distinctive-row test fails, restore the code byte-for-byte, and rerun it green.
 
-- [ ] **Step 9: Update the parity checklist and run task gates**
+- [x] **Step 9: Update the parity checklist and run task gates**
 
 Run:
 
@@ -146,7 +146,7 @@ git diff --check
 
 Record total Rust RPCs and Python-equivalent coverage from the manifest, not from arithmetic in prose.
 
-- [ ] **Step 10: Commit and request independent review**
+- [x] **Step 10: Commit and request independent review**
 
 ```bash
 git add crates/revops-db/src/queries.rs crates/revops-db/tests/queries.rs \
@@ -167,14 +167,24 @@ Owner marks only Task 56 `impl`; Python verifier owns `review`.
 - [ ] Implement Task 42's first-cycle Rust mempool evidence and commit-coupled seed provenance semantics.
 - [ ] Independently mutation-test both corrections and merge only after their existing Hexmem review criteria pass.
 
-### Task 3: Observer Runtime Framework and Persistent Loop Health
+### Task 3: Observer Runtime Framework and Persistent Loop Health — Hexmem Task 57
 
-**Files:** create `crates/revops/src/runtime.rs`, `crates/revops/src/loop_health.rs`; modify `crates/revops/src/main.rs`, `crates/revops/src/fee_runway.rs`, and `crates/revops/tests/manifest.rs`.
+**Design:** `docs/superpowers/specs/2026-07-28-observer-runtime-loop-health-design.md`.
+
+**Files:** create `crates/revops/src/runtime.rs`,
+`crates/revops/src/loop_health.rs`, and
+`crates/revops-db/src/loop_health.rs`; modify the observer DB schema/owner,
+`crates/revops/src/main.rs`, `fee_scheduler.rs`, `rpc_health.rs`, and their
+integration/action-surface tests.
 
 - [ ] RED-test that removing any required subsystem spawn or health write fails.
-- [ ] Add bounded single-flight owners for fee, rebalance, planner, LN+, and Boltz.
+- [ ] Add the bounded single-flight framework for all five loop identities and
+      production-spawn only real passes. Do not use success-shaped no-op owners;
+      rebalance/planner/LN+/Boltz remain `not_wired` until Tasks 4–7.
 - [ ] Persist last-start, last-pass, last-error, dropped/coalesced work, and generation per loop.
-- [ ] Prove observer mode cannot construct any action adapter.
+- [ ] Make fee health depend on a real owner completion acknowledgement, not dispatch.
+- [ ] Split `AuthorityRuntime::Observer` from `AuthorityRuntime::Live` and prove
+      observer mode cannot accept, hold, or construct any action adapter.
 
 ### Task 4: LN+ Runtime, Operator Surface, and Fake Boundaries
 
@@ -250,4 +260,3 @@ Owner marks only Task 56 `impl`; Python verifier owns `review`.
 - [ ] Require 69/69 Python-equivalent RPC registration and all production-equivalent observer loop spawns.
 - [ ] Require fake-boundary coverage for every external mutation type and zero unauthorized action construction in observer mode.
 - [ ] Mark only soak and actual cutover rows open; publish the reviewed, green code-complete commit without deploying it.
-

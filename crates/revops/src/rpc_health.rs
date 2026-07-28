@@ -127,6 +127,65 @@ pub fn build_health(
     })
 }
 
+pub fn build_health_with_loops(
+    generated_at: i64,
+    pnl_1d: Option<&PnlSummary>,
+    pnl_7d: Option<&PnlSummary>,
+    total_capacity_sats: Option<i64>,
+    loops: Result<&[revops_db::loop_health::LoopHealthRow], String>,
+) -> Value {
+    let mut value = build_health(generated_at, pnl_1d, pnl_7d, total_capacity_sats);
+    value["loops"] = match loops {
+        Ok(rows) => Value::Array(
+            rows.iter()
+                .map(|row| {
+                    json!({
+                        "loop_name": row.loop_id.as_str(),
+                        "wiring_status": row.wiring_status.as_str(),
+                        "generation": row.generation,
+                        "terminal_generation": row.terminal_generation,
+                        "terminal_status": row.terminal_status.as_str(),
+                        "runtime_status": row.runtime_status.as_str(),
+                        "last_suspended_at": row.last_suspended_at,
+                        "last_suspension_reason": row.last_suspension_reason,
+                        "last_started_at": row.last_started_at,
+                        "last_passed_at": row.last_passed_at,
+                        "last_error_at": row.last_error_at,
+                        "last_error": row.last_error,
+                        "coalesced_total": row.coalesced_total,
+                        "dropped_total": row.dropped_total,
+                        "updated_at": row.updated_at,
+                        "current_status": current_loop_status(row),
+                    })
+                })
+                .collect(),
+        ),
+        Err(error) => json!({"error": error}),
+    };
+    if let Some(gaps) = value["_gaps"].as_array_mut() {
+        gaps.retain(|gap| gap != "loops");
+    }
+    value
+}
+
+fn current_loop_status(row: &revops_db::loop_health::LoopHealthRow) -> &'static str {
+    use revops_db::loop_health::WiringStatus;
+    if row.wiring_status == WiringStatus::NotWired {
+        return "not_wired";
+    }
+    if row.runtime_status == revops_db::loop_health::RuntimeStatus::Suspended {
+        return "suspended";
+    }
+    if row.generation > row.terminal_generation {
+        return "incomplete";
+    }
+    match row.terminal_status {
+        revops_db::loop_health::TerminalStatus::Passed => "passed",
+        revops_db::loop_health::TerminalStatus::Error => "error",
+        revops_db::loop_health::TerminalStatus::None => "never_run",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +328,117 @@ mod tests {
             !gaps.contains(&"boltz"),
             "boltz is no longer a gap once populated: {gaps:?}"
         );
+    }
+    #[test]
+    fn durable_loop_rows_replace_only_the_loops_gap() {
+        let rows: Vec<revops_db::loop_health::LoopHealthRow> =
+            revops_db::loop_health::REQUIRED_LOOPS
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    let mut row = revops_db::loop_health::LoopHealthRow::new(
+                        id,
+                        if id == revops_db::loop_health::LoopId::Fee {
+                            revops_db::loop_health::WiringStatus::Ready
+                        } else {
+                            revops_db::loop_health::WiringStatus::NotWired
+                        },
+                        100 + index as i64,
+                    );
+                    row.generation = index as u64;
+                    row.coalesced_total = 10 + index as u64;
+                    row.dropped_total = 20 + index as u64;
+                    row
+                })
+                .collect();
+        let value = build_health_with_loops(200, None, None, None, Ok(&rows));
+        assert_eq!(value["loops"].as_array().unwrap().len(), 5);
+        assert_eq!(value["loops"][0]["loop_name"], "fee");
+        assert_eq!(value["loops"][1]["wiring_status"], "not_wired");
+        assert_eq!(value["loops"][4]["dropped_total"], 24);
+        assert!(!value["_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap == "loops"));
+    }
+
+    #[test]
+    fn same_second_new_generation_is_incomplete_not_prior_passed() {
+        let mut row = revops_db::loop_health::LoopHealthRow::new(
+            revops_db::loop_health::LoopId::Fee,
+            revops_db::loop_health::WiringStatus::Ready,
+            100,
+        );
+        row.generation = 2;
+        row.terminal_generation = 1;
+        row.last_started_at = Some(100);
+        row.last_passed_at = Some(100);
+        let value = build_health_with_loops(100, None, None, None, Ok(&[row]));
+        assert_eq!(value["loops"][0]["current_status"], "incomplete");
+    }
+
+    #[test]
+    fn same_second_terminal_kind_is_not_inferred_from_timestamps() {
+        use revops_db::loop_health::{LoopHealthRow, LoopId, TerminalStatus, WiringStatus};
+        let mut errored = LoopHealthRow::new(LoopId::Fee, WiringStatus::Ready, 100);
+        errored.generation = 2;
+        errored.terminal_generation = 2;
+        errored.last_passed_at = Some(100);
+        errored.last_error_at = Some(100);
+        errored.terminal_status = TerminalStatus::Error;
+        let error_value = build_health_with_loops(100, None, None, None, Ok(&[errored]));
+        assert_eq!(error_value["loops"][0]["current_status"], "error");
+        let mut passed = LoopHealthRow::new(LoopId::Fee, WiringStatus::Ready, 100);
+        passed.generation = 2;
+        passed.terminal_generation = 2;
+        passed.last_passed_at = Some(100);
+        passed.last_error_at = Some(100);
+        passed.terminal_status = TerminalStatus::Passed;
+        let pass_value = build_health_with_loops(100, None, None, None, Ok(&[passed]));
+        assert_eq!(pass_value["loops"][0]["current_status"], "passed");
+    }
+
+    #[test]
+    fn durable_suspension_takes_precedence_over_a_later_terminal_pass() {
+        use revops_db::loop_health::{
+            LoopHealthRow, LoopId, RuntimeStatus, TerminalStatus, WiringStatus,
+        };
+        let mut row = LoopHealthRow::new(LoopId::Fee, WiringStatus::Ready, 100);
+        row.generation = 1;
+        row.terminal_generation = 1;
+        row.terminal_status = TerminalStatus::Passed;
+        row.last_passed_at = Some(102);
+        row.runtime_status = RuntimeStatus::Suspended;
+        row.last_suspended_at = Some(101);
+        row.last_suspension_reason = Some("backpressure persistence failed".to_string());
+        let value = build_health_with_loops(103, None, None, None, Ok(&[row]));
+        assert_eq!(value["loops"][0]["terminal_status"], "passed");
+        assert_eq!(value["loops"][0]["runtime_status"], "suspended");
+        assert_eq!(value["loops"][0]["current_status"], "suspended");
+        assert_eq!(value["loops"][0]["last_suspended_at"], 101);
+        assert_eq!(
+            value["loops"][0]["last_suspension_reason"],
+            "backpressure persistence failed"
+        );
+    }
+
+    #[test]
+    fn loop_store_failure_is_section_local_and_not_fabricated() {
+        let value = build_health_with_loops(
+            200,
+            None,
+            None,
+            None,
+            Err("observer actor gone".to_string()),
+        );
+        assert_eq!(value["loops"]["error"], "observer actor gone");
+        assert!(value.get("generated_at").is_some());
+        assert!(value["financials"].is_null());
+        assert!(!value["_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap == "loops"));
     }
 }

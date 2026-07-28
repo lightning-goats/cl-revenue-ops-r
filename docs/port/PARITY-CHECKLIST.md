@@ -283,7 +283,7 @@ missing evidence.
 | plugin-bootstrap-and-init | `main.rs` | `[x]` |
 | threadsafe-rpc-proxy | `revops-rpc` (timeout guard) + `cln-rpc` | `[x]` |
 | option-registration-and-config | `options_table.rs`, `config_resolve.rs` (126 options in manifest) | `[x]` |
-| background-scheduler-loops | `fee_scheduler.rs` (fee loop only) | `[~]` fee loop only; flow/rebalance/planner/boltz loops absent |
+| background-scheduler-loops | `runtime.rs`, `loop_health.rs`, `fee_scheduler.rs` | `[~]` real fee pass reachable only in autonomous shadow; rebalance/planner/LN+/Boltz identities are durably `not_wired` with no no-op owner |
 | core-cycle-functions | `fee_scheduler.rs`, `revops-fees/cycle.rs` | `[~]` fee cycle only |
 | **rpc-method-surface-core** | `rpc_status/dashboard/history/report.rs` + Task 49's ten Batch A builders + Task 56's four planner read handlers | `[~]` **20 of 69 Python-equivalent registered**, **24 total Rust RPC methods** (four Rust-only); measured via `crates/revops/tests/manifest.rs`'s method-count guard and distinctive-row handler tests |
 | notification-subscriptions | `notify.rs` — forward_event, connect, disconnect, channel_state_changed | `[x]` all 4 subscribed (Python subscribes to exactly the same 4); `channel_state_changed` now parses BOTH closure events and the opening→NORMAL matrix (Task 44 A3 — the "closure events only" narrowing is gone); per-notification EFFECT parity is tracked in §2, not by this row |
@@ -322,6 +322,10 @@ positional parameters are refused explicitly. Evidence:
 `crates/revops/tests/manifest.rs`. State: **compiled, reachable, effective**;
 transport-proven and promotion-ready remain pending independent verification.
 
+#### Task 57 — observer runtime and durable loop health, 2026-07-28
+
+The plugin now registers exactly five loop identities in the Rust-owned observer database and exposes them through `revenue-health.loops`. Only the existing real fee owner is instantiated in autonomous-shadow mode; rebalance, planner, LN+, and Boltz have no handles or success-shaped no-op passes and report current-boot `not_wired`. The bounded runtime permits one in-flight pass and eight distinct pending keys, durably counts coalesced/dropped work, begins before execution, and generation-CAS records terminal pass/error state. Terminal generation plus terminal kind, rather than second-resolution timestamp ordering, makes same-second restarts and pass↔error sequences unambiguous. Missing begin/terminal/backpressure persistence suspends fail-closed; terminal-write loss leaves an unmatched durable generation. `AuthorityRuntime::Observer` cannot hold or construct action adapters; the broadcaster exists only in `AuthorityRuntime::Live`. Evidence: `crates/revops-db/tests/loop_health.rs`, `crates/revops/src/runtime_tests.rs`, `crates/revops/tests/{fee_scheduler,action_surface,manifest}.rs`, and `rpc_health.rs` unit tests. State: **fee runtime compiled/reachable/effective in autonomous shadow; durable inventory effective; other four loops not reachable and not effective; no authority transition, deployment, or live call performed.**
+
 **Round-2 correction (P1): the table below is the CURRENT response contract
 for each of the ten Batch A RPCs** (i.e. it already reflects the Task 50
 correction round's F1-F5/F10/F11 fixes below and this round's mixed-type-tags
@@ -335,7 +339,7 @@ Task 50 section below.
 
 | RPC (canonical name) | Evidence wired | Honest gaps / current contract |
 |---|---|---|
-| `revenue-health` | `queries::pnl_summary` (today/week financials) — real, DB-backed; `db=None` returns the same honest `build_health(now, None, None, None)` shape (round 2, P1), never a top-level error | `annualized_roc_pct` (needs live `listpeerchannels` capacity), channels/rebalancer/budget/planner/top_routes/loops all `null`+`_gaps`-listed; `fees` is `null`+gap-listed too, but a real fee controller (`revops-fees::cycle::ControllerState`) DOES exist and run — the gap is that its live state isn't plumbed into this handler yet (round 2, P2), not that no controller exists; `boltz` is the honest computed `{"enabled": false}` (no Boltz manager wired), not a gap |
+| `revenue-health` | `queries::pnl_summary` (today/week financials) — real, DB-backed; `db=None` returns the same honest `build_health(now, None, None, None)` shape (round 2, P1), never a top-level error | `annualized_roc_pct` (needs live `listpeerchannels` capacity), channels/rebalancer/budget/planner/top_routes remain `null`+`_gaps`-listed; `loops` is a Rust-owned durable five-identity inventory with wiring, generation/terminal kind, timestamps, errors, and backpressure counters; `fees` is `null`+gap-listed too, but a real fee controller (`revops-fees::cycle::ControllerState`) DOES exist and run — the gap is that its live state isn't plumbed into this handler yet (round 2, P2), not that no controller exists; `boltz` is the honest computed `{"enabled": false}` (no Boltz manager wired), not a gap |
 | `revenue-profitability` | none yet | explicit `not_yet_ported` marker on both branches (F3/F4 fix) — no `ChannelProfitability` assembly pipeline exists; never Python's real "No data available" / real fleet-summary shape |
 | `revenue-analyze` | none yet | explicit `not_yet_ported` marker (F5 fix, `MetricsLookup::NotWired`) when the pipeline never ran — no `FlowMetrics` assembly exists; distinguished from Python's genuine unknown-channel `{"channel": id, "analysis": null}` (no marker); no-`channel_id` whole-fleet sweep also returns `not_yet_ported` (mutating background job in Python, out of this read-only batch) |
 | `revenue-policy` (list/get/find/changes) | `queries::all_policies`/`policy_for_peer`/`policies_by_tag`/`policy_changes_since`/`last_policy_change_timestamp` — real, DB-backed | set/delete/tag/untag/batch refused before any DB access (`policy_action_gate`, proven by a test with no db-path configured); `since`/action normalization match Python exactly (F6/F9); an out-of-i64-range `since` is a loud in-band error (round 2, P1), never a wrapped/saturated value |
@@ -728,7 +732,7 @@ fns with **no production feed**; a future porter must include opening-state rows
 | ThreadSafeRpcProxy + socket-timeout guard | `revops-rpc` | `timeout` | `[x]` |
 | DataService (tiered RPC cache) | `fee_evidence.rs` prefetch | `fee_evidence`, `read_rpcs` | `[x]` |
 | utils (msat/base-unit helpers) | `revops-core/msat.rs` | `rounding_parity` | `[x]` |
-| Daemon loop scheduler + heartbeat | `fee_scheduler.rs` | `fee_scheduler` | `[~]` fee loop only |
+| Daemon loop scheduler + durable health | `runtime.rs`, `loop_health.rs`, `fee_scheduler.rs` | `runtime`, `loop_health`, `fee_scheduler` | `[~]` bounded real fee pass only; four later subsystem passes remain `not_wired` |
 | DB connection layer | `revops-db` | `actor_wal` | `[x]` |
 | Test harness | fixtures + `tempfile` | throughout | `[x]` |
 

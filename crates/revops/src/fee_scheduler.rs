@@ -97,7 +97,7 @@
 //! [`CycleMsg`] gets four more variants on top of T6's `RunPrepared`/
 //! `RunCycleNow`/`Shutdown`: `PolicyChanged`, `VegasSpikeCheck`, `WakeAll`,
 //! `Query`. Every one of them is a HINT delivered to the single owner
-//! thread over the same `mpsc::Sender<CycleMsg>` `RunPrepared` already
+//! thread over the same bounded [`SchedulerIngress`] `RunPrepared` already
 //! uses -- never a direct call into `ControllerState` from wherever the
 //! trigger originates, and never an inline cycle run inside a notification
 //! handler. That is the same settle/coalesce discipline T6b built for the
@@ -149,8 +149,10 @@ use std::collections::{HashMap, HashSet};
 
 use revops_fees::thompson::dynamics;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use cln_plugin::options::Value as OptValue;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy};
@@ -214,6 +216,52 @@ pub const DEFAULT_FLUSH_SETTLE_SECS: u64 = 30;
 /// evidence of a real backlog, not routine operation.
 pub const TRIGGER_QUEUE_CAPACITY: usize = 64;
 
+/// Fixed admission capacity for every scheduler producer. The owner has
+/// exactly one Tokio MPSC receiver; async callers await capacity and the
+/// dedicated synchronous callback/owner threads use `blocking_send`.
+pub const OWNER_QUEUE_CAPACITY: usize = 64;
+
+/// The private-sender boundary for scheduler admission. Exposing this
+/// wrapper (rather than Tokio's raw sender) makes async backpressure the
+/// only public production send API.
+///
+/// ~~~compile_fail,E0451
+/// fn forge(
+///     tx: tokio::sync::mpsc::Sender<revops::fee_scheduler::CycleMsg>,
+/// ) -> revops::fee_scheduler::SchedulerIngress {
+///     revops::fee_scheduler::SchedulerIngress { tx }
+/// }
+/// ~~~
+#[derive(Clone)]
+pub struct SchedulerIngress {
+    tx: tokio_mpsc::Sender<CycleMsg>,
+}
+
+impl SchedulerIngress {
+    pub async fn send(&self, msg: CycleMsg) -> Result<(), tokio_mpsc::error::SendError<CycleMsg>> {
+        self.tx.send(msg).await
+    }
+
+    pub(crate) fn blocking_send(
+        &self,
+        msg: CycleMsg,
+    ) -> Result<(), tokio_mpsc::error::SendError<CycleMsg>> {
+        self.tx.blocking_send(msg)
+    }
+
+    /// Raw receiver construction is crate-private: external code may submit
+    /// through `send`, but can never install an arbitrary consumer behind a
+    /// vetted observer pass.
+    ///
+    /// ~~~compile_fail,E0624
+    /// let _ = revops::fee_scheduler::SchedulerIngress::bounded_channel(1);
+    /// ~~~
+    pub(crate) fn bounded_channel(capacity: usize) -> (Self, tokio_mpsc::Receiver<CycleMsg>) {
+        let (tx, rx) = tokio_mpsc::channel(capacity.max(1));
+        (Self { tx }, rx)
+    }
+}
+
 /// The binary's source-commit identity for provenance rows (seed events,
 /// cycle commits, restart markers). Release builds inject the real commit
 /// via the `REVOPS_SOURCE_COMMIT` build-time env var; a plain `cargo
@@ -272,6 +320,8 @@ pub enum TriggerMode {
     /// by `phase_offset_secs` from spawn) -- T6's behavior, correct once
     /// Python is gone and there is no flush to observe.
     FixedInterval { phase_offset_secs: u64 },
+    /// Owner-only mode: cadence requests arrive through the bounded observer runtime.
+    ExternalOnly,
 }
 
 impl Default for TriggerMode {
@@ -489,7 +539,10 @@ pub enum FeeDebugQuery {
 pub enum CycleMsg {
     /// One cycle's prepared inputs from the async prefetch half; one
     /// message == one cycle on the owner thread.
-    RunPrepared(Box<PreparedCycle>),
+    RunPrepared(
+        Box<PreparedCycle>,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
     /// Ask for an immediate out-of-schedule cycle: the owner thread
     /// forwards this to the async half (only IT can prefetch), which
     /// prepares inputs and sends back a `RunPrepared`.
@@ -546,7 +599,7 @@ pub enum CycleMsg {
     InitialFeeStoreResult(InitialFeeStoreResult),
     /// A `revenue-r-fee-debug` query; the owner thread answers over the
     /// included reply channel without ever blocking on IO.
-    Query(FeeDebugQuery, mpsc::Sender<serde_json::Value>),
+    Query(FeeDebugQuery, std_mpsc::Sender<serde_json::Value>),
     Shutdown,
 }
 
@@ -586,6 +639,54 @@ pub enum InitialFeeStoreResult {
         context: String,
         result: Result<(), String>,
     },
+}
+
+/// Result-only callback capability for A3 store completions. Unlike
+/// `SchedulerIngress`, this cannot receive wake, query, cycle, notification,
+/// or any future action-bearing owner messages.
+#[derive(Clone)]
+struct InitialFeeResultSink {
+    deliver: Arc<dyn Fn(InitialFeeStoreResult) -> bool + Send + Sync + 'static>,
+}
+
+impl InitialFeeResultSink {
+    fn new(deliver: impl Fn(InitialFeeStoreResult) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            deliver: Arc::new(deliver),
+        }
+    }
+
+    fn deliver(&self, result: InitialFeeStoreResult) -> bool {
+        (self.deliver)(result)
+    }
+
+    fn scheduler(ingress: SchedulerIngress) -> Self {
+        Self::new(move |result| {
+            ingress
+                .blocking_send(CycleMsg::InitialFeeStoreResult(result))
+                .is_ok()
+        })
+    }
+}
+
+/// Safe integration-test receiver for A3 store results. The raw
+/// `Receiver<CycleMsg>` stays private and any non-result message is rejected.
+pub struct A3ResultReceiver {
+    rx: std::sync::Mutex<tokio_mpsc::Receiver<CycleMsg>>,
+}
+
+impl A3ResultReceiver {
+    pub fn try_recv(&self) -> Result<InitialFeeStoreResult, tokio_mpsc::error::TryRecvError> {
+        match self
+            .rx
+            .lock()
+            .expect("A3 result receiver poisoned")
+            .try_recv()?
+        {
+            CycleMsg::InitialFeeStoreResult(result) => Ok(result),
+            _ => panic!("A3 result receiver observed a non-result owner message"),
+        }
+    }
 }
 
 /// One in-flight A3 occurrence's owner-side bookkeeping, keyed by
@@ -856,6 +957,13 @@ fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
         CycleOutcome::PersistenceFailed => {
             "ran but PersistenceFailed: atomic commit failed, generation not advanced".to_string()
         }
+    }
+}
+
+fn cycle_completion(outcome: &CycleOutcome) -> Result<(), String> {
+    match outcome {
+        CycleOutcome::Ran { .. } => Ok(()),
+        other => Err(describe_cycle_outcome(other)),
     }
 }
 
@@ -1393,7 +1501,7 @@ pub struct CycleOwner {
     /// (`spawn_with_thread_spawner`) always sets this; a bare test-driven
     /// owner without one fails the A3 path CLOSED (a commit whose result
     /// could never return must not be dispatched).
-    self_tx: Option<mpsc::Sender<CycleMsg>>,
+    result_sink: Option<InitialFeeResultSink>,
     /// F5: in-flight A3 occurrences, keyed by channel_id. An entry's
     /// presence is the same-channel fail-closed race guard; its staged
     /// clones install only on a successful identity-matched commit
@@ -1420,6 +1528,7 @@ pub struct CycleOwner {
     /// the two. Bounded to ONE entry: a newer prepared snapshot
     /// supersedes an older deferred one (loudly, counted).
     deferred_cycle: Option<Box<PreparedCycle>>,
+    deferred_cycle_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     /// F7: deferred prepared cycles that were superseded by a newer one
     /// before they could run (each one loud, never silent). Never reset.
     deferred_cycles_superseded: u64,
@@ -1482,23 +1591,31 @@ impl CycleOwner {
             last_profile: "active".to_string(),
             last_cycle_at: None,
             last_cycle_outcome: None,
-            self_tx: None,
+            result_sink: None,
             pending_initial_fees: HashMap::new(),
             initial_fee_dispatch_seq: 0,
             initial_fee_conflicts: 0,
             state_generation: None,
             deferred_cycle: None,
+            deferred_cycle_ack: None,
             deferred_cycles_superseded: 0,
         }
     }
 
-    /// F5: wire the owner's own queue sender (see the `self_tx` field
-    /// doc). `spawn_with_thread_spawner` calls this before entering the
-    /// message loop; tests driving an owner directly call it with their
-    /// own receiver's sender and pump the resulting
-    /// [`CycleMsg::InitialFeeStoreResult`] messages back in.
-    pub fn set_self_sender(&mut self, tx: mpsc::Sender<CycleMsg>) {
-        self.self_tx = Some(tx);
+    /// F5: wire the private result-only sink. `spawn_with_thread_spawner`
+    /// calls this before entering the message loop; tests driving an owner
+    /// directly attach the result-only receiver and pump those results back in.
+    fn set_initial_fee_result_sink(&mut self, sink: InitialFeeResultSink) {
+        self.result_sink = Some(sink);
+    }
+
+    #[doc(hidden)]
+    pub fn attach_a3_result_receiver_for_tests(&mut self, capacity: usize) -> A3ResultReceiver {
+        let (ingress, rx) = SchedulerIngress::bounded_channel(capacity);
+        self.set_initial_fee_result_sink(InitialFeeResultSink::scheduler(ingress));
+        A3ResultReceiver {
+            rx: std::sync::Mutex::new(rx),
+        }
     }
 
     /// F5's red conflict counter (see the `initial_fee_conflicts` field
@@ -2850,14 +2967,14 @@ impl CycleOwner {
             return;
         }
 
-        // F5: without a self-sender the off-owner store results could
+        // F5: without a result sink the off-owner store results could
         // never return to the owner, so the occurrence must fail CLOSED
         // before any decision/RNG -- never dispatch work whose outcome is
         // undeliverable. Production wiring always sets one.
-        let Some(self_tx) = self.self_tx.clone() else {
+        let Some(result_sink) = self.result_sink.clone() else {
             self.persistence_failures += 1;
             eprintln!(
-                "revops: A3 NEW-CHANNEL REFUSED (failure #{}): owner has no self-sender for \
+                "revops: A3 NEW-CHANNEL REFUSED (failure #{}): owner has no result sink for \
                  commit-result routing; channel {channel_id} at {now} -- no decision was made, \
                  no entropy was drawn",
                 self.persistence_failures
@@ -2867,9 +2984,9 @@ impl CycleOwner {
                 now,
                 false,
                 None,
-                "REFUSED: owner has no self-sender for commit-result routing; no decision was \
+                "REFUSED: owner has no result sink for commit-result routing; no decision was \
                  made",
-                "new_channel no-self-sender refusal receipt",
+                "new_channel no-result-sink refusal receipt",
             );
             return;
         };
@@ -2899,19 +3016,29 @@ impl CycleOwner {
         );
         let store = self.store.as_ref().expect("checked store.is_none() above");
         let reply_key = event_key.clone();
-        store.dispatch_cycle_exists_with_generation(
+        let callback_channel_id = channel_id.clone();
+        let callback_reply_key = reply_key.clone();
+        let launch = store.dispatch_cycle_exists_with_generation(
             event_key,
             Box::new(move |result| {
-                let _ = self_tx.send(CycleMsg::InitialFeeStoreResult(
-                    InitialFeeStoreResult::Idempotency {
-                        channel_id,
-                        event_key: reply_key,
-                        generation,
-                        result: result.map_err(|e| format!("{e:#}")),
-                    },
-                ));
+                if !result_sink.deliver(InitialFeeStoreResult::Idempotency {
+                    channel_id: callback_channel_id,
+                    event_key: callback_reply_key,
+                    generation,
+                    result: result.map_err(|e| format!("{e:#}")),
+                }) {
+                    eprintln!("revops: A3 idempotency result lost: owner ingress closed");
+                }
             }),
         );
+        if let Err(e) = launch {
+            self.handle_idempotency_result(
+                channel_id,
+                reply_key,
+                generation,
+                Err(format!("{e:#}")),
+            );
+        }
     }
 
     /// [`CycleMsg::InitialFeeStoreResult`]'s handler (live-review finding
@@ -2965,7 +3092,10 @@ impl CycleOwner {
                     "revops: running the prepared cycle deferred behind an in-flight A3 \
                      commit (the cycle now sees the synchronized post-A3 state)"
                 );
-                let _ = self.run_cycle(*deferred, clock);
+                let outcome = self.run_cycle(*deferred, clock);
+                if let Some(completion) = self.deferred_cycle_ack.take() {
+                    let _ = completion.send(cycle_completion(&outcome));
+                }
             }
         }
     }
@@ -3349,32 +3479,38 @@ impl CycleOwner {
         // idempotency dispatch and are never unset; fail closed anyway
         // rather than panic the owner thread if that invariant ever
         // breaks.
-        let (Some(self_tx), Some(store)) = (self.self_tx.clone(), self.store.as_ref()) else {
+        let (Some(result_sink), Some(store)) = (self.result_sink.clone(), self.store.as_ref())
+        else {
             self.pending_initial_fees.remove(&channel_id);
             self.persistence_failures += 1;
             eprintln!(
                 "revops: A3 NEW-CHANNEL COMMIT NOT DISPATCHED (failure #{}): store or \
-                 self-sender vanished mid-flight for channel {channel_id}; nothing was \
+                 result sink vanished mid-flight for channel {channel_id}; nothing was \
                  committed, nothing was installed",
                 self.persistence_failures
             );
             return;
         };
         let event_key = prepared.event_key.clone();
-        store.dispatch_commit_fee_cycle_guarded(
+        let callback_channel_id = channel_id.clone();
+        let callback_event_key = event_key.clone();
+        let launch = store.dispatch_commit_fee_cycle_guarded(
             commit,
             expected_prior_generation,
             Box::new(move |result| {
-                let _ = self_tx.send(CycleMsg::InitialFeeStoreResult(
-                    InitialFeeStoreResult::Commit {
-                        channel_id,
-                        event_key,
-                        generation,
-                        result: result.map_err(|e| format!("{e:#}")),
-                    },
-                ));
+                if !result_sink.deliver(InitialFeeStoreResult::Commit {
+                    channel_id: callback_channel_id,
+                    event_key: callback_event_key,
+                    generation,
+                    result: result.map_err(|e| format!("{e:#}")),
+                }) {
+                    eprintln!("revops: A3 commit result lost: owner ingress closed");
+                }
             }),
         );
+        if let Err(e) = launch {
+            self.handle_commit_result(channel_id, event_key, generation, Err(format!("{e:#}")));
+        }
     }
 
     /// [`CycleMsg::RunPrepared`]'s owner-side entry. F7 sequencing rule
@@ -3416,6 +3552,31 @@ impl CycleOwner {
         None
     }
 
+    pub fn run_or_defer_cycle_with_ack(
+        &mut self,
+        prepared: Box<PreparedCycle>,
+        clock: &mut dyn FnMut() -> i64,
+        completion: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let prior_completion = if !self.pending_initial_fees.is_empty() {
+            self.deferred_cycle_ack.take()
+        } else {
+            None
+        };
+        match self.run_or_defer_cycle(prepared, clock) {
+            Some(outcome) => {
+                let _ = completion.send(cycle_completion(&outcome));
+            }
+            None => {
+                if let Some(prior) = prior_completion {
+                    let _ =
+                        prior.send(Err("deferred cycle superseded before execution".to_string()));
+                }
+                self.deferred_cycle_ack = Some(completion);
+            }
+        }
+    }
+
     /// F7: deferred prepared cycles superseded by a newer one (red
     /// counter; see the field doc).
     pub fn deferred_cycles_superseded(&self) -> u64 {
@@ -3427,13 +3588,13 @@ impl CycleOwner {
     /// interaction -- a receipt write against a stalled store must not
     /// wedge the owner either. The write's own failure comes back as an
     /// [`InitialFeeStoreResult::Receipt`] (loud + counted) when a
-    /// self-sender is wired; without one it is logged from the dispatch
+    /// result sink is wired; without one it is logged from the dispatch
     /// thread. Without a store this is a no-op, exactly like
     /// [`Self::record_trigger_receipt`]'s posture (the refusal stays
     /// loudly logged by the caller and enforced in-process).
     #[allow(clippy::too_many_arguments)]
     fn dispatch_a3_receipt(
-        &self,
+        &mut self,
         trigger: &FeeTrigger,
         received_at: i64,
         coalesced: bool,
@@ -3446,26 +3607,41 @@ impl CycleOwner {
         };
         let row = build_receipt(trigger, received_at, coalesced, cycle, detail);
         let context = context.to_string();
-        match self.self_tx.clone() {
-            Some(tx) => store.dispatch_record_trigger_event(
-                row,
-                Box::new(move |result| {
-                    let _ = tx.send(CycleMsg::InitialFeeStoreResult(
-                        InitialFeeStoreResult::Receipt {
-                            context,
+        let launch = match self.result_sink.clone() {
+            Some(result_sink) => {
+                let callback_context = context.clone();
+                store.dispatch_record_trigger_event(
+                    row,
+                    Box::new(move |result| {
+                        if !result_sink.deliver(InitialFeeStoreResult::Receipt {
+                            context: callback_context,
                             result: result.map_err(|e| format!("{e:#}")),
-                        },
-                    ));
-                }),
-            ),
-            None => store.dispatch_record_trigger_event(
-                row,
-                Box::new(move |result| {
-                    if let Err(e) = result {
-                        eprintln!("revops: A3 receipt record failed ({e:#}): {context}");
-                    }
-                }),
-            ),
+                        }) {
+                            eprintln!("revops: A3 receipt result lost: owner ingress closed");
+                        }
+                    }),
+                )
+            }
+            None => {
+                let callback_context = context.clone();
+                store.dispatch_record_trigger_event(
+                    row,
+                    Box::new(move |result| {
+                        if let Err(e) = result {
+                            eprintln!(
+                                "revops: A3 receipt record failed ({e:#}): {callback_context}"
+                            );
+                        }
+                    }),
+                )
+            }
+        };
+        if let Err(e) = launch {
+            self.persistence_failures += 1;
+            eprintln!(
+                "revops: A3 receipt dispatch FAILED (failure #{}): {e:#}: {context}",
+                self.persistence_failures
+            );
         }
     }
 
@@ -3562,10 +3738,133 @@ impl CycleOwner {
 /// for T7's RPC/wake senders).
 pub struct SchedulerHandle {
     /// Owner-thread channel (cycle messages; T7's debug/wake variants).
-    pub tx: mpsc::Sender<CycleMsg>,
-    /// Async-side wake channel: one `()` == "prefetch and run a cycle
-    /// NOW" (the tokio half of the `RunCycleNow` path).
-    pub wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    pub tx: SchedulerIngress,
+}
+
+pub fn spawn_owner_for_runtime(
+    mut cfg: SchedulerConfig,
+    store: Option<Box<dyn RunwayStateStore>>,
+) -> anyhow::Result<SchedulerHandle> {
+    cfg.trigger = TriggerMode::ExternalOnly;
+    spawn(cfg, None, PythonOptionCache::empty(), store)
+}
+
+pub struct FeeObserverPass {
+    socket_path: PathBuf,
+    db_handle: Option<DbHandle>,
+    python_options: PythonOptionCache,
+    tx: SchedulerIngress,
+    interval_secs: std::sync::atomic::AtomicU64,
+}
+
+impl FeeObserverPass {
+    pub fn new(
+        socket_path: PathBuf,
+        db_handle: Option<DbHandle>,
+        python_options: PythonOptionCache,
+        tx: SchedulerIngress,
+        initial_interval_secs: u64,
+    ) -> Self {
+        Self {
+            socket_path,
+            db_handle,
+            python_options,
+            tx,
+            interval_secs: std::sync::atomic::AtomicU64::new(initial_interval_secs.max(1)),
+        }
+    }
+    pub fn interval_secs(&self) -> u64 {
+        self.interval_secs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::loop_health::ObserverPass for FeeObserverPass {
+    fn run(
+        &self,
+        _key: crate::loop_health::RequestKey,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let _ = self.python_options.refresh(&self.socket_path).await;
+            let prepared = prepare_cycle(
+                &self.socket_path,
+                self.db_handle.as_ref(),
+                &self.python_options.snapshot(),
+            )
+            .await
+            .map_err(|error| error.context("fee prefetch"))?;
+            self.interval_secs.store(
+                prepared.cfg.fee_interval.max(1) as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            let (completion, acknowledged) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(CycleMsg::RunPrepared(Box::new(prepared), completion))
+                .await
+                .map_err(|_| anyhow::anyhow!("fee owner disconnected before dispatch"))?;
+            acknowledged
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("fee owner disconnected before completion: {error}")
+                })?
+                .map_err(anyhow::Error::msg)
+        })
+    }
+}
+
+pub struct FeeCadenceActivation {
+    handle: crate::loop_health::LoopHandle,
+    pass: std::sync::Arc<FeeObserverPass>,
+    phase_offset_secs: u64,
+}
+
+impl FeeCadenceActivation {
+    pub fn new(
+        handle: crate::loop_health::LoopHandle,
+        pass: std::sync::Arc<FeeObserverPass>,
+        phase_offset_secs: u64,
+    ) -> Self {
+        Self {
+            handle,
+            pass,
+            phase_offset_secs,
+        }
+    }
+
+    pub fn activate(self) {
+        let Self {
+            handle,
+            pass,
+            phase_offset_secs,
+        } = self;
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let delay =
+                    pass.interval_secs()
+                        .saturating_add(if first { phase_offset_secs } else { 0 });
+                first = false;
+                tokio::time::sleep(Duration::from_secs(delay.max(1))).await;
+                match handle
+                    .request(crate::loop_health::RequestKey::from("fixed_interval"))
+                    .await
+                {
+                    Ok(
+                        crate::loop_health::Admission::Enqueued
+                        | crate::loop_health::Admission::Coalesced,
+                    ) => {}
+                    Ok(crate::loop_health::Admission::Dropped) => {
+                        eprintln!("revops: fee loop request dropped by bounded runtime")
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "revops: fee loop request persistence failed: {error:#}; trigger exiting"
+                        );
+                        return;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Spawn the scheduler: the owner thread (a) and the trigger task (b).
@@ -3603,8 +3902,8 @@ pub fn spawn_with_thread_spawner<S>(
 where
     S: FnOnce(&str, Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
 {
-    let (tx, rx) = mpsc::channel::<CycleMsg>();
-    let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (tx, mut rx) = SchedulerIngress::bounded_channel(OWNER_QUEUE_CAPACITY);
+    let (wake_tx, wake_rx) = tokio_mpsc::channel::<()>(1);
     let socket_path = cfg.socket_path.clone();
     let db_path = cfg.db_path.clone();
     let trigger = cfg.trigger;
@@ -3620,19 +3919,21 @@ where
         let mut owner = CycleOwner::new(&cfg, crate::now_unix(), store);
         // F5: off-owner store dispatches route their results back onto
         // this same queue -- the owner never blocks on a store reply.
-        owner.set_self_sender(owner_self_tx);
+        owner.set_initial_fee_result_sink(InitialFeeResultSink::scheduler(owner_self_tx));
         let mut clock = crate::now_unix;
-        while let Ok(msg) = rx.recv() {
+        while let Some(msg) = rx.blocking_recv() {
             match msg {
-                CycleMsg::RunPrepared(prepared) => {
-                    // Outcome logging happens inside the owner; the loop
-                    // must survive every outcome. (F7: while an A3 store
-                    // result is pending the cycle is deferred, not run.)
-                    let _ = owner.run_or_defer_cycle(prepared, &mut clock);
+                CycleMsg::RunPrepared(prepared, completion) => {
+                    owner.run_or_defer_cycle_with_ack(prepared, &mut clock, completion);
                 }
                 CycleMsg::RunCycleNow => {
                     // Only the async half can prefetch; hand over.
-                    let _ = owner_wake.send(());
+                    match owner_wake.try_send(()) {
+                        Ok(()) | Err(tokio_mpsc::error::TrySendError::Full(())) => {}
+                        Err(tokio_mpsc::error::TrySendError::Closed(())) => {
+                            eprintln!("revops: RunCycleNow wake lost: trigger task closed")
+                        }
+                    }
                 }
                 CycleMsg::PolicyChanged { peer_id } => {
                     // A fresh read-only channel_states read (not the
@@ -3701,7 +4002,7 @@ where
         wake_rx,
     ));
 
-    Ok(SchedulerHandle { tx, wake_tx })
+    Ok(SchedulerHandle { tx })
 }
 
 /// One dispatch on the async side: prepare a cycle and send it to the
@@ -3720,7 +4021,7 @@ async fn dispatch_cycle(
     socket_path: &Path,
     db_handle: Option<&DbHandle>,
     python_options: &PythonOptionCache,
-    tick_tx: &mpsc::Sender<CycleMsg>,
+    tick_tx: &SchedulerIngress,
 ) -> Dispatch {
     // 2026-07-22 audit M3: Python re-reads `listconfigs` every cycle
     // (`_refresh_dynamic_config`), so refresh layer (b) before resolving —
@@ -3733,13 +4034,21 @@ async fn dispatch_cycle(
     match prepare_cycle(socket_path, db_handle, &snapshot).await {
         Ok(prepared) => {
             let interval_secs = prepared.cfg.fee_interval.max(1) as u64;
+            let (completion, acknowledged) = tokio::sync::oneshot::channel();
             if tick_tx
-                .send(CycleMsg::RunPrepared(Box::new(prepared)))
+                .send(CycleMsg::RunPrepared(Box::new(prepared), completion))
+                .await
                 .is_err()
             {
-                Dispatch::OwnerGone
-            } else {
-                Dispatch::Sent(interval_secs)
+                return Dispatch::OwnerGone;
+            }
+            match acknowledged.await {
+                Ok(Ok(())) => Dispatch::Sent(interval_secs),
+                Ok(Err(error)) => {
+                    eprintln!("revops: fee cycle owner reported failure: {error}");
+                    Dispatch::Skipped
+                }
+                Err(_) => Dispatch::OwnerGone,
             }
         }
         Err(e) => {
@@ -3757,8 +4066,8 @@ async fn trigger_loop(
     socket_path: PathBuf,
     db_handle: Option<DbHandle>,
     python_options: PythonOptionCache,
-    tick_tx: mpsc::Sender<CycleMsg>,
-    mut wake_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    tick_tx: SchedulerIngress,
+    mut wake_rx: tokio_mpsc::Receiver<()>,
 ) {
     // Initial cadence resolution -- schedule/staleness seed only; every
     // cycle's authoritative cfg is resolved in prepare_cycle.
@@ -3769,6 +4078,11 @@ async fn trigger_loop(
             .max(1) as u64;
 
     match trigger {
+        TriggerMode::ExternalOnly => {
+            while wake_rx.recv().await.is_some() {
+                eprintln!("revops: ignored legacy RunCycleNow in ExternalOnly mode; use bounded LoopHandle ingress");
+            }
+        }
         TriggerMode::FixedInterval { phase_offset_secs } => {
             let mut next = tokio::time::Instant::now()
                 + Duration::from_secs(interval_secs + phase_offset_secs);
@@ -3875,12 +4189,68 @@ async fn trigger_loop(
                 // cycle, since `run_fee_cycle` already calls
                 // `maybe_wake_for_vegas_spike` itself this same poll.
                 if !matches!(outcome, PollOutcome::RunCycle)
-                    && tick_tx.send(CycleMsg::VegasSpikeCheck).is_err()
+                    && tick_tx.send(CycleMsg::VegasSpikeCheck).await.is_err()
                 {
                     return; // owner thread gone
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_ingress_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a3_callback_blocking_send_backpressures_and_preserves_fifo_exactly_once() {
+        let (tx, mut rx) = SchedulerIngress::bounded_channel(1);
+        tx.blocking_send(CycleMsg::ForwardEvent {
+            channel_id: "first".to_string(),
+        })
+        .expect("fill ingress");
+
+        let callback_finished = std::sync::Arc::new(AtomicBool::new(false));
+        let callback_finished_in_thread = callback_finished.clone();
+        let callback_tx = tx.clone();
+        let callback = std::thread::spawn(move || {
+            callback_tx
+                .blocking_send(CycleMsg::InitialFeeStoreResult(
+                    InitialFeeStoreResult::Receipt {
+                        context: "a3-callback".to_string(),
+                        result: Ok(()),
+                    },
+                ))
+                .expect("A3 callback admitted after drain");
+            callback_finished_in_thread.store(true, Ordering::SeqCst);
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(
+            !callback_finished.load(Ordering::SeqCst),
+            "A3 callback must block while bounded ingress is saturated"
+        );
+        assert!(matches!(
+            rx.blocking_recv().expect("first queued message"),
+            CycleMsg::ForwardEvent { channel_id } if channel_id == "first"
+        ));
+        callback.join().unwrap();
+        assert!(callback_finished.load(Ordering::SeqCst));
+        match rx.blocking_recv().expect("one callback result after first") {
+            CycleMsg::InitialFeeStoreResult(InitialFeeStoreResult::Receipt { context, result }) => {
+                assert_eq!(context, "a3-callback");
+                assert!(result.is_ok());
+            }
+            _ => panic!("callback result must remain second in FIFO order"),
+        }
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "the callback result must be delivered exactly once"
+        );
     }
 }
 
