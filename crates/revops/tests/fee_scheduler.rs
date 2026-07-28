@@ -4256,6 +4256,131 @@ mod seedonce_restart {
         );
     }
 
+    #[test]
+    fn deferred_ack_supersession_keeps_newest_pending_then_reports_real_outcome() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path: _,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx);
+
+        let mut clock = || NOW + 3600;
+        let (old_tx, mut old_rx) = tokio::sync::oneshot::channel();
+        owner.run_or_defer_cycle_with_ack(Box::new(seedonce_prepared_cycle()), &mut clock, old_tx);
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let (new_tx, mut new_rx) = tokio::sync::oneshot::channel();
+        owner.run_or_defer_cycle_with_ack(Box::new(seedonce_prepared_cycle()), &mut clock, new_tx);
+        let old = old_rx.try_recv().expect("old deferred ACK is explicit");
+        assert_eq!(
+            old,
+            Err("deferred cycle superseded before execution".to_string())
+        );
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        release_parked(&_fx.journal_dir.join("rust-owned.db"), &parked);
+        pump_store_results(&mut owner, &rx);
+        assert_eq!(
+            new_rx.try_recv().expect("newest deferred ACK is terminal"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn immediate_skips_and_persistence_failures_are_never_acknowledged_as_success() {
+        let fx = fixture();
+        let mut owner = CycleOwner::new(
+            &SchedulerConfig {
+                db_path: fx.db_path.clone(),
+                socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+                journal_dir: fx.journal_dir.clone(),
+                lifecycle: StateLifecycle::RehydratePerCycle,
+                trigger: TriggerMode::ExternalOnly,
+            },
+            SEED,
+            None,
+        );
+        let (skipped_tx, mut skipped_rx) = tokio::sync::oneshot::channel();
+        let mut clock = || NOW;
+        owner.run_or_defer_cycle_with_ack(
+            Box::new(prepared(json!("unresolvable"), false)),
+            &mut clock,
+            skipped_tx,
+        );
+        let skipped = skipped_rx.try_recv().unwrap().unwrap_err();
+        assert!(skipped.contains("neighbor_median_min_competitors"));
+
+        let mut h = seedonce_harness_with_one_channel();
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        h.fail_commits.store(true, Ordering::SeqCst);
+        let prepared = h.prepared();
+        let (failed_tx, mut failed_rx) = tokio::sync::oneshot::channel();
+        let mut clock = || NOW + 3600;
+        h.owner
+            .run_or_defer_cycle_with_ack(Box::new(prepared), &mut clock, failed_tx);
+        let failed = failed_rx.try_recv().unwrap().unwrap_err();
+        assert!(failed.contains("PersistenceFailed"), "{failed}");
+    }
+
+    #[test]
+    fn owner_loss_closes_a_deferred_ack_that_never_reached_execution() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path: _,
+            parked: _,
+        } = parked_seedonce_after_first_cycle();
+        owner.handle_new_channel(new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            None,
+            NOW + 10,
+        ));
+        pump_store_results(&mut owner, &rx);
+        let (completion, mut acknowledged) = tokio::sync::oneshot::channel();
+        let mut clock = || NOW + 3600;
+        owner.run_or_defer_cycle_with_ack(
+            Box::new(seedonce_prepared_cycle()),
+            &mut clock,
+            completion,
+        );
+        assert!(matches!(
+            acknowledged.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(owner);
+        assert!(
+            matches!(
+                acknowledged.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ),
+            "owner loss must close every still-outstanding deferred ACK"
+        );
+    }
+
     /// F5 (same-channel pending/race, fail-closed): once a cycle has
     /// drained the trigger queue, a NEW occurrence for a channel whose
     /// store result is STILL in flight would pass the offer as `Enqueued`
