@@ -165,7 +165,10 @@ fn watcher_pass_aborts_when_a_lifecycle_write_fails() {
     // Skip the backfill choke point so the failure seam is phase 3's CAS.
     db.set_config_override(revops_lnplus::reconcile::BACKFILL_FLAG, "1")
         .unwrap();
-    *db.fail_cas_swap.borrow_mut() = true;
+    // Fail ONLY the next cas call (phase 3's opening patch) then heal —
+    // a blanket failure would be caught by any later write and prove
+    // nothing about this specific seam's fail-closed handling.
+    *db.fail_cas_swap_times.borrow_mut() = 1;
 
     let result = run_watcher_once(
         &db,

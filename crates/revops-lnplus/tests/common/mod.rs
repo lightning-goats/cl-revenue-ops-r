@@ -69,6 +69,11 @@ pub struct FakeDb {
     // contract in kernel callers.
     pub fail_insert_swap: RefCell<bool>,
     pub fail_cas_swap: RefCell<bool>,
+    /// Fail exactly the next N `cas_swap` calls, then heal — for tests
+    /// pinning ONE specific call site's fail-closed handling (a blanket
+    /// failure would be caught by any later write and prove nothing about
+    /// the seam under test).
+    pub fail_cas_swap_times: RefCell<u32>,
     pub fail_compound: RefCell<bool>,
     pub fail_get_breaker: RefCell<bool>,
     pub fail_set_breaker: RefCell<bool>,
@@ -177,6 +182,13 @@ impl LnPlusDb for FakeDb {
         patch: &SwapPatch,
     ) -> PortResult<CasOutcome> {
         injected(&self.fail_cas_swap, "cas_swap")?;
+        {
+            let mut remaining = self.fail_cas_swap_times.borrow_mut();
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(PortError::new("injected cas_swap failure (counted)"));
+            }
+        }
         Ok(self.cas_inner(swap_id, expected_statuses, false, patch))
     }
 

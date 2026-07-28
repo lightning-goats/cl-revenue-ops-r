@@ -305,12 +305,18 @@ fn terminalize_and_trip_conflicts_when_funding_txid_present() {
 
 #[test]
 fn terminalize_and_trip_rolls_back_the_row_when_the_breaker_write_fails() {
-    // THE atomicity proof: a real persistence fault on the breaker half
-    // (config_overrides dropped) must roll the row's terminalization back
-    // too — all-or-nothing, acknowledged as Err.
+    // THE atomicity proof: a real persistence fault on EXACTLY the breaker
+    // WRITE (reads unaffected — a RAISE trigger on INSERT) must roll the
+    // row's terminalization back too — all-or-nothing, acknowledged as
+    // Err. A whole-table fault would trip the compound's breaker READ
+    // first and prove nothing about the write half.
     let (_dir, db, path) = open_db();
     seeded(&db, "s1", "opening");
-    sabotage(&path, "DROP TABLE config_overrides;");
+    sabotage(
+        &path,
+        "CREATE TRIGGER sabotage_breaker_write BEFORE INSERT ON config_overrides \
+         BEGIN SELECT RAISE(ABORT, 'sabotaged breaker write'); END;",
+    );
 
     let result =
         db.terminalize_and_trip(&deadline_spec("s1"), &failed_patch(), miss_cause("s1"), 500);
@@ -320,6 +326,20 @@ fn terminalize_and_trip_rolls_back_the_row_when_the_breaker_write_fails() {
         "opening",
         "the row terminalization must have rolled back with the failed breaker write"
     );
+}
+
+#[test]
+fn terminalize_and_trip_rolls_back_when_the_whole_store_half_is_gone() {
+    // Companion coverage: the coarser whole-table fault (read AND write
+    // gone) is also acknowledged with the row rolled back.
+    let (_dir, db, path) = open_db();
+    seeded(&db, "s1", "opening");
+    sabotage(&path, "DROP TABLE config_overrides;");
+
+    let result =
+        db.terminalize_and_trip(&deadline_spec("s1"), &failed_patch(), miss_cause("s1"), 500);
+    assert!(result.is_err());
+    assert_eq!(db.get_swap("s1").unwrap().status, "opening");
 }
 
 // --------------------------------------------- fallible acked plain writes
