@@ -31,7 +31,7 @@ fn rule1_pending_import_starts_timeout_clock_now() {
         pending: vec![e],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert_eq!(result.imported.pending, 1);
     let row = db.get_swap("1").unwrap();
     assert_eq!(row.status, "applied");
@@ -50,7 +50,7 @@ fn rule1_idempotent_skip_when_local_row_exists() {
         pending: vec![entry("1")],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert_eq!(result.imported.pending, 0);
     assert_eq!(result.skipped, vec!["1".to_string()]);
 }
@@ -74,7 +74,7 @@ fn rule1_missing_capacity_falls_back_to_get_swap_detail() {
         pending: vec![entry("1")],
         ..Default::default()
     };
-    backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     let row = db.get_swap("1").unwrap();
     assert_eq!(row.capacity_sats, 750_000);
     assert_eq!(row.duration_months, 3);
@@ -98,7 +98,7 @@ fn rule2_opening_import_with_valid_peer_and_deadline() {
         opening: vec![e],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert_eq!(result.imported.opening, 1);
     let row = db.get_swap("2").unwrap();
     assert_eq!(row.status, "opening");
@@ -118,7 +118,7 @@ fn rule2_invalid_peer_left_null_with_warning() {
         opening: vec![e],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert!(result
         .warnings
         .iter()
@@ -137,7 +137,7 @@ fn rule2_missing_deadline_falls_back_to_48h_with_warning() {
         opening: vec![entry("2")],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert!(result
         .warnings
         .iter()
@@ -184,7 +184,7 @@ fn rule3_running_contract_derives_outbound_peer_and_protects_pending() {
         completed: vec![e],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert_eq!(result.imported.active, 1);
     let row = db.get_swap("3").unwrap();
     assert_eq!(row.status, "opened");
@@ -207,7 +207,7 @@ fn rule3_get_swap_failure_imports_with_outbound_null_error_logged() {
         completed: vec![e],
         ..Default::default()
     };
-    backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     let row = db.get_swap("3").unwrap();
     assert!(row.outbound_peer.is_none());
     assert!(logger.contains("operator must protect this channel manually"));
@@ -231,7 +231,7 @@ fn rule4_ended_contract_imported_unrated_and_bumps_peer() {
         completed: vec![e],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert_eq!(result.imported.ended, 1);
     let row = db.get_swap("4").unwrap();
     assert_eq!(row.status, "ended");
@@ -255,7 +255,7 @@ fn rule4_missing_ends_warns_but_still_imports_as_ended() {
         completed: vec![entry("4")],
         ..Default::default()
     };
-    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    let result = backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert!(result
         .warnings
         .iter()
@@ -287,6 +287,6 @@ fn control_completed_entry_still_running_takes_rule3_not_rule4() {
         completed: vec![e],
         ..Default::default()
     };
-    backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000);
+    backfill_from_lnplus(&my, &db, &api, &chain, &logger, 1000).expect("backfill");
     assert_eq!(db.get_swap("5").unwrap().status, "opened");
 }

@@ -75,7 +75,8 @@ fn breaker_tripped_short_circuits_before_any_live_call() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert!(!result.outcome.applied && !result.outcome.recommended);
     assert_eq!(
@@ -106,7 +107,8 @@ fn has_inflight_short_circuits_before_any_live_call() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert!(!result.outcome.applied);
     assert_eq!(*api.get_my_swaps_calls.borrow(), 0);
@@ -133,7 +135,8 @@ fn feerate_above_ceiling_short_circuits_before_reconcile() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert!(!result.outcome.applied);
     assert_eq!(
@@ -172,7 +175,8 @@ fn disabled_config_short_circuits_before_even_the_feerate_read() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert!(!result.outcome.applied);
     assert_eq!(*chain.opening_feerate_calls.borrow(), 0);
@@ -185,7 +189,7 @@ fn healthy_pass_proceeds_through_reconcile_and_fetches_candidates() {
     // the pass, the live calls DO fire (proves the assertions above are
     // testing suppression, not a client that never calls anything).
     let db = FakeDb::new();
-    db.set_config_override(BACKFILL_FLAG, "1"); // skip backfill's own extra calls
+    db.set_config_override(BACKFILL_FLAG, "1").unwrap(); // skip backfill's own extra calls
     let api = FakeApi::new();
     let chain = FakeChain::new();
     let policy = FakePolicy::new();
@@ -202,7 +206,8 @@ fn healthy_pass_proceeds_through_reconcile_and_fetches_candidates() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert_eq!(*chain.opening_feerate_calls.borrow(), 1);
     assert_eq!(*api.get_my_swaps_calls.borrow(), 1, "reconcile's one call");
@@ -218,7 +223,7 @@ fn healthy_pass_proceeds_through_reconcile_and_fetches_candidates() {
 #[test]
 fn cached_our_id_is_reused_without_a_fresh_getinfo_call() {
     let db = FakeDb::new();
-    db.set_config_override(BACKFILL_FLAG, "1");
+    db.set_config_override(BACKFILL_FLAG, "1").unwrap();
     let api = FakeApi::new();
     let chain = FakeChain::new();
     // If `our_node_id` were called again it would return `pubkey(9)`
@@ -241,7 +246,8 @@ fn cached_our_id_is_reused_without_a_fresh_getinfo_call() {
         &planner,
         &logger,
         params,
-    );
+    )
+    .expect("pass");
 
     assert_eq!(result.resolved_our_id.as_deref(), Some("cached-id"));
 }
@@ -271,7 +277,7 @@ fn qualifying_swap_and_outbound_peer() -> (revops_lnplus::types::SwapListing, St
 #[test]
 fn dry_run_blocks_a_live_apply_even_when_config_says_execute() {
     let db = FakeDb::new();
-    db.set_config_override(BACKFILL_FLAG, "1");
+    db.set_config_override(BACKFILL_FLAG, "1").unwrap();
     let api = FakeApi::new();
     let chain = FakeChain::new();
     let policy = FakePolicy::new();
@@ -292,7 +298,8 @@ fn dry_run_blocks_a_live_apply_even_when_config_says_execute() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert!(
         !result.outcome.applied,
@@ -319,7 +326,7 @@ fn dry_run_blocks_a_live_apply_even_when_config_says_execute() {
 #[test]
 fn armed_control_the_same_scenario_actually_applies() {
     let db = FakeDb::new();
-    db.set_config_override(BACKFILL_FLAG, "1");
+    db.set_config_override(BACKFILL_FLAG, "1").unwrap();
     let api = FakeApi::new();
     let chain = FakeChain::new();
     let policy = FakePolicy::new();
@@ -340,7 +347,8 @@ fn armed_control_the_same_scenario_actually_applies() {
         &planner,
         &logger,
         eval_params(),
-    );
+    )
+    .expect("pass");
 
     assert!(
         result.outcome.applied,
@@ -390,7 +398,8 @@ fn watcher_dry_run_never_connects_or_funds_a_channel() {
         &open_exec(),
         7,
         1_000, // well before the deadline
-    );
+    )
+    .expect("pass");
 
     assert!(summary.opened.is_empty());
     assert!(
@@ -436,7 +445,8 @@ fn watcher_armed_control_actually_opens_the_channel() {
         &open_exec(),
         7,
         1_000,
-    );
+    )
+    .expect("pass");
 
     assert_eq!(summary.opened, vec!["s1".to_string()]);
     assert_eq!(chain.connect_calls.borrow().len(), 1);

@@ -10,7 +10,7 @@ use crate::backfill;
 use crate::breaker::{self, BreakerCause};
 use crate::db_types::{SwapPatch, TERMINAL_PENDING_GHOST_STATUSES};
 use crate::error::LnPlusError;
-use crate::ports::{ChainPort, LnPlusApi, LnPlusDb, LogLevel, Logger};
+use crate::ports::{ChainPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PortResult};
 use crate::types::MySwaps;
 
 /// py 676 `_RECONCILE_GRACE_SECONDS`: local 'applied' rows younger than
@@ -30,7 +30,7 @@ pub fn reconcile_ok(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     now: i64,
-) -> bool {
+) -> PortResult<bool> {
     let my = match api.get_my_swaps() {
         Ok(my) => my,
         Err(e) => {
@@ -38,11 +38,11 @@ pub fn reconcile_ok(
                 LogLevel::Warn,
                 &format!("LNPLUS: reconcile fetch failed: {e}"),
             );
-            return false;
+            return Ok(false);
         }
     };
-    if !maybe_run_backfill_once(&my, db, api, chain, logger, now) {
-        return false;
+    if !maybe_run_backfill_once(&my, db, api, chain, logger, now)? {
+        return Ok(false);
     }
     reconcile(&my, db, api, logger, now)
 }
@@ -61,20 +61,17 @@ pub fn maybe_run_backfill_once(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     now: i64,
-) -> bool {
+) -> PortResult<bool> {
     if db.get_config_override(BACKFILL_FLAG).is_some() {
-        return true;
+        return Ok(true);
     }
-    // Python wraps `backfill_from_lnplus` in try/except; this Rust port's
-    // `backfill::backfill_from_lnplus` cannot itself fail (its port calls
-    // are individually fallible and handled inline, matching Python's
-    // per-entry try/except shape) — so this call always succeeds. The
-    // `bool` return is kept so a future fallible backfill (e.g. one that
-    // fails outright on a malformed `my`) has somewhere to report it
-    // without changing this function's signature.
-    backfill::backfill_from_lnplus(my, db, api, chain, logger, now);
-    db.set_config_override(BACKFILL_FLAG, &now.to_string());
-    true
+    // Task 61 4A: a backfill persistence failure propagates (fail closed)
+    // — and, critically, the done-flag below is then NEVER written, so
+    // the choke point retries the backfill next pass instead of latching
+    // "done" over a half-imported ledger.
+    backfill::backfill_from_lnplus(my, db, api, chain, logger, now)?;
+    db.set_config_override(BACKFILL_FLAG, &now.to_string())?;
+    Ok(true)
 }
 
 /// py `_reconcile` (900-1027), excluding the choke point (hoisted to
@@ -89,7 +86,7 @@ pub fn reconcile(
     api: &dyn LnPlusApi,
     logger: &dyn Logger,
     now: i64,
-) -> bool {
+) -> PortResult<bool> {
     let pending_ids = my.pending_ids();
     let opening_ids = my.opening_ids();
     let completed_ids = my.completed_ids();
@@ -98,8 +95,9 @@ pub fn reconcile(
 
     // Defect #5 fix: re-verify a currently-tripped REVERIFIABLE cause
     // before evaluating any new divergence below, so a resolved ghost
-    // trip cannot mask a genuinely new one forever.
-    if let Some(state) = db.get_breaker() {
+    // trip cannot mask a genuinely new one forever. Task 61 4A: a
+    // breaker read failure propagates — fail closed, never "clear".
+    if let Some(state) = db.get_breaker()? {
         let still_reproducible = match &state.cause {
             BreakerCause::OpeningGhostNoLocalRecord { swap_id } => {
                 opening_ids.contains(swap_id) && !local_ids.contains(swap_id)
@@ -113,7 +111,7 @@ pub fn reconcile(
             // readability.
             _ => true,
         };
-        breaker::auto_clear_if_resolved(db, logger, still_reproducible);
+        breaker::auto_clear_if_resolved(db, logger, still_reproducible)?;
     }
 
     let mut ok = true;
@@ -141,7 +139,7 @@ pub fn reconcile(
                             detail: "still 'applied' but LN+ lists it completed — resolve manually (backfill skips swaps that already have a local row)".to_string(),
                         },
                         now,
-                    );
+                    )?;
                     ok = false;
                     continue;
                 }
@@ -149,12 +147,13 @@ pub fn reconcile(
                 // on a successful fetch is a REMOTE cancellation, not our
                 // defection. Terminal, frees the serialization slot and the
                 // capacity reservation automatically -- NOT a breaker trip.
-                db.update_swap(
+                db.cas_swap(
                     &sid,
+                    &["applied"],
                     &SwapPatch::default()
                         .status("cancelled_remote")
                         .outcome("swap disappeared from LN+ (creator cancelled/deleted)"),
-                );
+                )?;
                 logger.log(
                     LogLevel::Warn,
                     &format!("LNPLUS: applied swap {sid} vanished from LN+ (not in pending/opening/completed) — treating as remote cancellation, not tripping the breaker"),
@@ -171,7 +170,7 @@ pub fn reconcile(
                             detail: format!("(status {}) missing/divergent on LN+", row.status),
                         },
                         now,
-                    );
+                    )?;
                     ok = false;
                 }
             }
@@ -191,7 +190,7 @@ pub fn reconcile(
                 swap_id: sid.clone(),
             },
             now,
-        );
+        )?;
         ok = false;
     }
 
@@ -220,11 +219,11 @@ pub fn reconcile(
                 swap_id: sid.clone(),
             },
             now,
-        );
+        )?;
         ok = false;
     }
 
-    ok
+    Ok(ok)
 }
 
 /// Re-exported so callers only need one `use` for reconcile-adjacent

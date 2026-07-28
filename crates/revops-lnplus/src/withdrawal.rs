@@ -26,7 +26,7 @@
 
 use crate::db_types::SwapPatch;
 use crate::error::LnPlusError;
-use crate::ports::{LnPlusApi, LnPlusDb, LogLevel, Logger};
+use crate::ports::{LnPlusApi, LnPlusDb, LogLevel, Logger, PortResult};
 use crate::types::MySwaps;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,10 @@ pub fn classify_delete_application_error(err: &LnPlusError) -> DeleteApplication
 }
 
 /// py `_handle_pending_timeouts` (2067-2086), phase 6 of the watcher.
+///
+/// Task 61 4A: the withdrawn transition is a CAS from `"applied"` and a
+/// persistence failure aborts with `Err` — a swap is only reported
+/// withdrawn when its terminal write actually landed.
 pub fn handle_pending_timeouts(
     my: &MySwaps,
     db: &dyn LnPlusDb,
@@ -69,7 +73,7 @@ pub fn handle_pending_timeouts(
     logger: &dyn Logger,
     timeout_days: i64,
     now: i64,
-) -> Vec<String> {
+) -> PortResult<Vec<String>> {
     let mut withdrawn = Vec::new();
     let cutoff = now - timeout_days * 86_400;
     let pending_ids = my.pending_ids();
@@ -84,8 +88,14 @@ pub fn handle_pending_timeouts(
         }
         match api.delete_application(&sid) {
             Ok(()) => {
-                db.update_swap(&sid, &SwapPatch::default().status("withdrawn"));
-                withdrawn.push(sid);
+                if db.cas_swap(
+                    &sid,
+                    &["applied"],
+                    &SwapPatch::default().status("withdrawn"),
+                )? == crate::ports::CasOutcome::Applied
+                {
+                    withdrawn.push(sid);
+                }
             }
             Err(e) => match classify_delete_application_error(&e) {
                 DeleteApplicationOutcome::Withdrawn => {
@@ -93,8 +103,14 @@ pub fn handle_pending_timeouts(
                         LogLevel::Info,
                         &format!("LNPLUS: delete_application for {sid}: LN+ reports no application left — treating as withdrawn"),
                     );
-                    db.update_swap(&sid, &SwapPatch::default().status("withdrawn"));
-                    withdrawn.push(sid);
+                    if db.cas_swap(
+                        &sid,
+                        &["applied"],
+                        &SwapPatch::default().status("withdrawn"),
+                    )? == crate::ports::CasOutcome::Applied
+                    {
+                        withdrawn.push(sid);
+                    }
                 }
                 DeleteApplicationOutcome::Advanced => {
                     logger.log(
@@ -111,7 +127,7 @@ pub fn handle_pending_timeouts(
             },
         }
     }
-    withdrawn
+    Ok(withdrawn)
 }
 
 #[cfg(test)]

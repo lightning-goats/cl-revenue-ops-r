@@ -5,7 +5,9 @@
 
 use crate::db_types::{SwapPatch, SwapRow};
 use crate::open::OPEN_STATES;
-use crate::ports::{ChainPort, LnPlusDb, LogLevel, Logger, PlannerActionRequest, PolicyPort};
+use crate::ports::{
+    CasOutcome, ChainPort, LnPlusDb, LogLevel, Logger, PlannerActionRequest, PolicyPort, PortResult,
+};
 
 /// Which `lnplus_swaps` boolean column a no_close operation targets —
 /// `"tag_added"` for the outbound side, `"incoming_tag_added"` for the
@@ -30,19 +32,50 @@ fn flag_of(row: &SwapRow, column: TagColumn) -> Option<bool> {
     }
 }
 
+/// Task 61 4A: the ownership-flag write is a CAS from the status the
+/// caller just observed. A conflict (the row moved concurrently) skips
+/// the stamp with a log line — the protection tag itself already landed;
+/// a persistence FAILURE propagates as `Err` (fail closed).
+fn stamp_flag(
+    sid: &str,
+    column: TagColumn,
+    value: bool,
+    expected_statuses: &[&str],
+    db: &dyn LnPlusDb,
+    logger: &dyn Logger,
+) -> PortResult<()> {
+    match db.cas_swap(sid, expected_statuses, &patch_for(column, value))? {
+        CasOutcome::Applied => Ok(()),
+        CasOutcome::Conflict { actual } => {
+            logger.log(
+                LogLevel::Warn,
+                &format!(
+                    "LNPLUS: swap {sid} moved (now {actual:?}) before its no_close ownership \
+                     flag could be stamped — tag left in place, flag not recorded"
+                ),
+            );
+            Ok(())
+        }
+    }
+}
+
 /// py `_protect_peer_no_close` (1985-2022). C-3: a pre-existing tag
 /// (operator-set or another contract's) is recorded as "not ours" (0) so
 /// release never clobbers it. Lazy-eval audit F3b: on a lookup FAILURE,
 /// protect anyway but never claim ownership (stamp 0) — worst case is a
 /// stale tag needing manual cleanup, not an unprotected channel.
+///
+/// `expected_statuses`: the status(es) the caller just read the row in —
+/// the CAS guard for the ownership-flag stamp (Task 61 4A).
 pub fn protect_peer_no_close(
     sid: &str,
     peer: &str,
     column: TagColumn,
+    expected_statuses: &[&str],
     db: &dyn LnPlusDb,
     policy: &dyn PolicyPort,
     logger: &dyn Logger,
-) {
+) -> PortResult<()> {
     let lookup = policy.get_policy(peer);
     let (already_tagged, lookup_failed) = match &lookup {
         Ok(Some(p)) => (p.has_tag("no_close"), false),
@@ -63,18 +96,20 @@ pub fn protect_peer_no_close(
                 &format!("LNPLUS: add_tag(no_close) failed for {peer}: {e}"),
             );
         }
-        db.update_swap(sid, &patch_for(column, false));
-        return;
+        return stamp_flag(sid, column, false, expected_statuses, db, logger);
     }
     if already_tagged {
-        db.update_swap(sid, &patch_for(column, false));
+        stamp_flag(sid, column, false, expected_statuses, db, logger)
     } else {
         match policy.add_tag(peer, "no_close") {
-            Ok(()) => db.update_swap(sid, &patch_for(column, true)),
-            Err(e) => logger.log(
-                LogLevel::Warn,
-                &format!("LNPLUS: add_tag(no_close) failed for {peer}: {e}"),
-            ),
+            Ok(()) => stamp_flag(sid, column, true, expected_statuses, db, logger),
+            Err(e) => {
+                logger.log(
+                    LogLevel::Warn,
+                    &format!("LNPLUS: add_tag(no_close) failed for {peer}: {e}"),
+                );
+                Ok(())
+            }
         }
     }
 }
@@ -123,6 +158,11 @@ pub fn release_no_close_if_ours(
 /// the channel WE opened outbound, and the counterparty's channel TO us
 /// (the LN+ agreement binds both — closing either mid-contract is a
 /// defection).
+///
+/// Task 61 4A: every ledger write is a CAS from the "opened" status the
+/// caller selected this row by, and any persistence failure aborts the
+/// activation with `Err` (fail closed — the next pass retries from the
+/// still-"opened" row).
 pub fn activate(
     row: &SwapRow,
     entry_ends_at: Option<i64>,
@@ -130,7 +170,7 @@ pub fn activate(
     db: &dyn LnPlusDb,
     policy: &dyn PolicyPort,
     logger: &dyn Logger,
-) {
+) -> PortResult<()> {
     let sid = row.swap_id.clone();
 
     let mut pre = SwapPatch::default();
@@ -144,18 +184,54 @@ pub fn activate(
         pre = pre.incoming_peer(inc.clone());
     }
     if pre != SwapPatch::default() {
-        db.update_swap(&sid, &pre);
+        if let CasOutcome::Conflict { actual } = db.cas_swap(&sid, &["opened"], &pre)? {
+            logger.log(
+                LogLevel::Warn,
+                &format!(
+                    "LNPLUS: swap {sid} moved (now {actual:?}) before activation could record \
+                     its contract terms — skipping activation this pass"
+                ),
+            );
+            return Ok(());
+        }
     }
 
     if let Some(outbound_peer) = &row.outbound_peer {
-        protect_peer_no_close(&sid, outbound_peer, TagColumn::Outbound, db, policy, logger);
+        protect_peer_no_close(
+            &sid,
+            outbound_peer,
+            TagColumn::Outbound,
+            &["opened"],
+            db,
+            policy,
+            logger,
+        )?;
     }
     let incoming_peer = incoming.or_else(|| db.get_swap(&sid).and_then(|r| r.incoming_peer));
     if let Some(incoming_peer) = &incoming_peer {
-        protect_peer_no_close(&sid, incoming_peer, TagColumn::Incoming, db, policy, logger);
+        protect_peer_no_close(
+            &sid,
+            incoming_peer,
+            TagColumn::Incoming,
+            &["opened"],
+            db,
+            policy,
+            logger,
+        )?;
     }
 
-    db.update_swap(&sid, &SwapPatch::default().status("active"));
+    if let CasOutcome::Conflict { actual } =
+        db.cas_swap(&sid, &["opened"], &SwapPatch::default().status("active"))?
+    {
+        logger.log(
+            LogLevel::Warn,
+            &format!(
+                "LNPLUS: swap {sid} moved (now {actual:?}) before its active transition — \
+                 leaving as-is"
+            ),
+        );
+        return Ok(());
+    }
 
     let current = db.get_swap(&sid).unwrap_or_else(|| row.clone());
     let action_id = db.record_planner_action(&PlannerActionRequest {
@@ -168,8 +244,9 @@ pub fn activate(
         estimated_cost_sats: None,
         reason: format!("LN+ swap {sid} contract active until {:?}", current.ends_at),
         metadata: None,
-    });
-    db.update_planner_action(action_id, "completed");
+    })?;
+    db.update_planner_action(action_id, "completed")?;
+    Ok(())
 }
 
 /// py `_check_mid_contract_vanish` (1852-1865). Fail-open on an RPC

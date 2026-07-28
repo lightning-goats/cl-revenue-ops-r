@@ -28,7 +28,7 @@ use crate::exec_mode::ExecutionMode;
 use crate::gated::{GatedChainPort, GatedLnPlusApi};
 use crate::open::OpenExecParams;
 use crate::ports::{
-    ChainPort, IgnorePeerPort, LnPlusApi, LnPlusDb, Logger, PlannerPort, PolicyPort,
+    ChainPort, IgnorePeerPort, LnPlusApi, LnPlusDb, Logger, PlannerPort, PolicyPort, PortResult,
 };
 use crate::reconcile;
 use crate::watcher::{self, WatcherSummary};
@@ -73,6 +73,8 @@ pub struct EvaluatorPassResult {
 /// `mode: ExecutionMode` is REQUIRED and has no default here on purpose —
 /// see [`crate::exec_mode`]'s doc comment; passing
 /// [`ExecutionMode::default()`] (`DryRun`) is always safe.
+/// Task 61 4A: a ledger persistence failure (including a breaker read
+/// failure — fail closed) aborts the pass with `Err`.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluator_pass(
     cfg: &LnPlusConfig,
@@ -84,13 +86,13 @@ pub fn evaluator_pass(
     planner: &dyn PlannerPort,
     logger: &dyn Logger,
     params: EvaluatorPassParams,
-) -> EvaluatorPassResult {
+) -> PortResult<EvaluatorPassResult> {
     let gated_api = GatedLnPlusApi::new(api, mode, logger);
     let gated_chain = GatedChainPort::new(chain, mode, logger);
 
     // Steps 1-2 (ENTRYPOINTS.md §1): local reads only, no network/API call
     // either way.
-    let breaker_tripped = breaker::tripped_message(db);
+    let breaker_tripped = breaker::tripped_message(db)?;
     let has_inflight = !db.inflight_swaps().is_empty();
 
     let mut opening_feerate_perkw: Option<i64> = None;
@@ -116,7 +118,7 @@ pub fn evaluator_pass(
             // `get_my_swaps` call; must not fire on a pass that's about to
             // no-op anyway).
             reconcile_ok =
-                reconcile::reconcile_ok(db, &gated_api, &gated_chain, logger, params.now);
+                reconcile::reconcile_ok(db, &gated_api, &gated_chain, logger, params.now)?;
             if reconcile_ok {
                 // Steps 5-9.
                 swaps = gated_api.get_applicable_swaps().unwrap_or_default();
@@ -145,11 +147,11 @@ pub fn evaluator_pass(
         now: params.now,
     };
 
-    let outcome = evaluator::run_cycle(inputs, db, &gated_api, policy, planner, logger);
-    EvaluatorPassResult {
+    let outcome = evaluator::run_cycle(inputs, db, &gated_api, policy, planner, logger)?;
+    Ok(EvaluatorPassResult {
         outcome,
         resolved_our_id: our_id,
-    }
+    })
 }
 
 /// One watcher pass: [`watcher::run_watcher_once`] with every mutating
@@ -171,7 +173,7 @@ pub fn watcher_pass(
     open_exec: &OpenExecParams,
     pending_timeout_days: i64,
     now: i64,
-) -> WatcherSummary {
+) -> PortResult<WatcherSummary> {
     let gated_api = GatedLnPlusApi::new(api, mode, logger);
     let gated_chain = GatedChainPort::new(chain, mode, logger);
     watcher::run_watcher_once(
@@ -216,8 +218,9 @@ impl WatcherLoop {
     }
 
     /// `None` iff another [`WatcherLoop::try_pass`] call on this same
-    /// instance is currently running (skip, not queue). `Some(summary)`
-    /// otherwise.
+    /// instance is currently running (skip, not queue). `Some(result)`
+    /// otherwise — the inner `Result` is the pass's own fallible outcome
+    /// (Task 61 4A).
     #[allow(clippy::too_many_arguments)]
     pub fn try_pass(
         &self,
@@ -231,7 +234,7 @@ impl WatcherLoop {
         open_exec: &OpenExecParams,
         pending_timeout_days: i64,
         now: i64,
-    ) -> Option<WatcherSummary> {
+    ) -> Option<PortResult<WatcherSummary>> {
         let _guard = self.reentry_lock.try_lock().ok()?;
         Some(watcher_pass(
             mode,

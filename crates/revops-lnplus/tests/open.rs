@@ -36,7 +36,8 @@ fn execute_swap_open_full_funding_flow() {
         .with_deadline_at(200_000);
     db.insert(row.clone());
 
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(opened);
     assert_eq!(
         chain.connect_calls.borrow().as_slice(),
@@ -70,7 +71,8 @@ fn idempotent_skip_matches_existing_channel_by_total_msat() {
         .with_outbound_peer(peer.clone())
         .with_deadline_at(200_000);
     db.insert(row.clone());
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(opened);
     assert!(
         chain.connect_calls.borrow().is_empty(),
@@ -102,7 +104,9 @@ fn b7_dual_fund_matches_by_to_us_msat_when_total_msat_diverges() {
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 0)
         .with_outbound_peer(peer.clone())
         .with_deadline_at(200_000);
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    db.insert(row.clone());
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(opened);
     assert!(chain.fund_channel_calls.borrow().is_empty());
 }
@@ -127,7 +131,9 @@ fn control_capacity_mismatch_does_not_match_existing_channel_i5b() {
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 0)
         .with_outbound_peer(peer.clone())
         .with_deadline_at(200_000);
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    db.insert(row.clone());
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(opened);
     assert_eq!(
         chain.fund_channel_calls.borrow().len(),
@@ -143,7 +149,9 @@ fn already_funded_row_only_completes_application() {
     let chain = FakeChain::new();
     let logger = FakeLogger::new();
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 0).with_channel_funding_txid("prior-txid");
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    db.insert(row.clone());
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(opened);
     assert!(chain.connect_calls.borrow().is_empty());
     assert!(chain.fund_channel_calls.borrow().is_empty());
@@ -171,7 +179,8 @@ fn feerate_selection_by_deadline_slack() {
         let row = SwapRow::new("1", "opening", 1_000_000, 6, 0)
             .with_outbound_peer(peer)
             .with_deadline_at(deadline);
-        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, now);
+        db.insert(row.clone());
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, now).expect("open");
         let (_, _, feerate) = chain.fund_channel_calls.borrow()[0].clone();
         assert_eq!(feerate, expected, "now={now} deadline={deadline}");
     }
@@ -191,7 +200,8 @@ fn connect_failure_does_not_write_opening_intent_and_does_not_reserve() {
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 0)
         .with_outbound_peer(peer)
         .with_deadline_at(200_000);
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(!opened);
     assert!(db.reservations.borrow().is_empty());
 }
@@ -208,7 +218,9 @@ fn fundchannel_failure_releases_the_reservation() {
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 0)
         .with_outbound_peer(peer)
         .with_deadline_at(200_000);
-    let opened = execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000);
+    db.insert(row.clone());
+    let opened =
+        execute_swap_open(&row, None, &params(), &db, &api, &chain, &logger, 1000).expect("open");
     assert!(!opened);
     let reservations = db.reservations.borrow();
     let (_, record) = reservations
@@ -245,7 +257,7 @@ fn complete_and_mark_opened_treats_already_past_opening_as_success() {
         )),
     );
     let logger = FakeLogger::new();
-    assert!(complete_and_mark_opened("1", &db, &api, &logger));
+    assert!(complete_and_mark_opened("1", &db, &api, &logger).expect("complete"));
     assert_eq!(db.get_swap("1").unwrap().status, "opened");
 }
 
@@ -259,7 +271,7 @@ fn control_generic_complete_application_failure_is_retryable() {
         Err(revops_lnplus::error::LnPlusError::new("timeout")),
     );
     let logger = FakeLogger::new();
-    assert!(!complete_and_mark_opened("1", &db, &api, &logger));
+    assert!(!complete_and_mark_opened("1", &db, &api, &logger).expect("complete"));
     assert_eq!(
         db.get_swap("1").unwrap().status,
         "opening",
@@ -276,10 +288,11 @@ fn defect4_missed_deadline_terminalizes_the_row_not_just_the_breaker() {
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 500).with_deadline_at(1000);
     db.insert(row.clone());
 
-    maybe_trip_deadline_miss(&row, "1", Some(1000), 2000, &db, &logger);
+    maybe_trip_deadline_miss(&row, "1", Some(1000), 2000, &db, &logger).expect("deadline");
 
     let state = db
         .get_breaker()
+        .unwrap()
         .expect("breaker must trip on a missed deadline");
     assert_eq!(
         state.cause,
@@ -306,9 +319,9 @@ fn control_deadline_not_yet_passed_does_not_trip_or_terminalize() {
     let row = SwapRow::new("1", "opening", 1_000_000, 6, 500).with_deadline_at(5000);
     db.insert(row.clone());
 
-    maybe_trip_deadline_miss(&row, "1", Some(5000), 2000, &db, &logger);
+    maybe_trip_deadline_miss(&row, "1", Some(5000), 2000, &db, &logger).expect("deadline");
 
-    assert!(db.get_breaker().is_none());
+    assert!(db.get_breaker().unwrap().is_none());
     assert_eq!(db.get_swap("1").unwrap().status, "opening");
 }
 
@@ -321,10 +334,10 @@ fn control_already_funded_row_never_trips_deadline_miss() {
         .with_channel_funding_txid("txid1");
     db.insert(row.clone());
 
-    maybe_trip_deadline_miss(&row, "1", Some(1000), 2000, &db, &logger);
+    maybe_trip_deadline_miss(&row, "1", Some(1000), 2000, &db, &logger).expect("deadline");
 
     assert!(
-        db.get_breaker().is_none(),
+        db.get_breaker().unwrap().is_none(),
         "a funded row missing its deadline is not a real miss"
     );
     assert_eq!(db.get_swap("1").unwrap().status, "opening");

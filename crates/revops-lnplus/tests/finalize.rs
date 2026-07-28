@@ -34,7 +34,8 @@ fn defect1_deferred_outcome_must_not_be_counted_as_finalized() {
         .with_incoming_peer(pubkey(2));
     db.insert(row.clone());
 
-    let outcome = finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger);
+    let outcome =
+        finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger).expect("finalize");
     assert!(matches!(outcome, FinalizeOutcome::Deferred { .. }));
 
     let mut finalized = Vec::new();
@@ -73,7 +74,8 @@ fn control_genuinely_finalized_outcome_is_counted() {
         .with_incoming_peer(incoming);
     db.insert(row.clone());
 
-    let outcome = finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger);
+    let outcome =
+        finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger).expect("finalize");
     assert!(outcome.is_finalized());
 
     let mut finalized = Vec::new();
@@ -103,7 +105,7 @@ fn positive_rating_filed_when_incoming_channel_still_open() {
         .with_incoming_peer(incoming.clone());
     db.insert(row.clone());
 
-    finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger);
+    finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger).expect("finalize");
 
     assert_eq!(
         api.create_rating_calls.borrow()[0],
@@ -131,7 +133,7 @@ fn negative_rating_and_ignore_peer_when_channel_closed_defection() {
         .with_incoming_peer(incoming.clone());
     db.insert(row.clone());
 
-    finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger);
+    finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger).expect("finalize");
 
     assert_eq!(
         api.create_rating_calls.borrow()[0],
@@ -153,7 +155,8 @@ fn c8_missing_incoming_peer_ends_unjudged_no_rating() {
     let row = SwapRow::new("1", "active", 1_000_000, 6, 0).with_outbound_peer(pubkey(1));
     db.insert(row.clone());
 
-    let outcome = finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger);
+    let outcome =
+        finalize(&row, &db, &api, &policy, Some(&ignore), &chain, &logger).expect("finalize");
     assert!(outcome.is_finalized());
     assert!(api.create_rating_calls.borrow().is_empty());
     assert_eq!(
@@ -174,7 +177,7 @@ fn retry_pending_ratings_files_on_success() {
     row.outcome = Some("positive".to_string());
     db.insert(row);
 
-    retry_pending_ratings(&db, &api, &logger, 2000);
+    retry_pending_ratings(&db, &api, &logger, 2000).expect("ratings");
 
     assert_eq!(db.get_swap("1").unwrap().status, "ended");
 }
@@ -193,7 +196,7 @@ fn retry_pending_ratings_gives_up_after_seven_days() {
     db.insert(row);
 
     let far_future = 1000 + 7 * 86_400 + 1;
-    retry_pending_ratings(&db, &api, &logger, far_future);
+    retry_pending_ratings(&db, &api, &logger, far_future).expect("ratings");
 
     let after = db.get_swap("1").unwrap();
     assert_eq!(after.status, "ended");
@@ -214,7 +217,7 @@ fn control_retry_pending_ratings_stays_pending_before_the_deadline() {
     db.insert(row);
 
     let still_within_window = 1000 + 86_400; // 1 day past ends_at, well under 7
-    retry_pending_ratings(&db, &api, &logger, still_within_window);
+    retry_pending_ratings(&db, &api, &logger, still_within_window).expect("ratings");
 
     assert_eq!(
         db.get_swap("1").unwrap().status,

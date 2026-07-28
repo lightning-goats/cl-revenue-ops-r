@@ -29,10 +29,10 @@ fn b4_vanished_applied_row_becomes_cancelled_remote_not_a_trip() {
     db.insert(SwapRow::new("1", "applied", 100_000, 6, 0));
     let now = 10_000; // far past the grace window
     let my = MySwaps::default();
-    let ok = reconcile(&my, &db, &api, &logger, now);
+    let ok = reconcile(&my, &db, &api, &logger, now).expect("reconcile");
     assert!(ok, "B4 must not trip the breaker");
     assert_eq!(db.get_swap("1").unwrap().status, "cancelled_remote");
-    assert!(db.get_breaker().is_none());
+    assert!(db.get_breaker().unwrap().is_none());
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn control_within_grace_window_applied_row_is_not_touched_b9() {
     db.insert(SwapRow::new("1", "applied", 100_000, 6, 0));
     let now = RECONCILE_GRACE_SECONDS - 1; // still inside the grace window
     let my = MySwaps::default();
-    let ok = reconcile(&my, &db, &api, &logger, now);
+    let ok = reconcile(&my, &db, &api, &logger, now).expect("reconcile");
     assert!(ok);
     assert_eq!(
         db.get_swap("1").unwrap().status,
@@ -63,12 +63,12 @@ fn applied_but_ln_plus_completed_trips_not_cancels() {
         completed: vec![entry("1")],
         ..Default::default()
     };
-    let ok = reconcile(&my, &db, &api, &logger, now);
+    let ok = reconcile(&my, &db, &api, &logger, now).expect("reconcile");
     assert!(!ok);
     // Must stay a LIVE contract row (still "applied"), not be
     // mismarked cancelled_remote (which would skip activation entirely).
     assert_eq!(db.get_swap("1").unwrap().status, "applied");
-    assert!(db.get_breaker().is_some());
+    assert!(db.get_breaker().unwrap().is_some());
 }
 
 // ---------------------------------------------------------- defect #5 (I1)
@@ -82,9 +82,9 @@ fn opening_ghost_with_no_local_record_trips_breaker() {
         opening: vec![entry("42")],
         ..Default::default()
     };
-    let ok = reconcile(&my, &db, &api, &logger, 1000);
+    let ok = reconcile(&my, &db, &api, &logger, 1000).expect("reconcile");
     assert!(!ok);
-    let state = db.get_breaker().expect("breaker must be tripped");
+    let state = db.get_breaker().unwrap().expect("breaker must be tripped");
     assert_eq!(
         state.cause,
         BreakerCause::OpeningGhostNoLocalRecord {
@@ -103,8 +103,8 @@ fn defect5_ghost_trip_auto_clears_once_backfill_adopts_the_row() {
         ..Default::default()
     };
     // Pass 1: trips (matches the 8-day incident's trigger exactly).
-    assert!(!reconcile(&my, &db, &api, &logger, 1000));
-    assert!(db.get_breaker().is_some());
+    assert!(!reconcile(&my, &db, &api, &logger, 1000).expect("reconcile"));
+    assert!(db.get_breaker().unwrap().is_some());
 
     // Simulate backfill adopting the row (what `revenue-lnplus-backfill`
     // or the automatic choke point does).
@@ -117,10 +117,10 @@ fn defect5_ghost_trip_auto_clears_once_backfill_adopts_the_row() {
     // Pass 2: the SAME `my` (LN+ still lists it under opening -- that's
     // expected, LN+ doesn't know about our local adoption) but now there
     // IS a local row -- the ghost condition no longer reproduces.
-    let ok = reconcile(&my, &db, &api, &logger, 1500);
+    let ok = reconcile(&my, &db, &api, &logger, 1500).expect("reconcile");
     assert!(ok, "the resolved ghost must not keep failing reconcile");
     assert!(
-        db.get_breaker().is_none(),
+        db.get_breaker().unwrap().is_none(),
         "defect #5 fix: reverifiable cause must auto-clear once resolved"
     );
     assert!(logger.contains("auto-cleared"));
@@ -139,12 +139,12 @@ fn control_ghost_trip_stays_latched_while_still_a_ghost() {
         opening: vec![entry("42")],
         ..Default::default()
     };
-    assert!(!reconcile(&my, &db, &api, &logger, 1000));
-    assert!(db.get_breaker().is_some());
-    let ok = reconcile(&my, &db, &api, &logger, 2000);
+    assert!(!reconcile(&my, &db, &api, &logger, 1000).expect("reconcile"));
+    assert!(db.get_breaker().unwrap().is_some());
+    let ok = reconcile(&my, &db, &api, &logger, 2000).expect("reconcile");
     assert!(!ok);
     assert!(
-        db.get_breaker().is_some(),
+        db.get_breaker().unwrap().is_some(),
         "ghost never resolved -- must stay latched"
     );
 }
@@ -163,13 +163,14 @@ fn missed_deadline_cause_never_auto_clears_even_after_reconcile_runs_clean() {
         cause: BreakerCause::MissedOpenDeadline {
             swap_id: "9".to_string(),
         },
-    });
+    })
+    .unwrap();
     let my = MySwaps::default();
     for now in [1000, 2000, 3000] {
-        reconcile(&my, &db, &api, &logger, now);
+        reconcile(&my, &db, &api, &logger, now).expect("reconcile");
     }
     assert!(
-        db.get_breaker().is_some(),
+        db.get_breaker().unwrap().is_some(),
         "MissedOpenDeadline must never auto-clear"
     );
 }
@@ -186,13 +187,13 @@ fn b5b_stale_pending_ghost_matching_terminal_local_row_is_cleaned_up_not_tripped
         pending: vec![entry("7")],
         ..Default::default()
     };
-    let ok = reconcile(&my, &db, &api, &logger, 1000);
+    let ok = reconcile(&my, &db, &api, &logger, 1000).expect("reconcile");
     assert!(ok, "B5(b) cleanup must not trip the breaker");
     assert_eq!(
         api.delete_application_calls.borrow().as_slice(),
         &["7".to_string()]
     );
-    assert!(db.get_breaker().is_none());
+    assert!(db.get_breaker().unwrap().is_none());
 }
 
 #[test]
@@ -206,10 +207,10 @@ fn control_pending_ghost_with_no_local_row_at_all_still_trips() {
         pending: vec![entry("8")],
         ..Default::default()
     };
-    let ok = reconcile(&my, &db, &api, &logger, 1000);
+    let ok = reconcile(&my, &db, &api, &logger, 1000).expect("reconcile");
     assert!(!ok);
     assert!(api.delete_application_calls.borrow().is_empty());
-    let state = db.get_breaker().unwrap();
+    let state = db.get_breaker().unwrap().unwrap();
     assert_eq!(
         state.cause,
         BreakerCause::PendingGhostNoLocalRecord {
@@ -225,9 +226,9 @@ fn opening_opened_row_divergent_from_remote_trips() {
     let logger = FakeLogger::new();
     db.insert(SwapRow::new("3", "opened", 100_000, 6, 0).with_outbound_peer(pubkey(1)));
     let my = MySwaps::default(); // LN+ shows neither opening nor completed for "3"
-    let ok = reconcile(&my, &db, &api, &logger, 1000);
+    let ok = reconcile(&my, &db, &api, &logger, 1000).expect("reconcile");
     assert!(!ok);
-    assert!(db.get_breaker().is_some());
+    assert!(db.get_breaker().unwrap().is_some());
 }
 
 #[test]
@@ -240,8 +241,8 @@ fn b10_first_cause_preserved_across_multiple_new_divergences() {
         pending: vec![entry("b")],
         ..Default::default()
     };
-    reconcile(&my, &db, &api, &logger, 1000);
-    let state = db.get_breaker().unwrap();
+    reconcile(&my, &db, &api, &logger, 1000).expect("reconcile");
+    let state = db.get_breaker().unwrap().unwrap();
     // Whichever ran first in iteration order, the SECOND divergence must
     // not overwrite it.
     assert!(matches!(

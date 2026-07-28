@@ -21,7 +21,7 @@ fn activate_protects_both_sides_and_marks_active() {
         .with_incoming_peer(incoming.clone());
     db.insert(row.clone());
 
-    activate(&row, Some(50_000), None, &db, &policy, &logger);
+    activate(&row, Some(50_000), None, &db, &policy, &logger).expect("activate");
 
     assert!(policy.has_tag(&outbound, "no_close"));
     assert!(policy.has_tag(&incoming, "no_close"));
@@ -46,7 +46,16 @@ fn c3_pre_existing_tag_recorded_as_not_ours() {
     let row = SwapRow::new("1", "active", 1, 1, 0);
     db.insert(row);
 
-    protect_peer_no_close("1", &peer, TagColumn::Outbound, &db, &policy, &logger);
+    protect_peer_no_close(
+        "1",
+        &peer,
+        TagColumn::Outbound,
+        &["active"],
+        &db,
+        &policy,
+        &logger,
+    )
+    .expect("protect");
 
     let after = db.get_swap("1").unwrap();
     assert_eq!(
@@ -66,7 +75,16 @@ fn f3b_lookup_failure_protects_but_stamps_zero() {
     let row = SwapRow::new("1", "active", 1, 1, 0);
     db.insert(row);
 
-    protect_peer_no_close("1", &peer, TagColumn::Outbound, &db, &policy, &logger);
+    protect_peer_no_close(
+        "1",
+        &peer,
+        TagColumn::Outbound,
+        &["active"],
+        &db,
+        &policy,
+        &logger,
+    )
+    .expect("protect");
 
     assert!(
         policy.has_tag(&peer, "no_close"),
@@ -92,7 +110,16 @@ fn control_fresh_tag_we_add_is_recorded_as_ours() {
     let row = SwapRow::new("1", "active", 1, 1, 0);
     db.insert(row);
 
-    protect_peer_no_close("1", &peer, TagColumn::Outbound, &db, &policy, &logger);
+    protect_peer_no_close(
+        "1",
+        &peer,
+        TagColumn::Outbound,
+        &["active"],
+        &db,
+        &policy,
+        &logger,
+    )
+    .expect("protect");
 
     assert!(policy.has_tag(&peer, "no_close"));
     assert_eq!(db.get_swap("1").unwrap().tag_added, Some(true));

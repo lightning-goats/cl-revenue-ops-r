@@ -45,7 +45,8 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::breaker::{BreakerCause, BreakerState};
 use crate::db_types::{PeerRow, SwapPatch, SwapRow};
 use crate::ports::{
-    LnPlusDb, Logger, PlannerActionRequest, PortError, PortResult, ReserveSpendRequest,
+    CasOutcome, CompoundOutcome, InsertOutcome, LnPlusDb, Logger, PlannerActionRequest, PortError,
+    PortResult, ReserveSpendRequest, TerminalizeSpec, TripAck,
 };
 use crate::types::{Metadata, Rating};
 
@@ -159,36 +160,37 @@ impl From<revops_db::budget::BudgetError> for OpenError {
     }
 }
 
-/// `rusqlite`-backed [`LnPlusDb`]. `Mutex`-wrapped connections (rather than
-/// `RefCell`) so the type stays usable from behind an `Arc` if the plugin
-/// ever calls the evaluator/watcher passes from more than one OS thread —
-/// every method here still runs to completion holding the lock, so there is
-/// no cross-call atomicity beyond that (matching Python's single-connection,
-/// GIL-adjacent behavior; true cross-statement transactions are used only
-/// where `database.py` itself uses `BEGIN IMMEDIATE`, i.e. inside
-/// `revops_db::budget::BudgetDb`).
+/// `rusqlite`-backed [`LnPlusDb`] over exactly ONE `Connection` (Task 61
+/// 4A architecture gate): LN+ lifecycle state AND the unified budget rail
+/// share this single connection, so a compound of terminal transition +
+/// reservation settle/release + receipt can be one `BEGIN IMMEDIATE`
+/// transaction. Budget-rail logic is NOT duplicated here — the rail's
+/// transaction-composable kernels (`revops_db::budget::reserve_spend_in_tx`
+/// / `mark_spent_in_tx` / `release_spend_reservation_on`) run on this
+/// store's connection, with this store owning the boundary.
+///
+/// `Mutex`-wrapped (rather than `RefCell`) so the type stays usable from
+/// behind an `Arc` if the plugin ever calls the evaluator/watcher passes
+/// from more than one OS thread.
 pub struct SqliteLnPlusDb {
     conn: Mutex<Connection>,
-    budget: Mutex<revops_db::budget::BudgetDb>,
     logger: Box<dyn Logger>,
 }
 
 impl SqliteLnPlusDb {
-    /// Opens (creating if needed) the lnplus tables at `path`, plus a
-    /// composed `BudgetDb` at the SAME path for the three budget-rail
-    /// methods. `path` must be this crate's own database file — never
-    /// lnnode's production `revenue_ops.db` (see `revops_db::budget`'s
-    /// module doc for why: the Rust plugin does not hold production write
-    /// authority pre-cutover).
+    /// Opens (creating if needed) the lnplus tables AND the budget-rail
+    /// tables at `path`, on one connection. `path` must be this crate's
+    /// own database file — never lnnode's production `revenue_ops.db`
+    /// (see `revops_db::budget`'s module doc for why: the Rust plugin
+    /// does not hold production write authority pre-cutover).
     pub fn open(path: &Path, logger: Box<dyn Logger>) -> Result<Self, OpenError> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         ensure_schema(&conn)?;
-        let budget = revops_db::budget::BudgetDb::open(path)?;
+        revops_db::budget::ensure_rail_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
-            budget: Mutex::new(budget),
             logger,
         })
     }
@@ -205,6 +207,170 @@ impl SqliteLnPlusDb {
             crate::ports::LogLevel::Warn,
             &format!("LNPLUS sqlite: {msg}"),
         );
+    }
+
+    /// Task 61 4A: a persistence failure is logged AND returned — the log
+    /// line is diagnostics, the `Err` is the acknowledgement the caller
+    /// acts on. Never one without the other.
+    fn ack_err(&self, what: &str, e: impl std::fmt::Display) -> PortError {
+        self.warn(&format!("{what} failed: {e}"));
+        PortError::new(format!("{what}: {e}"))
+    }
+}
+
+/// The dynamic `SET` clause both [`LnPlusDb::cas_swap`] and the compound
+/// share: `(sql fragments, boxed params)` for exactly the fields `patch`
+/// sets. Returns `None` when the patch is empty (nothing to write).
+fn patch_set_clause(patch: &SwapPatch) -> Option<(String, Vec<Box<dyn rusqlite::ToSql>>)> {
+    let mut sets: Vec<&str> = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    macro_rules! set_field {
+        ($col:literal, $val:expr) => {
+            sets.push(concat!($col, " = ?"));
+            values.push(Box::new($val));
+        };
+    }
+    if let Some(v) = &patch.status {
+        set_field!("status", v.clone());
+    }
+    if let Some(v) = &patch.outbound_peer {
+        set_field!("outbound_peer", v.clone());
+    }
+    if let Some(v) = &patch.incoming_peer {
+        set_field!("incoming_peer", v.clone());
+    }
+    if let Some(v) = &patch.our_identifier {
+        set_field!("our_identifier", v.clone());
+    }
+    if let Some(v) = patch.opened_at {
+        set_field!("opened_at", v);
+    }
+    if let Some(v) = patch.ends_at {
+        set_field!("ends_at", v);
+    }
+    if let Some(v) = patch.deadline_at {
+        set_field!("deadline_at", v);
+    }
+    if let Some(v) = &patch.channel_funding_txid {
+        set_field!("channel_funding_txid", v.clone());
+    }
+    if let Some(v) = &patch.outcome {
+        set_field!("outcome", v.clone());
+    }
+    if let Some(v) = patch.tag_added {
+        set_field!("tag_added", v as i64);
+    }
+    if let Some(v) = patch.incoming_tag_added {
+        set_field!("incoming_tag_added", v as i64);
+    }
+    if sets.is_empty() {
+        return None;
+    }
+    Some((sets.join(", "), values))
+}
+
+/// CAS core shared by [`LnPlusDb::cas_swap`] and the compound: runs the
+/// guarded UPDATE on `conn` (a connection OR an open transaction) and
+/// classifies the result. `require_null_funding_txid` adds the
+/// deadline-miss veto to the guard.
+fn cas_swap_on(
+    conn: &rusqlite::Connection,
+    swap_id: &str,
+    expected_statuses: &[&str],
+    require_null_funding_txid: bool,
+    patch: &SwapPatch,
+) -> rusqlite::Result<CasOutcome> {
+    let Some((set_clause, mut values)) = patch_set_clause(patch) else {
+        // An empty patch from an expected status is a vacuous Applied —
+        // but only if the guard actually holds; check it explicitly.
+        let actual: Option<String> = conn
+            .query_row(
+                "SELECT status FROM lnplus_swaps WHERE swap_id = ?1",
+                [swap_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok(match actual {
+            Some(ref s) if expected_statuses.contains(&s.as_str()) => CasOutcome::Applied,
+            other => CasOutcome::Conflict { actual: other },
+        });
+    };
+    let marks = expected_statuses
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let txid_guard = if require_null_funding_txid {
+        " AND channel_funding_txid IS NULL"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "UPDATE lnplus_swaps SET {set_clause} \
+         WHERE swap_id = ? AND status IN ({marks}){txid_guard}"
+    );
+    values.push(Box::new(swap_id.to_string()));
+    for s in expected_statuses {
+        values.push(Box::new(s.to_string()));
+    }
+    let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+    let changed = conn.execute(&sql, params.as_slice())?;
+    if changed > 0 {
+        return Ok(CasOutcome::Applied);
+    }
+    let actual: Option<String> = conn
+        .query_row(
+            "SELECT status FROM lnplus_swaps WHERE swap_id = ?1",
+            [swap_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(CasOutcome::Conflict { actual })
+}
+
+/// `set_config_override`'s core (M-13 v2 version ordering), runnable on a
+/// connection or an open transaction.
+fn set_config_override_on(
+    conn: &rusqlite::Connection,
+    key: &str,
+    value: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let current_max: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM config_overrides",
+        [],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config_overrides (key, value, version, updated_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![key, value, current_max + 1, now],
+    )?;
+    Ok(())
+}
+
+/// Fail-closed breaker read on a connection or an open transaction: a
+/// present-but-undecodable value is an ERROR (corruption evidence in a
+/// Rust-only store), never silently "untripped".
+fn get_breaker_on(conn: &rusqlite::Connection) -> Result<Option<BreakerState>, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config_overrides WHERE key = ?1",
+            [BREAKER_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("breaker read: {e}"))?;
+    match raw {
+        None => Ok(None),
+        Some(raw) => match decode_breaker(&raw) {
+            Some(state) => Ok(Some(state)),
+            None => Err(format!(
+                "breaker value at {BREAKER_KEY:?} is not this crate's JSON shape — refusing to \
+                 treat an undecodable persisted breaker as untripped (fail closed)"
+            )),
+        },
     }
 }
 
@@ -244,18 +410,23 @@ const SWAP_COLUMNS: &str = "swap_id, status, capacity_sats, duration_months, out
 impl LnPlusDb for SqliteLnPlusDb {
     // -- swap ledger --------------------------------------------------
 
-    /// `lnplus_record_swap` (`database.py:7571-7584`) — `INSERT OR REPLACE`.
-    fn record_swap(&self, row: &SwapRow) {
+    /// Task 61 4A replacement for `lnplus_record_swap`'s `INSERT OR
+    /// REPLACE`: a plain `INSERT` persisting EVERY row field, with the
+    /// conflict typed as [`InsertOutcome::AlreadyExists`] instead of a
+    /// silent overwrite.
+    fn insert_swap_new(&self, row: &SwapRow) -> PortResult<InsertOutcome> {
         let metadata_json = row
             .metadata
             .as_ref()
             .map(|m| serde_json::to_string(m).unwrap_or_default());
         let conn = self.conn.lock().unwrap();
         let result = conn.execute(
-            "INSERT OR REPLACE INTO lnplus_swaps \
+            "INSERT INTO lnplus_swaps \
              (swap_id, status, capacity_sats, duration_months, outbound_peer, \
-              incoming_peer, our_identifier, applied_at, planner_action_id, metadata_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              incoming_peer, our_identifier, applied_at, opened_at, ends_at, deadline_at, \
+              channel_funding_txid, outcome, tag_added, incoming_tag_added, \
+              planner_action_id, metadata_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             rusqlite::params![
                 row.swap_id,
                 row.status,
@@ -265,76 +436,40 @@ impl LnPlusDb for SqliteLnPlusDb {
                 row.incoming_peer,
                 row.our_identifier,
                 row.applied_at,
+                row.opened_at,
+                row.ends_at,
+                row.deadline_at,
+                row.channel_funding_txid,
+                row.outcome,
+                row.tag_added.map(|v| v as i64),
+                row.incoming_tag_added.map(|v| v as i64),
                 row.planner_action_id,
                 metadata_json,
             ],
         );
-        if let Err(e) = result {
-            self.warn(&format!("record_swap({}) failed: {e}", row.swap_id));
+        match result {
+            Ok(_) => Ok(InsertOutcome::Inserted),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Ok(InsertOutcome::AlreadyExists)
+            }
+            Err(e) => Err(self.ack_err(&format!("insert_swap_new({})", row.swap_id), e)),
         }
     }
 
-    /// `lnplus_update_swap` (`database.py:7586-7595`) — dynamic `SET`
-    /// clause over exactly the columns [`SwapPatch`] sets (a fixed subset of
-    /// Python's `_LNPLUS_UPDATABLE_FIELDS`; `completed_at` is in Python's
-    /// updatable set but has no `SwapPatch` field since nothing in
-    /// `lnplus_swaps.py` ever writes it — see this module's doc comment).
-    fn update_swap(&self, swap_id: &str, patch: &SwapPatch) {
-        let mut sets: Vec<&str> = Vec::new();
-        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        macro_rules! set_field {
-            ($col:literal, $val:expr) => {
-                sets.push(concat!($col, " = ?"));
-                values.push(Box::new($val));
-            };
-        }
-        if let Some(v) = &patch.status {
-            set_field!("status", v.clone());
-        }
-        if let Some(v) = &patch.outbound_peer {
-            set_field!("outbound_peer", v.clone());
-        }
-        if let Some(v) = &patch.incoming_peer {
-            set_field!("incoming_peer", v.clone());
-        }
-        if let Some(v) = &patch.our_identifier {
-            set_field!("our_identifier", v.clone());
-        }
-        if let Some(v) = patch.opened_at {
-            set_field!("opened_at", v);
-        }
-        if let Some(v) = patch.ends_at {
-            set_field!("ends_at", v);
-        }
-        if let Some(v) = patch.deadline_at {
-            set_field!("deadline_at", v);
-        }
-        if let Some(v) = &patch.channel_funding_txid {
-            set_field!("channel_funding_txid", v.clone());
-        }
-        if let Some(v) = &patch.outcome {
-            set_field!("outcome", v.clone());
-        }
-        if let Some(v) = patch.tag_added {
-            set_field!("tag_added", v as i64);
-        }
-        if let Some(v) = patch.incoming_tag_added {
-            set_field!("incoming_tag_added", v as i64);
-        }
-        if sets.is_empty() {
-            return; // py: `if not fields: return`
-        }
-        let sql = format!(
-            "UPDATE lnplus_swaps SET {} WHERE swap_id = ?",
-            sets.join(", ")
-        );
-        values.push(Box::new(swap_id.to_string()));
+    /// Task 61 4A replacement for `lnplus_update_swap`'s blind UPDATE:
+    /// the patch applies only from an expected status (CAS on the
+    /// lifecycle column), acknowledged with a typed outcome.
+    fn cas_swap(
+        &self,
+        swap_id: &str,
+        expected_statuses: &[&str],
+        patch: &SwapPatch,
+    ) -> PortResult<CasOutcome> {
         let conn = self.conn.lock().unwrap();
-        let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
-        if let Err(e) = conn.execute(&sql, params.as_slice()) {
-            self.warn(&format!("update_swap({swap_id}) failed: {e}"));
-        }
+        cas_swap_on(&conn, swap_id, expected_statuses, false, patch)
+            .map_err(|e| self.ack_err(&format!("cas_swap({swap_id})"), e))
     }
 
     fn get_swap(&self, swap_id: &str) -> Option<SwapRow> {
@@ -379,7 +514,7 @@ impl LnPlusDb for SqliteLnPlusDb {
     /// `lnplus_prune_terminal` (`database.py:7656-7671`), same cutoff logic:
     /// a row qualifies only when `applied_at` is older than the cutoff AND
     /// (`ends_at IS NULL` or also older than the cutoff).
-    fn prune_terminal(&self, older_than_days: i64, now: i64) -> usize {
+    fn prune_terminal(&self, older_than_days: i64, now: i64) -> PortResult<usize> {
         let cutoff = now - older_than_days.max(0) * 86_400;
         let statuses = crate::db_types::TERMINAL_STATUSES;
         let marks = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -395,13 +530,8 @@ impl LnPlusDb for SqliteLnPlusDb {
         params.push(Box::new(cutoff));
         let conn = self.conn.lock().unwrap();
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        match conn.execute(&sql, refs.as_slice()) {
-            Ok(n) => n,
-            Err(e) => {
-                self.warn(&format!("prune_terminal failed: {e}"));
-                0
-            }
-        }
+        conn.execute(&sql, refs.as_slice())
+            .map_err(|e| self.ack_err("prune_terminal", e))
     }
 
     // -- peer reputation ------------------------------------------------
@@ -432,12 +562,12 @@ impl LnPlusDb for SqliteLnPlusDb {
 
     /// `lnplus_bump_peer` (`database.py:7631-7646`) — `INSERT ... ON
     /// CONFLICT DO UPDATE`, same upsert shape.
-    fn bump_peer(&self, pubkey: &str, defection: bool, rating: Option<Rating>) {
+    fn bump_peer(&self, pubkey: &str, defection: bool, rating: Option<Rating>) -> PortResult<()> {
         let now = Self::now();
         let pos = matches!(rating, Some(Rating::Positive)) as i64;
         let neg = matches!(rating, Some(Rating::Negative)) as i64;
         let conn = self.conn.lock().unwrap();
-        let result = conn.execute(
+        conn.execute(
             "INSERT INTO lnplus_peers (pubkey, swaps_count, defections, \
                  ratings_given_positive, ratings_given_negative, last_swap_at) \
              VALUES (?1, 1, ?2, ?3, ?4, ?5) \
@@ -448,10 +578,9 @@ impl LnPlusDb for SqliteLnPlusDb {
                  ratings_given_negative = ratings_given_negative + excluded.ratings_given_negative, \
                  last_swap_at = excluded.last_swap_at",
             rusqlite::params![pubkey, defection as i64, pos, neg, now],
-        );
-        if let Err(e) = result {
-            self.warn(&format!("bump_peer({pubkey}) failed: {e}"));
-        }
+        )
+        .map(|_| ())
+        .map_err(|e| self.ack_err(&format!("bump_peer({pubkey})"), e))
     }
 
     // -- backfill flag (config_overrides) ------------------------------
@@ -474,87 +603,116 @@ impl LnPlusDb for SqliteLnPlusDb {
     /// version computed BEFORE the `INSERT OR REPLACE` (M-13 v2 fix: an
     /// `INSERT OR REPLACE` deletes the conflicting row first, so reading
     /// `MAX(version)` after it would see the wrong max if this key held it).
-    fn set_config_override(&self, key: &str, value: &str) {
+    /// Task 61 4A: any failure — begin, write, or COMMIT — is acknowledged
+    /// as `Err`, with the transaction rolled back (COMMIT inside the
+    /// guarded result, the Task 42 boundary rule).
+    fn set_config_override(&self, key: &str, value: &str) -> PortResult<()> {
         let now = Self::now();
         let mut conn_guard = self.conn.lock().unwrap();
-        let tx =
-            match conn_guard.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
-                Ok(tx) => tx,
-                Err(e) => {
-                    self.warn(&format!("set_config_override({key}) begin failed: {e}"));
-                    return;
-                }
-            };
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err(&format!("set_config_override({key}) begin"), e))?;
         let result: rusqlite::Result<()> = (|| {
-            let current_max: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM config_overrides",
-                [],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT OR REPLACE INTO config_overrides (key, value, version, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![key, value, current_max + 1, now],
-            )?;
+            set_config_override_on(&tx, key, value, now)?;
+            tx.commit()?;
             Ok(())
         })();
-        match result {
-            Ok(()) => {
-                if let Err(e) = tx.commit() {
-                    self.warn(&format!("set_config_override({key}) commit failed: {e}"));
-                }
-            }
-            Err(e) => {
-                self.warn(&format!("set_config_override({key}) failed: {e}"));
-                // `tx` drops here -> automatic rollback (its `Drop` impl).
-            }
-        }
+        result.map_err(|e| self.ack_err(&format!("set_config_override({key})"), e))
     }
 
-    fn delete_config_override(&self, key: &str) {
+    fn delete_config_override(&self, key: &str) -> PortResult<()> {
         let conn = self.conn.lock().unwrap();
-        if let Err(e) = conn.execute("DELETE FROM config_overrides WHERE key = ?1", [key]) {
-            self.warn(&format!("delete_config_override({key}) failed: {e}"));
-        }
+        conn.execute("DELETE FROM config_overrides WHERE key = ?1", [key])
+            .map(|_| ())
+            .map_err(|e| self.ack_err(&format!("delete_config_override({key})"), e))
     }
 
     // -- circuit breaker --------------------------------------------------
 
     /// See this module's doc comment: JSON-encoded, own wire format (not
-    /// Python's plain-string one).
-    fn get_breaker(&self) -> Option<BreakerState> {
-        let raw = self.get_config_override(BREAKER_KEY)?;
-        match decode_breaker(&raw) {
-            Some(state) => Some(state),
-            None => {
-                self.warn(&format!(
-                    "get_breaker: value at {BREAKER_KEY:?} is not this crate's JSON shape \
-                     (foreign writer?) — treating as untripped rather than guessing"
-                ));
-                None
+    /// Python's plain-string one). Task 61 4A: fails CLOSED — an
+    /// undecodable persisted value is an `Err`, never "untripped".
+    fn get_breaker(&self) -> PortResult<Option<BreakerState>> {
+        let conn = self.conn.lock().unwrap();
+        get_breaker_on(&conn).map_err(|e| self.ack_err("get_breaker", e))
+    }
+
+    fn set_breaker(&self, state: &BreakerState) -> PortResult<()> {
+        self.set_config_override(BREAKER_KEY, &encode_breaker(state))
+    }
+
+    fn clear_breaker(&self) -> PortResult<()> {
+        self.delete_config_override(BREAKER_KEY)
+    }
+
+    /// Task 61 4A: the atomic compound. One `BEGIN IMMEDIATE` transaction
+    /// covers the guarded row CAS AND the breaker advance; COMMIT sits
+    /// inside the guarded result so any failure — including COMMIT itself
+    /// — rolls both halves back together and returns `Err`.
+    fn terminalize_and_trip(
+        &self,
+        spec: &TerminalizeSpec<'_>,
+        patch: &SwapPatch,
+        cause: BreakerCause,
+        now: i64,
+    ) -> PortResult<CompoundOutcome> {
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| {
+                self.ack_err(&format!("terminalize_and_trip({}) begin", spec.swap_id), e)
+            })?;
+        let result: Result<CompoundOutcome, String> = (|| {
+            let cas = cas_swap_on(
+                &tx,
+                spec.swap_id,
+                spec.expected_statuses,
+                spec.require_null_funding_txid,
+                patch,
+            )
+            .map_err(|e| format!("row cas: {e}"))?;
+            match cas {
+                CasOutcome::Conflict { actual } => {
+                    // Guard did not hold — nothing may land, including the
+                    // breaker half. COMMIT the (empty) transaction inside
+                    // the guard so an error here still rolls back.
+                    tx.commit().map_err(|e| format!("commit: {e}"))?;
+                    Ok(CompoundOutcome::Conflict { actual })
+                }
+                CasOutcome::Applied => {
+                    let breaker = match get_breaker_on(&tx)? {
+                        Some(_) => TripAck::AlreadyTripped, // B10: first cause untouched
+                        None => {
+                            let state = BreakerState {
+                                tripped_at: now,
+                                cause,
+                            };
+                            set_config_override_on(&tx, BREAKER_KEY, &encode_breaker(&state), now)
+                                .map_err(|e| format!("breaker write: {e}"))?;
+                            TripAck::NewTrip
+                        }
+                    };
+                    tx.commit().map_err(|e| format!("commit: {e}"))?;
+                    Ok(CompoundOutcome::Terminalized { breaker })
+                }
             }
-        }
-    }
-
-    fn set_breaker(&self, state: &BreakerState) {
-        self.set_config_override(BREAKER_KEY, &encode_breaker(state));
-    }
-
-    fn clear_breaker(&self) {
-        self.delete_config_override(BREAKER_KEY);
+        })();
+        // A failed transaction is rolled back by `tx`'s Drop; the Err is
+        // the acknowledgement.
+        result.map_err(|e| self.ack_err(&format!("terminalize_and_trip({})", spec.swap_id), e))
     }
 
     // -- planner-action breadcrumbs --------------------------------------
 
     /// `record_planner_action` (`database.py:7454-7468`).
-    fn record_planner_action(&self, req: &PlannerActionRequest) -> i64 {
+    fn record_planner_action(&self, req: &PlannerActionRequest) -> PortResult<i64> {
         let now = Self::now();
         let metadata_json = req
             .metadata
             .as_ref()
             .map(|m| serde_json::to_string(m).unwrap_or_default());
         let conn = self.conn.lock().unwrap();
-        let result = conn.execute(
+        conn.execute(
             "INSERT INTO planner_actions \
              (action_type, peer_id, amount_sats, estimated_cost_sats, status, created_at, reason, metadata_json) \
              VALUES (?1, ?2, ?3, ?4, 'planned', ?5, ?6, ?7)",
@@ -567,14 +725,9 @@ impl LnPlusDb for SqliteLnPlusDb {
                 req.reason,
                 metadata_json,
             ],
-        );
-        match result {
-            Ok(_) => conn.last_insert_rowid(),
-            Err(e) => {
-                self.warn(&format!("record_planner_action failed: {e}"));
-                0
-            }
-        }
+        )
+        .map(|_| conn.last_insert_rowid())
+        .map_err(|e| self.ack_err("record_planner_action", e))
     }
 
     /// `update_planner_action` (`database.py:7470-7494`): sets `status`
@@ -583,7 +736,7 @@ impl LnPlusDb for SqliteLnPlusDb {
     /// (Python's `elif status in (...)：` fallback branch — this port never
     /// takes the explicit-`completed_at`-argument path Python also supports,
     /// since [`LnPlusDb::update_planner_action`] has no such parameter).
-    fn update_planner_action(&self, action_id: i64, status: &str) {
+    fn update_planner_action(&self, action_id: i64, status: &str) -> PortResult<()> {
         let conn = self.conn.lock().unwrap();
         let result = if matches!(status, "completed" | "failed") {
             let now = Self::now();
@@ -597,14 +750,56 @@ impl LnPlusDb for SqliteLnPlusDb {
                 rusqlite::params![status, action_id],
             )
         };
-        if let Err(e) = result {
-            self.warn(&format!("update_planner_action({action_id}) failed: {e}"));
-        }
+        result
+            .map(|_| ())
+            .map_err(|e| self.ack_err(&format!("update_planner_action({action_id})"), e))
+    }
+
+    fn trip_breaker_if_untripped(&self, state: &BreakerState) -> PortResult<TripAck> {
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err("trip_breaker_if_untripped begin", e))?;
+        let result: Result<TripAck, String> = (|| {
+            let ack = match get_breaker_on(&tx)? {
+                Some(_) => TripAck::AlreadyTripped, // B10: first cause untouched
+                None => {
+                    set_config_override_on(&tx, BREAKER_KEY, &encode_breaker(state), Self::now())
+                        .map_err(|e| format!("breaker write: {e}"))?;
+                    TripAck::NewTrip
+                }
+            };
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
+            Ok(ack)
+        })();
+        result.map_err(|e| self.ack_err("trip_breaker_if_untripped", e))
+    }
+
+    fn clear_breaker_if_cause(&self, expected: &BreakerCause) -> PortResult<bool> {
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err("clear_breaker_if_cause begin", e))?;
+        let result: Result<bool, String> = (|| {
+            let cleared = match get_breaker_on(&tx)? {
+                Some(state) if &state.cause == expected => {
+                    tx.execute("DELETE FROM config_overrides WHERE key = ?1", [BREAKER_KEY])
+                        .map_err(|e| format!("breaker delete: {e}"))?;
+                    true
+                }
+                _ => false,
+            };
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
+            Ok(cleared)
+        })();
+        result.map_err(|e| self.ack_err("clear_breaker_if_cause", e))
     }
 
     // -- unified budget rail ----------------------------------------------
-    // Delegates to the composed `revops_db::budget::BudgetDb` — see this
-    // module's doc comment for why that is NOT a duplicate implementation.
+    // Runs `revops_db::budget`'s transaction-composable kernels on THIS
+    // store's single connection (never a second connection) — see this
+    // module's doc comment. Not a duplicate implementation: the guard/sum/
+    // insert/settle logic is single-sourced in revops-db.
 
     fn reserve_spend(&self, req: &ReserveSpendRequest) -> PortResult<bool> {
         let now = Self::now();
@@ -630,19 +825,25 @@ impl LnPlusDb for SqliteLnPlusDb {
             weekly_budget_limit: None,
             weekly_since_timestamp: None,
         };
-        let mut budget = self.budget.lock().unwrap();
-        budget
-            .reserve_spend(budget_req, now)
-            .map(|(granted, _remaining)| granted)
-            .map_err(|e| PortError::new(format!("reserve_spend: {e}")))
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err("reserve_spend begin", e))?;
+        let result: Result<bool, String> = (|| {
+            let (granted, _remaining) =
+                revops_db::budget::reserve_spend_in_tx(&tx, &budget_req, now)
+                    .map_err(|e| format!("reserve: {e}"))?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
+            Ok(granted)
+        })();
+        result.map_err(|e| self.ack_err("reserve_spend", e))
     }
 
     fn release_spend_reservation(&self, reservation_id: &str) -> PortResult<()> {
-        let mut budget = self.budget.lock().unwrap();
-        budget
-            .release_spend_reservation(reservation_id)
+        let conn = self.conn.lock().unwrap();
+        revops_db::budget::release_spend_reservation_on(&conn, reservation_id)
             .map(|_| ())
-            .map_err(|e| PortError::new(format!("release_spend_reservation: {e}")))
+            .map_err(|e| self.ack_err("release_spend_reservation", e))
     }
 
     fn mark_spend_reservation_spent(
@@ -652,16 +853,32 @@ impl LnPlusDb for SqliteLnPlusDb {
         source: &str,
     ) -> PortResult<bool> {
         let now = Self::now();
-        let mut budget = self.budget.lock().unwrap();
-        budget
-            .mark_spend_reservation_spent(
+        let mut conn_guard = self.conn.lock().unwrap();
+        let tx = conn_guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.ack_err("mark_spend_reservation_spent begin", e))?;
+        let result: Result<bool, String> = (|| {
+            match revops_db::budget::mark_spent_in_tx(
+                &tx,
                 reservation_id,
                 Some(actual_spent_sats),
                 Some(source),
                 true,
                 now,
             )
-            .map_err(|e| PortError::new(format!("mark_spend_reservation_spent: {e}")))
+            .map_err(|e| format!("settle: {e}"))?
+            {
+                revops_db::budget::MarkSpentTx::Applied(changed) => {
+                    tx.commit().map_err(|e| format!("commit: {e}"))?;
+                    Ok(changed)
+                }
+                revops_db::budget::MarkSpentTx::EventRejected => {
+                    // tx drops -> rollback: the 'spent' flip is undone.
+                    Ok(false)
+                }
+            }
+        })();
+        result.map_err(|e| self.ack_err("mark_spend_reservation_spent", e))
     }
 }
 

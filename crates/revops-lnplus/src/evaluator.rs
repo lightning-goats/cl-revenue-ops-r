@@ -19,7 +19,8 @@ use crate::config::LnPlusConfig;
 use crate::db_types::SwapPatch;
 use crate::error::LnPlusError;
 use crate::ports::{
-    ChainPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PlannerActionRequest, PlannerPort, PolicyPort,
+    ChainPort, InsertOutcome, LnPlusApi, LnPlusDb, LogLevel, Logger, PlannerActionRequest,
+    PlannerPort, PolicyPort, PortResult,
 };
 use crate::types::{Metadata, Participant, SwapListing};
 
@@ -372,6 +373,10 @@ pub struct CycleInputs {
 
 /// py `run_cycle` (287-332) + `_select_and_apply` (564-661). One pass:
 /// gate every candidate, pick at most one, apply or recommend it.
+///
+/// Task 61 4A: a ledger persistence failure anywhere in the pass aborts
+/// with `Err` (fail closed) — in particular, an unacknowledged intent
+/// write can never be followed by the live `create_application` call.
 #[allow(clippy::too_many_arguments)]
 pub fn run_cycle(
     inputs: CycleInputs,
@@ -380,28 +385,28 @@ pub fn run_cycle(
     policy: Option<&dyn PolicyPort>,
     planner: &dyn PlannerPort,
     logger: &dyn Logger,
-) -> CycleOutcome {
+) -> PortResult<CycleOutcome> {
     let mut summary = CycleOutcome {
         best_regular_ev: inputs.best_regular_ev,
         ..Default::default()
     };
 
     if !inputs.cfg.lnplus_swaps_enabled {
-        return summary;
+        return Ok(summary);
     }
     if let Some(reason) = &inputs.preflight.breaker_tripped {
         logger.log(
             LogLevel::Warn,
             &format!("LNPLUS: breaker tripped ({reason}) — no applications"),
         );
-        return summary;
+        return Ok(summary);
     }
     if inputs.preflight.has_inflight {
         logger.log(
             LogLevel::Debug,
             "LNPLUS: swap in flight — serialization gate holds",
         );
-        return summary;
+        return Ok(summary);
     }
     match inputs.opening_feerate_perkw {
         None => {
@@ -409,7 +414,7 @@ pub fn run_cycle(
                 LogLevel::Warn,
                 "LNPLUS: feerates unavailable — skipping cycle",
             );
-            return summary;
+            return Ok(summary);
         }
         Some(perkw) if perkw > inputs.cfg.lnplus_apply_feerate_ceiling => {
             logger.log(
@@ -419,7 +424,7 @@ pub fn run_cycle(
                     inputs.cfg.lnplus_apply_feerate_ceiling
                 ),
             );
-            return summary;
+            return Ok(summary);
         }
         _ => {}
     }
@@ -428,7 +433,7 @@ pub fn run_cycle(
             LogLevel::Warn,
             "LNPLUS: reconciliation preflight failed — no applications",
         );
-        return summary;
+        return Ok(summary);
     }
 
     let mut qualifying = Vec::new();
@@ -465,8 +470,8 @@ pub fn run_cycle(
         planner,
         logger,
         &mut summary,
-    );
-    summary
+    )?;
+    Ok(summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -482,7 +487,7 @@ fn select_and_apply(
     planner: &dyn PlannerPort,
     logger: &dyn Logger,
     summary: &mut CycleOutcome,
-) {
+) -> PortResult<()> {
     let mut scored: Vec<(f64, SwapListing, Assignment)> = Vec::new();
     for swap in qualifying {
         let (value, assignment) = swap_ev(&swap, cfg, best_regular_ev, planner);
@@ -493,7 +498,7 @@ fn select_and_apply(
         scored.push((value, swap, assignment));
     }
     if scored.is_empty() {
-        return;
+        return Ok(());
     }
     // D-3: among equal-EV qualifiers, prefer fewer participants.
     scored.sort_by(|a, b| {
@@ -515,7 +520,7 @@ fn select_and_apply(
             ),
         );
         summary.swap_id = None;
-        return;
+        return Ok(());
     }
 
     let open_cost = planner.estimate_open_cost();
@@ -529,7 +534,7 @@ fn select_and_apply(
             &format!("economics:confirmed funds {confirmed_unreserved_sats} below capacity+fees+reserve {required}"),
         );
         summary.swap_id = None;
-        return;
+        return Ok(());
     }
     if let Some(budget) = capex_budget_sats {
         if budget < open_cost {
@@ -538,7 +543,7 @@ fn select_and_apply(
                 &format!("economics:capex budget {budget} below open cost {open_cost}"),
             );
             summary.swap_id = None;
-            return;
+            return Ok(());
         }
     }
 
@@ -561,10 +566,10 @@ fn select_and_apply(
         estimated_cost_sats: Some(open_cost),
         reason: reason.clone(),
         metadata: Some(metadata),
-    });
+    })?;
 
     if !cfg.lnplus_execute_applications || cfg.planner_dry_run {
-        db.update_planner_action(action_id, "recommended");
+        db.update_planner_action(action_id, "recommended")?;
         logger.log(
             LogLevel::Info,
             &format!(
@@ -573,10 +578,14 @@ fn select_and_apply(
             ),
         );
         summary.recommended = true;
-        return;
+        return Ok(());
     }
 
-    // Intent-first: ledger row before the external call.
+    // Intent-first: ledger row before the external call, as a typed
+    // insert whose acknowledgement gates the live call (Task 61 4A). An
+    // AlreadyExists here is an invariant breach — a row for a swap we
+    // are about to apply to — and must veto the application, not be
+    // clobbered over.
     let mut row = crate::db_types::SwapRow::new(
         swap.id.clone(),
         "applied",
@@ -594,28 +603,45 @@ fn select_and_apply(
     if let Some(id) = &assignment.our_identifier {
         row = row.with_our_identifier(id.clone());
     }
-    db.record_swap(&row);
+    match db.insert_swap_new(&row)? {
+        InsertOutcome::Inserted => {}
+        InsertOutcome::AlreadyExists => {
+            db.update_planner_action(action_id, "failed")?;
+            logger.log(
+                LogLevel::Error,
+                &format!(
+                    "LNPLUS: a ledger row for swap {} already exists — refusing to apply over it",
+                    swap.id
+                ),
+            );
+            summary.reject(&swap.id, "ledger:row already exists — not applying");
+            summary.swap_id = None;
+            return Ok(());
+        }
+    }
 
     if let Err(e) = api.create_application(&swap.id) {
-        db.update_swap(
+        db.cas_swap(
             &swap.id,
+            &["applied"],
             &SwapPatch::default()
                 .status("failed")
                 .outcome(format!("apply failed: {e}")),
-        );
-        db.update_planner_action(action_id, "failed");
+        )?;
+        db.update_planner_action(action_id, "failed")?;
         logger.log(
             LogLevel::Warn,
             &format!("LNPLUS: application to {} failed: {e}", swap.id),
         );
-        return;
+        return Ok(());
     }
-    db.update_planner_action(action_id, "completed");
+    db.update_planner_action(action_id, "completed")?;
     logger.log(
         LogLevel::Info,
         &format!("LNPLUS: applied to swap {} — {reason}", swap.id),
     );
     summary.applied = true;
+    Ok(())
 }
 
 /// PR 3d: freeze one peer-channel observation at pass entry. py

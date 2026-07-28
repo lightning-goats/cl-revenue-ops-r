@@ -194,6 +194,15 @@ CREATE TABLE IF NOT EXISTS rebalance_costs (
 );
 ";
 
+/// Task 61 4A: idempotent rail DDL on a caller-owned connection, so a
+/// store that must hold LN+ lifecycle state and budget reservations
+/// behind ONE transaction boundary (one connection) can create the rail
+/// tables without opening a second [`BudgetDb`] connection.
+pub fn ensure_rail_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(DDL)?;
+    Ok(())
+}
+
 /// Single-owner budget-rail handle over one writable `rusqlite::Connection`.
 /// The async actor wrap is Phase 3b wiring; until then the connection never
 /// crosses a task boundary.
@@ -256,7 +265,7 @@ impl BudgetDb {
         let budget_since = req.since_timestamp.unwrap_or(now - 24 * 3600);
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = reserve_spend_locked(
+        let result = reserve_spend_body(
             &self.conn,
             &req,
             &rid,
@@ -266,12 +275,19 @@ impl BudgetDb {
             budget_since,
             now,
         );
-        if result.is_err() {
-            // Mirror Python's except: ROLLBACK (best-effort), then surface.
-            // (Python logged and returned (False, 0); the Rust surface keeps
-            // the error — either way no reservation exists: fail toward
-            // refusing the spend.)
-            rollback_quietly(&self.conn);
+        match &result {
+            Ok(_) => {
+                // Refusals wrote nothing (COMMIT == ROLLBACK observationally);
+                // grants must commit. One COMMIT covers both.
+                self.conn.execute_batch("COMMIT")?;
+            }
+            Err(_) => {
+                // Mirror Python's except: ROLLBACK (best-effort), then surface.
+                // (Python logged and returned (False, 0); the Rust surface keeps
+                // the error — either way no reservation exists: fail toward
+                // refusing the spend.)
+                rollback_quietly(&self.conn);
+            }
         }
         result
     }
@@ -279,12 +295,7 @@ impl BudgetDb {
     /// Python `release_spend_reservation`: single autocommit
     /// `UPDATE … SET status='released' WHERE … status='active'`.
     pub fn release_spend_reservation(&mut self, reservation_id: &str) -> Result<bool> {
-        let n = self.conn.execute(
-            "UPDATE spend_reservations SET status = 'released' \
-             WHERE reservation_id = ?1 AND status = 'active'",
-            [reservation_id],
-        )?;
-        Ok(n > 0)
+        release_spend_reservation_on(&self.conn, reservation_id)
     }
 
     /// Python `mark_spend_reservation_spent` (P2-003 atomic settle).
@@ -308,7 +319,7 @@ impl BudgetDb {
             return Ok(false);
         }
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = mark_spent_locked(
+        let result = mark_spent_in_tx(
             &self.conn,
             &rid,
             actual_spent_sats,
@@ -316,10 +327,22 @@ impl BudgetDb {
             record_event,
             now,
         );
-        if result.is_err() {
-            rollback_quietly(&self.conn);
+        match result {
+            Ok(MarkSpentTx::Applied(changed)) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(changed)
+            }
+            Ok(MarkSpentTx::EventRejected) => {
+                // Roll the 'spent' flip back — never leave a reservation
+                // 'spent' without its event (fail toward HOLDING budget).
+                self.conn.execute_batch("ROLLBACK")?;
+                Ok(false)
+            }
+            Err(e) => {
+                rollback_quietly(&self.conn);
+                Err(e)
+            }
         }
-        result
     }
 
     /// Python `record_spend_event` (P2-008): `INSERT OR REPLACE`, retried 3x
@@ -600,14 +623,79 @@ impl BudgetDb {
 }
 
 // ---------------------------------------------------------------------------
-// locked bodies (run inside an already-open BEGIN IMMEDIATE)
+// transaction-composable kernels (Task 61 4A)
+//
+// These run INSIDE a transaction the CALLER opened (BEGIN IMMEDIATE) on the
+// caller's single connection, and never COMMIT or ROLLBACK themselves — the
+// caller owns the boundary. That is what lets an LN+ store make a terminal
+// lifecycle transition + reservation settle/release + receipt one atomic
+// unit: all the writes join the caller's one transaction. `BudgetDb`'s
+// public methods delegate here and apply the exact historical
+// COMMIT/ROLLBACK decisions, so standalone rail behavior is unchanged.
 // ---------------------------------------------------------------------------
 
-/// Body of `reserve_spend` inside the writer lock. Owns COMMIT/ROLLBACK on
-/// its success paths; an `Err` return leaves the transaction open for the
-/// caller's best-effort ROLLBACK (mirroring Python's `except` block).
+/// `reserve_spend`'s guard + sums + insert, commit-free. Sanitize rejects
+/// return `Ok((false, 0))` without writing (callers may also pre-check
+/// before opening the transaction, as `BudgetDb::reserve_spend` does).
+pub fn reserve_spend_in_tx(
+    conn: &Connection,
+    req: &ReserveRequest,
+    now: i64,
+) -> Result<(bool, i64)> {
+    let amount = sanitize_amount(req.amount_sats);
+    if amount <= 0 {
+        return Ok((false, 0));
+    }
+    let rid = req.reservation_id.trim().to_string();
+    if rid.is_empty() {
+        return Ok((false, 0));
+    }
+    let cat = req.category.trim().to_lowercase();
+    if cat.is_empty() {
+        return Ok((false, 0));
+    }
+    let meta_json = metadata_json(req.metadata.as_ref())?;
+    let budget_since = req.since_timestamp.unwrap_or(now - 24 * 3600);
+    reserve_spend_body(
+        conn,
+        req,
+        &rid,
+        &cat,
+        amount,
+        meta_json.as_deref(),
+        budget_since,
+        now,
+    )
+}
+
+/// Python `release_spend_reservation`'s single UPDATE on a caller-owned
+/// connection (autocommit standalone, or joining the caller's open
+/// transaction — the statement itself is boundary-free either way).
+pub fn release_spend_reservation_on(conn: &Connection, reservation_id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE spend_reservations SET status = 'released' \
+         WHERE reservation_id = ?1 AND status = 'active'",
+        [reservation_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// How a commit-free settle landed; the caller maps this onto its own
+/// transaction boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkSpentTx {
+    /// The settle ran; `true` iff an active reservation flipped to
+    /// 'spent' (with its event written when requested). Caller COMMITs.
+    Applied(bool),
+    /// The settlement event was sanitize-rejected AFTER the 'spent' flip
+    /// — the caller MUST roll its transaction back (never leave a
+    /// reservation 'spent' without its event).
+    EventRejected,
+}
+
+/// Body of `reserve_spend` inside the writer lock, commit-free.
 #[allow(clippy::too_many_arguments)]
-fn reserve_spend_locked(
+fn reserve_spend_body(
     conn: &Connection,
     req: &ReserveRequest,
     rid: &str,
@@ -630,7 +718,6 @@ fn reserve_spend_locked(
     let mut existing_active_sats = 0i64;
     if let Some(status) = existing {
         if status == "spent" || status == "released" {
-            conn.execute_batch("COMMIT")?;
             return Ok((false, 0));
         }
         if status == "active" {
@@ -680,7 +767,6 @@ fn reserve_spend_locked(
             gen_reserved + reb_reserved + reb_committed + gen_committed - existing_active_sats;
         daily_remaining = effective_budget_sats - already;
         if amount > daily_remaining {
-            conn.execute_batch("ROLLBACK")?;
             return Ok((false, daily_remaining));
         }
 
@@ -704,7 +790,6 @@ fn reserve_spend_locked(
                 - existing_active_sats;
             let remaining = weekly_budget_limit - weekly_already;
             if amount > remaining {
-                conn.execute_batch("ROLLBACK")?;
                 return Ok((false, remaining));
             }
             weekly_remaining = Some(remaining);
@@ -727,7 +812,6 @@ fn reserve_spend_locked(
             meta_json
         ],
     )?;
-    conn.execute_batch("COMMIT")?;
 
     if !enforce_budget {
         return Ok((true, 0));
@@ -739,15 +823,21 @@ fn reserve_spend_locked(
     Ok((true, after))
 }
 
-/// Body of `mark_spend_reservation_spent` inside the writer lock (P2-003).
-fn mark_spent_locked(
+/// Body of `mark_spend_reservation_spent` inside the writer lock (P2-003),
+/// commit-free (Task 61 4A): the caller owns the transaction and maps
+/// [`MarkSpentTx`] onto its own COMMIT/ROLLBACK decision.
+pub fn mark_spent_in_tx(
     conn: &Connection,
     rid: &str,
     actual_spent_sats: Option<i64>,
     source: Option<&str>,
     record_event: bool,
     now: i64,
-) -> Result<bool> {
+) -> Result<MarkSpentTx> {
+    let rid = rid.trim();
+    if rid.is_empty() {
+        return Ok(MarkSpentTx::Applied(false));
+    }
     struct ResvRow {
         category: String,
         subcategory: Option<String>,
@@ -772,8 +862,7 @@ fn mark_spent_locked(
         )
         .optional()?;
     let Some(row) = row else {
-        conn.execute_batch("COMMIT")?;
-        return Ok(false);
+        return Ok(MarkSpentTx::Applied(false));
     };
     let changed = conn.execute(
         "UPDATE spend_reservations SET status = 'spent' \
@@ -793,16 +882,14 @@ fn mark_spent_locked(
             source: Some(source.unwrap_or("reservation_settlement").to_string()),
             metadata: Some(serde_json::json!({ "reservation_id": rid })),
         };
-        // Same connection: the INSERT joins this transaction. If it fails we
-        // roll the 'spent' flip back — do not leave the reservation 'spent'
-        // without its event (fail toward HOLDING budget).
+        // Same connection: the INSERT joins the caller's transaction. If it
+        // is rejected, the caller must roll the 'spent' flip back — never a
+        // reservation 'spent' without its event (fail toward HOLDING budget).
         if !record_spend_event_on(conn, &ev)? {
-            conn.execute_batch("ROLLBACK")?;
-            return Ok(false);
+            return Ok(MarkSpentTx::EventRejected);
         }
     }
-    conn.execute_batch("COMMIT")?;
-    Ok(changed)
+    Ok(MarkSpentTx::Applied(changed))
 }
 
 /// Internal `record_spend_event` (P2-008) with Python's exact bool shape:

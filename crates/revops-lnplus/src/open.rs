@@ -10,12 +10,12 @@
 //! forever. This port also patches the row to `"failed"` in the same
 //! call.
 
-use crate::breaker::{self, BreakerCause};
+use crate::breaker::BreakerCause;
 use crate::db_types::{SwapPatch, SwapRow};
 use crate::error::LnPlusError;
 use crate::ports::{
-    ChainPort, Feerate, LnPlusApi, LnPlusDb, LogLevel, Logger, PlannerActionRequest,
-    ReserveSpendRequest,
+    CasOutcome, ChainPort, CompoundOutcome, Feerate, LnPlusApi, LnPlusDb, LogLevel, Logger,
+    PlannerActionRequest, PortResult, ReserveSpendRequest, TerminalizeSpec,
 };
 use crate::types::{Metadata, MySwapEntry};
 use crate::validation::valid_connect_addr;
@@ -44,9 +44,13 @@ pub struct OpenExecParams {
     pub budget_since_timestamp: Option<i64>,
 }
 
-/// py `_execute_swap_open` (1532-1699). Returns `true` only when the row
-/// actually reached `"opened"` — callers use this to decide whether the
-/// pass may report the swap as opened.
+/// py `_execute_swap_open` (1532-1699). Returns `Ok(true)` only when the
+/// row actually reached `"opened"` — callers use this to decide whether
+/// the pass may report the swap as opened.
+///
+/// Task 61 4A: every ledger write is a CAS from the in-flight statuses
+/// this row was selected by, and a persistence failure aborts with `Err`
+/// (fail closed) instead of continuing on unacknowledged state.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_swap_open(
     row: &SwapRow,
@@ -57,7 +61,7 @@ pub fn execute_swap_open(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     now: i64,
-) -> bool {
+) -> PortResult<bool> {
     let sid = row.swap_id.clone();
     let deadline = row.deadline_at;
 
@@ -79,7 +83,7 @@ pub fn execute_swap_open(
                 "LNPLUS: swap {sid} has no outbound_peer yet — cannot open, retrying next pass"
             ),
         );
-        return false;
+        return Ok(false);
     };
 
     let channels = chain.list_peer_channels(None).unwrap_or_else(|e| {
@@ -102,12 +106,22 @@ pub fn execute_swap_open(
     let mut first_fund = false;
     if let Some(existing) = existing {
         if let Some(txid) = &existing.funding_txid {
-            db.update_swap(
+            if let CasOutcome::Conflict { actual } = db.cas_swap(
                 &sid,
+                &["applied", "opening"],
                 &SwapPatch::default()
                     .channel_funding_txid(txid.clone())
                     .opened_at(now),
-            );
+            )? {
+                logger.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "LNPLUS: swap {sid} moved (now {actual:?}) before its funding txid \
+                         could be recorded — retrying next pass"
+                    ),
+                );
+                return Ok(false);
+            }
         }
     } else {
         let hours_left = deadline.map(|d| (d - now) as f64 / 3600.0).unwrap_or(-1.0);
@@ -145,17 +159,29 @@ pub fn execute_swap_open(
                 LogLevel::Warn,
                 &format!("LNPLUS: connect to {peer} failed for swap {sid}: {e}"),
             );
-            maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger);
-            return false;
+            maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
+            return Ok(false);
         }
 
-        // Write intent before the irreversible external call.
-        db.update_swap(
+        // Write intent before the irreversible external call — CAS from
+        // the in-flight statuses; an unacknowledged intent write must
+        // never be followed by the live call (Task 61 4A).
+        if let CasOutcome::Conflict { actual } = db.cas_swap(
             &sid,
+            &["applied", "opening"],
             &SwapPatch::default()
                 .status("opening")
                 .outcome("fundchannel attempt"),
-        );
+        )? {
+            logger.log(
+                LogLevel::Warn,
+                &format!(
+                    "LNPLUS: swap {sid} moved (now {actual:?}) before its fundchannel intent \
+                     could be recorded — not funding this pass"
+                ),
+            );
+            return Ok(false);
+        }
 
         let reservation_id = format!("lnplus-open-{sid}-{now}");
         let mut metadata = Metadata::new();
@@ -174,8 +200,8 @@ pub fn execute_swap_open(
             Ok(active) => active,
             Err(e) => {
                 logger.log(LogLevel::Warn, &format!("LNPLUS: budget reservation failed for swap {sid} — retrying next pass ({e})"));
-                maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger);
-                return false;
+                maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
+                return Ok(false);
             }
         };
         if !reservation_active {
@@ -183,8 +209,8 @@ pub fn execute_swap_open(
                 LogLevel::Warn,
                 &format!("LNPLUS: budget reservation failed for swap {sid} — retrying next pass"),
             );
-            maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger);
-            return false;
+            maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
+            return Ok(false);
         }
 
         match chain.fund_channel(&peer, capacity_sats, feerate) {
@@ -194,8 +220,8 @@ pub fn execute_swap_open(
                     &format!("LNPLUS: fundchannel to {peer} failed for swap {sid}: {e}"),
                 );
                 release_swap_open_reservation(&reservation_id, &sid, db, logger);
-                maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger);
-                return false;
+                maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
+                return Ok(false);
             }
             Ok(result) => match result.txid {
                 None => {
@@ -204,16 +230,29 @@ pub fn execute_swap_open(
                         &format!("LNPLUS: fundchannel for swap {sid} returned no txid"),
                     );
                     release_swap_open_reservation(&reservation_id, &sid, db, logger);
-                    maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger);
-                    return false;
+                    maybe_trip_deadline_miss(row, &sid, deadline, now, db, logger)?;
+                    return Ok(false);
                 }
                 Some(txid) => {
-                    db.update_swap(
+                    if let CasOutcome::Conflict { actual } = db.cas_swap(
                         &sid,
+                        &["opening"],
                         &SwapPatch::default()
                             .channel_funding_txid(txid)
                             .opened_at(now),
-                    );
+                    )? {
+                        // The channel funded but the row moved out from
+                        // under us — surface loudly; the funding txid is
+                        // real money on chain with no ledger anchor.
+                        logger.log(
+                            LogLevel::Error,
+                            &format!(
+                                "LNPLUS: swap {sid} moved (now {actual:?}) between fundchannel \
+                                 and its txid record — operator review needed"
+                            ),
+                        );
+                        return Ok(false);
+                    }
                     first_fund = true;
                     settle_swap_open_reservation(
                         &reservation_id,
@@ -227,16 +266,16 @@ pub fn execute_swap_open(
         }
     }
 
-    let marked_opened = complete_and_mark_opened(&sid, db, api, logger);
+    let marked_opened = complete_and_mark_opened(&sid, db, api, logger)?;
     if first_fund {
         record_swap_open_planner_action(
             row,
             "completed",
             &format!("LN+ swap {sid}: channel opened to {peer}"),
             db,
-        );
+        )?;
     }
-    marked_opened
+    Ok(marked_opened)
 }
 
 /// py `_already_past_opening` (1701-1717): true when LN+ rejects
@@ -248,27 +287,47 @@ pub fn already_past_opening(e: &LnPlusError) -> bool {
 }
 
 /// py `_complete_and_mark_opened` (1719-1734).
+///
+/// Task 61 4A: the "opened" transition is a CAS from the in-flight
+/// statuses. A conflict whose actual status is already `"opened"` is a
+/// success (an earlier pass got there); any other conflict is not.
 pub fn complete_and_mark_opened(
     sid: &str,
     db: &dyn LnPlusDb,
     api: &dyn LnPlusApi,
     logger: &dyn Logger,
-) -> bool {
+) -> PortResult<bool> {
     if let Err(e) = api.complete_application(sid) {
         if !already_past_opening(&e) {
             logger.log(
                 LogLevel::Warn,
                 &format!("LNPLUS: complete_application failed for {sid} (will retry): {e}"),
             );
-            return false;
+            return Ok(false);
         }
         logger.log(
             LogLevel::Info,
             &format!("LNPLUS: complete_application for {sid} reports it already left 'opening' — treating as already complete and marking opened"),
         );
     }
-    db.update_swap(sid, &SwapPatch::default().status("opened"));
-    true
+    match db.cas_swap(
+        sid,
+        &["applied", "opening"],
+        &SwapPatch::default().status("opened"),
+    )? {
+        CasOutcome::Applied => Ok(true),
+        CasOutcome::Conflict { actual } if actual.as_deref() == Some("opened") => Ok(true),
+        CasOutcome::Conflict { actual } => {
+            logger.log(
+                LogLevel::Warn,
+                &format!(
+                    "LNPLUS: swap {sid} moved (now {actual:?}) before its opened transition — \
+                     not reporting it opened this pass"
+                ),
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn release_swap_open_reservation(
@@ -325,6 +384,11 @@ fn settle_swap_open_reservation(
 /// with the breaker trip — the breaker still latches (never
 /// auto-clearable, per `breaker.rs`) but the row now correctly falls out
 /// of `reserved_sats()`/`inflight_swaps()`.
+/// Since Task 61 4A the row-terminalize + breaker-trip pairing is
+/// GENUINELY atomic: one [`LnPlusDb::terminalize_and_trip`] transaction
+/// covers the row CAS (guarded on in-flight status + no recorded funding
+/// txid) and the B10 first-cause-preserving trip; either both land or
+/// neither does, and a persistence failure surfaces as `Err`.
 pub fn maybe_trip_deadline_miss(
     row: &SwapRow,
     sid: &str,
@@ -332,40 +396,63 @@ pub fn maybe_trip_deadline_miss(
     now: i64,
     db: &dyn LnPlusDb,
     logger: &dyn Logger,
-) {
-    let Some(deadline) = deadline else { return };
+) -> PortResult<()> {
+    let Some(deadline) = deadline else {
+        return Ok(());
+    };
     if now <= deadline {
-        return;
+        return Ok(());
     }
-    let current = db.get_swap(sid).unwrap_or_else(|| row.clone());
-    if current.channel_funding_txid.is_some() {
-        return;
-    }
-    breaker::trip_and_persist(
-        db,
-        logger,
+    let outcome = db.terminalize_and_trip(
+        &TerminalizeSpec {
+            swap_id: sid,
+            expected_statuses: &["applied", "opening"],
+            require_null_funding_txid: true,
+        },
+        &SwapPatch::default()
+            .status("failed")
+            .outcome("missed open deadline"),
         BreakerCause::MissedOpenDeadline {
             swap_id: sid.to_string(),
         },
         now,
-    );
-    // Defect #4 fix: terminalize the row so reserved-budget/inflight
-    // telemetry stops counting a swap that will never open.
-    db.update_swap(
-        sid,
-        &SwapPatch::default()
-            .status("failed")
-            .outcome("missed open deadline"),
-    );
-    record_swap_open_planner_action(
-        &current,
-        "failed",
-        &format!("LN+ swap {sid}: missed open deadline"),
-        db,
-    );
+    )?;
+    match outcome {
+        CompoundOutcome::Terminalized { breaker } => {
+            logger.log(
+                LogLevel::Error,
+                &format!(
+                    "LNPLUS: CIRCUIT BREAKER — missed 48h deadline for swap {sid}; row \
+                     terminalized{}",
+                    match breaker {
+                        crate::ports::TripAck::NewTrip => "",
+                        crate::ports::TripAck::AlreadyTripped =>
+                            " (breaker already tripped; first cause preserved)",
+                    }
+                ),
+            );
+            record_swap_open_planner_action(
+                row,
+                "failed",
+                &format!("LN+ swap {sid}: missed open deadline"),
+                db,
+            )?;
+        }
+        CompoundOutcome::Conflict { .. } => {
+            // Guard held inside the transaction: the row was funded, or
+            // already moved out of the in-flight statuses — exactly the
+            // cases the old code's racy pre-checks tried to skip.
+        }
+    }
+    Ok(())
 }
 
-fn record_swap_open_planner_action(row: &SwapRow, status: &str, reason: &str, db: &dyn LnPlusDb) {
+fn record_swap_open_planner_action(
+    row: &SwapRow,
+    status: &str,
+    reason: &str,
+    db: &dyn LnPlusDb,
+) -> PortResult<()> {
     let action_id = db.record_planner_action(&PlannerActionRequest {
         action_type: "swap_open",
         peer_id: row
@@ -376,6 +463,6 @@ fn record_swap_open_planner_action(row: &SwapRow, status: &str, reason: &str, db
         estimated_cost_sats: Some(0),
         reason: reason.to_string(),
         metadata: None,
-    });
-    db.update_planner_action(action_id, status);
+    })?;
+    db.update_planner_action(action_id, status)
 }

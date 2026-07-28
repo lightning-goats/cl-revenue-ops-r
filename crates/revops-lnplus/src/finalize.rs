@@ -53,7 +53,10 @@
 use crate::activate::{incoming_channel_open, release_no_close_if_ours, TagColumn};
 use crate::db_types::{SwapPatch, SwapRow};
 use crate::error::LnPlusError;
-use crate::ports::{ChainPort, IgnorePeerPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PolicyPort};
+use crate::ports::{
+    CasOutcome, ChainPort, IgnorePeerPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PolicyPort,
+    PortResult,
+};
 use crate::types::Rating;
 
 /// py 1938 `_RATING_RETRY_WINDOW_SECONDS`.
@@ -108,6 +111,11 @@ impl FinalizeOutcome {
 }
 
 /// py `_finalize` (1868-1937).
+///
+/// Task 61 4A: terminal transitions are CAS from `"active"` (the status
+/// the watcher selected this row by); a persistence failure is `Err`
+/// (fail closed), and a CAS conflict defers — a swap whose terminal
+/// write did not land must never be counted finalized.
 pub fn finalize(
     row: &SwapRow,
     db: &dyn LnPlusDb,
@@ -116,7 +124,7 @@ pub fn finalize(
     ignore_peer: Option<&dyn IgnorePeerPort>,
     chain: &dyn ChainPort,
     logger: &dyn Logger,
-) -> FinalizeOutcome {
+) -> PortResult<FinalizeOutcome> {
     let sid = row.swap_id.clone();
     let outbound_peer = row.outbound_peer.clone();
 
@@ -140,20 +148,28 @@ pub fn finalize(
             policy,
             logger,
         );
-        db.update_swap(
+        match db.cas_swap(
             &sid,
+            &["active"],
             &SwapPatch::default()
                 .status("ended")
                 .outcome("ended_unjudged"),
-        );
+        )? {
+            CasOutcome::Applied => {}
+            CasOutcome::Conflict { actual } => {
+                return Ok(FinalizeOutcome::Deferred {
+                    reason: format!("row moved (now {actual:?}) before its unjudged end"),
+                });
+            }
+        }
         logger.log(
             LogLevel::Warn,
             &format!("LNPLUS: finalize for swap {sid} — cannot judge counterparty (incoming_peer is NULL/empty); ending unjudged, no rating filed"),
         );
-        return FinalizeOutcome::Finalized {
+        return Ok(FinalizeOutcome::Finalized {
             status: "ended".to_string(),
             outcome: "ended_unjudged".to_string(),
-        };
+        });
     };
 
     let Some(positive) = incoming_channel_open(Some(&incoming_peer), chain) else {
@@ -163,9 +179,9 @@ pub fn finalize(
             LogLevel::Warn,
             &format!("LNPLUS: finalize for swap {sid} deferred — listpeerchannels failed (unknown channel state), not defaulting to a negative rating; will retry next pass"),
         );
-        return FinalizeOutcome::Deferred {
+        return Ok(FinalizeOutcome::Deferred {
             reason: "listpeerchannels failed".to_string(),
-        };
+        });
     };
     let rating = if positive {
         Rating::Positive
@@ -194,9 +210,9 @@ pub fn finalize(
         logger,
     );
 
-    db.bump_peer(&incoming_peer, !positive, Some(rating));
+    db.bump_peer(&incoming_peer, !positive, Some(rating))?;
     if let Some(outbound_peer) = &outbound_peer {
-        db.bump_peer(outbound_peer, false, None);
+        db.bump_peer(outbound_peer, false, None)?;
     }
 
     if !positive {
@@ -215,26 +231,34 @@ pub fn finalize(
     } else {
         "ended_rating_pending"
     };
-    db.update_swap(
+    match db.cas_swap(
         &sid,
+        &["active"],
         &SwapPatch::default()
             .status(final_status)
             .outcome(rating.as_str()),
-    );
-    FinalizeOutcome::Finalized {
-        status: final_status.to_string(),
-        outcome: rating.as_str().to_string(),
+    )? {
+        CasOutcome::Applied => Ok(FinalizeOutcome::Finalized {
+            status: final_status.to_string(),
+            outcome: rating.as_str().to_string(),
+        }),
+        CasOutcome::Conflict { actual } => Ok(FinalizeOutcome::Deferred {
+            reason: format!("row moved (now {actual:?}) before its terminal transition"),
+        }),
     }
 }
 
 /// py `_retry_pending_ratings` (1963-1983). Bounded: gives up (-> `ended`)
 /// once more than [`RATING_RETRY_WINDOW_SECONDS`] past the contract end.
+///
+/// Task 61 4A: terminal writes are CAS from `"ended_rating_pending"` and
+/// a persistence failure aborts with `Err`.
 pub fn retry_pending_ratings(
     db: &dyn LnPlusDb,
     api: &dyn LnPlusApi,
     logger: &dyn Logger,
     now: i64,
-) {
+) -> PortResult<()> {
     for row in db.get_swaps_by_status(&["ended_rating_pending"]) {
         let sid = row.swap_id.clone();
         let rating = if row.outcome.as_deref() == Some("negative") {
@@ -244,17 +268,23 @@ pub fn retry_pending_ratings(
         };
         let deadline = row.ends_at.unwrap_or(now) + RATING_RETRY_WINDOW_SECONDS;
         if try_create_rating(&sid, rating, api, logger) {
-            db.update_swap(&sid, &SwapPatch::default().status("ended"));
+            db.cas_swap(
+                &sid,
+                &["ended_rating_pending"],
+                &SwapPatch::default().status("ended"),
+            )?;
         } else if now > deadline {
             logger.log(LogLevel::Warn, &format!("LNPLUS: giving up on rating swap {sid} after 7 days of retries — ending unrated"));
-            db.update_swap(
+            db.cas_swap(
                 &sid,
+                &["ended_rating_pending"],
                 &SwapPatch::default()
                     .status("ended")
                     .outcome(format!("{}_rating_unfiled", rating.as_str())),
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

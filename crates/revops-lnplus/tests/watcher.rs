@@ -30,6 +30,7 @@ fn run(
     now: i64,
 ) -> WatcherSummary {
     run_watcher_once(db, api, chain, policy, None, logger, &open_params(), 7, now)
+        .expect("watcher pass")
 }
 
 #[test]

@@ -109,7 +109,7 @@ fn record_and_get_swap_roundtrips() {
     meta.insert("swap_id".to_string(), "s1".to_string());
     row.metadata = Some(meta);
 
-    db.record_swap(&row);
+    db.insert_swap_new(&row).unwrap();
     let fetched = db.get_swap("s1").expect("row present");
 
     assert_eq!(fetched.status, "applied");
@@ -133,28 +133,22 @@ fn get_swap_missing_returns_none() {
     assert!(db.get_swap("does-not-exist").is_none());
 }
 
-#[test]
-fn record_swap_is_insert_or_replace_idempotent_on_swap_id() {
-    let (_dir, db) = open_db();
-    let row1 = SwapRow::new("s1", "applied", 100, 1, 1000);
-    db.record_swap(&row1);
-    let row2 = SwapRow::new("s1", "applied", 999, 1, 1000);
-    db.record_swap(&row2);
-
-    let fetched = db.get_swap("s1").unwrap();
-    assert_eq!(fetched.capacity_sats, 999, "second record_swap replaces");
-}
+// The old `record_swap` INSERT OR REPLACE idempotency test is gone by
+// design (Task 61 4A): a second insert of the same swap_id is now a typed
+// `AlreadyExists` that never clobbers — see `tests/store_acks.rs`.
 
 #[test]
-fn update_swap_only_touches_patched_columns() {
+fn cas_swap_only_touches_patched_columns() {
     let (_dir, db) = open_db();
     let row = SwapRow::new("s1", "applied", 500_000, 6, 1000).with_outbound_peer("02aa");
-    db.record_swap(&row);
+    db.insert_swap_new(&row).unwrap();
 
-    db.update_swap(
+    db.cas_swap(
         "s1",
+        &["applied"],
         &SwapPatch::default().status("opening").opened_at(2000),
-    );
+    )
+    .unwrap();
 
     let fetched = db.get_swap("s1").unwrap();
     assert_eq!(fetched.status, "opening");
@@ -167,24 +161,39 @@ fn update_swap_only_touches_patched_columns() {
 }
 
 #[test]
-fn update_swap_with_no_fields_set_is_a_no_op() {
+fn cas_swap_with_no_fields_set_is_a_guarded_no_op() {
     let (_dir, db) = open_db();
     let row = SwapRow::new("s1", "applied", 500_000, 6, 1000);
-    db.record_swap(&row);
-    db.update_swap("s1", &SwapPatch::default());
+    db.insert_swap_new(&row).unwrap();
+    assert_eq!(
+        db.cas_swap("s1", &["applied"], &SwapPatch::default())
+            .unwrap(),
+        revops_lnplus::ports::CasOutcome::Applied
+    );
+    assert_eq!(
+        db.cas_swap("s1", &["opening"], &SwapPatch::default())
+            .unwrap(),
+        revops_lnplus::ports::CasOutcome::Conflict {
+            actual: Some("applied".to_string())
+        },
+        "an empty patch still honors the status guard"
+    );
     assert_eq!(db.get_swap("s1").unwrap().status, "applied");
 }
 
 #[test]
-fn update_swap_persists_tag_added_booleans() {
+fn cas_swap_persists_tag_added_booleans() {
     let (_dir, db) = open_db();
-    db.record_swap(&SwapRow::new("s1", "active", 1, 1, 1000));
-    db.update_swap(
+    db.insert_swap_new(&SwapRow::new("s1", "active", 1, 1, 1000))
+        .unwrap();
+    db.cas_swap(
         "s1",
+        &["active"],
         &SwapPatch::default()
             .tag_added(true)
             .incoming_tag_added(false),
-    );
+    )
+    .unwrap();
     let fetched = db.get_swap("s1").unwrap();
     assert_eq!(fetched.tag_added, Some(true));
     assert_eq!(fetched.incoming_tag_added, Some(false));
@@ -193,9 +202,12 @@ fn update_swap_persists_tag_added_booleans() {
 #[test]
 fn get_swaps_by_status_filters_and_orders_by_applied_at() {
     let (_dir, db) = open_db();
-    db.record_swap(&SwapRow::new("s1", "applied", 1, 1, 300));
-    db.record_swap(&SwapRow::new("s2", "applied", 1, 1, 100));
-    db.record_swap(&SwapRow::new("s3", "opened", 1, 1, 200));
+    db.insert_swap_new(&SwapRow::new("s1", "applied", 1, 1, 300))
+        .unwrap();
+    db.insert_swap_new(&SwapRow::new("s2", "applied", 1, 1, 100))
+        .unwrap();
+    db.insert_swap_new(&SwapRow::new("s3", "opened", 1, 1, 200))
+        .unwrap();
 
     let applied = db.get_swaps_by_status(&["applied"]);
     assert_eq!(
@@ -211,8 +223,10 @@ fn get_swaps_by_status_filters_and_orders_by_applied_at() {
 #[test]
 fn inflight_swaps_uses_the_default_trait_status_set() {
     let (_dir, db) = open_db();
-    db.record_swap(&SwapRow::new("s1", "applied", 1, 1, 1));
-    db.record_swap(&SwapRow::new("s2", "ended", 1, 1, 1));
+    db.insert_swap_new(&SwapRow::new("s1", "applied", 1, 1, 1))
+        .unwrap();
+    db.insert_swap_new(&SwapRow::new("s2", "ended", 1, 1, 1))
+        .unwrap();
     let inflight = db.inflight_swaps();
     assert_eq!(inflight.len(), 1);
     assert_eq!(inflight[0].swap_id, "s1");
@@ -223,11 +237,14 @@ fn prune_terminal_deletes_old_terminal_rows_but_keeps_recent_ones() {
     let (_dir, db) = open_db();
     let now = 1_000_000i64;
     let old_cutoff = now - 200 * 86_400;
-    db.record_swap(&SwapRow::new("old", "ended", 1, 1, old_cutoff - 10));
-    db.record_swap(&SwapRow::new("recent", "ended", 1, 1, now - 10));
-    db.record_swap(&SwapRow::new("inflight", "applied", 1, 1, old_cutoff - 10));
+    db.insert_swap_new(&SwapRow::new("old", "ended", 1, 1, old_cutoff - 10))
+        .unwrap();
+    db.insert_swap_new(&SwapRow::new("recent", "ended", 1, 1, now - 10))
+        .unwrap();
+    db.insert_swap_new(&SwapRow::new("inflight", "applied", 1, 1, old_cutoff - 10))
+        .unwrap();
 
-    let pruned = db.prune_terminal(180, now);
+    let pruned = db.prune_terminal(180, now).unwrap();
 
     assert_eq!(pruned, 1);
     assert!(db.get_swap("old").is_none());
@@ -248,13 +265,13 @@ fn bump_peer_creates_then_accumulates() {
     let (_dir, db) = open_db();
     assert!(db.get_peer("02aa").is_none());
 
-    db.bump_peer("02aa", false, Some(Rating::Positive));
+    db.bump_peer("02aa", false, Some(Rating::Positive)).unwrap();
     let p1 = db.get_peer("02aa").unwrap();
     assert_eq!(p1.swaps_count, 1);
     assert_eq!(p1.ratings_given_positive, 1);
     assert_eq!(p1.defections, 0);
 
-    db.bump_peer("02aa", true, Some(Rating::Negative));
+    db.bump_peer("02aa", true, Some(Rating::Negative)).unwrap();
     let p2 = db.get_peer("02aa").unwrap();
     assert_eq!(p2.swaps_count, 2, "count accumulates across calls");
     assert_eq!(
@@ -271,15 +288,15 @@ fn bump_peer_creates_then_accumulates() {
 fn config_override_set_get_delete_roundtrip() {
     let (_dir, db) = open_db();
     assert_eq!(db.get_config_override("k"), None);
-    db.set_config_override("k", "v1");
+    db.set_config_override("k", "v1").unwrap();
     assert_eq!(db.get_config_override("k").as_deref(), Some("v1"));
-    db.set_config_override("k", "v2");
+    db.set_config_override("k", "v2").unwrap();
     assert_eq!(
         db.get_config_override("k").as_deref(),
         Some("v2"),
         "second set overwrites"
     );
-    db.delete_config_override("k");
+    db.delete_config_override("k").unwrap();
     assert_eq!(db.get_config_override("k"), None);
 }
 
@@ -288,7 +305,7 @@ fn config_override_set_get_delete_roundtrip() {
 #[test]
 fn breaker_set_get_clear_roundtrips_the_structured_cause() {
     let (_dir, db) = open_db();
-    assert!(db.get_breaker().is_none());
+    assert!(db.get_breaker().unwrap().is_none());
 
     let state = BreakerState {
         tripped_at: 555,
@@ -296,12 +313,12 @@ fn breaker_set_get_clear_roundtrips_the_structured_cause() {
             swap_id: "s1".to_string(),
         },
     };
-    db.set_breaker(&state);
-    let fetched = db.get_breaker().expect("breaker present");
+    db.set_breaker(&state).unwrap();
+    let fetched = db.get_breaker().unwrap().expect("breaker present");
     assert_eq!(fetched, state);
 
-    db.clear_breaker();
-    assert!(db.get_breaker().is_none());
+    db.clear_breaker().unwrap();
+    assert!(db.get_breaker().unwrap().is_none());
 }
 
 #[test]
@@ -331,24 +348,27 @@ fn breaker_roundtrips_every_cause_variant() {
             tripped_at: 1,
             cause: cause.clone(),
         };
-        db.set_breaker(&state);
-        assert_eq!(db.get_breaker().unwrap().cause, cause);
-        db.clear_breaker();
+        db.set_breaker(&state).unwrap();
+        assert_eq!(db.get_breaker().unwrap().unwrap().cause, cause);
+        db.clear_breaker().unwrap();
     }
 }
 
 #[test]
-fn breaker_read_fails_open_on_foreign_or_malformed_value() {
-    // A Python-shaped plain-string breaker value (or any garbage) must
-    // read back as "no breaker tripped", never panic or misparse.
+fn breaker_read_fails_closed_on_foreign_or_malformed_value() {
+    // Task 61 4A inverted this from the original wiring-layer behavior: a
+    // value this crate cannot decode is corruption evidence in a
+    // Rust-only store and must be an ERROR, never silently "untripped"
+    // (see tests/store_acks.rs for the full fail-closed matrix).
     let (_dir, db) = open_db();
     db.set_config_override(
         revops_lnplus::breaker::BREAKER_KEY,
         "circuit breaker tripped: swap 42 ghost",
-    );
+    )
+    .unwrap();
     assert!(
-        db.get_breaker().is_none(),
-        "a foreign-format value must fail open, not panic"
+        db.get_breaker().is_err(),
+        "a foreign-format value must fail closed"
     );
 }
 
@@ -357,17 +377,19 @@ fn breaker_read_fails_open_on_foreign_or_malformed_value() {
 #[test]
 fn record_and_update_planner_action_persists_status_and_completed_at() {
     let (dir, db) = open_db();
-    let id = db.record_planner_action(&PlannerActionRequest {
-        action_type: "swap_apply",
-        peer_id: "02aa".to_string(),
-        amount_sats: Some(500_000),
-        estimated_cost_sats: Some(2500),
-        reason: "test".to_string(),
-        metadata: None,
-    });
+    let id = db
+        .record_planner_action(&PlannerActionRequest {
+            action_type: "swap_apply",
+            peer_id: "02aa".to_string(),
+            amount_sats: Some(500_000),
+            estimated_cost_sats: Some(2500),
+            reason: "test".to_string(),
+            metadata: None,
+        })
+        .unwrap();
     assert!(id > 0);
 
-    db.update_planner_action(id, "completed");
+    db.update_planner_action(id, "completed").unwrap();
 
     let conn = rusqlite::Connection::open(dir.path().join("lnplus.db")).unwrap();
     let (status, completed_at): (String, Option<i64>) = conn
@@ -388,15 +410,17 @@ fn record_and_update_planner_action_persists_status_and_completed_at() {
 fn update_planner_action_to_a_non_terminal_status_leaves_completed_at_null() {
     // Control for the test above: only completed/failed stamp completed_at.
     let (dir, db) = open_db();
-    let id = db.record_planner_action(&PlannerActionRequest {
-        action_type: "swap_apply",
-        peer_id: "02aa".to_string(),
-        amount_sats: None,
-        estimated_cost_sats: None,
-        reason: "test".to_string(),
-        metadata: None,
-    });
-    db.update_planner_action(id, "recommended");
+    let id = db
+        .record_planner_action(&PlannerActionRequest {
+            action_type: "swap_apply",
+            peer_id: "02aa".to_string(),
+            amount_sats: None,
+            estimated_cost_sats: None,
+            reason: "test".to_string(),
+            metadata: None,
+        })
+        .unwrap();
+    db.update_planner_action(id, "recommended").unwrap();
 
     let conn = rusqlite::Connection::open(dir.path().join("lnplus.db")).unwrap();
     let completed_at: Option<i64> = conn
@@ -482,21 +506,23 @@ fn boundary_independent_instances_reopen_committed_swap_planner_and_budget_state
     let swap = SwapRow::new("boundary-swap", "applied", 600_000, 6, 1_000)
         .with_outbound_peer("02aa")
         .with_planner_action_id(41);
-    first.record_swap(&swap);
+    first.insert_swap_new(&swap).unwrap();
     assert_eq!(
         second.get_swap("boundary-swap").unwrap().capacity_sats,
         600_000,
         "the independently opened LN+ connection must see the committed swap"
     );
 
-    let action_id = second.record_planner_action(&PlannerActionRequest {
-        action_type: "swap_apply",
-        peer_id: "02aa".to_string(),
-        amount_sats: Some(600_000),
-        estimated_cost_sats: Some(2_500),
-        reason: "boundary reopen".to_string(),
-        metadata: None,
-    });
+    let action_id = second
+        .record_planner_action(&PlannerActionRequest {
+            action_type: "swap_apply",
+            peer_id: "02aa".to_string(),
+            amount_sats: Some(600_000),
+            estimated_cost_sats: Some(2_500),
+            reason: "boundary reopen".to_string(),
+            metadata: None,
+        })
+        .unwrap();
     assert!(action_id > 0);
 
     assert!(first
@@ -588,11 +614,11 @@ fn boundary_write_lock_waits_for_busy_timeout_and_leaves_no_partial_state() {
     let row =
         SwapRow::new("busy-timeout", "applied", 700_000, 12, 2_000).with_outbound_peer("02bb");
     let swap_started = Instant::now();
-    db.record_swap(&row);
+    let swap_result = db.insert_swap_new(&row);
     let swap_elapsed = swap_started.elapsed();
 
     let action_started = Instant::now();
-    let action_id = db.record_planner_action(&PlannerActionRequest {
+    let action_result = db.record_planner_action(&PlannerActionRequest {
         action_type: "swap_apply",
         peer_id: "02busy".to_string(),
         amount_sats: Some(700_000),
@@ -618,9 +644,13 @@ fn boundary_write_lock_waits_for_busy_timeout_and_leaves_no_partial_state() {
         action_elapsed <= Duration::from_millis(revops_lnplus::sqlite_db::BUSY_TIMEOUT_MS + 3_000),
         "planner write exceeded the generous bounded-failure window: {action_elapsed:?}"
     );
-    assert_eq!(
-        action_id, 0,
-        "the timed-out planner write must report failure"
+    assert!(
+        swap_result.is_err(),
+        "the timed-out swap insert must be acknowledged as an Err (Task 61 4A), not swallowed"
+    );
+    assert!(
+        action_result.is_err(),
+        "the timed-out planner write must be acknowledged as an Err (Task 61 4A)"
     );
 
     blocker.execute_batch("ROLLBACK").unwrap();
@@ -672,7 +702,7 @@ fn boundary_write_waits_then_succeeds_when_raw_lock_is_released() {
         .with_our_identifier("A")
         .with_planner_action_id(88);
     let started = Instant::now();
-    db.record_swap(&row);
+    db.insert_swap_new(&row).unwrap();
     let elapsed = started.elapsed();
     blocker_thread.join().unwrap();
 
@@ -716,11 +746,11 @@ fn boundary_reopen_preserves_structured_breaker_first_cause_exactly() {
         },
     };
     let db = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
-    db.set_breaker(&first_cause);
+    db.set_breaker(&first_cause).unwrap();
     drop(db);
 
     let reopened = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
-    assert_eq!(reopened.get_breaker(), Some(first_cause));
+    assert_eq!(reopened.get_breaker().unwrap(), Some(first_cause));
 }
 
 #[test]
@@ -750,8 +780,9 @@ fn boundary_foreign_breaker_encodings_are_read_only_and_panic_free() {
 
         let db = SqliteLnPlusDb::open(&path, Box::new(FakeLogger::new())).unwrap();
         assert!(
-            db.get_breaker().is_none(),
-            "foreign encoding must not panic or be interpreted as Rust state"
+            db.get_breaker().is_err(),
+            "foreign encoding must fail closed (Task 61 4A), never panic or be \
+             interpreted as Rust state"
         );
         drop(db);
 

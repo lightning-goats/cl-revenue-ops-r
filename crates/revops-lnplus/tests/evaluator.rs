@@ -361,7 +361,7 @@ fn run_cycle_disabled_returns_empty_summary() {
     let api = FakeApi::new();
     let planner = FakePlanner::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied && !out.recommended);
 }
 
@@ -387,7 +387,7 @@ fn run_cycle_breaker_blocks_applications() {
     let api = FakeApi::new();
     let planner = FakePlanner::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied && !out.recommended);
     assert!(logger.contains("breaker tripped"));
 }
@@ -412,7 +412,7 @@ fn run_cycle_feerate_above_ceiling_blocks() {
     let api = FakeApi::new();
     let planner = FakePlanner::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied);
     assert!(logger.contains("above ceiling"));
 }
@@ -446,7 +446,7 @@ fn run_cycle_full_apply_flow_writes_intent_before_external_call() {
     let db = FakeDb::new();
     let api = FakeApi::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(out.applied, "rejections: {:?}", out.rejections);
     assert_eq!(api.create_application_calls.borrow().len(), 1);
     // Intent-first: the DB row exists (as 'applied') regardless of the
@@ -486,7 +486,7 @@ fn run_cycle_apply_failure_marks_row_failed_not_applied() {
     *api.create_application_result.borrow_mut() =
         Err(revops_lnplus::error::LnPlusError::new("boom"));
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied);
     let row = db.get_swap("1").unwrap();
     assert_eq!(row.status, "failed");
@@ -523,7 +523,7 @@ fn run_cycle_dry_run_recommends_without_applying() {
     let db = FakeDb::new();
     let api = FakeApi::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(out.recommended && !out.applied);
     assert!(api.create_application_calls.borrow().is_empty());
     assert!(
@@ -561,7 +561,7 @@ fn run_cycle_insufficient_funds_gate7_rejects() {
     let db = FakeDb::new();
     let api = FakeApi::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied && !out.recommended);
     assert!(out.rejections.iter().any(|r| r.gate == "economics"));
 }
@@ -595,7 +595,7 @@ fn run_cycle_capex_budget_gate9_rejects() {
     let db = FakeDb::new();
     let api = FakeApi::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied && !out.recommended);
     assert!(out
         .rejections
@@ -637,7 +637,7 @@ fn run_cycle_preference_margin_regular_ev_wins() {
     let db = FakeDb::new();
     let api = FakeApi::new();
     let logger = FakeLogger::new();
-    let out = run_cycle(inputs, &db, &api, None, &planner, &logger);
+    let out = run_cycle(inputs, &db, &api, None, &planner, &logger).expect("cycle");
     assert!(!out.applied && !out.recommended);
     assert!(out.swap_id.is_none());
     assert!(out.rejections.iter().any(|r| r.gate == "preference_margin"));

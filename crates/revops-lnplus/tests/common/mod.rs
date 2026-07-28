@@ -7,13 +7,14 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use revops_lnplus::breaker::BreakerState;
+use revops_lnplus::breaker::{BreakerCause, BreakerState};
 use revops_lnplus::db_types::{PeerRow, SwapPatch, SwapRow};
 use revops_lnplus::error::LnPlusError;
 use revops_lnplus::ports::{
-    ChainPort, ChannelInfo, Feerate, FundChannelResult, IgnorePeerPort, LnPlusApi, LnPlusDb,
-    LogLevel, Logger, PeerPolicy, PlannerActionRequest, PlannerPort, PolicyPort, PortError,
-    PortResult, ReserveSpendRequest,
+    CasOutcome, ChainPort, ChannelInfo, CompoundOutcome, Feerate, FundChannelResult,
+    IgnorePeerPort, InsertOutcome, LnPlusApi, LnPlusDb, LogLevel, Logger, PeerPolicy,
+    PlannerActionRequest, PlannerPort, PolicyPort, PortError, PortResult, ReserveSpendRequest,
+    TerminalizeSpec, TripAck,
 };
 use revops_lnplus::types::{MySwaps, NotificationEntry, Rating, SwapDetail, SwapListing};
 
@@ -63,6 +64,28 @@ pub struct FakeDb {
     pub reserve_spend_result: RefCell<Option<PortResult<bool>>>,
     pub release_should_fail: RefCell<bool>,
     pub mark_spent_should_fail: RefCell<Option<u32>>, // Some(n) = fail n times then succeed
+    // -- Task 61 4A failure injection: `true` = the corresponding write
+    // (or fail-closed read) returns Err, exercising the acked-write
+    // contract in kernel callers.
+    pub fail_insert_swap: RefCell<bool>,
+    pub fail_cas_swap: RefCell<bool>,
+    pub fail_compound: RefCell<bool>,
+    pub fail_get_breaker: RefCell<bool>,
+    pub fail_set_breaker: RefCell<bool>,
+    pub fail_clear_breaker: RefCell<bool>,
+    pub fail_bump_peer: RefCell<bool>,
+    pub fail_set_config: RefCell<bool>,
+    pub fail_delete_config: RefCell<bool>,
+    pub fail_planner_actions: RefCell<bool>,
+    pub fail_prune: RefCell<bool>,
+}
+
+fn injected(flag: &RefCell<bool>, what: &str) -> PortResult<()> {
+    if *flag.borrow() {
+        Err(PortError::new(format!("injected {what} failure")))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,8 +109,19 @@ impl FakeDb {
         Self::default()
     }
 
+    /// Test seeding helper (NOT a trait method): unconditional insert or
+    /// overwrite, bypassing the typed-insert guard on purpose.
     pub fn insert(&self, row: SwapRow) {
         self.swaps.borrow_mut().insert(row.swap_id.clone(), row);
+    }
+
+    /// Test seeding/mutation helper (NOT a trait method): blind patch
+    /// apply, bypassing the CAS guard on purpose.
+    pub fn patch(&self, swap_id: &str, patch: &SwapPatch) {
+        let mut swaps = self.swaps.borrow_mut();
+        if let Some(row) = swaps.get_mut(swap_id) {
+            row.apply(patch);
+        }
     }
 
     pub fn action_status(&self, action_type: &str) -> Option<String> {
@@ -98,20 +132,52 @@ impl FakeDb {
             .find(|a| a.action_type == action_type)
             .map(|a| a.status.clone())
     }
+
+    /// The CAS core shared by the trait's `cas_swap` and the compound.
+    fn cas_inner(
+        &self,
+        swap_id: &str,
+        expected_statuses: &[&str],
+        require_null_funding_txid: bool,
+        patch: &SwapPatch,
+    ) -> CasOutcome {
+        let mut swaps = self.swaps.borrow_mut();
+        match swaps.get_mut(swap_id) {
+            None => CasOutcome::Conflict { actual: None },
+            Some(row) => {
+                if !expected_statuses.contains(&row.status.as_str())
+                    || (require_null_funding_txid && row.channel_funding_txid.is_some())
+                {
+                    return CasOutcome::Conflict {
+                        actual: Some(row.status.clone()),
+                    };
+                }
+                row.apply(patch);
+                CasOutcome::Applied
+            }
+        }
+    }
 }
 
 impl LnPlusDb for FakeDb {
-    fn record_swap(&self, row: &SwapRow) {
-        self.swaps
-            .borrow_mut()
-            .insert(row.swap_id.clone(), row.clone());
+    fn insert_swap_new(&self, row: &SwapRow) -> PortResult<InsertOutcome> {
+        injected(&self.fail_insert_swap, "insert_swap_new")?;
+        let mut swaps = self.swaps.borrow_mut();
+        if swaps.contains_key(&row.swap_id) {
+            return Ok(InsertOutcome::AlreadyExists);
+        }
+        swaps.insert(row.swap_id.clone(), row.clone());
+        Ok(InsertOutcome::Inserted)
     }
 
-    fn update_swap(&self, swap_id: &str, patch: &SwapPatch) {
-        let mut swaps = self.swaps.borrow_mut();
-        if let Some(row) = swaps.get_mut(swap_id) {
-            row.apply(patch);
-        }
+    fn cas_swap(
+        &self,
+        swap_id: &str,
+        expected_statuses: &[&str],
+        patch: &SwapPatch,
+    ) -> PortResult<CasOutcome> {
+        injected(&self.fail_cas_swap, "cas_swap")?;
+        Ok(self.cas_inner(swap_id, expected_statuses, false, patch))
     }
 
     fn get_swap(&self, swap_id: &str) -> Option<SwapRow> {
@@ -130,7 +196,8 @@ impl LnPlusDb for FakeDb {
         rows
     }
 
-    fn prune_terminal(&self, older_than_days: i64, now: i64) -> usize {
+    fn prune_terminal(&self, older_than_days: i64, now: i64) -> PortResult<usize> {
+        injected(&self.fail_prune, "prune_terminal")?;
         let cutoff = now - older_than_days * 86_400;
         let mut swaps = self.swaps.borrow_mut();
         let before = swaps.len();
@@ -138,14 +205,15 @@ impl LnPlusDb for FakeDb {
             let terminal = revops_lnplus::db_types::is_terminal_status(&r.status);
             !(terminal && r.applied_at < cutoff && r.ends_at.map(|e| e < cutoff).unwrap_or(true))
         });
-        before - swaps.len()
+        Ok(before - swaps.len())
     }
 
     fn get_peer(&self, pubkey: &str) -> Option<PeerRow> {
         self.peers.borrow().get(pubkey).cloned()
     }
 
-    fn bump_peer(&self, pubkey: &str, defection: bool, rating: Option<Rating>) {
+    fn bump_peer(&self, pubkey: &str, defection: bool, rating: Option<Rating>) -> PortResult<()> {
+        injected(&self.fail_bump_peer, "bump_peer")?;
         let mut peers = self.peers.borrow_mut();
         let entry = peers.entry(pubkey.to_string()).or_insert_with(|| PeerRow {
             pubkey: pubkey.to_string(),
@@ -160,31 +228,98 @@ impl LnPlusDb for FakeDb {
             Some(Rating::Negative) => entry.ratings_given_negative += 1,
             None => {}
         }
+        Ok(())
     }
 
     fn get_config_override(&self, key: &str) -> Option<String> {
         self.config.borrow().get(key).cloned()
     }
-    fn set_config_override(&self, key: &str, value: &str) {
+    fn set_config_override(&self, key: &str, value: &str) -> PortResult<()> {
+        injected(&self.fail_set_config, "set_config_override")?;
         self.config
             .borrow_mut()
             .insert(key.to_string(), value.to_string());
+        Ok(())
     }
-    fn delete_config_override(&self, key: &str) {
+    fn delete_config_override(&self, key: &str) -> PortResult<()> {
+        injected(&self.fail_delete_config, "delete_config_override")?;
         self.config.borrow_mut().remove(key);
+        Ok(())
     }
 
-    fn get_breaker(&self) -> Option<BreakerState> {
-        self.breaker.borrow().clone()
+    fn get_breaker(&self) -> PortResult<Option<BreakerState>> {
+        injected(&self.fail_get_breaker, "get_breaker")?;
+        Ok(self.breaker.borrow().clone())
     }
-    fn set_breaker(&self, state: &BreakerState) {
+    fn set_breaker(&self, state: &BreakerState) -> PortResult<()> {
+        injected(&self.fail_set_breaker, "set_breaker")?;
         *self.breaker.borrow_mut() = Some(state.clone());
+        Ok(())
     }
-    fn clear_breaker(&self) {
+    fn clear_breaker(&self) -> PortResult<()> {
+        injected(&self.fail_clear_breaker, "clear_breaker")?;
         *self.breaker.borrow_mut() = None;
+        Ok(())
     }
 
-    fn record_planner_action(&self, req: &PlannerActionRequest) -> i64 {
+    fn trip_breaker_if_untripped(&self, state: &BreakerState) -> PortResult<TripAck> {
+        injected(&self.fail_set_breaker, "trip_breaker_if_untripped")?;
+        let mut breaker = self.breaker.borrow_mut();
+        if breaker.is_some() {
+            Ok(TripAck::AlreadyTripped)
+        } else {
+            *breaker = Some(state.clone());
+            Ok(TripAck::NewTrip)
+        }
+    }
+
+    fn clear_breaker_if_cause(&self, expected: &BreakerCause) -> PortResult<bool> {
+        injected(&self.fail_clear_breaker, "clear_breaker_if_cause")?;
+        let mut breaker = self.breaker.borrow_mut();
+        match breaker.as_ref() {
+            Some(state) if &state.cause == expected => {
+                *breaker = None;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn terminalize_and_trip(
+        &self,
+        spec: &TerminalizeSpec<'_>,
+        patch: &SwapPatch,
+        cause: BreakerCause,
+        now: i64,
+    ) -> PortResult<CompoundOutcome> {
+        injected(&self.fail_compound, "terminalize_and_trip")?;
+        // In-memory, single-threaded: trivially atomic — apply the CAS,
+        // then the B10-preserving trip, with no partial state possible.
+        match self.cas_inner(
+            spec.swap_id,
+            spec.expected_statuses,
+            spec.require_null_funding_txid,
+            patch,
+        ) {
+            CasOutcome::Conflict { actual } => Ok(CompoundOutcome::Conflict { actual }),
+            CasOutcome::Applied => {
+                let mut breaker = self.breaker.borrow_mut();
+                let ack = if breaker.is_some() {
+                    TripAck::AlreadyTripped
+                } else {
+                    *breaker = Some(BreakerState {
+                        tripped_at: now,
+                        cause,
+                    });
+                    TripAck::NewTrip
+                };
+                Ok(CompoundOutcome::Terminalized { breaker: ack })
+            }
+        }
+    }
+
+    fn record_planner_action(&self, req: &PlannerActionRequest) -> PortResult<i64> {
+        injected(&self.fail_planner_actions, "record_planner_action")?;
         let mut id_cell = self.next_action_id.borrow_mut();
         *id_cell += 1;
         let id = *id_cell;
@@ -195,10 +330,11 @@ impl LnPlusDb for FakeDb {
             status: "pending".to_string(),
             reason: req.reason.clone(),
         });
-        id
+        Ok(id)
     }
 
-    fn update_planner_action(&self, action_id: i64, status: &str) {
+    fn update_planner_action(&self, action_id: i64, status: &str) -> PortResult<()> {
+        injected(&self.fail_planner_actions, "update_planner_action")?;
         if let Some(a) = self
             .planner_actions
             .borrow_mut()
@@ -207,6 +343,7 @@ impl LnPlusDb for FakeDb {
         {
             a.status = status.to_string();
         }
+        Ok(())
     }
 
     fn reserve_spend(&self, req: &ReserveSpendRequest) -> PortResult<bool> {

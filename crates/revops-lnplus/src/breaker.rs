@@ -25,7 +25,7 @@
 //! listing, ambiguous funded-channel divergences, and LN+ outages all
 //! require a human. This is the exact boundary the task spec draws.
 
-use crate::ports::{LnPlusDb, LogLevel, Logger};
+use crate::ports::{LnPlusDb, LogLevel, Logger, PortResult};
 
 /// Python's `config_overrides` key (py 664 `_BREAKER_KEY`), kept here only
 /// as documentation of the wire-compat key name a concrete `LnPlusDb`
@@ -142,56 +142,82 @@ pub fn maybe_auto_clear(existing: &BreakerState, still_reproducible: bool) -> bo
 /// DB-backed convenience wrapper over [`trip`]/[`maybe_auto_clear`] for
 /// production wiring; `reconcile.rs`'s tests exercise the pure functions
 /// directly.
-pub fn tripped_message(db: &dyn LnPlusDb) -> Option<String> {
-    db.get_breaker().map(|s| s.cause.message())
+///
+/// Task 61 4A: fail-closed — a breaker read/write failure propagates as
+/// `Err` so no caller can mistake "could not check the breaker" for
+/// "breaker is clear".
+pub fn tripped_message(db: &dyn LnPlusDb) -> PortResult<Option<String>> {
+    Ok(db.get_breaker()?.map(|s| s.cause.message()))
 }
 
-pub fn trip_and_persist(db: &dyn LnPlusDb, logger: &dyn Logger, cause: BreakerCause, now: i64) {
-    match trip(db.get_breaker(), cause, now) {
-        TripOutcome::NewTrip(state) => {
-            let msg = state.cause.message();
-            db.set_breaker(&state);
+/// Task 61 4A: the trip is the store's ATOMIC insert-if-absent primitive
+/// ([`LnPlusDb::trip_breaker_if_untripped`]) — B10 first-cause
+/// preservation is enforced in one transaction at the store, not by a
+/// racy read-then-write here.
+pub fn trip_and_persist(
+    db: &dyn LnPlusDb,
+    logger: &dyn Logger,
+    cause: BreakerCause,
+    now: i64,
+) -> PortResult<()> {
+    let msg = cause.message();
+    let state = BreakerState {
+        tripped_at: now,
+        cause,
+    };
+    match db.trip_breaker_if_untripped(&state)? {
+        crate::ports::TripAck::NewTrip => {
             logger.log(
                 LogLevel::Error,
                 &format!("LNPLUS: CIRCUIT BREAKER TRIPPED — {msg}"),
             );
         }
-        TripOutcome::AlreadyTripped(existing) => {
+        crate::ports::TripAck::AlreadyTripped => {
             logger.log(
                 LogLevel::Error,
                 &format!(
-                    "LNPLUS: CIRCUIT BREAKER TRIP — attempted trip suppressed (breaker already tripped: {})",
-                    existing.cause.message()
+                    "LNPLUS: CIRCUIT BREAKER TRIP — attempted trip suppressed (breaker already \
+                     tripped; first cause preserved; suppressed cause: {msg})"
                 ),
             );
         }
     }
+    Ok(())
 }
 
-pub fn clear_and_persist(db: &dyn LnPlusDb, logger: &dyn Logger) {
-    db.clear_breaker();
+pub fn clear_and_persist(db: &dyn LnPlusDb, logger: &dyn Logger) -> PortResult<()> {
+    db.clear_breaker()?;
     logger.log(
         LogLevel::Info,
         "LNPLUS: circuit breaker cleared by operator",
     );
+    Ok(())
 }
 
 /// Auto-clear entry point used by `reconcile.rs`: clears the breaker
 /// (logging distinctly from an operator-initiated clear) when the
 /// CURRENTLY tripped cause is reverifiable and `still_reproducible` is
-/// false. Returns `true` iff it actually cleared.
+/// false. Returns `Ok(true)` iff it actually cleared.
+///
+/// Task 61 4A: the clear is the store's ATOMIC exact-cause primitive
+/// ([`LnPlusDb::clear_breaker_if_cause`]) — automation can only remove
+/// the exact cause it re-verified, never whatever happens to be latched.
 pub fn auto_clear_if_resolved(
     db: &dyn LnPlusDb,
     logger: &dyn Logger,
     still_reproducible: bool,
-) -> bool {
-    let Some(state) = db.get_breaker() else {
-        return false;
+) -> PortResult<bool> {
+    let Some(state) = db.get_breaker()? else {
+        return Ok(false);
     };
     if !maybe_auto_clear(&state, still_reproducible) {
-        return false;
+        return Ok(false);
     }
-    db.clear_breaker();
+    if !db.clear_breaker_if_cause(&state.cause)? {
+        // The latched cause changed between the read and the clear —
+        // nothing was removed; the next pass re-evaluates from scratch.
+        return Ok(false);
+    }
     logger.log(
         LogLevel::Info,
         &format!(
@@ -199,7 +225,7 @@ pub fn auto_clear_if_resolved(
             state.cause.message()
         ),
     );
-    true
+    Ok(true)
 }
 
 #[cfg(test)]

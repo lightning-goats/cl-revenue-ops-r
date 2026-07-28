@@ -4,14 +4,16 @@
 //! four `_backfill_*` rule helpers (py 1030-1296).
 //!
 //! Common rule across every category: skip unconditionally if a local row
-//! for that `swap_id` already exists — `record_swap` is INSERT OR REPLACE
-//! and would otherwise clobber automation-owned state or resurrect a
-//! terminal row. This makes the whole function idempotent and safe to call
-//! any number of times.
+//! for that `swap_id` already exists. Since Task 61 4A this is enforced by
+//! the STORE, not just this module's pre-check: [`LnPlusDb::insert_swap_new`]
+//! is a typed INSERT whose `AlreadyExists` outcome leaves the stored row
+//! untouched, so a clobber/resurrection is structurally impossible even if
+//! the pre-check races. Each import is a single complete-row insert (every
+//! field persisted in one acknowledged write), and a persistence failure
+//! aborts the backfill with `Err` (fail closed).
 
-use crate::db_types::SwapPatch;
 use crate::error::LnPlusError;
-use crate::ports::{ChainPort, LnPlusApi, LnPlusDb, LogLevel, Logger};
+use crate::ports::{ChainPort, InsertOutcome, LnPlusApi, LnPlusDb, LogLevel, Logger, PortResult};
 use crate::types::{MySwapEntry, MySwaps, Rating, SwapDetail};
 use crate::validation::{parse_ts, valid_pubkey};
 
@@ -43,18 +45,36 @@ pub fn backfill_from_lnplus(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     now: i64,
-) -> BackfillResult {
+) -> PortResult<BackfillResult> {
     let mut result = BackfillResult::default();
     for entry in &my.pending {
-        backfill_pending(entry, now, db, api, logger, &mut result);
+        backfill_pending(entry, now, db, api, logger, &mut result)?;
     }
     for entry in &my.opening {
-        backfill_opening(entry, now, db, api, logger, &mut result);
+        backfill_opening(entry, now, db, api, logger, &mut result)?;
     }
     for entry in &my.completed {
-        backfill_completed(entry, now, db, api, chain, logger, &mut result);
+        backfill_completed(entry, now, db, api, chain, logger, &mut result)?;
     }
-    result
+    Ok(result)
+}
+
+/// The shared insert tail: a typed complete-row insert whose
+/// `AlreadyExists` is a skip (never a clobber), and whose persistence
+/// failure aborts the backfill.
+fn insert_import(
+    row: crate::db_types::SwapRow,
+    db: &dyn LnPlusDb,
+    result: &mut BackfillResult,
+) -> PortResult<bool> {
+    let sid = row.swap_id.clone();
+    match db.insert_swap_new(&row)? {
+        InsertOutcome::Inserted => Ok(true),
+        InsertOutcome::AlreadyExists => {
+            result.skipped.push(sid);
+            Ok(false)
+        }
+    }
 }
 
 fn resolve_capacity_duration(
@@ -98,28 +118,29 @@ fn backfill_pending(
     api: &dyn LnPlusApi,
     logger: &dyn Logger,
     result: &mut BackfillResult,
-) {
+) -> PortResult<()> {
     let sid = &entry.id;
     if sid.is_empty() {
-        return;
+        return Ok(());
     }
     if db.get_swap(sid).is_some() {
         result.skipped.push(sid.clone());
-        return;
+        return Ok(());
     }
     let (capacity, duration) = resolve_capacity_duration(entry, sid, api, &mut result.warnings);
-    db.record_swap(&crate::db_types::SwapRow::new(
-        sid.clone(),
-        "applied",
-        capacity,
-        duration,
-        now,
-    ));
+    if !insert_import(
+        crate::db_types::SwapRow::new(sid.clone(), "applied", capacity, duration, now),
+        db,
+        result,
+    )? {
+        return Ok(());
+    }
     logger.log(
         LogLevel::Info,
         &format!("LNPLUS: backfill — imported pending swap {sid} ({capacity} sats, {duration}mo); pending-timeout clock starts now"),
     );
     result.imported.pending += 1;
+    Ok(())
 }
 
 /// Rule 2 (py 1082-1118): opening row.
@@ -130,14 +151,14 @@ fn backfill_opening(
     api: &dyn LnPlusApi,
     logger: &dyn Logger,
     result: &mut BackfillResult,
-) {
+) -> PortResult<()> {
     let sid = &entry.id;
     if sid.is_empty() {
-        return;
+        return Ok(());
     }
     if db.get_swap(sid).is_some() {
         result.skipped.push(sid.clone());
-        return;
+        return Ok(());
     }
     let (capacity, duration) = resolve_capacity_duration(entry, sid, api, &mut result.warnings);
     let outbound_peer = entry
@@ -159,17 +180,20 @@ fn backfill_opening(
             ));
             now + 48 * 3600
         });
-    let mut row = crate::db_types::SwapRow::new(sid.clone(), "opening", capacity, duration, now);
+    let mut row = crate::db_types::SwapRow::new(sid.clone(), "opening", capacity, duration, now)
+        .with_deadline_at(deadline_ts);
     if let Some(p) = outbound_peer {
         row = row.with_outbound_peer(p);
     }
-    db.record_swap(&row);
-    db.update_swap(sid, &SwapPatch::default().deadline_at(deadline_ts));
+    if !insert_import(row, db, result)? {
+        return Ok(());
+    }
     logger.log(
         LogLevel::Info,
         &format!("LNPLUS: backfill — imported opening swap {sid} ({capacity} sats)"),
     );
     result.imported.opening += 1;
+    Ok(())
 }
 
 fn backfill_completed(
@@ -180,14 +204,14 @@ fn backfill_completed(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     result: &mut BackfillResult,
-) {
+) -> PortResult<()> {
     let sid = &entry.id;
     if sid.is_empty() {
-        return;
+        return Ok(());
     }
     if db.get_swap(sid).is_some() {
         result.skipped.push(sid.clone());
-        return;
+        return Ok(());
     }
     let ends_ts = entry.ends.as_ref().and_then(parse_ts);
     let incoming_peer = entry
@@ -212,14 +236,14 @@ fn backfill_completed(
             chain,
             logger,
             result,
-        );
+        )
     } else {
         if ends_ts.is_none() {
             result.warnings.push(format!(
                 "swap {sid}: completed entry has no parseable 'ends' — importing as ended anyway"
             ));
         }
-        backfill_ended_contract(sid, entry, ends_ts, incoming_peer, now, db, logger, result);
+        backfill_ended_contract(sid, entry, ends_ts, incoming_peer, now, db, logger, result)
     }
 }
 
@@ -237,7 +261,7 @@ fn backfill_running_contract(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     result: &mut BackfillResult,
-) {
+) -> PortResult<()> {
     let (outbound_peer, detail) = derive_outbound_for_import(sid, api, chain, logger);
     let capacity = entry
         .capacity_sats
@@ -249,15 +273,17 @@ fn backfill_running_contract(
             0
         });
     let duration = entry.duration_months.unwrap_or(0);
-    let mut row = crate::db_types::SwapRow::new(sid.to_string(), "opened", capacity, duration, now);
+    let mut row = crate::db_types::SwapRow::new(sid.to_string(), "opened", capacity, duration, now)
+        .with_ends_at(ends_ts);
     if let Some(p) = &outbound_peer {
         row = row.with_outbound_peer(p.clone());
     }
     if let Some(p) = incoming_peer {
         row = row.with_incoming_peer(p);
     }
-    db.record_swap(&row);
-    db.update_swap(sid, &SwapPatch::default().ends_at(ends_ts));
+    if !insert_import(row, db, result)? {
+        return Ok(());
+    }
     logger.log(
         LogLevel::Info,
         &format!(
@@ -266,6 +292,7 @@ fn backfill_running_contract(
         ),
     );
     result.imported.active += 1;
+    Ok(())
 }
 
 /// py `_derive_outbound_for_import` (1177-1232). Fetch `get_swap(sid)`,
@@ -352,7 +379,7 @@ fn backfill_ended_contract(
     db: &dyn LnPlusDb,
     logger: &dyn Logger,
     result: &mut BackfillResult,
-) {
+) -> PortResult<()> {
     let capacity = entry.capacity_sats.unwrap_or_else(|| {
         result.warnings.push(format!(
             "swap {sid}: capacity_sats unknown on import (defaulted to 0)"
@@ -361,23 +388,25 @@ fn backfill_ended_contract(
     });
     let duration = entry.duration_months.unwrap_or(0);
     let mut row = crate::db_types::SwapRow::new(sid.to_string(), "ended", capacity, duration, now);
+    row.outcome = Some("imported_pre_automation".to_string());
+    if let Some(ends_ts) = ends_ts {
+        row = row.with_ends_at(ends_ts);
+    }
     if let Some(p) = incoming_peer {
         row = row.with_incoming_peer(p);
     }
-    db.record_swap(&row);
-    let mut patch = SwapPatch::default().outcome("imported_pre_automation");
-    if let Some(ends_ts) = ends_ts {
-        patch = patch.ends_at(ends_ts);
+    if !insert_import(row, db, result)? {
+        return Ok(());
     }
-    db.update_swap(sid, &patch);
     logger.log(
         LogLevel::Info,
         &format!("LNPLUS: backfill — imported ended contract {sid} (no rating filed — still-open heuristic is only valid at contract end)"),
     );
     if let Some(peer) = incoming_peer {
-        db.bump_peer(peer, false, None::<Rating>);
+        db.bump_peer(peer, false, None::<Rating>)?;
     }
     result.imported.ended += 1;
+    Ok(())
 }
 
 /// Re-exported so `reconcile.rs` can name the specific error type without

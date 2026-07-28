@@ -76,33 +76,104 @@ pub struct ReserveSpendRequest {
     pub since_timestamp: Option<i64>,
 }
 
+/// Acknowledged outcome of [`LnPlusDb::insert_swap_new`]: creating a row
+/// is typed, never an `INSERT OR REPLACE` that can silently clobber
+/// automation-owned state (Task 61 4A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    /// A row with this `swap_id` already exists. The existing row is
+    /// untouched — the caller decides whether that is a skip (backfill)
+    /// or an invariant violation (evaluator intent rows).
+    AlreadyExists,
+}
+
+/// Acknowledged outcome of [`LnPlusDb::cas_swap`]: a lifecycle patch
+/// applies only from an expected status (compare-and-set on the one
+/// column every transition is keyed by), so a stale writer can never
+/// blindly overwrite a row that has since moved on (Task 61 4A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CasOutcome {
+    Applied,
+    /// Nothing was written. `actual` is the row's current status, `None`
+    /// when no row with that `swap_id` exists at all.
+    Conflict {
+        actual: Option<String>,
+    },
+}
+
+/// The compound guard for [`LnPlusDb::terminalize_and_trip`]: which
+/// statuses the row may be in, and whether an already-recorded funding
+/// txid vetoes the terminalization (the deadline-miss guard: a funded
+/// row must never be failed out from under its channel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalizeSpec<'a> {
+    pub swap_id: &'a str,
+    pub expected_statuses: &'a [&'a str],
+    pub require_null_funding_txid: bool,
+}
+
+/// How the breaker half of a compound landed: a fresh trip, or B10
+/// first-cause preservation (the breaker was already tripped and its
+/// original cause is untouched).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TripAck {
+    NewTrip,
+    AlreadyTripped,
+}
+
+/// Acknowledged outcome of [`LnPlusDb::terminalize_and_trip`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompoundOutcome {
+    /// The row terminalized AND the breaker state advanced, in one
+    /// atomic transaction.
+    Terminalized { breaker: TripAck },
+    /// The guard did not hold (wrong status, or a funding txid exists
+    /// where the spec forbids one). NOTHING was written — no row change,
+    /// no breaker change.
+    Conflict { actual: Option<String> },
+}
+
 /// The local SQLite ledger (`database.py`'s `lnplus_*` methods +
 /// budget-rail methods this module calls). Deliberately one trait per
 /// concern would fragment fakes across too many mocks for tests that
 /// exercise a whole gate chain — Python's `self._db` is one object too.
+///
+/// Task 61 4A: every lifecycle write on this trait is FALLIBLE and
+/// ACKNOWLEDGED — an implementation must surface a persistence failure
+/// as `Err`, never swallow it into a log line and return as if the write
+/// happened. Row creation is a typed insert, row mutation is a CAS
+/// transition, and the compound terminal+breaker change is atomic.
 pub trait LnPlusDb {
     // -- swap ledger --------------------------------------------------
-    /// py `lnplus_record_swap` — INSERT OR REPLACE (idempotent on
-    /// `swap_id`; a second call with the same id overwrites the row,
-    /// which is exactly what backfill's "skip if a row already exists"
-    /// guard is designed to avoid triggering unintentionally).
-    fn record_swap(&self, row: &SwapRow);
-    fn update_swap(&self, swap_id: &str, patch: &SwapPatch);
+    /// Typed INSERT of a complete [`SwapRow`] (every field persisted in
+    /// this one write). Never overwrites: an existing `swap_id` returns
+    /// [`InsertOutcome::AlreadyExists`] with the stored row untouched.
+    fn insert_swap_new(&self, row: &SwapRow) -> PortResult<InsertOutcome>;
+    /// Compare-and-set lifecycle transition: `patch` applies iff the
+    /// row's current status is one of `expected_statuses`; otherwise a
+    /// typed [`CasOutcome::Conflict`] with nothing written.
+    fn cas_swap(
+        &self,
+        swap_id: &str,
+        expected_statuses: &[&str],
+        patch: &SwapPatch,
+    ) -> PortResult<CasOutcome>;
     fn get_swap(&self, swap_id: &str) -> Option<SwapRow>;
     fn get_swaps_by_status(&self, statuses: &[&str]) -> Vec<SwapRow>;
     fn inflight_swaps(&self) -> Vec<SwapRow> {
         self.get_swaps_by_status(&crate::db_types::INFLIGHT_STATUSES)
     }
-    fn prune_terminal(&self, older_than_days: i64, now: i64) -> usize;
+    fn prune_terminal(&self, older_than_days: i64, now: i64) -> PortResult<usize>;
 
     // -- peer reputation ------------------------------------------------
     fn get_peer(&self, pubkey: &str) -> Option<PeerRow>;
-    fn bump_peer(&self, pubkey: &str, defection: bool, rating: Option<Rating>);
+    fn bump_peer(&self, pubkey: &str, defection: bool, rating: Option<Rating>) -> PortResult<()>;
 
     // -- backfill flag (config_overrides) ------------------------------
     fn get_config_override(&self, key: &str) -> Option<String>;
-    fn set_config_override(&self, key: &str, value: &str);
-    fn delete_config_override(&self, key: &str);
+    fn set_config_override(&self, key: &str, value: &str) -> PortResult<()>;
+    fn delete_config_override(&self, key: &str) -> PortResult<()>;
 
     // -- circuit breaker --------------------------------------------------
     // Dedicated (rather than routed through `*_config_override`) so the
@@ -111,14 +182,50 @@ pub trait LnPlusDb {
     // crate inventing a serialization format. A concrete implementation is
     // free to persist it into the same `_lnplus_breaker` config_overrides
     // row Python uses, encoded however it likes — see ENTRYPOINTS.md.
-    fn get_breaker(&self) -> Option<crate::breaker::BreakerState>;
-    fn set_breaker(&self, state: &crate::breaker::BreakerState);
-    fn clear_breaker(&self);
+    //
+    // Task 61 4A: the read fails CLOSED — a persisted value the
+    // implementation cannot decode is `Err` (corruption evidence), never
+    // silently "untripped".
+    fn get_breaker(&self) -> PortResult<Option<crate::breaker::BreakerState>>;
+    /// Operator-path unconditional write (last-writer-wins). Production
+    /// TRIP paths must use [`LnPlusDb::trip_breaker_if_untripped`] instead
+    /// — this method cannot preserve a first cause.
+    fn set_breaker(&self, state: &crate::breaker::BreakerState) -> PortResult<()>;
+    /// Operator-path unconditional clear ("clear whatever is latched" IS
+    /// the operator's intent). Automation must use
+    /// [`LnPlusDb::clear_breaker_if_cause`].
+    fn clear_breaker(&self) -> PortResult<()>;
+    /// ATOMIC insert-if-absent trip (Task 61 4A): persists `state` iff no
+    /// breaker is currently latched, in one transaction — the B10
+    /// first-cause guarantee at the STORE level, not just in caller logic.
+    /// An existing undecodable value is `Err` (fail closed).
+    fn trip_breaker_if_untripped(
+        &self,
+        state: &crate::breaker::BreakerState,
+    ) -> PortResult<TripAck>;
+    /// ATOMIC exact-cause clear (Task 61 4A): clears iff the currently
+    /// latched cause equals `expected` — an auto-clear can only remove the
+    /// exact cause it re-verified, never whatever happens to be latched.
+    /// Returns `Ok(true)` iff it cleared. Undecodable persisted value is
+    /// `Err` (fail closed).
+    fn clear_breaker_if_cause(&self, expected: &crate::breaker::BreakerCause) -> PortResult<bool>;
+
+    /// ATOMIC compound: CAS-terminalize the row per `spec`/`patch` AND
+    /// advance the breaker (trip with B10 first-cause preservation) in
+    /// one transaction. Either both land or neither does — a failure on
+    /// either half rolls the other back and returns `Err`.
+    fn terminalize_and_trip(
+        &self,
+        spec: &TerminalizeSpec<'_>,
+        patch: &SwapPatch,
+        cause: crate::breaker::BreakerCause,
+        now: i64,
+    ) -> PortResult<CompoundOutcome>;
 
     // -- planner-action breadcrumbs --------------------------------------
     /// Returns the new action id.
-    fn record_planner_action(&self, req: &PlannerActionRequest) -> i64;
-    fn update_planner_action(&self, action_id: i64, status: &str);
+    fn record_planner_action(&self, req: &PlannerActionRequest) -> PortResult<i64>;
+    fn update_planner_action(&self, action_id: i64, status: &str) -> PortResult<()>;
 
     // -- unified budget rail ----------------------------------------------
     fn reserve_spend(&self, req: &ReserveSpendRequest) -> PortResult<bool>;

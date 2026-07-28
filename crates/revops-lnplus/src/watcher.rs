@@ -19,7 +19,10 @@ use crate::breaker;
 use crate::db_types::{SwapPatch, TERMINAL_PENDING_GHOST_STATUSES};
 use crate::finalize;
 use crate::open::{self, OpenExecParams};
-use crate::ports::{ChainPort, IgnorePeerPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PolicyPort};
+use crate::ports::{
+    CasOutcome, ChainPort, IgnorePeerPort, LnPlusApi, LnPlusDb, LogLevel, Logger, PolicyPort,
+    PortResult,
+};
 use crate::reconcile;
 use crate::types::NotificationEntry;
 use crate::validation::{parse_ts, valid_pubkey};
@@ -41,6 +44,9 @@ pub struct WatcherSummary {
     pub skipped: Option<String>,
 }
 
+/// Task 61 4A: a ledger persistence failure anywhere in the pass aborts
+/// with `Err` (fail closed) — the owner records the pass as failed and
+/// the next pass retries from durable state.
 #[allow(clippy::too_many_arguments)]
 pub fn run_watcher_once(
     db: &dyn LnPlusDb,
@@ -52,7 +58,7 @@ pub fn run_watcher_once(
     open_exec: &OpenExecParams,
     pending_timeout_days: i64,
     now: i64,
-) -> WatcherSummary {
+) -> PortResult<WatcherSummary> {
     let mut summary = WatcherSummary::default();
 
     // Phase 1: fetch live state. An outage must not stall a funded
@@ -77,17 +83,17 @@ pub fn run_watcher_once(
                 chain,
                 logger,
                 now,
-            );
-            prune_terminal(db, logger, now);
-            finalize::retry_pending_ratings(db, api, logger, now);
-            return summary;
+            )?;
+            prune_terminal(db, logger, now)?;
+            finalize::retry_pending_ratings(db, api, logger, now)?;
+            return Ok(summary);
         }
     };
 
     // Phase 2: reconcile (choke point + divergence checks; breaker does
     // not block the phases below).
-    reconcile::maybe_run_backfill_once(&my, db, api, chain, logger, now);
-    reconcile::reconcile(&my, db, api, logger, now);
+    reconcile::maybe_run_backfill_once(&my, db, api, chain, logger, now)?;
+    reconcile::reconcile(&my, db, api, logger, now)?;
 
     // Phase 3: entries LN+ shows as filled/opening.
     let mut processed_opening_ids = BTreeSet::new();
@@ -148,10 +154,21 @@ pub fn run_watcher_once(
             }
             None => {}
         }
-        db.update_swap(&sid, &patch);
+        if let CasOutcome::Conflict { actual } =
+            db.cas_swap(&sid, &["applied", "opening"], &patch)?
+        {
+            logger.log(
+                LogLevel::Warn,
+                &format!(
+                    "LNPLUS: swap {sid} moved (now {actual:?}) before its opening patch — \
+                     skipping this pass"
+                ),
+            );
+            continue;
+        }
         let row = db.get_swap(&sid).unwrap_or(row);
         let opened_now =
-            open::execute_swap_open(&row, Some(entry), open_exec, db, api, chain, logger, now);
+            open::execute_swap_open(&row, Some(entry), open_exec, db, api, chain, logger, now)?;
         processed_opening_ids.insert(sid.clone());
         if opened_now {
             summary.opened.push(sid);
@@ -182,7 +199,7 @@ pub fn run_watcher_once(
         chain,
         logger,
         now,
-    );
+    )?;
 
     // Phase 4: swaps LN+ reports completed -> activate protection.
     let completed_by_id: BTreeMap<&str, _> = my
@@ -204,7 +221,7 @@ pub fn run_watcher_once(
             db,
             policy,
             logger,
-        );
+        )?;
         summary.activated.push(sid);
     }
 
@@ -214,7 +231,7 @@ pub fn run_watcher_once(
         let due = row.ends_at.map(|e| now >= e).unwrap_or(false);
         if due {
             // Defect #1 fix consumed here: only push when actually finalized.
-            let outcome = finalize::finalize(&row, db, api, policy, ignore_peer, chain, logger);
+            let outcome = finalize::finalize(&row, db, api, policy, ignore_peer, chain, logger)?;
             if outcome.is_finalized() {
                 summary.finalized.push(sid);
             }
@@ -228,10 +245,11 @@ pub fn run_watcher_once(
                     &sid,
                     incoming_peer,
                     TagColumn::Incoming,
+                    &["active"],
                     db,
                     policy,
                     logger,
-                );
+                )?;
             }
         }
         if row.tag_added.is_none() {
@@ -240,10 +258,11 @@ pub fn run_watcher_once(
                     &sid,
                     outbound_peer,
                     TagColumn::Outbound,
+                    &["active"],
                     db,
                     policy,
                     logger,
-                );
+                )?;
             }
         }
         activate::check_mid_contract_vanish(&row, chain, logger);
@@ -251,13 +270,13 @@ pub fn run_watcher_once(
 
     // Phase 6: applications that timed out still pending.
     summary.withdrawn =
-        withdrawal::handle_pending_timeouts(&my, db, api, logger, pending_timeout_days, now);
+        withdrawal::handle_pending_timeouts(&my, db, api, logger, pending_timeout_days, now)?;
 
     // Phase 7: cheap terminal-row pruning + rating retries.
-    prune_terminal(db, logger, now);
-    finalize::retry_pending_ratings(db, api, logger, now);
+    prune_terminal(db, logger, now)?;
+    finalize::retry_pending_ratings(db, api, logger, now)?;
 
-    summary
+    Ok(summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -271,7 +290,7 @@ fn phase_3b(
     chain: &dyn ChainPort,
     logger: &dyn Logger,
     now: i64,
-) {
+) -> PortResult<()> {
     for row in db.get_swaps_by_status(&["opening"]) {
         let sid = row.swap_id.clone();
         if processed_opening_ids.contains(&sid) {
@@ -289,20 +308,22 @@ fn phase_3b(
                 continue;
             }
         }
-        if open::execute_swap_open(&row, None, open_exec, db, api, chain, logger, now) {
+        if open::execute_swap_open(&row, None, open_exec, db, api, chain, logger, now)? {
             summary.opened.push(sid);
         }
     }
+    Ok(())
 }
 
-fn prune_terminal(db: &dyn LnPlusDb, logger: &dyn Logger, now: i64) {
-    let pruned = db.prune_terminal(180, now);
+fn prune_terminal(db: &dyn LnPlusDb, logger: &dyn Logger, now: i64) -> PortResult<()> {
+    let pruned = db.prune_terminal(180, now)?;
     if pruned > 0 {
         logger.log(
             LogLevel::Debug,
             &format!("LNPLUS: pruned {pruned} terminal swap row(s)"),
         );
     }
+    Ok(())
 }
 
 /// py `_poll_notifications` (2089-2112). Observability only: no
@@ -362,7 +383,7 @@ pub struct StatusSnapshot {
     pub backfill_done: bool,
 }
 
-pub fn get_status(db: &dyn LnPlusDb) -> StatusSnapshot {
+pub fn get_status(db: &dyn LnPlusDb) -> PortResult<StatusSnapshot> {
     let mut recent_ended = db.get_swaps_by_status(&["ended"]);
     if recent_ended.len() > 10 {
         recent_ended = recent_ended.split_off(recent_ended.len() - 10);
@@ -371,12 +392,12 @@ pub fn get_status(db: &dyn LnPlusDb) -> StatusSnapshot {
     if recent_failed.len() > 5 {
         recent_failed = recent_failed.split_off(recent_failed.len() - 5);
     }
-    StatusSnapshot {
-        breaker: breaker::tripped_message(db),
+    Ok(StatusSnapshot {
+        breaker: breaker::tripped_message(db)?,
         inflight: db.inflight_swaps(),
         active: db.get_swaps_by_status(&["active"]),
         recent_ended,
         recent_failed,
         backfill_done: db.get_config_override(reconcile::BACKFILL_FLAG).is_some(),
-    }
+    })
 }
