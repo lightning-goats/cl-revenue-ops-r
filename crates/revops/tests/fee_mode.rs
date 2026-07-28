@@ -533,3 +533,114 @@ fn live_row_legacy_unbound_seeded_event_must_not_authorize() {
         "a legacy UNBOUND 'seeded' row must never mint live authority: {result:?}"
     );
 }
+
+/// F-R4 integration seam: the EXACT `SeedBindingState` derived by
+/// `fee_runway::verified_seed_binding` from a real store with a
+/// post-success refusal — not a hand-built `Invalid` — must deny BOTH
+/// the autonomous-shadow row and the live row. This enforces the
+/// implementation seam between derivation and mode authorization
+/// instead of inferring it from separate unit tests.
+#[test]
+fn db_derived_post_success_refusal_denies_both_shadow_and_live() {
+    use revops_db::fee_runway::{
+        commit_fee_cycle, load_latest_state, record_seed_refusal, verified_seed_binding,
+        FeeCycleCommit, FeeSeedEventRow, FeeStateRow,
+    };
+    use revops_db::notifications::init_schema;
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+
+    // A real, fully valid bound bootstrap...
+    commit_fee_cycle(
+        &conn,
+        &FeeCycleCommit {
+            cycle_id: "seam-bootstrap-cycle".to_string(),
+            started_at: 1_800_000_000,
+            completed_at: 1_800_000_000,
+            source_commit: SOURCE_COMMIT.to_string(),
+            binary_sha256: "0".repeat(64),
+            state_rows: vec![FeeStateRow {
+                channel_id: "700x1x0".to_string(),
+                v2_state_json: "{}".to_string(),
+                last_update: 1_800_000_000,
+            }],
+            pending_seed: Some(FeeSeedEventRow {
+                seeded_at: 1_800_000_000,
+                outcome: "seeded".to_string(),
+                source_db_path: "/prod/revenue_ops.db".to_string(),
+                source_max_last_update: 1_799_999_000,
+                row_count: 1,
+                payload_sha256: "ab".repeat(32),
+                source_commit: SOURCE_COMMIT.to_string(),
+                refused_channel: None,
+                refused_field: None,
+                detail: None,
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // ...followed by a refusal recorded AFTER the success.
+    record_seed_refusal(
+        &conn,
+        &FeeSeedEventRow {
+            seeded_at: 1_800_000_100,
+            outcome: "seed_refused".to_string(),
+            source_db_path: "/prod/revenue_ops.db".to_string(),
+            source_max_last_update: 1_799_999_500,
+            row_count: 1,
+            payload_sha256: "cd".repeat(32),
+            source_commit: SOURCE_COMMIT.to_string(),
+            refused_channel: Some("700x1x0".to_string()),
+            refused_field: Some("thompson_state".to_string()),
+            detail: None,
+        },
+    )
+    .unwrap();
+
+    // The exact derived value and the exact real state snapshot.
+    let binding = verified_seed_binding(&conn).unwrap();
+    assert!(
+        matches!(binding, SeedBindingState::Invalid { ref reason } if reason.contains("AFTER")),
+        "the derivation itself must call this conflicting: {binding:?}"
+    );
+    let state = load_latest_state(&conn).unwrap();
+    assert_eq!(state.generation, 1);
+
+    // Autonomous shadow: denied.
+    let shadow = validate_fee_mode(
+        ModeFlags {
+            observer: true,
+            fee_dryrun: true,
+            fee_broadcast: false,
+            fee_stateful_shadow: true,
+        },
+        None,
+        &state,
+        &binding,
+    );
+    assert!(
+        matches!(shadow, Err(FeeModeDenyReason::SeedProvenanceInvalid(_))),
+        "shadow must deny the DB-derived post-success-refusal state: {shadow:?}"
+    );
+
+    // Live: denied, even with a genuinely valid consumed arm.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let arm = real_consumed_arm(tmp.path(), "seam-refusal-nonce");
+    let live = validate_fee_mode(
+        ModeFlags {
+            observer: false,
+            fee_dryrun: false,
+            fee_broadcast: true,
+            fee_stateful_shadow: false,
+        },
+        Some(arm),
+        &state,
+        &binding,
+    );
+    assert!(
+        matches!(live, Err(FeeModeDenyReason::SeedProvenanceInvalid(_))),
+        "live must deny the DB-derived post-success-refusal state: {live:?}"
+    );
+}

@@ -2048,6 +2048,22 @@ impl CycleOwner {
         }
     }
 
+    /// Task 42 (F-R2 complete matrix): THE single admissibility gate for
+    /// every out-of-cycle generation-advancing commit path. `None` means
+    /// admissible (bootstrap `Ready`); `Some(state)` carries the exact
+    /// refusing state for the path's receipt. Both production guards (A3
+    /// new-channel, failed-forward nudge) delegate here, so a
+    /// state-window hole cannot be opened on one path without mutating
+    /// the shared gate itself.
+    fn out_of_cycle_commit_refusal(&self) -> Option<SeedOnceBootstrapState> {
+        let bootstrap = self.bootstrap_state();
+        if bootstrap == SeedOnceBootstrapState::Ready {
+            None
+        } else {
+            Some(bootstrap)
+        }
+    }
+
     /// Task 42: the autonomous (`SeedOnce`) mempool-evidence refresh,
     /// run BEFORE the evidence snapshot freezes. Mirrors the Python
     /// recorder gate (`record_mempool_fee`'s call site: Vegas Reflex
@@ -2668,8 +2684,7 @@ impl CycleOwner {
         // Task 42 correction F2 (fail-closed): same admissibility rule as
         // the A3 new-channel guard — out-of-cycle commits only once the
         // SeedOnce bootstrap is complete (see `bootstrap_state`).
-        let bootstrap = self.bootstrap_state();
-        if bootstrap != SeedOnceBootstrapState::Ready {
+        if let Some(bootstrap) = self.out_of_cycle_commit_refusal() {
             eprintln!(
                 "revops: FAILED-FORWARD NUDGE REFUSED (fail-closed): SeedOnce bootstrap \
                  is {bootstrap:?} (channel {channel_id} at {now})"
@@ -3114,8 +3129,7 @@ impl CycleOwner {
         // skips the complete Python import FOREVER); while provenance is
         // pending it would take the generation the seed is bound to and
         // orphan it permanently. Refuse; the event replays later.
-        let bootstrap = self.bootstrap_state();
-        if bootstrap != SeedOnceBootstrapState::Ready {
+        if let Some(bootstrap) = self.out_of_cycle_commit_refusal() {
             eprintln!(
                 "revops: A3 NEW-CHANNEL REFUSED (fail-closed): SeedOnce bootstrap is \
                  {bootstrap:?}; no out-of-cycle commit may run before a complete, \

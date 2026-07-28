@@ -2213,6 +2213,232 @@ mod seedonce_restart {
         h.assert_seed_indivisible("after bootstrap following pre-hydration nudges");
     }
 
+    /// F-R2 refined: the failed-forward guard's REFUSED window. A real
+    /// seed refusal (poisoned Python blob) puts the bootstrap in
+    /// `Refused`; a nudge must be refused by the BOOTSTRAP guard
+    /// (receipt names the state — the no-posterior skip cannot mask a
+    /// Refused-only hole) with generation/state/request/provenance all
+    /// unchanged. Refusal is PROCESS-LIFETIME by design ("restart to
+    /// re-attempt"): after restart the state is `NotStarted`, and the
+    /// nudge is still refused by that window instead.
+    #[test]
+    fn failed_forward_in_the_refused_window_is_refused_by_the_bootstrap_guard() {
+        use revops::fee_scheduler::SeedOnceBootstrapState;
+
+        let mut h = seedonce_harness_with_one_channel();
+        h.prod_conn()
+            .execute(
+                "UPDATE fee_strategy_state SET v2_state_json = ?1 WHERE channel_id = ?2",
+                rusqlite::params![
+                    r#"{"fee_state": {"algorithm_version": "dts_pid_v1", "thompson_state": {"_last_fee_min": "not-a-number"}}, "cycle_state": {}}"#,
+                    CHANNEL
+                ],
+            )
+            .expect("poison python blob");
+        let outcome = h.run_cycle();
+        assert_eq!(
+            outcome,
+            CycleOutcome::SkippedStateUnavailable,
+            "{outcome:?}"
+        );
+        assert_eq!(
+            h.owner.bootstrap_state(),
+            SeedOnceBootstrapState::Refused,
+            "a real refusal puts the bootstrap in Refused"
+        );
+        let seed_rows_before = h.seed_event_count();
+
+        let latest_ff_detail = |h: &SeedOnceHarness| -> Option<String> {
+            h.store_conn()
+                .query_row(
+                    "SELECT detail FROM rust_fee_trigger_events \
+                     WHERE trigger_type = 'failed_forward' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok()
+        };
+
+        h.owner
+            .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 5));
+        let detail = latest_ff_detail(&h).expect("a refusal receipt was recorded");
+        assert!(
+            detail.contains("bootstrap") && detail.contains("Refused"),
+            "the refusal must come from the BOOTSTRAP guard in the Refused window, \
+             got: {detail}"
+        );
+        assert_eq!(h.generation(), 0, "no generation movement");
+        assert_eq!(h.state_row_count(), 0, "no durable state");
+        assert!(h.state().fee_states.is_empty(), "no in-memory adoption");
+        let requests: i64 = h
+            .store_conn()
+            .query_row("SELECT COUNT(*) FROM rust_fee_requests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(requests, 0, "no action of any kind");
+        assert_eq!(
+            h.seed_event_count(),
+            seed_rows_before,
+            "provenance unchanged (exactly the one refusal row, nothing new)"
+        );
+
+        // Process-lifetime semantics, tested explicitly: a fresh process
+        // is NotStarted (may re-attempt against the current snapshot),
+        // and the nudge is refused by THAT window until a real bootstrap.
+        h.restart();
+        assert_eq!(
+            h.owner.bootstrap_state(),
+            SeedOnceBootstrapState::NotStarted,
+            "refusal is process-lifetime; restart re-attempts"
+        );
+        h.owner
+            .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 6));
+        let detail = latest_ff_detail(&h).expect("post-restart refusal receipt");
+        assert!(
+            detail.contains("bootstrap") && detail.contains("NotStarted"),
+            "post-restart the NotStarted window refuses: {detail}"
+        );
+        assert_eq!(h.generation(), 0);
+    }
+
+    /// F-R2 COMPLETE state x path matrix: every non-Ready bootstrap state
+    /// must refuse BOTH out-of-cycle commit paths (failed-forward nudge
+    /// and A3 new-channel), each refusal receipt naming the exact state;
+    /// Ready admits both (positive controls). Per-path narrow mutants
+    /// (opening one state's window on one path) red exactly their cell.
+    #[test]
+    fn bootstrap_gate_matrix_refuses_every_non_ready_state_on_both_paths() {
+        use revops::fee_scheduler::SeedOnceBootstrapState as B;
+
+        fn harness_in(state: B) -> SeedOnceHarness {
+            let mut h = seedonce_harness_with_one_channel();
+            match state {
+                B::NotStarted => {}
+                B::PendingSeedCommit => {
+                    h.fail_commits.store(true, Ordering::SeqCst);
+                    let outcome = h.run_cycle();
+                    assert_eq!(outcome, CycleOutcome::PersistenceFailed, "{outcome:?}");
+                    h.fail_commits.store(false, Ordering::SeqCst);
+                }
+                B::Refused => {
+                    h.prod_conn()
+                        .execute(
+                            "UPDATE fee_strategy_state SET v2_state_json = ?1 \
+                             WHERE channel_id = ?2",
+                            rusqlite::params![
+                                r#"{"fee_state": {"algorithm_version": "dts_pid_v1", "thompson_state": {"_last_fee_min": "not-a-number"}}, "cycle_state": {}}"#,
+                                CHANNEL
+                            ],
+                        )
+                        .expect("poison python blob");
+                    let outcome = h.run_cycle();
+                    assert_eq!(
+                        outcome,
+                        CycleOutcome::SkippedStateUnavailable,
+                        "{outcome:?}"
+                    );
+                }
+                B::Ready => {
+                    let outcome = h.run_cycle();
+                    assert!(matches!(outcome, CycleOutcome::Ran { .. }), "{outcome:?}");
+                }
+            }
+            assert_eq!(
+                h.owner.bootstrap_state(),
+                state,
+                "fixture reached {state:?}"
+            );
+            h
+        }
+
+        fn latest_detail(h: &SeedOnceHarness, trigger_type: &str) -> Option<String> {
+            h.store_conn()
+                .query_row(
+                    &format!(
+                        "SELECT detail FROM rust_fee_trigger_events \
+                         WHERE trigger_type = '{trigger_type}' ORDER BY id DESC LIMIT 1"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .ok()
+        }
+
+        for state in [B::NotStarted, B::PendingSeedCommit, B::Refused] {
+            // Path 1: failed-forward nudge.
+            let mut h = harness_in(state);
+            let generation_before = h.generation();
+            h.owner
+                .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 50));
+            let detail = latest_detail(&h, "failed_forward")
+                .unwrap_or_else(|| panic!("{state:?}/nudge: refusal receipt recorded"));
+            assert!(
+                detail.contains("bootstrap") && detail.contains(&format!("{state:?}")),
+                "{state:?}/nudge must be refused by the bootstrap guard naming the \
+                 state, got: {detail}"
+            );
+            assert_eq!(
+                h.generation(),
+                generation_before,
+                "{state:?}/nudge: no commit"
+            );
+
+            // Path 2: A3 new-channel.
+            let mut h = harness_in(state);
+            let generation_before = h.generation();
+            let rx = self_channel(&mut h.owner);
+            h.owner.handle_new_channel(new_channel_prepared(
+                "900x1x0",
+                &peer_a(),
+                150,
+                FeeStrategy::Static,
+                Some(200),
+                None,
+                NOW + 50,
+            ));
+            pump_store_results(&mut h.owner, &rx);
+            let detail = latest_detail(&h, "new_channel")
+                .unwrap_or_else(|| panic!("{state:?}/a3: refusal receipt recorded"));
+            assert!(
+                detail.contains("bootstrap") && detail.contains(&format!("{state:?}")),
+                "{state:?}/a3 must be refused by the bootstrap guard naming the state, \
+                 got: {detail}"
+            );
+            assert_eq!(h.generation(), generation_before, "{state:?}/a3: no commit");
+            assert_eq!(
+                h.state_row_count() as u64,
+                h.generation().min(1),
+                "{state:?}/a3: no partial state row beyond the bootstrap's own"
+            );
+        }
+
+        // Ready positive controls: both paths ADMIT.
+        let mut h = harness_in(B::Ready);
+        let rx = self_channel(&mut h.owner);
+        h.owner.handle_new_channel(new_channel_prepared(
+            "900x1x0",
+            &peer_a(),
+            150,
+            FeeStrategy::Static,
+            Some(200),
+            None,
+            NOW + 60,
+        ));
+        pump_store_results(&mut h.owner, &rx);
+        assert_eq!(
+            h.generation(),
+            2,
+            "Ready/a3: the out-of-cycle commit proceeds (generation advances)"
+        );
+        h.owner
+            .handle_failed_forward(&super::failed_forward(CHANNEL, NOW + 70));
+        if let Some(detail) = latest_detail(&h, "failed_forward") {
+            assert!(
+                !detail.contains("bootstrap"),
+                "Ready/nudge must NOT be refused by the bootstrap guard: {detail}"
+            );
+        }
+    }
+
     /// Python re-review F-R1: the hydrate-time seed-binding invariant
     /// must be ENFORCED, not just implemented — a generation>0 store
     /// whose provenance fails derived verification refuses hydration
