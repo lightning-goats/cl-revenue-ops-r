@@ -34,6 +34,7 @@ use revops_fees::pyrand::PyRandom;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Fixed cycle clock value -- deliberately different from [`SEED`] so a
 /// buggy per-cycle reseed (which would use the cycle clock) lands on a
@@ -1057,13 +1058,18 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     .expect("spawn scheduler");
 
     // Fire-and-forget: must not crash the owner thread.
-    handle.tx.send(CycleMsg::WakeAll).expect("send WakeAll");
+    handle
+        .tx
+        .send(CycleMsg::WakeAll)
+        .await
+        .expect("send WakeAll");
 
     // Query must round-trip through the real reply channel.
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     handle
         .tx
         .send(CycleMsg::Query(FeeDebugQuery::Summary, reply_tx))
+        .await
         .expect("send Query");
     let value = reply_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -1071,7 +1077,7 @@ async fn scheduler_dispatches_wake_and_query_messages_through_owner_thread() {
     assert!(value.get("last_cycle_decision").is_some(), "{value:?}");
     assert!(value.get("channels").is_some(), "{value:?}");
 
-    handle.tx.send(CycleMsg::Shutdown).ok();
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
 }
 
 #[tokio::test]
@@ -1097,6 +1103,7 @@ async fn run_prepared_acknowledges_only_after_real_owner_outcome() {
             Box::new(prepared(json!(3), false)),
             ack_tx,
         ))
+        .await
         .expect("dispatch prepared cycle");
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
         .await
@@ -1106,7 +1113,179 @@ async fn run_prepared_acknowledges_only_after_real_owner_outcome() {
         outcome.is_ok(),
         "real owner outcome must be acknowledged: {outcome:?}"
     );
-    handle.tx.send(CycleMsg::Shutdown).ok();
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+}
+
+type HeldOwnerBody = Box<dyn FnOnce() + Send + 'static>;
+
+fn held_owner(
+    fx: &Fixture,
+) -> (
+    revops::fee_scheduler::SchedulerHandle,
+    Arc<std::sync::Mutex<Option<HeldOwnerBody>>>,
+) {
+    let held = Arc::new(std::sync::Mutex::new(None));
+    let held_for_spawn = held.clone();
+    let handle = revops::fee_scheduler::spawn_with_thread_spawner(
+        SchedulerConfig {
+            db_path: fx.db_path.clone(),
+            socket_path: PathBuf::from("/nonexistent/lightning-rpc"),
+            journal_dir: fx.journal_dir.clone(),
+            lifecycle: StateLifecycle::RehydratePerCycle,
+            trigger: TriggerMode::ExternalOnly,
+        },
+        None,
+        revops::config_resolve::PythonOptionCache::empty(),
+        None,
+        move |_name, body| {
+            *held_for_spawn.lock().unwrap() = Some(body);
+            Ok(())
+        },
+    )
+    .expect("construct held owner");
+    (handle, held)
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_backpressures_notification_then_rpc_until_drain() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    for i in 0..revops::fee_scheduler::OWNER_QUEUE_CAPACITY {
+        handle
+            .tx
+            .send(CycleMsg::ForwardEvent {
+                channel_id: format!("queued-{i}"),
+            })
+            .await
+            .expect("fill bounded owner ingress");
+    }
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let blocked = handle
+        .tx
+        .send(CycleMsg::Query(FeeDebugQuery::Summary, reply_tx));
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err(),
+        "RPC producer must backpressure while the bounded ingress is saturated"
+    );
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    blocked.await.expect("RPC admitted after owner drains");
+    let value = tokio::task::spawn_blocking(move || reply_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(value.get("channels").is_some());
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_backpressures_cycle_and_acknowledges_only_after_drain() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    for i in 0..revops::fee_scheduler::OWNER_QUEUE_CAPACITY {
+        handle
+            .tx
+            .send(CycleMsg::ForwardEvent {
+                channel_id: format!("queued-{i}"),
+            })
+            .await
+            .unwrap();
+    }
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    let blocked = handle.tx.send(CycleMsg::RunPrepared(
+        Box::new(prepared(json!(3), false)),
+        ack_tx,
+    ));
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err(),
+        "cycle producer must backpressure while owner ingress is saturated"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut ack_rx)
+            .await
+            .is_err(),
+        "queue admission is not cycle completion"
+    );
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    blocked.await.unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .expect("owner completion deadline")
+        .expect("owner reply after drain");
+    assert!(
+        outcome.is_ok(),
+        "real owner outcome after drain: {outcome:?}"
+    );
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_backpressures_wake_until_drain() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    for i in 0..revops::fee_scheduler::OWNER_QUEUE_CAPACITY {
+        handle
+            .tx
+            .send(CycleMsg::ForwardEvent {
+                channel_id: format!("queued-{i}"),
+            })
+            .await
+            .unwrap();
+    }
+    let blocked = handle.tx.send(CycleMsg::RunCycleNow);
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err(),
+        "wake producers must use the same bounded owner ingress, never a bypass sender"
+    );
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    blocked.await.expect("wake admitted after owner drains");
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_owner_ingress_reports_closed_owner_and_closes_outstanding_ack() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    handle
+        .tx
+        .send(CycleMsg::RunPrepared(
+            Box::new(prepared(json!(3), false)),
+            ack_tx,
+        ))
+        .await
+        .unwrap();
+    drop(held.lock().unwrap().take());
+    assert!(
+        ack_rx.await.is_err(),
+        "queued ACK must close with owner loss"
+    );
+    let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+    assert!(handle
+        .tx
+        .send(CycleMsg::Query(FeeDebugQuery::Summary, reply_tx))
+        .await
+        .is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,10 +1489,20 @@ mod seedonce_restart {
 
     /// F5 test plumbing: wire an owner's self-sender to a local receiver
     /// (the production loop's stand-in) ...
-    fn self_channel(owner: &mut CycleOwner) -> std::sync::mpsc::Receiver<CycleMsg> {
-        let (tx, rx) = std::sync::mpsc::channel();
+    struct TestOwnerReceiver(std::sync::Mutex<tokio::sync::mpsc::Receiver<CycleMsg>>);
+
+    impl TestOwnerReceiver {
+        fn try_recv(&self) -> Result<CycleMsg, tokio::sync::mpsc::error::TryRecvError> {
+            self.0.lock().unwrap().try_recv()
+        }
+    }
+
+    fn self_channel(owner: &mut CycleOwner) -> TestOwnerReceiver {
+        let (tx, bounded_rx) = revops::fee_scheduler::SchedulerIngress::bounded_channel(
+            revops::fee_scheduler::OWNER_QUEUE_CAPACITY,
+        );
         owner.set_self_sender(tx);
-        rx
+        TestOwnerReceiver(std::sync::Mutex::new(bounded_rx))
     }
 
     /// ... and pump every off-owner store result message back into the
@@ -1321,7 +1510,7 @@ mod seedonce_restart {
     /// message loop's `InitialFeeStoreResult` arm does. With `TestStore`'s
     /// inline dispatch, one call drains the full
     /// idempotency -> decide -> commit -> install chain.
-    fn pump_store_results(owner: &mut CycleOwner, rx: &std::sync::mpsc::Receiver<CycleMsg>) {
+    fn pump_store_results(owner: &mut CycleOwner, rx: &TestOwnerReceiver) {
         let mut clock = || NOW;
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -3700,7 +3889,7 @@ mod seedonce_restart {
     struct ParkedSeedOnce {
         _fx: Fixture,
         owner: CycleOwner,
-        rx: std::sync::mpsc::Receiver<CycleMsg>,
+        rx: TestOwnerReceiver,
         store_path: PathBuf,
         parked: Arc<std::sync::Mutex<Vec<ParkedGuardedCommit>>>,
     }
@@ -4529,6 +4718,7 @@ mod seedonce_restart {
             .send(CycleMsg::NewChannel(Box::new(
                 NewChannelPreparation::Ready(Box::new(prepared)),
             )))
+            .await
             .expect("send NewChannel");
 
         // The owner must keep servicing other messages while the store
@@ -4537,6 +4727,7 @@ mod seedonce_restart {
         handle
             .tx
             .send(CycleMsg::Query(FeeDebugQuery::RunwayCounters, reply_tx))
+            .await
             .expect("send Query");
         let value = reply_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -4546,7 +4737,7 @@ mod seedonce_restart {
             "the query answer must be the real runway-counters shape: {value:?}"
         );
 
-        handle.tx.send(CycleMsg::Shutdown).ok();
+        handle.tx.send(CycleMsg::Shutdown).await.ok();
     }
 }
 

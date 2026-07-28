@@ -806,9 +806,14 @@ async fn main() -> Result<()> {
                 // predates the scheduler existing.
                 if let Some(handle) = p.state().scheduler.get() {
                     let channel_id = notify::forward_trigger_channel_id(&v);
-                    let _ = handle
+                    if handle
                         .tx
-                        .send(revops::fee_scheduler::CycleMsg::ForwardEvent { channel_id });
+                        .send(revops::fee_scheduler::CycleMsg::ForwardEvent { channel_id })
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("revops: forward_event scheduler ingress closed");
+                    }
 
                     // Task 44: the fee-relevant FAILURE path (py
                     // cl-revenue-ops.py:6911-6941). Separate from the
@@ -826,11 +831,16 @@ async fn main() -> Result<()> {
                     // fee a sender pays to traverse us is our policy on the
                     // out channel; the in channel's fee belongs to our peer.
                     if let Some(signal) = notify::failed_forward_signal(&v, revops::now_unix()) {
-                        let _ = handle
+                        if handle
                             .tx
                             .send(revops::fee_scheduler::CycleMsg::FailedForward(Box::new(
                                 signal,
-                            )));
+                            )))
+                            .await
+                            .is_err()
+                        {
+                            eprintln!("revops: failed-forward scheduler ingress closed");
+                        }
                     }
                 }
                 Ok(())
@@ -892,9 +902,15 @@ async fn main() -> Result<()> {
                                     signal,
                                 )
                                 .await;
-                                let _ = tx.send(revops::fee_scheduler::CycleMsg::NewChannel(
-                                    Box::new(preparation),
-                                ));
+                                if tx
+                                    .send(revops::fee_scheduler::CycleMsg::NewChannel(Box::new(
+                                        preparation,
+                                    )))
+                                    .await
+                                    .is_err()
+                                {
+                                    eprintln!("revops: new-channel scheduler ingress closed");
+                                }
                             });
                         }
                         _ => {
@@ -1230,6 +1246,7 @@ async fn main() -> Result<()> {
                 if handle
                     .tx
                     .send(revops::fee_scheduler::CycleMsg::Query(query, reply_tx))
+                    .await
                     .is_err()
                 {
                     return Ok(serde_json::json!({"error": "fee-cycle owner thread not running"}));
@@ -1261,7 +1278,11 @@ async fn main() -> Result<()> {
                                   -- see plugin log)"
                     }));
                 };
-                match handle.tx.send(revops::fee_scheduler::CycleMsg::WakeAll) {
+                match handle
+                    .tx
+                    .send(revops::fee_scheduler::CycleMsg::WakeAll)
+                    .await
+                {
                     Ok(()) => Ok(serde_json::json!({
                         "status": "ok",
                         "message": "wake-all requested; sleeping channels will be evaluated on \
@@ -1297,12 +1318,19 @@ async fn main() -> Result<()> {
                             revops::fee_scheduler::FeeDebugQuery::RunwayCounters,
                             reply_tx,
                         ))
-                        .is_ok()
+                        .await
+                        .is_err()
                     {
-                        if let Ok(Ok(value)) =
-                            tokio::task::spawn_blocking(move || reply_rx.recv()).await
-                        {
-                            counters = value;
+                        return Ok(serde_json::json!({
+                            "error": "fee-cycle owner thread not running"
+                        }));
+                    }
+                    match tokio::task::spawn_blocking(move || reply_rx.recv()).await {
+                        Ok(Ok(value)) => counters = value,
+                        _ => {
+                            return Ok(serde_json::json!({
+                                "error": "fee-cycle owner thread did not respond"
+                            }));
                         }
                     }
                 }

@@ -211,6 +211,24 @@ fn observer_runtime_source_cannot_name_any_action_capability() {
 }
 
 #[test]
+fn scheduler_has_no_unbounded_owner_or_wake_ingress() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("crates/revops/src/fee_scheduler.rs")).unwrap();
+    for forbidden in [
+        "mpsc::channel::<CycleMsg>()",
+        "unbounded_channel::<()>",
+        "UnboundedSender<()>",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "all scheduler producers must share fixed-capacity ingress; found {forbidden}"
+        );
+    }
+    assert!(source.contains("blocking_recv()"));
+    assert!(source.contains("blocking_send(CycleMsg::InitialFeeStoreResult"));
+}
+
+#[test]
 fn production_composition_spawns_only_the_real_fee_pass() {
     let root = workspace_root();
     let source = std::fs::read_to_string(root.join("crates/revops/src/main.rs")).unwrap();
