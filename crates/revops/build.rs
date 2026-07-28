@@ -26,29 +26,57 @@
 //! wins outright — this script never overrides an externally supplied
 //! value, it only re-exports it so `option_env!` can see it.
 //!
-//! ## Deliberately NO `cargo:rerun-if-*` directives (tradeoff, pinned)
+//! ## Freshness (task 41): forced re-run + Git-metadata watches
 //!
-//! This script emits no `cargo:rerun-if-changed` or
-//! `cargo:rerun-if-env-changed` directive at all. The moment a build
-//! script emits ANY such directive, cargo stops treating "always re-run"
-//! as the default and instead skips re-running the script unless one of
-//! the watched paths/env-vars actually changed. That is exactly wrong for
-//! a `-dirty` provenance stamp: editing a tracked source file after a
-//! clean build changes `git status --porcelain`'s output but touches none
-//! of the paths a plausible watch list would name (`.git/HEAD`,
-//! `packed-refs`, a specific ref file) until the NEXT commit or checkout,
-//! so a previously-clean build's stale `REVOPS_SOURCE_COMMIT` would keep
-//! being embedded into every following binary — silently claiming a clean
-//! commit for a binary that no longer matches it. Emitting no directives
-//! at all keeps cargo's un-opted-in default: this build script re-runs on
-//! EVERY build, so the provenance stamp can never go stale. The cost is
-//! literally running this script (a couple of `git` subprocess calls)
-//! once per build, which is trivial next to what "guaranteed-fresh
-//! provenance for a live-authority cutover gate" is worth.
+//! An earlier revision emitted NO `cargo:rerun-if-*` directives, believing
+//! cargo's un-opted-in default was "re-run the build script on every
+//! build". It is not: with no directives, cargo re-runs the script only
+//! when a file INSIDE THE PACKAGE changes. Git metadata (`.git/`) and
+//! everything outside `crates/revops` are not part of that scan, so a
+//! docs-only commit advanced HEAD while incremental rebuilds kept
+//! embedding the previous commit until `cargo clean` — a stale provenance
+//! stamp on a surface whose whole job is binary identity.
+//!
+//! The fix is layered, and `tests/build_provenance.rs` enforces the
+//! end-to-end property (HEAD advance, dirty tree, env unpinning — each
+//! must refresh a plain incremental rebuild, no clean):
+//!
+//! 1. `rerun-if-changed` on a path under `OUT_DIR` that is never created.
+//!    Cargo treats a missing watched path as always-out-of-date, so the
+//!    script re-runs on EVERY build — which also keeps the `-dirty`
+//!    suffix honest for working-tree edits that touch no watched path.
+//! 2. `rerun-if-changed` on the Git metadata that determines the stamp
+//!    (`HEAD`, the checked-out branch's loose ref, `packed-refs`, the
+//!    index; worktree-aware via `--git-common-dir`). Documented cargo
+//!    behavior, covering ref/HEAD/index staleness even if (1)'s
+//!    missing-path semantics ever changed.
+//! 3. `rerun-if-env-changed=REVOPS_SOURCE_COMMIT`, so pinning or
+//!    unpinning the release pipeline's override is itself a re-run
+//!    trigger.
+//!
+//! The cost is running this script (a few `git` subprocess calls) once per
+//! build — trivial next to what "guaranteed-fresh provenance for a
+//! live-authority cutover gate" is worth. The script's OUTPUT is stable
+//! for an unchanged tree, so the forced re-run does not cascade into
+//! recompiles.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Layer 3: react to the release pipeline pinning/unpinning the
+    // override.
+    println!("cargo:rerun-if-env-changed=REVOPS_SOURCE_COMMIT");
+
+    // Layer 1: a watched path that never exists forces this script to
+    // re-run on every build (missing input = always out-of-date).
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        println!("cargo:rerun-if-changed={out_dir}/revops-provenance-never-created-force-rerun");
+    }
+
+    // Layer 2: watch the Git metadata the stamp is derived from.
+    emit_git_metadata_watches();
+
     if let Ok(pinned) = std::env::var("REVOPS_SOURCE_COMMIT") {
         if !pinned.is_empty() {
             println!("cargo:rustc-env=REVOPS_SOURCE_COMMIT={pinned}");
@@ -77,6 +105,46 @@ fn main() {
         commit
     };
     println!("cargo:rustc-env=REVOPS_SOURCE_COMMIT={value}");
+}
+
+/// Watch `HEAD`, the checked-out branch's loose ref file, `packed-refs`,
+/// and the index. In a linked worktree `HEAD`/`index` live in the
+/// per-worktree git dir while refs and `packed-refs` live in the common
+/// dir, hence both lookups. Watching a ref file that does not exist yet
+/// (ref only in `packed-refs`) is harmless — it just forces re-runs, which
+/// layer 1 does anyway.
+fn emit_git_metadata_watches() {
+    let Some(git_dir) = run_git(&["rev-parse", "--absolute-git-dir"]).map(PathBuf::from) else {
+        return;
+    };
+    let common_dir = run_git(&["rev-parse", "--git-common-dir"])
+        .map(|dir| absolutize(PathBuf::from(dir)))
+        .unwrap_or_else(|| git_dir.clone());
+
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join("packed-refs").display()
+    );
+    if let Some(branch_ref) = run_git(&["symbolic-ref", "-q", "HEAD"]).filter(|s| !s.is_empty()) {
+        println!(
+            "cargo:rerun-if-changed={}",
+            common_dir.join(branch_ref).display()
+        );
+    }
+}
+
+/// `--git-common-dir` may answer relative to the build script's cwd (the
+/// package root); anchor it there so the watch points at a real path.
+fn absolutize(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path,
+    }
 }
 
 fn run_git(args: &[&str]) -> Option<String> {
