@@ -27,6 +27,9 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     // append-only-with-status-flips, never swept.
     "rust_rebalance_attempts",
     "rust_rebalance_reservations",
+    // Task 62: capital (open/close/defib) money-path evidence.
+    "rust_capital_intents",
+    "rust_capital_reservations",
 ];
 
 /// Class C: current-state rows, bounded by key/upsert construction.

@@ -138,6 +138,20 @@ enum Command {
         since: i64,
         reply: oneshot::Sender<Result<i64>>,
     },
+    // -- Task 62: durable capital intent/reservation rails --
+    InsertCapitalIntent {
+        intent: fee_runway::CapitalIntent,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    SettleCapitalIntent {
+        settle: fee_runway::CapitalSettle,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    UnresolvedCapitalIntents(oneshot::Sender<Result<Vec<fee_runway::UnresolvedCapitalIntent>>>),
+    ActiveCapitalReservedSats {
+        since: i64,
+        reply: oneshot::Sender<Result<i64>>,
+    },
     // -- Task 59 §5.3: durable cutover-arm nonce deny-ledger insert.
     // Async-only (F6): startup orchestration awaits it on the runtime;
     // no blocking sibling exists to panic a current-thread runtime --
@@ -990,6 +1004,95 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 62: insert one capital intent + ACTIVE reservation atomically.
+    pub async fn insert_capital_intent(&self, intent: fee_runway::CapitalIntent) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertCapitalIntent { intent, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 62: two-phase admission for the submit-path capital intent.
+    pub fn try_insert_capital_intent(
+        &self,
+        intent: fee_runway::CapitalIntent,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .try_send(Command::InsertCapitalIntent { intent, reply })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => StoreAdmissionRefused::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => StoreAdmissionRefused::ActorGone,
+            })?;
+        Ok(StoreReceipt::from_rx(rx))
+    }
+
+    /// Task 62: exactly-once terminal capital settlement.
+    pub async fn settle_capital_intent(&self, settle: fee_runway::CapitalSettle) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SettleCapitalIntent { settle, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the capital owner's OS thread.
+    pub fn blocking_settle_capital_intent(&self, settle: fee_runway::CapitalSettle) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::SettleCapitalIntent { settle, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 62: restart-reconciliation work list.
+    pub async fn unresolved_capital_intents(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedCapitalIntent>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UnresolvedCapitalIntents(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the capital owner's OS thread.
+    pub fn blocking_unresolved_capital_intents(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedCapitalIntent>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UnresolvedCapitalIntents(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 62: capital budget-window hold (active + quarantined).
+    pub async fn active_capital_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveCapitalReservedSats { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the capital owner's OS thread.
+    pub fn blocking_active_capital_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ActiveCapitalReservedSats { since, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Task 59 §5.3: burn one cutover-arm nonce in the durable deny
     /// ledger, DB-first (before any filesystem consumption). Returns
     /// `Ok(true)` on insert, `Ok(false)` when the nonce was already
@@ -1550,6 +1653,22 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::ActiveRebalanceReservedSats { since, reply } => {
                     let result = fee_runway::active_rebalance_reserved_sats(&conn, since);
+                    let _ = reply.send(result);
+                }
+                Command::InsertCapitalIntent { intent, reply } => {
+                    let result = fee_runway::insert_capital_intent(&conn, &intent);
+                    let _ = reply.send(result);
+                }
+                Command::SettleCapitalIntent { settle, reply } => {
+                    let result = fee_runway::settle_capital_intent(&conn, &settle);
+                    let _ = reply.send(result);
+                }
+                Command::UnresolvedCapitalIntents(reply) => {
+                    let result = fee_runway::unresolved_capital_intents(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::ActiveCapitalReservedSats { since, reply } => {
+                    let result = fee_runway::active_capital_reserved_sats(&conn, since);
                     let _ = reply.send(result);
                 }
                 Command::InsertConsumedArmNonce {

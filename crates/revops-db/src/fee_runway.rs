@@ -339,6 +339,36 @@ CREATE TABLE IF NOT EXISTS rust_rebalance_reservations (
 );
 CREATE INDEX IF NOT EXISTS idx_rust_rebalance_reservations_status
     ON rust_rebalance_reservations(status);
+
+CREATE TABLE IF NOT EXISTS rust_capital_intents (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('open','close','defib')),
+    peer_id TEXT NOT NULL,
+    channel_id TEXT,
+    amount_sats INTEGER NOT NULL,
+    reason TEXT,
+    submitted_at INTEGER NOT NULL,
+    outcome TEXT CHECK (outcome IN
+        ('clean_refusal','rejected','success','outcome_unknown')),
+    outcome_detail TEXT,
+    txid TEXT,
+    completed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_rust_capital_intents_outcome
+    ON rust_capital_intents(outcome);
+
+CREATE TABLE IF NOT EXISTS rust_capital_reservations (
+    id INTEGER PRIMARY KEY,
+    attempt_request_id TEXT NOT NULL,
+    reserved_sats INTEGER NOT NULL,
+    reserved_at INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active','settled','released','quarantined')),
+    settled_sats INTEGER,
+    resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_rust_capital_reservations_status
+    ON rust_capital_reservations(status);
 ";
 
 // ---------------------------------------------------------------------------
@@ -2163,4 +2193,166 @@ pub fn active_rebalance_reserved_sats(conn: &Connection, since: i64) -> Result<i
         |row| row.get(0),
     )
     .context("sum active rebalance reservations")
+}
+
+// ---------------------------------------------------------------------------
+// Task 62: durable capital intent/reservation rails (Class E)
+// ---------------------------------------------------------------------------
+
+/// One capital action's pre-submit intent (Task 62 slice 1): open/close/
+/// defib. The insert also creates the ACTIVE reservation in the SAME
+/// transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapitalIntent {
+    pub request_id: String,
+    /// 'open' | 'close' | 'defib' (CHECK-enforced).
+    pub kind: String,
+    pub peer_id: String,
+    pub channel_id: Option<String>,
+    pub amount_sats: i64,
+    pub reason: Option<String>,
+    pub submitted_at: i64,
+}
+
+/// One capital intent's TERMINAL settlement (exactly once).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapitalSettle {
+    pub request_id: String,
+    /// 'clean_refusal' | 'rejected' | 'success' | 'outcome_unknown'.
+    pub outcome: String,
+    pub outcome_detail: Option<String>,
+    pub txid: Option<String>,
+    /// 'settled' | 'released' | 'quarantined'.
+    pub reservation_status: String,
+    pub settled_sats: Option<i64>,
+    pub resolved_at: i64,
+}
+
+/// One `outcome IS NULL` capital intent, for restart reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedCapitalIntent {
+    pub id: i64,
+    pub request_id: String,
+    pub kind: String,
+    pub peer_id: String,
+    pub channel_id: Option<String>,
+    pub amount_sats: i64,
+    pub submitted_at: i64,
+}
+
+/// Insert one capital intent AND its `active` reservation atomically.
+pub fn insert_capital_intent(conn: &Connection, intent: &CapitalIntent) -> Result<i64> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin capital intent txn")?;
+    tx.execute(
+        "INSERT INTO rust_capital_intents
+             (request_id, kind, peer_id, channel_id, amount_sats, reason, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            intent.request_id,
+            intent.kind,
+            intent.peer_id,
+            intent.channel_id,
+            intent.amount_sats,
+            intent.reason,
+            intent.submitted_at
+        ],
+    )
+    .context("insert capital intent (UNIQUE request_id)")?;
+    let intent_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO rust_capital_reservations
+             (attempt_request_id, reserved_sats, reserved_at, status)
+         VALUES (?1, ?2, ?3, 'active')",
+        params![intent.request_id, intent.amount_sats, intent.submitted_at],
+    )
+    .context("insert active capital reservation")?;
+    tx.commit().context("commit capital intent txn")?;
+    Ok(intent_id)
+}
+
+/// Apply one TERMINAL capital settlement atomically, exactly once.
+pub fn settle_capital_intent(conn: &Connection, settle: &CapitalSettle) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin capital settle txn")?;
+    let updated = tx
+        .execute(
+            "UPDATE rust_capital_intents
+             SET outcome = ?2, outcome_detail = ?3, txid = COALESCE(?4, txid),
+                 completed_at = ?5
+             WHERE request_id = ?1 AND outcome IS NULL",
+            params![
+                settle.request_id,
+                settle.outcome,
+                settle.outcome_detail,
+                settle.txid,
+                settle.resolved_at
+            ],
+        )
+        .context("settle capital intent outcome")?;
+    if updated == 0 {
+        anyhow::bail!(
+            "capital intent {} is already terminal (or unknown); refusing a second \
+             terminal write",
+            settle.request_id
+        );
+    }
+    tx.execute(
+        "UPDATE rust_capital_reservations
+         SET status = ?2, settled_sats = ?3, resolved_at = ?4
+         WHERE attempt_request_id = ?1 AND status = 'active'",
+        params![
+            settle.request_id,
+            settle.reservation_status,
+            settle.settled_sats,
+            settle.resolved_at
+        ],
+    )
+    .context("flip capital reservation")?;
+    tx.commit().context("commit capital settle txn")?;
+    Ok(())
+}
+
+/// Every capital intent whose terminal outcome was never recorded.
+pub fn unresolved_capital_intents(conn: &Connection) -> Result<Vec<UnresolvedCapitalIntent>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, request_id, kind, peer_id, channel_id, amount_sats, submitted_at
+             FROM rust_capital_intents
+             WHERE outcome IS NULL
+             ORDER BY id ASC",
+        )
+        .context("prepare unresolved capital intents")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UnresolvedCapitalIntent {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                kind: row.get(2)?,
+                peer_id: row.get(3)?,
+                channel_id: row.get(4)?,
+                amount_sats: row.get(5)?,
+                submitted_at: row.get(6)?,
+            })
+        })
+        .context("query unresolved capital intents")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read unresolved capital intents")?;
+    Ok(rows)
+}
+
+/// Sats held against the capital budget: ACTIVE + QUARANTINED
+/// reservations at or after `since` (an unknown outcome may have spent
+/// on-chain funds -- releasing it would over-spend).
+pub fn active_capital_reserved_sats(conn: &Connection, since: i64) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(reserved_sats), 0)
+         FROM rust_capital_reservations
+         WHERE status IN ('active', 'quarantined') AND reserved_at >= ?1",
+        params![since],
+        |row| row.get(0),
+    )
+    .context("sum active capital reservations")
 }

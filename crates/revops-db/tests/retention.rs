@@ -361,6 +361,8 @@ fn never_prune_membership_is_pinned_exactly() {
         "rust_consumed_arm_nonces",
         "rust_rebalance_attempts",
         "rust_rebalance_reservations",
+        "rust_capital_intents",
+        "rust_capital_reservations",
     ]
     .into_iter()
     .collect();

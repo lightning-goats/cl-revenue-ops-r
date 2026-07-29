@@ -1055,3 +1055,112 @@ async fn rebalance_settle_is_exactly_once_and_quarantine_retains() {
         "quarantined reservations keep counting; settled ones do not"
     );
 }
+
+// -- Task 62 slice 1: durable capital intent/reservation rails --
+
+fn capital_intent(request_id: &str, kind: &str) -> revops_db::fee_runway::CapitalIntent {
+    revops_db::fee_runway::CapitalIntent {
+        request_id: request_id.into(),
+        kind: kind.into(),
+        peer_id: "02aa".repeat(16),
+        channel_id: if kind == "open" {
+            None
+        } else {
+            Some("700x1x0".into())
+        },
+        amount_sats: 1_000_000,
+        reason: Some("winner redeployment".into()),
+        submitted_at: 1_800_000_100,
+    }
+}
+
+/// Intent + ACTIVE reservation atomically; UNIQUE dedup; unresolved
+/// listing; reserve sum counts active AND quarantined.
+#[tokio::test]
+async fn capital_intent_reserves_atomically_and_settles_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_read_write(&dir.path().join("observer.db"))
+        .await
+        .unwrap();
+
+    let id = handle
+        .insert_capital_intent(capital_intent("cap-1", "open"))
+        .await
+        .expect("first intent");
+    assert!(id > 0);
+    let err = handle
+        .insert_capital_intent(capital_intent("cap-1", "open"))
+        .await
+        .expect_err("duplicate request_id refuses");
+    assert!(
+        format!("{err:#}").to_lowercase().contains("unique"),
+        "{err:#}"
+    );
+
+    handle
+        .insert_capital_intent(capital_intent("cap-2", "close"))
+        .await
+        .unwrap();
+    assert_eq!(handle.unresolved_capital_intents().await.unwrap().len(), 2);
+    assert_eq!(
+        handle
+            .active_capital_reserved_sats(1_700_000_000)
+            .await
+            .unwrap(),
+        2_000_000
+    );
+
+    // Success settles; unknown quarantines (still counted); second
+    // terminal refuses.
+    handle
+        .settle_capital_intent(revops_db::fee_runway::CapitalSettle {
+            request_id: "cap-1".into(),
+            outcome: "success".into(),
+            outcome_detail: None,
+            txid: Some("deadbeef".into()),
+            reservation_status: "settled".into(),
+            settled_sats: Some(1_000_000),
+            resolved_at: 1_800_000_200,
+        })
+        .await
+        .expect("settle success");
+    handle
+        .settle_capital_intent(revops_db::fee_runway::CapitalSettle {
+            request_id: "cap-2".into(),
+            outcome: "outcome_unknown".into(),
+            outcome_detail: Some("close reply lost".into()),
+            txid: None,
+            reservation_status: "quarantined".into(),
+            settled_sats: None,
+            resolved_at: 1_800_000_201,
+        })
+        .await
+        .expect("settle unknown");
+    let err = handle
+        .settle_capital_intent(revops_db::fee_runway::CapitalSettle {
+            request_id: "cap-1".into(),
+            outcome: "rejected".into(),
+            outcome_detail: None,
+            txid: None,
+            reservation_status: "released".into(),
+            settled_sats: None,
+            resolved_at: 1_800_000_300,
+        })
+        .await
+        .expect_err("second terminal refuses");
+    assert!(format!("{err:#}").contains("already terminal"), "{err:#}");
+
+    assert!(handle
+        .unresolved_capital_intents()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        handle
+            .active_capital_reserved_sats(1_700_000_000)
+            .await
+            .unwrap(),
+        1_000_000,
+        "only the quarantined hold remains"
+    );
+}
