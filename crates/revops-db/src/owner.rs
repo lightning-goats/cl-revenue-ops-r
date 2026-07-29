@@ -255,6 +255,14 @@ pub struct StoreReceipt<T> {
     rx: oneshot::Receiver<Result<T>>,
 }
 
+impl<T> StoreReceipt<T> {
+    /// Crate-internal constructor so sibling actors (Task 65's state
+    /// writer) share the exact receipt/admission vocabulary.
+    pub(crate) fn from_rx(rx: oneshot::Receiver<Result<T>>) -> Self {
+        Self { rx }
+    }
+}
+
 /// How an admitted command's bounded receipt wait resolved.
 #[derive(Debug)]
 pub enum StoreReceiptWait<T> {

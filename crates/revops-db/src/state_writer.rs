@@ -35,6 +35,8 @@ use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::owner::{StoreAdmissionRefused, StoreReceipt};
+
 /// The hard batch bound (the Task 65 contract's number).
 pub const STATE_WRITER_BATCH_BOUND: usize = 100;
 
@@ -174,6 +176,136 @@ macro_rules! roundtrip {
             .context("state writer actor gone")?;
         rx.await.context("state writer actor dropped reply")?
     }};
+}
+
+macro_rules! try_roundtrip {
+    ($self:ident, $variant:expr) => {{
+        let (reply, rx) = oneshot::channel();
+        $self.tx.try_send($variant(reply)).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => StoreAdmissionRefused::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => StoreAdmissionRefused::ActorGone,
+        })?;
+        Ok(StoreReceipt::from_rx(rx))
+    }};
+}
+
+impl StateWriterHandle {
+    /// Task 65 §two-phase: every mutating op has a try-variant whose
+    /// refusal proves nothing was enqueued (the `not_admitted` ack arm)
+    /// and whose receipt's bounded wait classifies expiry as
+    /// OUTCOME UNKNOWN (`admitted_outcome_unknown`).
+    pub fn try_set_config_override(
+        &self,
+        key: String,
+        value: String,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::SetConfigOverride {
+            key,
+            value,
+            reply
+        })
+    }
+
+    pub fn try_delete_config_override(
+        &self,
+        key: String,
+    ) -> std::result::Result<StoreReceipt<ConfigDelete>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::DeleteConfigOverride { key, reply })
+    }
+
+    pub fn try_upsert_peer_policy(
+        &self,
+        write: PeerPolicyWrite,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<()>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::UpsertPeerPolicy {
+            write,
+            now,
+            reply
+        })
+    }
+
+    pub fn try_apply_policy_batch(
+        &self,
+        writes: Vec<PeerPolicyWrite>,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<BatchAck>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ApplyPolicyBatch {
+            writes,
+            now,
+            reply
+        })
+    }
+
+    pub fn try_set_hot_channel_override(
+        &self,
+        peer_id: String,
+        note: Option<String>,
+        min_depletion_trigger_pct: Option<f64>,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<()>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::SetHotChannelOverride {
+            peer_id,
+            note,
+            min_depletion_trigger_pct,
+            now,
+            reply
+        })
+    }
+
+    pub fn try_remove_hot_channel_override(
+        &self,
+        peer_id: String,
+    ) -> std::result::Result<StoreReceipt<bool>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::RemoveHotChannelOverride {
+            peer_id,
+            reply
+        })
+    }
+
+    pub fn try_release_budget_reservation(
+        &self,
+        reservation_id: String,
+    ) -> std::result::Result<StoreReceipt<BudgetTransition>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ReleaseBudgetReservation {
+            reservation_id,
+            reply
+        })
+    }
+
+    pub fn try_mark_budget_spent(
+        &self,
+        reservation_id: String,
+        actual_spent: i64,
+    ) -> std::result::Result<StoreReceipt<BudgetTransition>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::MarkBudgetSpent {
+            reservation_id,
+            actual_spent,
+            reply
+        })
+    }
+
+    pub fn try_cleanup_stale_reservations(
+        &self,
+        max_age_seconds: i64,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::CleanupStaleReservations {
+            max_age_seconds,
+            now,
+            reply
+        })
+    }
+
+    pub fn try_cleanup_closed_channels(
+        &self,
+        channel_ids: Vec<String>,
+    ) -> std::result::Result<StoreReceipt<BatchAck>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::CleanupClosedChannels {
+            channel_ids,
+            reply
+        })
+    }
 }
 
 impl StateWriterHandle {
