@@ -294,3 +294,70 @@ fn health_does_not_inherit_a_prior_boots_pass() {
     // is attributable rather than a bare string.
     assert_eq!(value["boot_id"], "boot-OLD");
 }
+
+/// Task 67 slice 6b: `revenue-r-analyze` for a single channel is served
+/// from the flow owner's PERSISTED state. Fields the store does not hold
+/// are declared in `_gaps` -- never defaulted to zero, which would be
+/// indistinguishable from a genuinely idle channel.
+#[test]
+fn analyze_serves_persisted_flow_state_and_gaps_the_rest() {
+    use revops_db::analytics::ChannelFlowStateRow;
+
+    let row = ChannelFlowStateRow {
+        scid: "700x1x0".into(),
+        peer_id: "02aa".into(),
+        flow_state: "source".into(),
+        balance_position: "depleted".into(),
+        flow_ratio: 0.82,
+        velocity: 1.5,
+        confidence: 0.61,
+        forward_count: 12,
+        updated_at: 1_800_000_000,
+        boot_id: "boot-a".into(),
+    };
+    let v = revops::rpc_analyze::build_analyze_from_persisted(
+        Some(&serde_json::json!("700x1x0")),
+        Some(&row),
+    );
+    assert_eq!(v["channel"], "700x1x0");
+    let a = &v["analysis"];
+    assert_eq!(a["state"], "source");
+    assert_eq!(a["balance_position"], "depleted");
+    assert_eq!(a["forward_count"], 12);
+    assert_eq!(a["peer_id"], "02aa");
+    // Provenance: which process derived this, and when.
+    assert_eq!(a["boot_id"], "boot-a");
+    assert_eq!(a["updated_at"], 1_800_000_000);
+    // Unpersisted FlowMetrics fields are DECLARED, not zeroed.
+    let gaps: Vec<&str> = a["_gaps"]
+        .as_array()
+        .expect("declared gaps")
+        .iter()
+        .map(|g| g.as_str().unwrap())
+        .collect();
+    for expected in ["sats_in", "sats_out", "capacity", "daily_volume"] {
+        assert!(
+            gaps.contains(&expected),
+            "missing gap for {expected}: {gaps:?}"
+        );
+    }
+    for zeroed in ["sats_in", "sats_out", "capacity", "daily_volume"] {
+        assert!(
+            a.get(zeroed).map(|x| x.is_null()).unwrap_or(true),
+            "{zeroed} must be null, never a fabricated 0"
+        );
+    }
+
+    // A channel the analyzer has no row for is Python's own
+    // `{"channel": ..., "analysis": null}` -- no marker, not an error.
+    let v = revops::rpc_analyze::build_analyze_from_persisted(
+        Some(&serde_json::json!("999x9x9")),
+        None,
+    );
+    assert_eq!(v["channel"], "999x9x9");
+    assert!(v["analysis"].is_null());
+    assert!(
+        v.get("error").is_none(),
+        "unknown channel is not an error: {v}"
+    );
+}
