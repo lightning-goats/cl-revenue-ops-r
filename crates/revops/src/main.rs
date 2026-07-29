@@ -3105,9 +3105,17 @@ async fn main() -> Result<()> {
     // uninitialized arm); the read-only QUERY transport is
     // production-constructible but ships DISABLED (py cfg.enabled
     // default false), so it too refuses until an operator turns it on.
+    // Parity fix (parity_matrix finding 4): resolve the Boltz config from
+    // the SAME three layers every other subsystem uses -- DB override,
+    // the operator's live Python value, then the documented default.
+    // Building the transport from `BoltzCliProcessConfig::default()` made
+    // eight Boltz RPCs answer "integration disabled" while Python
+    // returned real data.
+    let boltz_cfg =
+        revops::boltz_config::resolve_boltz_cfg(db.as_ref(), &python_options.snapshot()).await;
     let boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync> =
         std::sync::Arc::new(revops_boltz::process::ProcessBoltzCli::new(
-            revops_boltz::process::BoltzCliProcessConfig::default(),
+            boltz_cfg.to_process_config(),
         ));
     let boltz_owner = observer_db.clone().map(|store| {
         revops::boltz_owner::spawn_boltz_owner(revops::boltz_owner::BoltzOwnerDeps {
@@ -3117,12 +3125,12 @@ async fn main() -> Result<()> {
             structural: std::sync::Arc::new(revops::boltz_owner::UnassembledStructuralSpend),
             store,
             config: revops::boltz_owner::BoltzOwnerConfig {
-                daily_budget_sats: 3_000, // py boltz_daily_budget_sats default
+                daily_budget_sats: boltz_cfg.daily_budget_sats,
                 budget_window_hours: 24,
-                structural_envelope_sats: 0,
+                structural_envelope_sats: boltz_cfg.structural_budget_sats,
                 allow_concurrent_swaps: false,
                 default_cooldown_seconds: 3_600,
-                auto_cycle_enabled: false,
+                auto_cycle_enabled: boltz_cfg.auto_cycle_enabled,
                 create_timeout_secs: revops::boltz_owner::CREATE_TIMEOUT_FLOOR_SECS,
             },
             clock: Box::new(now_unix),
