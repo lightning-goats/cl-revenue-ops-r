@@ -3,7 +3,7 @@
 //! REAL temp-schema writer actor.
 
 use revops::state_writer::{ProductionStateWriter, StateWriteAck};
-use revops_db::state_writer::{spawn_state_writer, BudgetTransition, PeerPolicyWrite};
+use revops_db::state_writer::{spawn_state_writer, PeerPolicyWrite};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
