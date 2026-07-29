@@ -3123,6 +3123,7 @@ async fn main() -> Result<()> {
                 allow_concurrent_swaps: false,
                 default_cooldown_seconds: 3_600,
                 auto_cycle_enabled: false,
+                create_timeout_secs: revops::boltz_owner::CREATE_TIMEOUT_FLOOR_SECS,
             },
             clock: Box::new(now_unix),
         })

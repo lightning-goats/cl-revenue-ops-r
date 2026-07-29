@@ -69,8 +69,10 @@ const OWNER_STORE_BUDGET: std::time::Duration =
 
 const OWNER_QUEUE_CAPACITY: usize = 16;
 
-/// py create timeout: `max(cfg.timeout_seconds, 120)`.
-const CREATE_TIMEOUT_SECS: u64 = 120;
+/// py create timeout floor: `max(cfg.timeout_seconds, 120)`
+/// (boltz_manager.py:1959). Production uses this; the config field lets
+/// the e2e proof drive the ambiguity path without a 2-minute test.
+pub const CREATE_TIMEOUT_FLOOR_SECS: u64 = 120;
 
 /// Manual-action timeout (py cfg default).
 const MANUAL_TIMEOUT_SECS: u64 = 60;
@@ -103,6 +105,10 @@ pub struct BoltzOwnerConfig {
     pub default_cooldown_seconds: i64,
     /// py `boltz_auto_cycle_enabled`.
     pub auto_cycle_enabled: bool,
+    /// Create-call timeout. Production passes
+    /// [`CREATE_TIMEOUT_FLOOR_SECS`] (py's `max(cfg, 120)`); tests lower
+    /// it to exercise the ambiguity path.
+    pub create_timeout_secs: u64,
 }
 
 /// Everything the owner thread needs. `capability: None` is the
@@ -689,7 +695,7 @@ impl OwnerState {
                 wallet_name,
                 currency.as_deref(),
                 *amount_sats,
-                CREATE_TIMEOUT_SECS,
+                self.deps.config.create_timeout_secs,
             ) {
                 Ok(ActionOutcome::Executed(create)) => classify_boltz_create(&create),
                 Ok(ActionOutcome::Preview { .. }) => BoltzSubmitOutcome::NotSubmitted {
@@ -716,7 +722,7 @@ impl OwnerState {
                 wallet_name.as_deref(),
                 chan_ids,
                 *routing_fee_limit_ppm,
-                CREATE_TIMEOUT_SECS,
+                self.deps.config.create_timeout_secs,
             ) {
                 Ok(ActionOutcome::Executed(create)) => classify_boltz_create(&create),
                 Ok(ActionOutcome::Preview { .. }) => BoltzSubmitOutcome::NotSubmitted {
@@ -743,7 +749,7 @@ impl OwnerState {
                 from_wallet_name,
                 to_address.as_deref(),
                 to_wallet_name.as_deref(),
-                CREATE_TIMEOUT_SECS,
+                self.deps.config.create_timeout_secs,
             ) {
                 Ok(ActionOutcome::Executed(create)) => classify_boltz_create(&create),
                 Ok(ActionOutcome::Preview { .. }) => BoltzSubmitOutcome::NotSubmitted {
