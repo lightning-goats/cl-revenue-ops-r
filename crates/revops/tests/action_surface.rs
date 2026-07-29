@@ -439,3 +439,37 @@ fn startup_resolution_guard_has_no_bypass_or_reset_seam() {
         );
     }
 }
+
+/// Task 60: the three rebalance operator RPCs register through
+/// `rpc_name()` exactly once each -- the canonical/prefixed switch stays
+/// the single naming authority, and main.rs hardcodes no raw rebalance
+/// method name that could collide with the running Python plugin.
+#[test]
+fn rebalance_rpcs_register_exactly_once_through_rpc_name() {
+    let root = workspace_root();
+    let main_src =
+        std::fs::read_to_string(root.join("crates/revops/src/main.rs")).expect("read main.rs");
+    for suffix in ["rebalance-plan", "rebalance-cycle", "rebalance-debug"] {
+        assert_eq!(
+            main_src.matches(&format!("rpc_name(\"{suffix}\")")).count(),
+            1,
+            "{suffix} must be named exactly once through rpc_name()"
+        );
+    }
+    assert_eq!(
+        main_src.matches("rpc_name(\"rebalance\")").count(),
+        1,
+        "the manual RPC must be named exactly once through rpc_name()"
+    );
+    for literal in [
+        "\"revenue-rebalance\"",
+        "\"revenue-rebalance-cycle\"",
+        "\"revenue-rebalance-debug\"",
+        "\"revenue-r-rebalance",
+    ] {
+        assert!(
+            !main_src.contains(literal),
+            "main.rs must not hardcode the method name {literal}"
+        );
+    }
+}

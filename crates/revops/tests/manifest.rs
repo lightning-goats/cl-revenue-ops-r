@@ -359,13 +359,26 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     for name in BATCH_A_CANONICAL_METHODS {
         assert!(methods.contains(name), "methods: {methods:?}");
     }
-    // Exactly 28 rpc methods total (no leftover revenue-r-* names bleeding
+    // Task 60: the three rebalance operator RPCs (owner-backed;
+    // Python-parity uninitialized arms until engine assembly at cutover).
+    for rebalance in [
+        "revenue-rebalance-cycle",
+        "revenue-rebalance-debug",
+        "revenue-rebalance",
+    ] {
+        assert!(
+            methods.contains(&rebalance),
+            "missing {rebalance}: {methods:?}"
+        );
+    }
+    // Exactly 31 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
     // rebalance planner, Task 49's ten Batch A builders, Task 56's four
-    // DB-backed planner read RPCs, and Task 61 4E's four LN+ operator
-    // RPCs (status/breaker-clear/abandon/backfill through the LN+ owner).
+    // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
+    // (status/breaker-clear/abandon/backfill through the LN+ owner), and
+    // Task 60's three rebalance operator RPCs (cycle/debug/manual).
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -373,7 +386,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        28,
+        31,
         "methods: {methods:?}"
     );
 

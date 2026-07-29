@@ -625,3 +625,35 @@ fn manual_candidate(params: &ManualRebalanceParams) -> RebalanceCandidate {
         source_turnover_rate: 0.0,
     }
 }
+
+/// Task 60: the pre-cutover evidence stand-in -- every read fails typed,
+/// so a submission could never pass evidence revalidation even if the
+/// engine gate were somehow bypassed. Replaced by a real facade impl at
+/// engine assembly.
+pub struct UnassembledEvidence;
+
+impl FacadeRpc for UnassembledEvidence {
+    fn get_funds(&self) -> Result<Value, revops_rebalance::router::RpcFailure> {
+        Err(revops_rebalance::router::RpcFailure {
+            message: "facade evidence not assembled (pre-cutover)".to_string(),
+        })
+    }
+    fn get_peer_channels(&self) -> Result<Value, revops_rebalance::router::RpcFailure> {
+        Err(revops_rebalance::router::RpcFailure {
+            message: "facade evidence not assembled (pre-cutover)".to_string(),
+        })
+    }
+    fn get_channels_source(
+        &self,
+        _source: &str,
+    ) -> Result<Value, revops_rebalance::router::RpcFailure> {
+        Err(revops_rebalance::router::RpcFailure {
+            message: "facade evidence not assembled (pre-cutover)".to_string(),
+        })
+    }
+    fn get_node_id(&self) -> Result<String, revops_rebalance::router::RpcFailure> {
+        Err(revops_rebalance::router::RpcFailure {
+            message: "facade evidence not assembled (pre-cutover)".to_string(),
+        })
+    }
+}
