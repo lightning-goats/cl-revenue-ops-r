@@ -22,6 +22,7 @@ pub mod fee_mode;
 pub mod fee_scheduler;
 pub mod fee_state;
 pub mod fee_triggers;
+pub mod financial_snapshot;
 pub mod flow_owner;
 pub mod hydration;
 pub mod lnplus_adapters;
