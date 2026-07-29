@@ -4,6 +4,7 @@
 //! unit-testing in isolation from the cln-plugin stdio handshake (which the
 //! `tests/manifest.rs` black-box test covers instead).
 
+pub mod boltz_boundaries;
 pub mod capital_adapters;
 pub mod capital_boundaries;
 pub mod capital_evidence;
