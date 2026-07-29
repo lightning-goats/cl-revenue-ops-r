@@ -427,6 +427,19 @@ pub trait RunwayStateStore: Send {
         event: revops_db::fee_runway::FeeTriggerEventRow,
         on_done: StoreDispatchCallback<()>,
     ) -> anyhow::Result<()>;
+
+    /// Task 59: one bounded Class-W retention sweep
+    /// (`revops_db::fee_runway::run_retention_sweep`), dispatched
+    /// off-owner after a successful scheduled cycle commit. The report's
+    /// `next_cursor` is the owner's fairness continuation for the next
+    /// sweep; a failure is counted red by the owner and NEVER fails or
+    /// blocks the fee cycle that scheduled it.
+    fn dispatch_run_retention_sweep(
+        &self,
+        now: i64,
+        cursor: revops_db::retention::RetentionCursor,
+        on_done: StoreDispatchCallback<revops_db::retention::RetentionReport>,
+    ) -> anyhow::Result<()>;
 }
 
 /// Run `work` on a freshly spawned thread and hand its result to
@@ -630,6 +643,20 @@ impl RunwayStateStore for revops_db::owner::ObserverHandle {
         spawn_store_dispatch(
             "revops-a3-receipt",
             move || handle.blocking_record_fee_trigger_event(event),
+            on_done,
+        )
+    }
+
+    fn dispatch_run_retention_sweep(
+        &self,
+        now: i64,
+        cursor: revops_db::retention::RetentionCursor,
+        on_done: StoreDispatchCallback<revops_db::retention::RetentionReport>,
+    ) -> anyhow::Result<()> {
+        let handle = self.clone();
+        spawn_store_dispatch(
+            "revops-retention-sweep",
+            move || handle.blocking_run_retention_sweep(now, cursor),
             on_done,
         )
     }

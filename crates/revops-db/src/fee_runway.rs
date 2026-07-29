@@ -77,6 +77,11 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::retention::{
+    RetentionCursor, RetentionReport, RETENTION_BATCH_ROWS, RETENTION_MAX_BATCHES_PER_SWEEP,
+    RUNWAY_EVIDENCE_RETENTION_SECONDS, SNAPSHOT_KEEP_LAST,
+};
+
 /// Idempotent `CREATE TABLE IF NOT EXISTS` (+ enabling foreign key
 /// enforcement, a per-connection SQLite setting) for every Task 4 table.
 /// Safe to call on every connection open, including a connection that
@@ -295,6 +300,14 @@ CREATE TABLE IF NOT EXISTS rust_broadcast_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_rust_broadcast_attempts_outcome
     ON rust_broadcast_attempts(outcome);
+
+CREATE TABLE IF NOT EXISTS rust_consumed_arm_nonces (
+    nonce TEXT PRIMARY KEY,
+    consumed_at INTEGER NOT NULL,
+    source_commit TEXT NOT NULL,
+    binary_sha256 TEXT NOT NULL,
+    arm_expires_at INTEGER NOT NULL
+);
 ";
 
 // ---------------------------------------------------------------------------
@@ -1803,4 +1816,139 @@ pub fn latest_runway_snapshot(conn: &Connection) -> Result<Option<RunwaySnapshot
     )
     .optional()
     .context("read latest runway snapshot")
+}
+
+/// Insert one burned cutover-arm nonce. This table is a deny ledger: no read
+/// path may use a row to grant authority.
+pub fn insert_consumed_nonce(
+    conn: &Connection,
+    nonce: &str,
+    consumed_at: i64,
+    source_commit: &str,
+    binary_sha256: &str,
+    arm_expires_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO rust_consumed_arm_nonces
+             (nonce, consumed_at, source_commit, binary_sha256, arm_expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            nonce,
+            consumed_at,
+            source_commit,
+            binary_sha256,
+            arm_expires_at
+        ],
+    )
+    .context("insert consumed cutover-arm nonce")?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SweepTarget {
+    Horizon {
+        table: &'static str,
+        key: &'static str,
+    },
+    Snapshots,
+}
+
+impl SweepTarget {
+    const ORDERED: [Self; 4] = [
+        Self::Horizon {
+            table: "rust_fee_shadow_outcomes",
+            key: "cycle_ts",
+        },
+        Self::Horizon {
+            table: "rust_fee_trigger_events",
+            key: "received_at",
+        },
+        Self::Horizon {
+            table: "rust_mempool_ma_comparison",
+            key: "at",
+        },
+        Self::Snapshots,
+    ];
+
+    fn table(self) -> &'static str {
+        match self {
+            Self::Horizon { table, .. } => table,
+            Self::Snapshots => "rust_runway_snapshots",
+        }
+    }
+}
+
+/// Delete at most one batch from one Class-W table in its own immediate
+/// transaction. SQL identifiers come exclusively from the private fixed enum.
+fn sweep_one_batch(conn: &Connection, target: SweepTarget, horizon: i64) -> Result<usize> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin retention batch")?;
+    let deleted = match target {
+        SweepTarget::Horizon { table, key } => {
+            let sql = format!(
+                "DELETE FROM {table}
+                 WHERE id IN (
+                     SELECT id FROM {table}
+                     WHERE {key} < ?1
+                     ORDER BY {key} ASC, id ASC
+                     LIMIT ?2
+                 )"
+            );
+            tx.execute(&sql, params![horizon, RETENTION_BATCH_ROWS as i64])
+                .with_context(|| format!("sweep {table}"))?
+        }
+        SweepTarget::Snapshots => tx
+            .execute(
+                "DELETE FROM rust_runway_snapshots
+                 WHERE id IN (
+                     SELECT id FROM rust_runway_snapshots
+                     WHERE id NOT IN (
+                         SELECT id FROM rust_runway_snapshots
+                         ORDER BY id DESC
+                         LIMIT ?1
+                     )
+                     ORDER BY id ASC
+                     LIMIT ?2
+                 )",
+                params![SNAPSHOT_KEEP_LAST as i64, RETENTION_BATCH_ROWS as i64],
+            )
+            .context("sweep rust_runway_snapshots")?,
+    };
+    tx.commit().context("commit retention batch")?;
+    Ok(deleted)
+}
+
+/// Run one globally bounded, fair Class-W retention sweep.
+///
+/// At most one batch is offered to a table before the cursor advances to
+/// the next table, and at most [`RETENTION_MAX_BATCHES_PER_SWEEP`] nonempty
+/// batches are committed across the whole sweep. A full empty round proves
+/// that no eligible Class-W rows remain.
+pub fn run_retention_sweep(
+    conn: &Connection,
+    now: i64,
+    cursor: RetentionCursor,
+) -> Result<RetentionReport> {
+    let targets = SweepTarget::ORDERED;
+    let mut report = RetentionReport::empty(cursor);
+    let horizon = now.saturating_sub(RUNWAY_EVIDENCE_RETENTION_SECONDS);
+    let mut index = cursor.index(targets.len());
+    let mut empty_in_round = 0usize;
+
+    while report.batches < RETENTION_MAX_BATCHES_PER_SWEEP && empty_in_round < targets.len() {
+        let target = targets[index];
+        let deleted = sweep_one_batch(conn, target, horizon)?;
+        if deleted == 0 {
+            empty_in_round += 1;
+        } else {
+            empty_in_round = 0;
+            report.batches += 1;
+            *report.deleted.entry(target.table()).or_insert(0) += deleted as u64;
+            report.next_cursor = RetentionCursor::after(index, targets.len());
+        }
+        index = (index + 1) % targets.len();
+    }
+    report.truncated = report.batches == RETENTION_MAX_BATCHES_PER_SWEEP;
+    Ok(report)
 }

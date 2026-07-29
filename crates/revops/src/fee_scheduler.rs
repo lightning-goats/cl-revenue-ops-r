@@ -639,6 +639,12 @@ pub enum InitialFeeStoreResult {
         context: String,
         result: Result<(), String>,
     },
+    /// Task 59: `dispatch_run_retention_sweep`'s answer. Success carries
+    /// the owner's next fairness cursor; a failure increments the
+    /// never-reset red retention counter. Nothing staged depends on it.
+    Retention {
+        result: Result<revops_db::retention::RetentionReport, String>,
+    },
 }
 
 /// Result-only callback capability for A3 store completions. Unlike
@@ -1505,6 +1511,16 @@ pub struct CycleOwner {
     /// Red error counter (Task 5 step 3): committed-cycle persistence
     /// failures. Never reset.
     persistence_failures: u64,
+    /// Task 59: red error counter for failed/undispatchable retention
+    /// sweeps. Never reset; a retention failure never fails a cycle.
+    retention_failures: u64,
+    /// Task 59: the next sweep's fairness continuation, updated only from
+    /// a delivered sweep report.
+    retention_cursor: revops_db::retention::RetentionCursor,
+    /// Task 59: at most one sweep in flight -- a commit landing while the
+    /// previous sweep's report is outstanding schedules nothing (the next
+    /// committed cycle re-schedules).
+    retention_in_flight: bool,
     db_path: PathBuf,
     /// `None` only if the journal dir could not be created -- logged
     /// loudly at construction; cycles still run (decisions are lost to
@@ -1624,6 +1640,9 @@ impl CycleOwner {
             store,
             spawn_now: seed_now,
             persistence_failures: 0,
+            retention_failures: 0,
+            retention_cursor: revops_db::retention::RetentionCursor::default(),
+            retention_in_flight: false,
             db_path: cfg.db_path.clone(),
             journal,
             state_sink,
@@ -1981,6 +2000,9 @@ impl CycleOwner {
                 }
             }
             committed_cycle_id = Some(cycle_id);
+            // Task 59: retention rides only successful scheduled commits,
+            // off this owner thread; it can never fail the cycle.
+            self.schedule_retention_sweep(now);
         }
 
         (
@@ -1994,6 +2016,47 @@ impl CycleOwner {
     /// Red error counter: SeedOnce cycles whose atomic commit failed.
     pub fn persistence_failures(&self) -> u64 {
         self.persistence_failures
+    }
+
+    /// Task 59 red error counter: retention sweeps that failed or could
+    /// not be dispatched. Never reset.
+    pub fn retention_failures(&self) -> u64 {
+        self.retention_failures
+    }
+
+    /// Task 59: schedule one bounded Class-W retention sweep off this
+    /// owner thread. Called ONLY after a successful SCHEDULED cycle
+    /// commit. At most one sweep is in flight; a launch failure is
+    /// counted red and logged, and NEVER affects the committed cycle.
+    fn schedule_retention_sweep(&mut self, now: i64) {
+        if self.retention_in_flight {
+            return;
+        }
+        let (Some(result_sink), Some(store)) = (self.result_sink.clone(), self.store.as_ref())
+        else {
+            return;
+        };
+        let launch = store.dispatch_run_retention_sweep(
+            now,
+            self.retention_cursor,
+            Box::new(move |result| {
+                if !result_sink.deliver(InitialFeeStoreResult::Retention {
+                    result: result.map_err(|e| format!("{e:#}")),
+                }) {
+                    eprintln!("revops: retention sweep result undeliverable (owner gone)");
+                }
+            }),
+        );
+        match launch {
+            Ok(()) => self.retention_in_flight = true,
+            Err(e) => {
+                self.retention_failures += 1;
+                eprintln!(
+                    "revops: RETENTION SWEEP DISPATCH FAILED (failure #{}): {e:#}",
+                    self.retention_failures
+                );
+            }
+        }
     }
 
     /// Task 6 step 2: Rust's own mempool recorder, plus (during the
@@ -3316,6 +3379,24 @@ impl CycleOwner {
                 generation,
                 result,
             } => self.handle_commit_result(channel_id, event_key, generation, result),
+            InitialFeeStoreResult::Retention { result } => {
+                self.retention_in_flight = false;
+                match result {
+                    Ok(report) => {
+                        self.retention_cursor = report.next_cursor;
+                    }
+                    Err(e) => {
+                        // Loud + counted red, never reset -- and never
+                        // any effect on cycle outcomes (the sweep is pure
+                        // Class-W housekeeping).
+                        self.retention_failures += 1;
+                        eprintln!(
+                            "revops: RETENTION SWEEP FAILED (failure #{}): {e}",
+                            self.retention_failures
+                        );
+                    }
+                }
+            }
         }
         // F7 sequencing: the A3 occurrence(s) settled -- run the cycle
         // that was deferred behind them, on this same owner thread, so it
@@ -3965,6 +4046,12 @@ impl CycleOwner {
                 },
                 "last_profile": self.last_profile,
                 "governor_ledger_open": self.governor.ledger_open(),
+                // Task 59: never-reset red retention counter + in-flight
+                // sweep visibility.
+                "retention": {
+                    "failures": self.retention_failures,
+                    "in_flight": self.retention_in_flight,
+                },
             }),
         }
     }

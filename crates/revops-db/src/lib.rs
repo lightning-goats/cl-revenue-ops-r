@@ -10,6 +10,7 @@ pub mod loop_health;
 pub mod notifications;
 pub mod owner;
 pub mod queries;
+pub mod retention;
 
 /// The lock-wait budget every sqlite connection this plugin opens must
 /// carry. SQLite's default is 0 -- an immediate `SQLITE_BUSY` the instant

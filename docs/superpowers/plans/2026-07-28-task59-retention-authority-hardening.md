@@ -89,7 +89,7 @@
 - Modify: the Task 58-specified operator runbook section(s)
 - Create: `/home/sat/agent-tasks/task-59-implementation-report.md`
 
-1. Update retention/runbook language: no manual `VACUUM`, list never-prune evidence, and state DB-path plus ledger restore/backup policy.
+1. Update retention/runbook language: no automatic `VACUUM`; any operator-manual `VACUUM` requires the plugin stopped. List never-prune evidence and state DB-path plus ledger restore/backup policy.
 2. Execute the reviewed R/T/F/A mutation matrix. For signature-only compile-shape pins, use the documented compile-failure substitution and disclose it in the report.
 3. Run focused tests again, then `cargo test --workspace --all-targets`, workspace doctests, release tests/build, `cargo fmt --all -- --check`, and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 4. Inspect `git diff --check`, full diff, status, and commit history. Request an implementation code review and address only technically verified findings.

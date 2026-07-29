@@ -13,6 +13,7 @@ use crate::fee_runway::{
     MempoolSampleRow, QuarantineEntry, QuarantineRow, RunwaySnapshotRow,
 };
 use crate::notifications::{self, ForwardRow};
+use crate::retention::{RetentionCursor, RetentionReport};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
@@ -114,6 +115,13 @@ enum Command {
         reply: oneshot::Sender<Result<i64>>,
     },
     LatestRunwaySnapshot(oneshot::Sender<Result<Option<RunwaySnapshotRow>>>),
+    // -- Task 59: bounded Class-W retention sweep. The connection stays on
+    // the owner thread; only the cursor/report messages cross it --
+    RunRetentionSweep {
+        now: i64,
+        cursor: RetentionCursor,
+        reply: oneshot::Sender<Result<RetentionReport>>,
+    },
     // -- Task 5: SeedOnce seed events + restart markers (Task 42: the
     // standalone write path records REFUSALS only; successful seed
     // provenance rides FeeCycleCommit::pending_seed through the atomic
@@ -731,6 +739,38 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Run one bounded Class-W retention sweep on the owner thread
+    /// (`fee_runway::run_retention_sweep`). Only the periodic-sweep subset
+    /// of `retention::WINDOWED_TABLES` is ever touched; the caller keeps
+    /// the returned cursor for the next sweep's fairness continuation.
+    pub async fn run_retention_sweep(
+        &self,
+        now: i64,
+        cursor: RetentionCursor,
+    ) -> Result<RetentionReport> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RunRetentionSweep { now, cursor, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::run_retention_sweep`] for the
+    /// scheduler's `std::thread`.
+    pub fn blocking_run_retention_sweep(
+        &self,
+        now: i64,
+        cursor: RetentionCursor,
+    ) -> Result<RetentionReport> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RunRetentionSweep { now, cursor, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Record one STANDALONE SeedOnce seed REFUSAL (Task 42: success
     /// provenance has no standalone path -- see
     /// [`fee_runway::record_seed_refusal`]).
@@ -1226,6 +1266,10 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::LatestRunwaySnapshot(reply) => {
                     let result = fee_runway::latest_runway_snapshot(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::RunRetentionSweep { now, cursor, reply } => {
+                    let result = fee_runway::run_retention_sweep(&conn, now, cursor);
                     let _ = reply.send(result);
                 }
                 Command::RecordSeedRefusal { event, reply } => {
