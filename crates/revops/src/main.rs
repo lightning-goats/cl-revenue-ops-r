@@ -1287,24 +1287,17 @@ async fn main() -> Result<()> {
                     Some(id) => revops::fee_scheduler::FeeDebugQuery::Channel(id.to_string()),
                     None => revops::fee_scheduler::FeeDebugQuery::Summary,
                 };
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                if handle
-                    .tx
-                    .send(revops::fee_scheduler::CycleMsg::Query(query, reply_tx))
-                    .await
-                    .is_err()
-                {
-                    return Ok(serde_json::json!({"error": "fee-cycle owner thread not running"}));
-                }
-                // `reply_rx.recv()` is a blocking std call -- `spawn_blocking`
-                // keeps it off the tokio worker thread this async fn is
-                // polled on.
-                match tokio::task::spawn_blocking(move || reply_rx.recv()).await {
-                    Ok(Ok(value)) => Ok(value),
-                    _ => Ok(serde_json::json!({
-                        "error": "fee-cycle owner thread did not respond"
-                    })),
-                }
+                // Task 59 §3.3: two-phase bounded bridge -- typed
+                // `owner_queue_saturated` (refused admission, nothing
+                // enqueued) and `owner_response_timeout` (admitted,
+                // response expired) replace the unbounded admission +
+                // `recv()` waits. Both are retryable read failures.
+                Ok(revops::fee_scheduler::query_owner_bounded(
+                    &handle.tx,
+                    query,
+                    revops::fee_scheduler::RPC_BRIDGE_RECV_TIMEOUT,
+                )
+                .await)
             },
         )
         .rpcmethod(
@@ -1356,28 +1349,18 @@ async fn main() -> Result<()> {
                 // running (passive-observer mode, or it failed to start).
                 let mut counters = serde_json::Value::Null;
                 if let Some(handle) = s.scheduler.get() {
-                    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                    if handle
-                        .tx
-                        .send(revops::fee_scheduler::CycleMsg::Query(
-                            revops::fee_scheduler::FeeDebugQuery::RunwayCounters,
-                            reply_tx,
-                        ))
-                        .await
-                        .is_err()
-                    {
-                        return Ok(serde_json::json!({
-                            "error": "fee-cycle owner thread not running"
-                        }));
+                    // Task 59 §3.3: same bounded two-phase bridge as
+                    // revenue-r-fee-debug (typed, retryable errors).
+                    let value = revops::fee_scheduler::query_owner_bounded(
+                        &handle.tx,
+                        revops::fee_scheduler::FeeDebugQuery::RunwayCounters,
+                        revops::fee_scheduler::RPC_BRIDGE_RECV_TIMEOUT,
+                    )
+                    .await;
+                    if value.get("error").is_some() {
+                        return Ok(value);
                     }
-                    match tokio::task::spawn_blocking(move || reply_rx.recv()).await {
-                        Ok(Ok(value)) => counters = value,
-                        _ => {
-                            return Ok(serde_json::json!({
-                                "error": "fee-cycle owner thread did not respond"
-                            }));
-                        }
-                    }
+                    counters = value;
                 }
 
                 // Rust-owned store reads: all read-only, resolved live at

@@ -249,6 +249,26 @@ impl SchedulerIngress {
         self.tx.blocking_send(msg)
     }
 
+    /// Task 59 §3.3 phase 1: Query-only, non-parking admission. Tokio's
+    /// `try_send` either transfers the message or returns it -- there is
+    /// no later enqueue after a refusal, so `Err` proves nothing was
+    /// admitted and the caller never parks against the bounded queue.
+    /// By construction this path can carry ONLY `CycleMsg::Query`
+    /// (diagnostic reads); every effectful message type keeps Task 57's
+    /// pinned async-backpressure-only public send contract.
+    pub fn try_send_query(
+        &self,
+        query: FeeDebugQuery,
+        reply: std_mpsc::Sender<serde_json::Value>,
+    ) -> Result<(), QueryAdmissionRefused> {
+        self.tx
+            .try_send(CycleMsg::Query(query, reply))
+            .map_err(|e| match e {
+                tokio_mpsc::error::TrySendError::Full(_) => QueryAdmissionRefused::Saturated,
+                tokio_mpsc::error::TrySendError::Closed(_) => QueryAdmissionRefused::OwnerGone,
+            })
+    }
+
     /// Raw receiver construction is crate-private: external code may submit
     /// through `send`, but can never install an arbitrary consumer behind a
     /// vetted observer pass.
@@ -259,6 +279,79 @@ impl SchedulerIngress {
     pub(crate) fn bounded_channel(capacity: usize) -> (Self, tokio_mpsc::Receiver<CycleMsg>) {
         let (tx, rx) = tokio_mpsc::channel(capacity.max(1));
         (Self { tx }, rx)
+    }
+}
+
+/// Task 59 §3.3: typed refusal from the Query-only try-path. Both
+/// readings are section-local read failures (F13) -- retryable, never
+/// proof the owner died, never a trip condition.
+#[derive(Debug)]
+pub enum QueryAdmissionRefused {
+    /// The bounded owner queue is at capacity admitting real work;
+    /// nothing was enqueued (`owner_queue_saturated`).
+    Saturated,
+    /// The owner task is gone; nothing can be enqueued at all.
+    OwnerGone,
+}
+
+/// Task 59 §3.3: diagnostic-freshness bound for the RPC bridge's
+/// response phase. Explicitly NOT a legitimate-backlog bound: a fully
+/// store-contended 63-deep heavy backlog is minutes-scale, and no
+/// constant both covers it and stays useful as a diagnostic. Everything
+/// slower converts into the retryable typed `owner_response_timeout`.
+pub const RPC_BRIDGE_RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Task 59 §3.6: pending A3 age past which fee-debug logs a warning.
+/// Visibility only -- there is deliberately no cancellation (an owner
+/// timeout could not cancel the queued command and would recreate the
+/// scheduled-commit ambiguity F7 killed).
+pub const A3_PENDING_AGE_WARN_SECONDS: i64 = 60;
+
+/// Task 59 §3.3: the two-phase bounded diagnostic-query bridge, replacing
+/// the two unbounded waits (a parked `send().await` admission and an
+/// unbounded `recv()`). Phase 1 refuses admission typed and immediately;
+/// phase 2 bounds the response wait. Both error shapes carry DISTINCT
+/// stable codes and are section-local read failures -- retryable, loud,
+/// never evidence the owner died.
+pub async fn query_owner_bounded(
+    ingress: &SchedulerIngress,
+    query: FeeDebugQuery,
+    budget: std::time::Duration,
+) -> serde_json::Value {
+    let (reply_tx, reply_rx) = std_mpsc::channel();
+    match ingress.try_send_query(query, reply_tx) {
+        Err(QueryAdmissionRefused::Saturated) => {
+            return serde_json::json!({"error": {
+                "code": "owner_queue_saturated",
+                "message": "the fee owner's bounded queue is at capacity admitting real \
+                            work; nothing was enqueued -- the owner is busy, not dead; retry"
+            }});
+        }
+        Err(QueryAdmissionRefused::OwnerGone) => {
+            return serde_json::json!({"error": {
+                "code": "owner_gone",
+                "message": "fee-cycle owner thread not running"
+            }});
+        }
+        Ok(()) => {}
+    }
+    // `recv_timeout` is a blocking std call -- `spawn_blocking` keeps it
+    // off the tokio worker thread this async fn is polled on.
+    match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(budget)).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(std_mpsc::RecvTimeoutError::Timeout)) => serde_json::json!({"error": {
+            "code": "owner_response_timeout",
+            "message": format!(
+                "the admitted diagnostic query got no answer within {}s: the owner is \
+                 either busy behind a legitimate store-contended backlog or genuinely \
+                 stuck -- see loop health; retryable, never a trip condition",
+                budget.as_secs()
+            )
+        }}),
+        _ => serde_json::json!({"error": {
+            "code": "owner_gone",
+            "message": "fee-cycle owner thread exited before answering"
+        }}),
     }
 }
 
@@ -707,6 +800,10 @@ enum PendingInitialFee {
         event_key: String,
         generation: u64,
         prepared: Box<PreparedInitialFee>,
+        /// Task 59 §3.6: wall-clock stamp of this phase's dispatch, for
+        /// the `oldest_pending_age_seconds` diagnostic. Visibility only
+        /// -- nothing may ever cancel on it.
+        dispatched_at: i64,
     },
     /// Waiting for the off-owner `dispatch_commit_fee_cycle_guarded`
     /// answer; `staged` (clones -- nothing is installed yet) installs
@@ -719,6 +816,9 @@ enum PendingInitialFee {
         /// guarded commit's CAS basis.
         expected_prior_generation: u64,
         staged: Option<Box<(ChannelFeeState, ChannelCycleState)>>,
+        /// Task 59 §3.6: wall-clock stamp of this phase's dispatch (each
+        /// phase re-stamps; the long waits live within a phase).
+        dispatched_at: i64,
     },
 }
 
@@ -734,6 +834,22 @@ impl PendingInitialFee {
         match self {
             PendingInitialFee::CheckingIdempotency { generation, .. }
             | PendingInitialFee::Committing { generation, .. } => *generation,
+        }
+    }
+
+    fn dispatched_at(&self) -> i64 {
+        match self {
+            PendingInitialFee::CheckingIdempotency { dispatched_at, .. }
+            | PendingInitialFee::Committing { dispatched_at, .. } => *dispatched_at,
+        }
+    }
+
+    fn backdate(&mut self, seconds: i64) {
+        match self {
+            PendingInitialFee::CheckingIdempotency { dispatched_at, .. }
+            | PendingInitialFee::Committing { dispatched_at, .. } => {
+                *dispatched_at -= seconds;
+            }
         }
     }
 }
@@ -2024,6 +2140,23 @@ impl CycleOwner {
         self.retention_failures
     }
 
+    /// Task 59 §3.6: age of the OLDEST in-flight A3 occurrence, if any.
+    fn oldest_pending_age_seconds(&self, now: i64) -> Option<i64> {
+        self.pending_initial_fees
+            .values()
+            .map(|pending| now.saturating_sub(pending.dispatched_at()))
+            .max()
+    }
+
+    /// Test-only seam for the §3.6 threshold test: shift every pending
+    /// stamp into the past. Touches ONLY the diagnostic stamp -- no
+    /// occurrence state, no cancellation path exists to reach.
+    pub fn backdate_pending_initial_fees_for_tests(&mut self, seconds: i64) {
+        for pending in self.pending_initial_fees.values_mut() {
+            pending.backdate(seconds);
+        }
+    }
+
     /// Task 59: schedule one bounded Class-W retention sweep off this
     /// owner thread. Called ONLY after a successful SCHEDULED cycle
     /// commit. At most one sweep is in flight; a launch failure is
@@ -3309,6 +3442,7 @@ impl CycleOwner {
                 event_key: event_key.clone(),
                 generation,
                 prepared: Box::new(prepared),
+                dispatched_at: crate::now_unix(),
             },
         );
         let store = self.store.as_ref().expect("checked store.is_none() above");
@@ -3451,6 +3585,7 @@ impl CycleOwner {
             event_key: _matched_key,
             generation: _matched_generation,
             prepared,
+            dispatched_at: _,
         }) = self.pending_initial_fees.remove(&channel_id)
         else {
             unreachable!("matched CheckingIdempotency above");
@@ -3572,6 +3707,7 @@ impl CycleOwner {
             generation: _matched_generation,
             expected_prior_generation,
             staged,
+            dispatched_at: _,
         }) = self.pending_initial_fees.remove(&channel_id)
         else {
             unreachable!("matched Committing above");
@@ -3788,6 +3924,7 @@ impl CycleOwner {
                 generation,
                 expected_prior_generation,
                 staged,
+                dispatched_at: crate::now_unix(),
             },
         );
         // Both were verified in `handle_new_channel` before the
@@ -4014,7 +4151,21 @@ impl CycleOwner {
                     },
                 })
             }
-            FeeDebugQuery::RunwayCounters => serde_json::json!({
+            FeeDebugQuery::RunwayCounters => {
+                // Task 59 §3.6: warn (visibility only) when the oldest
+                // in-flight A3 occurrence crosses the threshold.
+                let oldest_pending_age = self.oldest_pending_age_seconds(crate::now_unix());
+                if let Some(age) = oldest_pending_age {
+                    if age > A3_PENDING_AGE_WARN_SECONDS {
+                        eprintln!(
+                            "revops: A3 occurrence pending for {age}s (warn threshold \
+                             {A3_PENDING_AGE_WARN_SECONDS}s) -- an off-owner store result \
+                             is outstanding; visibility only, no cancellation (see loop \
+                             health)"
+                        );
+                    }
+                }
+                serde_json::json!({
                 "lifecycle": match self.lifecycle {
                     StateLifecycle::RehydratePerCycle => "rehydrate_per_cycle",
                     StateLifecycle::SeedOnce => "seed_once",
@@ -4033,6 +4184,9 @@ impl CycleOwner {
                 // red identity-mismatch conflict counter.
                 "initial_fee": {
                     "pending": self.pending_initial_fees.len(),
+                    // Task 59 §3.6: stuck-pending visibility (there is
+                    // deliberately no cancellation to pair with it).
+                    "oldest_pending_age_seconds": oldest_pending_age,
                     "conflicts": self.initial_fee_conflicts,
                     // F7 observability: the CAS basis and the deferral
                     // bookkeeping.
@@ -4052,7 +4206,8 @@ impl CycleOwner {
                     "failures": self.retention_failures,
                     "in_flight": self.retention_in_flight,
                 },
-            }),
+                })
+            }
         }
     }
 }
@@ -4574,6 +4729,135 @@ mod bounded_ingress_tests {
             ),
             "the callback result must be delivered exactly once"
         );
+    }
+
+    /// T2a (Task 59 §3.3, R2-F1): a FULL owner queue refuses Query
+    /// admission typed and IMMEDIATELY -- the try-path either transfers
+    /// the message or returns it, so a refusal proves nothing was
+    /// enqueued and the RPC never parks on admission.
+    #[tokio::test]
+    async fn saturated_queue_refuses_query_admission_typed() {
+        let (tx, mut rx) = SchedulerIngress::bounded_channel(OWNER_QUEUE_CAPACITY);
+        for _ in 0..OWNER_QUEUE_CAPACITY {
+            tx.tx.try_send(CycleMsg::WakeAll).expect("fill to capacity");
+        }
+
+        let (reply_tx, _keep_reply_open) = std_mpsc::channel();
+        let started = std::time::Instant::now();
+        let refused = tx
+            .try_send_query(FeeDebugQuery::Summary, reply_tx)
+            .expect_err("a full bounded queue must refuse Query admission");
+        assert!(
+            matches!(refused, QueryAdmissionRefused::Saturated),
+            "{refused:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "admission refusal must be immediate"
+        );
+
+        // The bridge composes the refusal into the DISTINCT typed JSON
+        // error -- a section-local read failure, never a trip condition.
+        let value = query_owner_bounded(&tx, FeeDebugQuery::Summary, RPC_BRIDGE_RECV_TIMEOUT).await;
+        assert_eq!(value["error"]["code"], "owner_queue_saturated");
+
+        // Neither attempt enqueued anything: the queue still holds
+        // exactly the legitimate fill, nothing else.
+        let mut drained = 0usize;
+        while let Ok(msg) = rx.try_recv() {
+            assert!(matches!(msg, CycleMsg::WakeAll), "foreign message enqueued");
+            drained += 1;
+        }
+        assert_eq!(drained, OWNER_QUEUE_CAPACITY);
+    }
+
+    /// T2b (Task 59 §3.3, R2-F1/F13): behind the documented worst-case
+    /// legitimate backlog (a store-contended heavy handler plus a full
+    /// bounded queue), an admitted Query whose budget expires yields the
+    /// DISTINCT typed `owner_response_timeout` -- and a retry still
+    /// ANSWERS once the backlog drains: expiry is a section-local read
+    /// failure, never proof the owner died.
+    ///
+    /// The owner loop here is synthetic (the real `FailedForward` chain
+    /// needs a hydrated SeedOnce owner): one heavy handler stall, cheap
+    /// messages otherwise, Query answered off the loop -- the §3.3
+    /// derivation's shape. The bounded-bridge composition under test is
+    /// the production `query_owner_bounded` verbatim.
+    #[tokio::test]
+    async fn admitted_query_answers_behind_max_legitimate_backlog() {
+        let (tx, mut rx) = SchedulerIngress::bounded_channel(OWNER_QUEUE_CAPACITY);
+        let owner = std::thread::spawn(move || {
+            while let Some(msg) = rx.blocking_recv() {
+                match msg {
+                    CycleMsg::FailedForward(_) => {
+                        // The store-contended heavy handler (§3.3: the
+                        // synchronous idempotency read + guarded nudge
+                        // commit under lock contention).
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    CycleMsg::Query(_query, reply) => {
+                        // A reply to an expired bridge is a send to a
+                        // dropped receiver -- ignored, exactly like the
+                        // production loop.
+                        let _ = reply.send(serde_json::json!({"ok": true}));
+                    }
+                    CycleMsg::Shutdown => return,
+                    _ => {}
+                }
+            }
+        });
+
+        // Heavy handler first, then fill the rest of the queue.
+        tx.send(CycleMsg::FailedForward(Box::new(FailedForwardSignal {
+            channel_id: "700x1x0".to_string(),
+            amount_msat: 0,
+            failcode: Some(4108),
+            failreason: None,
+            event_ts: 1_800_000_000,
+        })))
+        .await
+        .expect("send heavy handler");
+        for _ in 0..(OWNER_QUEUE_CAPACITY - 1) {
+            tx.send(CycleMsg::WakeAll).await.expect("fill backlog");
+        }
+        // Let the owner dequeue the heavy handler (freeing one slot) and
+        // enter its 2 s stall before admitting the query.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Admitted (one slot free after the heavy handler was dequeued),
+        // then the small budget expires while the owner is mid-stall.
+        let value = query_owner_bounded(
+            &tx,
+            FeeDebugQuery::Summary,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(value["error"]["code"], "owner_response_timeout");
+
+        // Retryable: keep retrying through saturation refusals while the
+        // backlog drains; the admitted retry must genuinely answer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let answered = loop {
+            let value = query_owner_bounded(
+                &tx,
+                FeeDebugQuery::Summary,
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+            if value.get("ok").is_some() {
+                break value;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "an admitted query behind a legitimate backlog must eventually answer, \
+                 kept getting {value:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(answered, serde_json::json!({"ok": true}));
+
+        tx.send(CycleMsg::Shutdown).await.expect("shutdown");
+        owner.join().unwrap();
     }
 }
 

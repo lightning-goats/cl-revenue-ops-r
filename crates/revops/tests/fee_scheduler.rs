@@ -5107,6 +5107,81 @@ mod seedonce_restart {
         );
     }
 
+    /// T4 (Task 59 §3.6): a parked A3 occurrence's age is visible in
+    /// fee-debug, crosses the warn threshold without any cancellation,
+    /// and the surface clears when the occurrence settles.
+    #[test]
+    fn a3_pending_age_visible_after_threshold() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+        pump_store_results(&mut owner, &rx);
+
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert!(
+            debug["initial_fee"]["oldest_pending_age_seconds"].is_null(),
+            "no pending occurrence, no age surface: {debug:?}"
+        );
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx); // idempotency -> decide -> commit PARKED
+        assert_eq!(owner.initial_fee_pending(), 1, "commit parked in flight");
+
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        let age = debug["initial_fee"]["oldest_pending_age_seconds"]
+            .as_i64()
+            .expect("a parked occurrence must surface its pending age");
+        assert!(
+            (0..=120).contains(&age),
+            "fresh occurrence, small age: {age}"
+        );
+
+        // Cross the warn threshold (no cancellation may exist -- only
+        // visibility): backdate the pending stamp past the constant.
+        owner.backdate_pending_initial_fees_for_tests(
+            revops::fee_scheduler::A3_PENDING_AGE_WARN_SECONDS + 30,
+        );
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        let age = debug["initial_fee"]["oldest_pending_age_seconds"]
+            .as_i64()
+            .expect("age surface must persist across the threshold");
+        assert!(
+            age > revops::fee_scheduler::A3_PENDING_AGE_WARN_SECONDS,
+            "backdated age must read past the warn threshold: {age}"
+        );
+        assert_eq!(
+            owner.initial_fee_pending(),
+            1,
+            "threshold crossing is visibility only -- NEVER a cancellation"
+        );
+
+        release_parked(&store_path, &parked);
+        pump_store_results(&mut owner, &rx);
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert!(
+            debug["initial_fee"]["oldest_pending_age_seconds"].is_null(),
+            "settled occurrence clears the age surface: {debug:?}"
+        );
+    }
+
     /// F7 (install rule): an A3 commit that DID land, whose callback is
     /// processed only after the owner advanced past the decision's basis,
     /// must NOT install its staged (now stale) state over the newer owner
