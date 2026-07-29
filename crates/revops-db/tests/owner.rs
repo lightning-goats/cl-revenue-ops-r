@@ -1374,3 +1374,116 @@ async fn boltz_operational_state_survives_restart() {
     handle.remove_boltz_ignore("ext-swap-1").await.unwrap();
     assert!(handle.boltz_ignores().await.unwrap().is_empty());
 }
+
+// -- Task 67 slice 2: analytics durable stores --
+
+/// Channel flow state, kalman state, and temporal profiles are
+/// CURRENT-STATE (one row per scid, upsert-replaces); financial snapshots
+/// are a TIME SERIES (append-only, windowed).
+#[tokio::test]
+async fn analytics_stores_round_trip_and_upsert_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_read_write(&dir.path().join("observer.db"))
+        .await
+        .unwrap();
+
+    // Channel state: upsert replaces, keyed by scid.
+    handle
+        .upsert_channel_flow_state(revops_db::analytics::ChannelFlowStateRow {
+            scid: "700x1x0".into(),
+            peer_id: "02aa".into(),
+            flow_state: "source".into(),
+            balance_position: "depleted".into(),
+            flow_ratio: 0.82,
+            velocity: 1.5,
+            confidence: 0.61,
+            forward_count: 12,
+            updated_at: 1_800_000_000,
+            boot_id: "boot-a".into(),
+        })
+        .await
+        .unwrap();
+    handle
+        .upsert_channel_flow_state(revops_db::analytics::ChannelFlowStateRow {
+            scid: "700x1x0".into(),
+            peer_id: "02aa".into(),
+            flow_state: "sink".into(),
+            balance_position: "saturated".into(),
+            flow_ratio: 0.11,
+            velocity: -0.4,
+            confidence: 0.90,
+            forward_count: 30,
+            updated_at: 1_800_000_100,
+            boot_id: "boot-b".into(),
+        })
+        .await
+        .unwrap();
+    let states = handle.channel_flow_states().await.unwrap();
+    assert_eq!(states.len(), 1, "upsert replaces, never appends");
+    assert_eq!(states[0].flow_state, "sink");
+    assert_eq!(states[0].boot_id, "boot-b");
+    assert_eq!(states[0].forward_count, 30);
+
+    // Kalman state: opaque JSON payload, one row per scid.
+    handle
+        .upsert_kalman_state(
+            "700x1x0",
+            serde_json::json!({"flow_ratio": 0.5, "observation_count": 3}),
+            1_800_000_200,
+        )
+        .await
+        .unwrap();
+    handle
+        .upsert_kalman_state(
+            "700x1x0",
+            serde_json::json!({"flow_ratio": 0.7, "observation_count": 4}),
+            1_800_000_300,
+        )
+        .await
+        .unwrap();
+    let kalman = handle.kalman_states().await.unwrap();
+    assert_eq!(kalman.len(), 1);
+    assert_eq!(kalman[0].1["observation_count"], 4);
+
+    // Temporal profile: same discipline.
+    handle
+        .upsert_temporal_profile(
+            "700x1x0",
+            serde_json::json!({"hourly": [1, 2, 3]}),
+            1_800_000_400,
+        )
+        .await
+        .unwrap();
+    let profiles = handle.temporal_profiles().await.unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].1["hourly"][2], 3);
+
+    // Financial snapshots APPEND (a time series, never upserted).
+    for (at, revenue) in [(1_800_000_000i64, 1_000i64), (1_800_086_400, 1_500)] {
+        handle
+            .insert_financial_snapshot(revops_db::analytics::FinancialSnapshotRow {
+                taken_at: at,
+                local_balance_sats: 5_000_000,
+                remote_balance_sats: 3_000_000,
+                onchain_sats: 1_000_000,
+                capacity_sats: 8_000_000,
+                revenue_accumulated_sats: revenue,
+                rebalance_cost_accumulated_sats: 200,
+                channel_count: 21,
+            })
+            .await
+            .unwrap();
+    }
+    let snapshots = handle.financial_snapshots(10).await.unwrap();
+    assert_eq!(snapshots.len(), 2, "snapshots are a time series");
+    assert_eq!(snapshots[0].taken_at, 1_800_086_400, "newest first");
+    assert_eq!(snapshots[0].revenue_accumulated_sats, 1_500);
+
+    // The blocking siblings the owner threads use agree.
+    let h2 = handle.clone();
+    let blocking = tokio::task::spawn_blocking(move || h2.blocking_channel_flow_states())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocking.len(), 1);
+}

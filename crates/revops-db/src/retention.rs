@@ -35,6 +35,11 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     // pruning it would erase the evidence that says WHICH process
     // produced a terminal.
     "rust_boot_sessions",
+    // Task 67: financial history -- the ROC/TLV trend basis. One row per
+    // day (py cadence 86400s), so ~365/year: deleting financial history
+    // to reclaim space is not a real tradeoff on this node, and a
+    // truncated series silently changes what the trend surfaces mean.
+    "rust_financial_snapshots",
     // Task 63: Boltz money-path evidence + durable operational state.
     // Attempts/reservations are the swap intent/terminal ledger and
     // budget holds; ignores are operator decisions; cooldowns must
@@ -53,6 +58,11 @@ pub const CURRENT_STATE_TABLES: &[&str] = &[
     "rust_fee_state_generation",
     "rust_fee_state",
     "rust_loop_health",
+    // Task 67: one row per short-channel-id, upsert-replaces. Bounded by
+    // the channel count, so no sweep is needed.
+    "rust_channel_flow_states",
+    "rust_kalman_state",
+    "rust_temporal_profiles",
 ];
 
 /// Class D: explicitly classified but not pruned until a durable resume

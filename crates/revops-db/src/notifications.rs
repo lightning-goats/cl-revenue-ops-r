@@ -90,6 +90,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     // tests) gets the full schema, including `PRAGMA foreign_keys = ON`.
     crate::fee_runway::init_schema(conn)?;
     crate::loop_health::init_schema(conn)?;
+    crate::analytics::init_schema(conn)?;
     Ok(())
 }
 
