@@ -230,6 +230,17 @@ fn sweep_statements_touch_only_windowed_tables() {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fee_runway.rs")).unwrap();
     let windowed: BTreeSet<&str> = WINDOWED_TABLES.iter().copied().collect();
 
+    // Task 63 deliberate widening: two OWNER-EXPLICIT deletes that are
+    // not retention sweeps -- an operator un-ignoring an external swap,
+    // and the journal prune to the exact keep-set the
+    // `revops_boltz::journal` kernel computed (180d/200 entries). Both
+    // tables stay Class E for the SWEEP (the sweep must never touch
+    // them); these are the sanctioned non-sweep call sites. Widening
+    // this list further is a deliberate decision.
+    let owner_explicit: BTreeSet<&str> = ["rust_boltz_ignores", "rust_boltz_journal"]
+        .into_iter()
+        .collect();
+
     let mut checked = 0usize;
     for (idx, _) in source.match_indices("DELETE FROM") {
         let after = source[idx + "DELETE FROM".len()..].trim_start();
@@ -240,6 +251,9 @@ fn sweep_statements_touch_only_windowed_tables() {
         checked += 1;
         if name == "{table}" {
             continue; // covered by the `table: "..."` literal scan below
+        }
+        if owner_explicit.contains(name.as_str()) {
+            continue;
         }
         assert!(
             windowed.contains(name.as_str()),
@@ -363,6 +377,11 @@ fn never_prune_membership_is_pinned_exactly() {
         "rust_rebalance_reservations",
         "rust_capital_intents",
         "rust_capital_reservations",
+        "rust_boltz_attempts",
+        "rust_boltz_reservations",
+        "rust_boltz_ignores",
+        "rust_boltz_cooldowns",
+        "rust_boltz_journal",
     ]
     .into_iter()
     .collect();

@@ -4,6 +4,8 @@
 //! unit-testing in isolation from the cln-plugin stdio handshake (which the
 //! `tests/manifest.rs` black-box test covers instead).
 
+pub mod boltz_boundaries;
+pub mod boltz_owner;
 pub mod capital_adapters;
 pub mod capital_boundaries;
 pub mod capital_evidence;
@@ -32,6 +34,7 @@ pub mod rebalance_owner;
 pub mod rpc_analyze;
 pub mod rpc_boltz_budget;
 pub mod rpc_boltz_history;
+pub mod rpc_boltz_ops;
 pub mod rpc_boltz_status;
 pub mod rpc_capacity_report;
 pub mod rpc_capex_status;

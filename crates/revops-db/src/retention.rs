@@ -30,6 +30,17 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     // Task 62: capital (open/close/defib) money-path evidence.
     "rust_capital_intents",
     "rust_capital_reservations",
+    // Task 63: Boltz money-path evidence + durable operational state.
+    // Attempts/reservations are the swap intent/terminal ledger and
+    // budget holds; ignores are operator decisions; cooldowns must
+    // survive restarts (the Python in-memory parity gap); the journal
+    // prunes ONLY through the owner's explicit 180d/200-entry kernel
+    // (`revops_boltz::journal`), never a retention sweep.
+    "rust_boltz_attempts",
+    "rust_boltz_reservations",
+    "rust_boltz_ignores",
+    "rust_boltz_cooldowns",
+    "rust_boltz_journal",
 ];
 
 /// Class C: current-state rows, bounded by key/upsert construction.

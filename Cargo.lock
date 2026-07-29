@@ -822,6 +822,7 @@ dependencies = [
 name = "revops-boltz"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "revops-core",
  "serde",
  "serde_json",

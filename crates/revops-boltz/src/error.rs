@@ -48,6 +48,12 @@ pub enum CliError {
     InvalidJson { message: String },
     /// py boltz_manager.py:433-435 (`_ensure_enabled`).
     Disabled,
+    /// Task 63 hardening (no py equivalent -- Python's transport ran any
+    /// argv): the QUERY transport refused a subcommand outside its
+    /// read-only allowlist BEFORE spawning anything. Fund-moving verbs
+    /// travel only through the armed transport inside the Task-69
+    /// capability.
+    TransportRefused { subcommand: String },
 }
 
 impl fmt::Display for CliError {
@@ -67,6 +73,11 @@ impl fmt::Display for CliError {
             CliError::Disabled => write!(
                 f,
                 "Boltz CLI integration disabled (set revenue-ops-boltz-enabled=true)"
+            ),
+            CliError::TransportRefused { subcommand } => write!(
+                f,
+                "boltz query transport refused: '{subcommand}' is not an allowlisted \
+                 read-only subcommand"
             ),
         }
     }

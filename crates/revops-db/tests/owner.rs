@@ -1221,3 +1221,156 @@ async fn quarantined_capital_intents_feed_the_registry_seed() {
             .unwrap();
     assert_eq!(blocking.len(), 1);
 }
+
+// -- Task 63 slice 1: durable Boltz attempt/reservation + operational state --
+
+fn boltz_attempt(request_id: &str, kind: &str, fee: i64) -> revops_db::fee_runway::BoltzAttempt {
+    revops_db::fee_runway::BoltzAttempt {
+        request_id: request_id.into(),
+        kind: kind.into(),
+        channel_id: Some("700x1x0".into()),
+        amount_sats: 500_000,
+        estimated_fee_sats: fee,
+        argv_digest: "deadbeef".into(),
+        submitted_at: 1_800_000_000,
+    }
+}
+
+/// Attempt + ACTIVE reservation land atomically; the reservation holds the
+/// ESTIMATED FEE (the budget currency for swaps); duplicate request ids
+/// refuse; settle is exactly-once; quarantined holds keep counting.
+#[tokio::test]
+async fn boltz_attempt_reserves_fee_and_settles_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_read_write(&dir.path().join("observer.db"))
+        .await
+        .unwrap();
+
+    handle
+        .insert_boltz_attempt(boltz_attempt("b-1", "loop_out", 1_500))
+        .await
+        .expect("first attempt");
+    let err = handle
+        .insert_boltz_attempt(boltz_attempt("b-1", "loop_out", 1_500))
+        .await
+        .expect_err("duplicate request id refuses");
+    assert!(format!("{err:#}").contains("UNIQUE"), "{err:#}");
+    handle
+        .insert_boltz_attempt(boltz_attempt("b-2", "refund", 0))
+        .await
+        .unwrap();
+
+    assert_eq!(handle.unresolved_boltz_attempts().await.unwrap().len(), 2);
+    assert_eq!(
+        handle.active_boltz_reserved_sats(0).await.unwrap(),
+        1_500,
+        "reservations hold the fee estimate, not the swap amount"
+    );
+
+    // Committed settles; unknown quarantines (still counted); a second
+    // terminal refuses.
+    handle
+        .settle_boltz_attempt(revops_db::fee_runway::BoltzSettle {
+            request_id: "b-1".into(),
+            outcome: "committed".into(),
+            outcome_detail: None,
+            swap_id: Some("swap-aa".into()),
+            reservation_status: "settled".into(),
+            settled_sats: Some(1_450),
+            resolved_at: 1_800_000_100,
+        })
+        .await
+        .expect("settle committed");
+    handle
+        .settle_boltz_attempt(revops_db::fee_runway::BoltzSettle {
+            request_id: "b-2".into(),
+            outcome: "outcome_unknown".into(),
+            outcome_detail: Some("refund exit-0 is not proof".into()),
+            swap_id: None,
+            reservation_status: "quarantined".into(),
+            settled_sats: None,
+            resolved_at: 1_800_000_101,
+        })
+        .await
+        .expect("settle unknown");
+    let err = handle
+        .settle_boltz_attempt(revops_db::fee_runway::BoltzSettle {
+            request_id: "b-1".into(),
+            outcome: "rejected".into(),
+            outcome_detail: None,
+            swap_id: None,
+            reservation_status: "released".into(),
+            settled_sats: None,
+            resolved_at: 1_800_000_200,
+        })
+        .await
+        .expect_err("second terminal refuses");
+    assert!(format!("{err:#}").contains("already terminal"), "{err:#}");
+
+    assert!(handle.unresolved_boltz_attempts().await.unwrap().is_empty());
+    let quarantined = handle.quarantined_boltz_attempts().await.unwrap();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0].request_id, "b-2");
+    assert_eq!(
+        handle.active_boltz_reserved_sats(0).await.unwrap(),
+        0,
+        "b-1 settled; b-2's reservation held 0 (refunds reserve nothing)"
+    );
+}
+
+/// Cooldowns, ignores, and the journal are DURABLE: they survive an
+/// actor restart on the same file (the Python parity gap this fixes --
+/// its cooldowns were process-memory only).
+#[tokio::test]
+async fn boltz_operational_state_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("observer.db");
+    {
+        let handle = spawn_read_write(&db).await.unwrap();
+        handle
+            .set_boltz_cooldown("700x1x0", 1_800_000_000)
+            .await
+            .unwrap();
+        handle
+            .add_boltz_ignore("ext-swap-1", "operator: external test swap", 1_800_000_010)
+            .await
+            .unwrap();
+        handle
+            .upsert_boltz_journal(
+                "swap-aa",
+                serde_json::json!({"id": "swap-aa", "source": "loop_out"}),
+                "loop_out",
+                1_800_000_050,
+            )
+            .await
+            .unwrap();
+    }
+    let handle = spawn_read_write(&db).await.unwrap();
+    assert_eq!(
+        handle.boltz_cooldowns().await.unwrap(),
+        vec![("700x1x0".to_string(), 1_800_000_000i64)]
+    );
+    let ignores = handle.boltz_ignores().await.unwrap();
+    assert_eq!(ignores.len(), 1);
+    assert_eq!(ignores[0].0, "ext-swap-1");
+    let journal = handle.boltz_journal().await.unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].swap_id, "swap-aa");
+    assert_eq!(journal[0].record["id"], "swap-aa");
+
+    // Upsert replaces; ignore removal removes.
+    handle
+        .upsert_boltz_journal(
+            "swap-aa",
+            serde_json::json!({"id": "swap-aa", "status": "done"}),
+            "reconcile",
+            1_800_000_400,
+        )
+        .await
+        .unwrap();
+    let journal = handle.boltz_journal().await.unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].record["status"], "done");
+    handle.remove_boltz_ignore("ext-swap-1").await.unwrap();
+    assert!(handle.boltz_ignores().await.unwrap().is_empty());
+}
