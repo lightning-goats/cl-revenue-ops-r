@@ -1171,12 +1171,16 @@ fn revenue_r_policy_set_action_is_refused_before_any_db_access() {
         "revenue-r-policy",
         serde_json::json!({"action": "set", "peer_id": "irrelevant"}),
     );
-    let err = result["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected a refusal error, got: {result:?}"));
+    assert_eq!(
+        result["error"]["code"], "state_writer_authority_absent",
+        "must be the stable authority refusal, not a DB-access error: {result:?}"
+    );
     assert!(
-        err.contains("deprecated for normal operator use"),
-        "must be the tactical-action refusal, not a DB-access error: {err}"
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("write authority"),
+        "{result:?}"
     );
 }
 

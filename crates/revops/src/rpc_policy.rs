@@ -5,7 +5,7 @@
 //! tactical actions (`set`/`delete`/`tag`/`untag`/`batch`,
 //! `TACTICAL_POLICY_ACTIONS`, policy_manager.py:55) are DB writes and
 //! stay out of scope -- [`policy_action_gate`] always returns Python's
-//! "deprecated for normal operator use" refusal for them (never applying
+//! stable authority refusal for them (never applying
 //! Python's `internal`/`admin` override, since this port implements no
 //! write path for those actions to unlock).
 //!
@@ -79,11 +79,21 @@ pub fn normalize_action(raw: Option<&Value>) -> String {
 /// to fetch and call the matching `build_policy_*` below".
 pub fn policy_action_gate(action: &str) -> Option<Value> {
     if TACTICAL_ACTIONS.contains(&action) {
+        // Task 65 slice 4: the STABLE authority refusal. Python supports
+        // these write actions (set/tag/untag are the documented
+        // replacement for revenue-ignore); this plugin refuses them
+        // because it holds no production write authority before the
+        // Task 69 cutover -- never a fake success, never a misleading
+        // deprecation claim.
         return Some(json!({
-            "error": format!(
-                "revenue-policy {action} is deprecated for normal operator use. \
-                 Use revenue-policy list/get/find/changes for diagnostics."
-            )
+            "error": {
+                "code": "state_writer_authority_absent",
+                "message": format!(
+                    "revenue-policy {action} is a production-state write; this plugin \
+                     holds no write authority before cutover. Use the Python plugin's \
+                     revenue-policy for writes; list/get/find/changes serve reads here."
+                ),
+            }
         }));
     }
     if READ_ONLY_ACTIONS.contains(&action) {
@@ -235,13 +245,19 @@ mod tests {
     }
 
     #[test]
-    fn action_gate_blocks_tactical_actions_with_exact_python_message() {
-        let v = policy_action_gate("set").unwrap();
-        assert_eq!(
-            v["error"],
-            "revenue-policy set is deprecated for normal operator use. \
-             Use revenue-policy list/get/find/changes for diagnostics."
-        );
+    fn action_gate_blocks_writes_with_the_stable_authority_refusal() {
+        // Task 65 slice 4: Python SUPPORTS set/tag/untag (they are the
+        // recommended replacement for revenue-ignore) -- the old
+        // "deprecated" text was a mislabel. The honest refusal is that
+        // this plugin holds no production write authority before the
+        // Task 69 cutover.
+        for action in ["batch", "delete", "set", "tag", "untag"] {
+            let v = policy_action_gate(action).unwrap();
+            assert_eq!(v["error"]["code"], "state_writer_authority_absent");
+            let message = v["error"]["message"].as_str().unwrap();
+            assert!(message.contains(action), "{message}");
+            assert!(message.contains("write authority"), "{message}");
+        }
     }
 
     #[test]
