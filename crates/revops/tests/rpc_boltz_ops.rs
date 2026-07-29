@@ -346,3 +346,86 @@ pub const BOLTZ_SUFFIXES: &[&str] = &[
 fn suffix_list_is_exactly_twenty_two() {
     assert_eq!(BOLTZ_SUFFIXES.len(), 22);
 }
+
+// -- parity-matrix findings (2026-07-29). NOTE: these pins were written
+// AFTER the fixes, not RED-first -- the defects were found by
+// parity_matrix.py against live Python, which IS the failing-first
+// evidence, but it is not a repo test. Disclosed rather than dressed up.
+
+/// `revenue-boltz-backup` WITHOUT the mnemonic is a READ: Python answers
+/// it with no capability, so gating it behind the action capability was
+/// over-gating. The mnemonic branch still requires the capability.
+#[tokio::test]
+async fn backup_without_mnemonic_is_a_read_not_an_action() {
+    let (owner, _dir) = unassembled_owner().await;
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+    };
+    // Read half: answers despite NO action capability, with Python's keys.
+    let read = ops::handle_backup(&deps, false).await;
+    assert_eq!(
+        read["note"],
+        json!("Swap mnemonic omitted. Pass include_mnemonic=true to include.")
+    );
+    assert_eq!(read["pending_swaps"], json!([]));
+    assert!(read.get("error").is_none(), "{read:?}");
+
+    // Mnemonic half: still capability-gated.
+    assert_eq!(
+        ops::handle_backup(&deps, true).await,
+        json!({"error": "Boltz CLI integration not initialized"})
+    );
+}
+
+/// Gapped analytics fields use the project's `_gaps` ARRAY convention so
+/// the parity harness tracks them instead of counting them as
+/// mismatches, and they carry PYTHON's key names.
+#[tokio::test]
+async fn analytics_gaps_use_the_gaps_array_convention() {
+    let (owner, _dir) = unassembled_owner().await;
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+    };
+    for value in [
+        ops::handle_balance_recommendations(&deps).await,
+        ops::handle_expansion_treasury_status(&deps).await,
+        ops::handle_expansion_treasury_recommendations(&deps).await,
+    ] {
+        let gaps = value["_gaps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("must declare _gaps as an array: {value:?}"));
+        assert!(!gaps.is_empty());
+        // Every declared gap names a key that is actually present and null.
+        for gap in gaps {
+            let key = gap.as_str().unwrap();
+            assert!(
+                value.get(key).is_some(),
+                "declared gap `{key}` must be a present-but-null field: {value:?}"
+            );
+        }
+        assert!(
+            value.get("evidence_gap").is_none(),
+            "the bare evidence_gap string is not the convention: {value:?}"
+        );
+    }
+}
+
+/// External-pay-ignores uses Python's contract keys, not invented ones.
+#[tokio::test]
+async fn external_pay_ignores_uses_pythons_keys() {
+    let (owner, _dir) = unassembled_owner().await;
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+    };
+    let value = ops::handle_external_pay_ignores(&deps).await;
+    assert_eq!(value["action"], json!("list"));
+    assert!(value["ignores"].is_array());
+    assert!(value.get("ignored_external_swaps").is_none());
+    assert!(value.get("count").is_none());
+}
