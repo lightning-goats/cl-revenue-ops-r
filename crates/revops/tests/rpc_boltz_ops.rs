@@ -70,6 +70,7 @@ async fn absent_owner_returns_python_uninitialized_arm() {
         owner: None,
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let expected = json!({"error": UNINITIALIZED});
 
@@ -146,6 +147,7 @@ async fn usage_short_circuits_precede_the_initialization_guard() {
         owner: None,
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
 
     assert_eq!(
@@ -172,6 +174,7 @@ async fn auto_cycle_rpcs_use_status_shapes_not_the_error_arm() {
         owner: None,
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let run_now = ops::handle_auto_cycle_run_now(&deps, false, true).await;
     assert_eq!(run_now["status"], "disabled");
@@ -194,6 +197,7 @@ async fn unassembled_capability_is_also_the_uninitialized_arm() {
         owner: Some(owner),
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let expected = json!({"error": UNINITIALIZED});
     assert_eq!(
@@ -222,6 +226,7 @@ async fn read_rpcs_surface_query_transport_failures() {
         owner: Some(owner),
         query: Arc::new(SyncFake(cli)),
         now: NOW,
+        cfg: Default::default(),
     };
     let history = ops::handle_history(&deps, None).await;
     assert!(
@@ -248,6 +253,7 @@ async fn read_rpcs_build_kernel_payloads() {
         owner: Some(owner),
         query: Arc::new(SyncFake(cli)),
         now: NOW,
+        cfg: Default::default(),
     };
     let history = ops::handle_history(&deps, Some(&json!(10))).await;
     // The frozen kernel's shape: swaps + cost_summary (no invented
@@ -345,4 +351,132 @@ pub const BOLTZ_SUFFIXES: &[&str] = &[
 #[test]
 fn suffix_list_is_exactly_twenty_two() {
     assert_eq!(BOLTZ_SUFFIXES.len(), 22);
+}
+
+// -- parity-matrix findings (2026-07-29). NOTE: these pins were written
+// AFTER the fixes, not RED-first -- the defects were found by
+// parity_matrix.py against live Python, which IS the failing-first
+// evidence, but it is not a repo test. Disclosed rather than dressed up.
+
+/// `revenue-boltz-backup` WITHOUT the mnemonic is a READ: Python answers
+/// it with no capability, so gating it behind the action capability was
+/// over-gating. The mnemonic branch still requires the capability.
+#[tokio::test]
+async fn backup_without_mnemonic_is_a_read_not_an_action() {
+    let (owner, _dir) = unassembled_owner().await;
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+        cfg: Default::default(),
+    };
+    // Read half: answers despite NO action capability, with Python's keys.
+    let read = ops::handle_backup(&deps, false).await;
+    assert_eq!(
+        read["note"],
+        json!("Swap mnemonic omitted. Pass include_mnemonic=true to include.")
+    );
+    assert_eq!(read["pending_swaps"], json!([]));
+    assert!(read.get("error").is_none(), "{read:?}");
+
+    // Mnemonic half: still capability-gated.
+    assert_eq!(
+        ops::handle_backup(&deps, true).await,
+        json!({"error": "Boltz CLI integration not initialized"})
+    );
+}
+
+/// Gapped analytics fields use the project's `_gaps` ARRAY convention so
+/// the parity harness tracks them instead of counting them as
+/// mismatches, and they carry PYTHON's key names.
+#[tokio::test]
+async fn analytics_gaps_use_the_gaps_array_convention() {
+    let (owner, _dir) = unassembled_owner().await;
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+        cfg: Default::default(),
+    };
+    for value in [
+        ops::handle_balance_recommendations(&deps).await,
+        ops::handle_expansion_treasury_status(&deps).await,
+        ops::handle_expansion_treasury_recommendations(&deps).await,
+    ] {
+        let gaps = value["_gaps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("must declare _gaps as an array: {value:?}"));
+        assert!(!gaps.is_empty());
+        // Every declared gap names a key that is actually present and null.
+        for gap in gaps {
+            let key = gap.as_str().unwrap();
+            assert!(
+                value.get(key).is_some(),
+                "declared gap `{key}` must be a present-but-null field: {value:?}"
+            );
+        }
+        assert!(
+            value.get("evidence_gap").is_none(),
+            "the bare evidence_gap string is not the convention: {value:?}"
+        );
+    }
+}
+
+/// External-pay-ignores uses Python's contract keys, not invented ones.
+#[tokio::test]
+async fn external_pay_ignores_uses_pythons_keys() {
+    let (owner, _dir) = unassembled_owner().await;
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+        cfg: Default::default(),
+    };
+    let value = ops::handle_external_pay_ignores(&deps).await;
+    assert_eq!(value["action"], json!("list"));
+    assert!(value["ignores"].is_array());
+    assert!(value.get("ignored_external_swaps").is_none());
+    assert!(value.get("count").is_none());
+}
+
+/// `auto-cycle-status` reports Python's 7-key config block from the
+/// RESOLVED config, and `boltz_enabled` is the CONFIGURED enablement
+/// (Python's `bool(boltz_manager and boltz_manager.enabled)`) -- not
+/// whether an action capability is assembled. Reporting the latter was
+/// the mismatch the parity matrix flagged.
+#[tokio::test]
+async fn auto_cycle_status_reports_pythons_config_block() {
+    let (owner, _dir) = unassembled_owner().await;
+    let cfg = revops::boltz_config::BoltzCfgSnapshot {
+        enabled: true,
+        auto_cycle_enabled: true,
+        auto_cycle_interval_minutes: 15,
+        auto_cycle_max_actions: 1,
+        auto_cycle_startup_delay_seconds: 120,
+        expansion_treasury_enabled: true,
+        expansion_treasury_onchain_target_sats: 1_000_000,
+        expansion_treasury_min_deficit_sats: 250_000,
+        ..Default::default()
+    };
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+        cfg,
+    };
+    let v = ops::handle_auto_cycle_status(&deps).await;
+    // Configured-enabled, even though NO action capability is assembled.
+    assert_eq!(v["boltz_enabled"], json!(true));
+    let c = &v["config"];
+    assert_eq!(c["boltz_auto_cycle_enabled"], json!(true));
+    assert_eq!(c["boltz_auto_cycle_interval_minutes"], json!(15));
+    assert_eq!(c["boltz_auto_cycle_max_actions"], json!(1));
+    assert_eq!(c["boltz_auto_cycle_startup_delay_seconds"], json!(120));
+    assert_eq!(c["expansion_treasury_enabled"], json!(true));
+    assert_eq!(
+        c["expansion_treasury_onchain_target_sats"],
+        json!(1_000_000)
+    );
+    assert_eq!(c["expansion_treasury_min_deficit_sats"], json!(250_000));
+    assert!(v.get("error").is_none(), "this RPC never errors: {v:?}");
 }

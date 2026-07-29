@@ -128,7 +128,7 @@ async fn resolve_raw(
     }
 }
 
-async fn resolve_int(
+pub(crate) async fn resolve_int(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
     db_query_failures: &AtomicU64,
@@ -160,7 +160,7 @@ async fn resolve_float(
     }
 }
 
-async fn resolve_bool(
+pub(crate) async fn resolve_bool(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
     db_query_failures: &AtomicU64,
@@ -218,7 +218,7 @@ async fn resolve_lowercase_string(
     }
 }
 
-async fn resolve_string_opt(
+pub(crate) async fn resolve_string_opt(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
     db_query_failures: &AtomicU64,
