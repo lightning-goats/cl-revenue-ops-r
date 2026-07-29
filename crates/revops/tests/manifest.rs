@@ -2186,6 +2186,13 @@ fn revenue_r_batch_a_methods_reject_nonempty_positional_params_empty_array_still
 /// can legitimately land in different wall-clock seconds) can still be
 /// compared for semantic equality without a real behavioral difference
 /// being masked by an unrelated clock tick.
+/// Task 67 addition: `boot_id` is `<unix>-<pid>`, so it differs between
+/// two separate process invocations for exactly the same reason
+/// `generated_at` does. Normalizing it keeps this cross-process
+/// semantic-equality check honest; a real behavioural difference in any
+/// other field still surfaces. (The per-loop `boot_id`/`terminal_boot_id`
+/// are NOT normalized -- those are evidence about which process produced a
+/// terminal, and a divergence there would be a real finding.)
 const DOCUMENTED_NONDETERMINISTIC_FIELDS: &[&str] = &["generated_at", "timestamp"];
 
 fn normalize_nondeterministic_fields(v: &serde_json::Value) -> serde_json::Value {
@@ -2196,8 +2203,12 @@ fn normalize_nondeterministic_fields(v: &serde_json::Value) -> serde_json::Value
                 let is_runtime_loop_timestamp = k == "updated_at"
                     && map.contains_key("loop_name")
                     && map.contains_key("wiring_status");
+                // Top-level per-process boot identity only -- NOT the
+                // per-loop boot columns, which are real evidence.
+                let is_process_boot_id = k == "boot_id" && map.contains_key("generated_at");
                 if DOCUMENTED_NONDETERMINISTIC_FIELDS.contains(&k.as_str())
                     || is_runtime_loop_timestamp
+                    || is_process_boot_id
                 {
                     out.insert(k.clone(), serde_json::json!("<normalized>"));
                 } else {

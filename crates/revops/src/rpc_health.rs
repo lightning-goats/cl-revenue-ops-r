@@ -127,12 +127,19 @@ pub fn build_health(
     })
 }
 
+/// Task 67: `boot_id` is THIS process's identity. Every loop's
+/// `current_status` is judged against it, so a pass that completed in a
+/// prior boot reports `never_run_this_boot` rather than being inherited --
+/// the defect the Task 11 audit named. The raw terminal fields are still
+/// emitted (including `terminal_boot_id`), so the verdict changes without
+/// erasing the history an operator needs.
 pub fn build_health_with_loops(
     generated_at: i64,
     pnl_1d: Option<&PnlSummary>,
     pnl_7d: Option<&PnlSummary>,
     total_capacity_sats: Option<i64>,
     loops: Result<&[revops_db::loop_health::LoopHealthRow], String>,
+    boot_id: &str,
 ) -> Value {
     let mut value = build_health(generated_at, pnl_1d, pnl_7d, total_capacity_sats);
     value["loops"] = match loops {
@@ -155,35 +162,25 @@ pub fn build_health_with_loops(
                         "coalesced_total": row.coalesced_total,
                         "dropped_total": row.dropped_total,
                         "updated_at": row.updated_at,
-                        "current_status": current_loop_status(row),
+                        "boot_id": row.boot_id,
+                        "terminal_boot_id": row.terminal_boot_id,
+                        "current_status": revops_db::loop_health::current_boot_status(
+                            row, boot_id,
+                        )
+                        .as_str(),
                     })
                 })
                 .collect(),
         ),
         Err(error) => json!({"error": error}),
     };
+    // Name the boot the verdicts are judged against, so `current_status`
+    // is attributable instead of an unexplained string.
+    value["boot_id"] = json!(boot_id);
     if let Some(gaps) = value["_gaps"].as_array_mut() {
         gaps.retain(|gap| gap != "loops");
     }
     value
-}
-
-fn current_loop_status(row: &revops_db::loop_health::LoopHealthRow) -> &'static str {
-    use revops_db::loop_health::WiringStatus;
-    if row.wiring_status == WiringStatus::NotWired {
-        return "not_wired";
-    }
-    if row.runtime_status == revops_db::loop_health::RuntimeStatus::Suspended {
-        return "suspended";
-    }
-    if row.generation > row.terminal_generation {
-        return "incomplete";
-    }
-    match row.terminal_status {
-        revops_db::loop_health::TerminalStatus::Passed => "passed",
-        revops_db::loop_health::TerminalStatus::Error => "error",
-        revops_db::loop_health::TerminalStatus::None => "never_run",
-    }
 }
 
 #[cfg(test)]
@@ -351,7 +348,7 @@ mod tests {
                     row
                 })
                 .collect();
-        let value = build_health_with_loops(200, None, None, None, Ok(&rows));
+        let value = build_health_with_loops(200, None, None, None, Ok(&rows), "boot-test");
         // Task 67: eight loops, Python's label vocabulary, in
         // REQUIRED_LOOPS order (flow-analysis first).
         assert_eq!(value["loops"].as_array().unwrap().len(), 8);
@@ -377,7 +374,10 @@ mod tests {
         row.terminal_generation = 1;
         row.last_started_at = Some(100);
         row.last_passed_at = Some(100);
-        let value = build_health_with_loops(100, None, None, None, Ok(&[row]));
+        // Task 67: an in-flight generation counts only for the boot that
+        // STARTED it, so this row must name the boot under judgement.
+        row.boot_id = Some("boot-test".to_string());
+        let value = build_health_with_loops(100, None, None, None, Ok(&[row]), "boot-test");
         assert_eq!(value["loops"][0]["current_status"], "incomplete");
     }
 
@@ -390,7 +390,10 @@ mod tests {
         errored.last_passed_at = Some(100);
         errored.last_error_at = Some(100);
         errored.terminal_status = TerminalStatus::Error;
-        let error_value = build_health_with_loops(100, None, None, None, Ok(&[errored]));
+        errored.boot_id = Some("boot-test".to_string());
+        errored.terminal_boot_id = Some("boot-test".to_string());
+        let error_value =
+            build_health_with_loops(100, None, None, None, Ok(&[errored]), "boot-test");
         assert_eq!(error_value["loops"][0]["current_status"], "error");
         let mut passed = LoopHealthRow::new(LoopId::Fee, WiringStatus::Ready, 100);
         passed.generation = 2;
@@ -398,7 +401,9 @@ mod tests {
         passed.last_passed_at = Some(100);
         passed.last_error_at = Some(100);
         passed.terminal_status = TerminalStatus::Passed;
-        let pass_value = build_health_with_loops(100, None, None, None, Ok(&[passed]));
+        passed.boot_id = Some("boot-test".to_string());
+        passed.terminal_boot_id = Some("boot-test".to_string());
+        let pass_value = build_health_with_loops(100, None, None, None, Ok(&[passed]), "boot-test");
         assert_eq!(pass_value["loops"][0]["current_status"], "passed");
     }
 
@@ -415,7 +420,7 @@ mod tests {
         row.runtime_status = RuntimeStatus::Suspended;
         row.last_suspended_at = Some(101);
         row.last_suspension_reason = Some("backpressure persistence failed".to_string());
-        let value = build_health_with_loops(103, None, None, None, Ok(&[row]));
+        let value = build_health_with_loops(103, None, None, None, Ok(&[row]), "boot-test");
         assert_eq!(value["loops"][0]["terminal_status"], "passed");
         assert_eq!(value["loops"][0]["runtime_status"], "suspended");
         assert_eq!(value["loops"][0]["current_status"], "suspended");
@@ -434,6 +439,7 @@ mod tests {
             None,
             None,
             Err("observer actor gone".to_string()),
+            "boot-test",
         );
         assert_eq!(value["loops"]["error"], "observer actor gone");
         assert!(value.get("generated_at").is_some());

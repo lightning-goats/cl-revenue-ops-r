@@ -252,3 +252,45 @@ fn parse_window_days_error_pins_guard_order() {
     assert!(err.is_err());
     assert_eq!(err.unwrap_err()["error"], "window_days must be an integer");
 }
+
+// -- Task 67 slice 6: health reports CURRENT-BOOT loop status --
+
+/// The audit's core complaint, now surfaced end-to-end: a loop whose pass
+/// completed in a PRIOR boot must not read `passed` in health. It reads
+/// `never_run_this_boot`, and the row's raw terminal fields still show the
+/// history so an operator can see what happened and when.
+#[test]
+fn health_does_not_inherit_a_prior_boots_pass() {
+    use revops_db::loop_health::{LoopHealthRow, LoopId, TerminalStatus, WiringStatus};
+
+    let mut row = LoopHealthRow::new(LoopId::Fee, WiringStatus::Ready, 100);
+    row.generation = 7;
+    row.terminal_generation = 7;
+    row.terminal_status = TerminalStatus::Passed;
+    row.last_passed_at = Some(90);
+    row.boot_id = Some("boot-OLD".to_string());
+    row.terminal_boot_id = Some("boot-OLD".to_string());
+    let rows = vec![row];
+
+    // THIS boot never ran it.
+    let value =
+        revops::rpc_health::build_health_with_loops(200, None, None, None, Ok(&rows), "boot-NEW");
+    let loop0 = &value["loops"][0];
+    assert_eq!(
+        loop0["current_status"], "never_run_this_boot",
+        "a prior-boot pass must not be inherited: {loop0}"
+    );
+    // History is still visible -- the verdict changed, not the record.
+    assert_eq!(loop0["terminal_status"], "passed");
+    assert_eq!(loop0["last_passed_at"], 90);
+    assert_eq!(loop0["terminal_boot_id"], "boot-OLD");
+
+    // The boot that DID run it sees passed.
+    let value =
+        revops::rpc_health::build_health_with_loops(200, None, None, None, Ok(&rows), "boot-OLD");
+    assert_eq!(value["loops"][0]["current_status"], "passed");
+
+    // And health reports WHICH boot it is judging against, so the verdict
+    // is attributable rather than a bare string.
+    assert_eq!(value["boot_id"], "boot-OLD");
+}

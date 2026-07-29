@@ -93,6 +93,9 @@ struct State {
     boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>,
     /// The resolved Boltz config the transport above was built from.
     boltz_cfg: revops::boltz_config::BoltzCfgSnapshot,
+    /// Task 67: THIS process's boot identity. Loop health is judged
+    /// against it so a prior boot's pass is never inherited.
+    boot_id: String,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -2178,7 +2181,7 @@ async fn main() -> Result<()> {
                 // falls back to below (F11) -- reusing it here for the
                 // upfront no-DB case keeps both degraded paths consistent.
                 let Some(handle) = &s.db else {
-                    return Ok(revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone())));
+                    return Ok(revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()), &p.state().boot_id));
                 };
                 // Task 50 correction round, F11: Python's `revenue_health`
                 // try/excepts EACH section independently (cl-revenue-ops.py:
@@ -2201,9 +2204,10 @@ async fn main() -> Result<()> {
                     Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health_with_loops(
                         now, Some(&pnl_1d), Some(&pnl_7d), None,
                         loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()),
+                        &p.state().boot_id,
                     )),
                     Err(e) => {
-                        let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()));
+                        let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()), &p.state().boot_id);
                         out["financials"] = serde_json::json!({"error": e.to_string()});
                         // This is a LIVE failure, not a declared "not
                         // wired yet" gap -- `_gaps` must not carry it (a
@@ -3196,6 +3200,7 @@ async fn main() -> Result<()> {
         boltz_owner,
         boltz_query,
         boltz_cfg,
+        boot_id: boot_id.clone(),
     });
 
     let plugin = configured.start(state).await?;
