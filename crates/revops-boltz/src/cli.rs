@@ -33,7 +33,9 @@ pub fn run_json(
 ) -> Result<serde_json::Value, CliError> {
     let out = cli.run(args, timeout_secs)?;
     serde_json::from_str(&out).map_err(|e| CliError::InvalidJson {
-        message: format!("{e}: {}", &out[..out.len().min(300)]),
+        // Char-indexed, not byte-indexed: multibyte output straddling the
+        // cap must truncate cleanly, never panic on a char boundary.
+        message: format!("{e}: {}", out.chars().take(300).collect::<String>()),
     })
 }
 
@@ -138,6 +140,21 @@ mod tests {
         cli.push_ok("not json at all");
         let err = run_json(&cli, &["listswaps", "--json"], 30).unwrap_err();
         assert!(matches!(err, CliError::InvalidJson { .. }));
+    }
+
+    #[test]
+    fn run_json_error_snippet_is_char_safe_on_multibyte_output() {
+        // Byte 300 lands mid-character ("x" + 200 three-byte chars): a
+        // byte-indexed slice would panic on the char boundary.
+        let cli = FakeBoltzCli::new();
+        cli.push_ok(format!("x{}", "€".repeat(200)));
+        let err = run_json(&cli, &["listswaps", "--json"], 5).unwrap_err();
+        match err {
+            CliError::InvalidJson { message } => {
+                assert!(message.chars().count() <= 400, "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
