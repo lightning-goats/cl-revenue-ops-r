@@ -122,6 +122,22 @@ enum Command {
         cursor: RetentionCursor,
         reply: oneshot::Sender<Result<RetentionReport>>,
     },
+    // -- Task 60: durable rebalance attempt/reservation rails --
+    InsertRebalanceAttempt {
+        intent: fee_runway::RebalanceAttemptIntent,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    SettleRebalanceAttempt {
+        settle: fee_runway::RebalanceSettle,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    UnresolvedRebalanceAttempts(
+        oneshot::Sender<Result<Vec<fee_runway::UnresolvedRebalanceAttempt>>>,
+    ),
+    ActiveRebalanceReservedSats {
+        since: i64,
+        reply: oneshot::Sender<Result<i64>>,
+    },
     // -- Task 59 §5.3: durable cutover-arm nonce deny-ledger insert.
     // Async-only (F6): startup orchestration awaits it on the runtime;
     // no blocking sibling exists to panic a current-thread runtime --
@@ -260,6 +276,27 @@ impl<T> StoreReceipt<T> {
         match tokio::time::timeout(budget, self.rx).await {
             Ok(Ok(result)) => StoreReceiptWait::Replied(result),
             Ok(Err(_)) | Err(_) => StoreReceiptWait::OutcomeUnknown,
+        }
+    }
+
+    /// Blocking sibling of [`Self::within`] for an owner OS thread (Task
+    /// 60): bounded poll off any runtime. Same classification: expiry and
+    /// a dropped reply are both OUTCOME UNKNOWN.
+    pub fn blocking_within(mut self, budget: std::time::Duration) -> StoreReceiptWait<T> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match self.rx.try_recv() {
+                Ok(result) => return StoreReceiptWait::Replied(result),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return StoreReceiptWait::OutcomeUnknown;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    return StoreReceiptWait::OutcomeUnknown;
+                }
+            }
         }
     }
 }
@@ -840,6 +877,111 @@ impl ObserverHandle {
         rx.await.context("observer actor dropped reply")?
     }
 
+    /// Task 60: insert one rebalance intent + its ACTIVE reservation
+    /// atomically (see `fee_runway::insert_rebalance_attempt`).
+    pub async fn insert_rebalance_attempt(
+        &self,
+        intent: fee_runway::RebalanceAttemptIntent,
+    ) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertRebalanceAttempt { intent, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 60 §3.1 discipline: two-phase admission for the SUBMIT-path
+    /// intent write -- a refusal proves nothing was enqueued; an admitted
+    /// receipt's bounded wait classifies expiry as OUTCOME UNKNOWN and the
+    /// caller must not submit.
+    pub fn try_insert_rebalance_attempt(
+        &self,
+        intent: fee_runway::RebalanceAttemptIntent,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .try_send(Command::InsertRebalanceAttempt { intent, reply })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => StoreAdmissionRefused::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => StoreAdmissionRefused::ActorGone,
+            })?;
+        Ok(StoreReceipt { rx })
+    }
+
+    /// Task 60: apply one TERMINAL rebalance settlement (outcome +
+    /// reservation flip, one transaction, exactly once).
+    pub async fn settle_rebalance_attempt(
+        &self,
+        settle: fee_runway::RebalanceSettle,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SettleRebalanceAttempt { settle, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 60: the restart-reconciliation work list.
+    pub async fn unresolved_rebalance_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedRebalanceAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UnresolvedRebalanceAttempts(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 60: sats held by active + quarantined reservations since
+    /// `since` (the budget-window read).
+    pub async fn active_rebalance_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveRebalanceReservedSats { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::settle_rebalance_attempt`]
+    /// for the rebalance owner's OS thread.
+    pub fn blocking_settle_rebalance_attempt(
+        &self,
+        settle: fee_runway::RebalanceSettle,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::SettleRebalanceAttempt { settle, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::unresolved_rebalance_attempts`].
+    pub fn blocking_unresolved_rebalance_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedRebalanceAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UnresolvedRebalanceAttempts(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::active_rebalance_reserved_sats`].
+    pub fn blocking_active_rebalance_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ActiveRebalanceReservedSats { since, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Task 59 §5.3: burn one cutover-arm nonce in the durable deny
     /// ledger, DB-first (before any filesystem consumption). Returns
     /// `Ok(true)` on insert, `Ok(false)` when the nonce was already
@@ -1384,6 +1526,22 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::RunRetentionSweep { now, cursor, reply } => {
                     let result = fee_runway::run_retention_sweep(&conn, now, cursor);
+                    let _ = reply.send(result);
+                }
+                Command::InsertRebalanceAttempt { intent, reply } => {
+                    let result = fee_runway::insert_rebalance_attempt(&conn, &intent);
+                    let _ = reply.send(result);
+                }
+                Command::SettleRebalanceAttempt { settle, reply } => {
+                    let result = fee_runway::settle_rebalance_attempt(&conn, &settle);
+                    let _ = reply.send(result);
+                }
+                Command::UnresolvedRebalanceAttempts(reply) => {
+                    let result = fee_runway::unresolved_rebalance_attempts(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::ActiveRebalanceReservedSats { since, reply } => {
+                    let result = fee_runway::active_rebalance_reserved_sats(&conn, since);
                     let _ = reply.send(result);
                 }
                 Command::InsertConsumedArmNonce {

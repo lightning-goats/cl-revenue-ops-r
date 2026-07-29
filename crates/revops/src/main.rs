@@ -74,6 +74,12 @@ struct State {
     /// Whole-plugin authority split. Observer variants hold only observer loop handles; the guarded action adapter exists only inside `LiveRuntime`.
     #[allow(dead_code)]
     authority_runtime: revops::runtime::AuthorityRuntime,
+    /// Task 60: the serialized rebalance owner (engine unassembled until
+    /// cutover -- the RPCs sit on the Python-parity uninitialized arm) and
+    /// the manual RPC's rate limiter + hard cap.
+    rebalance_owner: Option<revops::rebalance_owner::RebalanceOwnerHandle>,
+    rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter,
+    rebalance_hard_cap_sats: i64,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -868,6 +874,9 @@ async fn main() -> Result<()> {
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
     let rebalance_plan_name = rpc_name("rebalance-plan");
+    let rebalance_cycle_name = rpc_name("rebalance-cycle");
+    let rebalance_debug_name = rpc_name("rebalance-debug");
+    let rebalance_manual_name = rpc_name("rebalance");
     let history_name = rpc_name("history");
     let report_name = rpc_name("report");
     let dashboard_name = rpc_name("dashboard");
@@ -1187,6 +1196,61 @@ async fn main() -> Result<()> {
                 Ok(revops::rpc_rebalance::build_rebalance_plan(
                     &channels, 200_000, 8, 1_000,
                 ))
+            },
+        )
+        .rpcmethod(
+            &rebalance_cycle_name,
+            "run one rebalance owner cycle (Python-parity revenue-rebalance-cycle; \
+             uninitialized until the engine is assembled at cutover)",
+            |p: Plugin<SharedState>, _v: serde_json::Value| async move {
+                let s = p.state();
+                Ok(revops::rpc_rebalance_ops::handle_rebalance_cycle(
+                    s.rebalance_owner.as_ref(),
+                )
+                .await)
+            },
+        )
+        .rpcmethod(
+            &rebalance_debug_name,
+            "rebalance diagnostic state (Python-parity revenue-rebalance-debug filters; \
+             uninitialized until the engine is assembled at cutover)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let s = p.state();
+                let summary_only = v.get("summary_only").and_then(|x| x.as_bool()).unwrap_or(false);
+                let include_hot_markers = v
+                    .get("include_hot_markers")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(true);
+                Ok(revops::rpc_rebalance_ops::handle_rebalance_debug(
+                    s.rebalance_owner.as_ref(),
+                    v.get("channel_id"),
+                    v.get("peer_id"),
+                    summary_only,
+                    include_hot_markers,
+                    v.get("max_candidates"),
+                )
+                .await)
+            },
+        )
+        .rpcmethod(
+            &rebalance_manual_name,
+            "manually trigger a rebalance with profit/budget constraints (Python-parity \
+             revenue-rebalance validation; uninitialized until the engine is assembled)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let s = p.state();
+                let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
+                Ok(revops::rpc_rebalance_ops::handle_manual_rebalance(
+                    s.rebalance_owner.as_ref(),
+                    &s.rebalance_rate_limiter,
+                    s.rebalance_hard_cap_sats,
+                    now_unix() as f64,
+                    v.get("from_channel"),
+                    v.get("to_channel"),
+                    v.get("amount_sats"),
+                    v.get("max_fee_sats"),
+                    force,
+                )
+                .await)
             },
         )
         .rpcmethod(
@@ -2662,6 +2726,48 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Task 60: the rebalance owner exists whenever the Rust-owned store
+    // does. The engine stays UNASSEMBLED pre-cutover (submissions refuse
+    // on the Python-parity uninitialized arm); restart reconciliation of
+    // unresolved rebalance attempts still runs -- store + one read-only
+    // listsendpays lookup per orphan.
+    let rebalance_hard_cap_sats = 5_000_000; // py rebalance_max_amount default
+    let rebalance_owner = observer_db.clone().map(|store| {
+        revops::rebalance_owner::spawn_rebalance_owner(
+            revops::rebalance_owner::RebalanceOwnerDeps {
+                engine: None,
+                evidence: std::sync::Arc::new(revops::rebalance_owner::UnassembledEvidence),
+                store,
+                reconcile: std::sync::Arc::new(revops::rebalance_adapters::ClnReconcileRpc::new(
+                    init_socket_path.clone(),
+                    30,
+                )),
+                config: revops::rebalance_owner::RebalanceOwnerConfig {
+                    daily_budget_sats: 5_000, // py daily_budget_sats default
+                    budget_window_hours: 24,
+                    rebalance_max_amount: rebalance_hard_cap_sats,
+                    pair_cooldown_seconds: 3_600,
+                },
+                clock: Box::new(now_unix),
+            },
+        )
+    });
+    if let Some(owner) = rebalance_owner.clone() {
+        tokio::spawn(async move {
+            match owner.reconcile_on_start().await {
+                Ok(summary) => {
+                    if summary.settled_success + summary.settled_failed + summary.quarantined > 0 {
+                        eprintln!(
+                            "revops: rebalance restart reconciliation: {} settled complete,                              {} settled failed, {} quarantined",
+                            summary.settled_success, summary.settled_failed, summary.quarantined
+                        );
+                    }
+                }
+                Err(e) => eprintln!("revops: rebalance restart reconciliation failed: {e:?}"),
+            }
+        });
+    }
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -2676,6 +2782,9 @@ async fn main() -> Result<()> {
         socket_path: init_socket_path.clone(),
         production_db_path: production_db_path_expanded.clone(),
         lnplus: lnplus_rpc_pass,
+        rebalance_owner,
+        rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter::production(),
+        rebalance_hard_cap_sats,
     });
 
     let plugin = configured.start(state).await?;

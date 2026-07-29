@@ -342,3 +342,32 @@ fn sweep_preserves_actual_request_and_ledger_child_rows() {
     assert_eq!(rows("rust_fee_ledger"), ledger_before);
     assert!(fee_runway::cycle_exists(&conn, "old-cycle-with-children").unwrap());
 }
+
+/// Task 60 slice 1 + task-59 review follow-up (facts:1720): the
+/// never-prune list is pinned by EXACT membership, not just partition
+/// completeness -- silently reclassifying an append-only evidence table
+/// out of Class E must red here even though the fixed SweepTarget enum
+/// makes it inert against the sweep itself.
+#[test]
+fn never_prune_membership_is_pinned_exactly() {
+    let expected: BTreeSet<&str> = [
+        "rust_fee_cycles",
+        "rust_fee_requests",
+        "rust_fee_ledger",
+        "rust_broadcast_attempts",
+        "rust_execution_quarantine",
+        "rust_fee_seed_events",
+        "rust_fee_restart_markers",
+        "rust_consumed_arm_nonces",
+        "rust_rebalance_attempts",
+        "rust_rebalance_reservations",
+    ]
+    .into_iter()
+    .collect();
+    let actual: BTreeSet<&str> = EXCLUDED_TABLES.iter().copied().collect();
+    assert_eq!(
+        actual, expected,
+        "EXCLUDED_TABLES (the never-prune list) changed membership -- adding a table \
+         here requires a deliberate edit to BOTH the classification and this pin"
+    );
+}

@@ -929,3 +929,129 @@ async fn admitted_receipt_within_budget_carries_the_actual_result() {
         other => panic!("a duplicate request_id is a CLEAN actor-reported error, got {other:?}"),
     }
 }
+
+// -- Task 60 slice 1: durable rebalance attempt/reservation rails --
+
+fn rebalance_intent(request_id: &str) -> revops_db::fee_runway::RebalanceAttemptIntent {
+    revops_db::fee_runway::RebalanceAttemptIntent {
+        request_id: request_id.into(),
+        source_channel: "100x1x0".into(),
+        dest_channel: "200x2x0".into(),
+        amount_sats: 250_000,
+        max_fee_sats: 300,
+        trigger: "manual".into(),
+        submitted_at: 1_800_000_100,
+    }
+}
+
+/// Intent + ACTIVE reservation land in ONE transaction; a duplicate
+/// request_id is a clean actor-reported error; the pending attempt shows
+/// in the unresolved list and its sats in the active reserve sum.
+#[tokio::test]
+async fn rebalance_intent_reserves_atomically_and_dedups() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_read_write(&dir.path().join("observer.db"))
+        .await
+        .unwrap();
+
+    let id = handle
+        .insert_rebalance_attempt(rebalance_intent("rb-1"))
+        .await
+        .expect("first intent inserts");
+    assert!(id > 0);
+
+    let err = handle
+        .insert_rebalance_attempt(rebalance_intent("rb-1"))
+        .await
+        .expect_err("duplicate request_id must refuse cleanly");
+    assert!(
+        format!("{err:#}").to_lowercase().contains("unique"),
+        "{err:#}"
+    );
+
+    let unresolved = handle.unresolved_rebalance_attempts().await.unwrap();
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].request_id, "rb-1");
+
+    let reserved = handle
+        .active_rebalance_reserved_sats(1_800_000_000)
+        .await
+        .unwrap();
+    assert_eq!(reserved, 250_000, "the active reservation counts");
+}
+
+/// Terminal settle flips the attempt AND its reservation atomically,
+/// EXACTLY once -- a second terminal write refuses; quarantined
+/// reservations keep counting toward the reserve.
+#[tokio::test]
+async fn rebalance_settle_is_exactly_once_and_quarantine_retains() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_read_write(&dir.path().join("observer.db"))
+        .await
+        .unwrap();
+
+    handle
+        .insert_rebalance_attempt(rebalance_intent("rb-ok"))
+        .await
+        .unwrap();
+    handle
+        .insert_rebalance_attempt(rebalance_intent("rb-unknown"))
+        .await
+        .unwrap();
+
+    // Success: settle + release-to-settled with the paid fee.
+    handle
+        .settle_rebalance_attempt(revops_db::fee_runway::RebalanceSettle {
+            request_id: "rb-ok".into(),
+            outcome: "success".into(),
+            outcome_detail: None,
+            fee_paid_sats: Some(42),
+            payment_hash: Some("hash-ok".into()),
+            reservation_status: "settled".into(),
+            resolved_at: 1_800_000_200,
+        })
+        .await
+        .expect("first terminal settle");
+
+    // Unknown: outcome recorded, reservation QUARANTINED (still counted).
+    handle
+        .settle_rebalance_attempt(revops_db::fee_runway::RebalanceSettle {
+            request_id: "rb-unknown".into(),
+            outcome: "outcome_unknown".into(),
+            outcome_detail: Some("waitsendpay timeout: payment still pending".into()),
+            fee_paid_sats: None,
+            payment_hash: Some("hash-unk".into()),
+            reservation_status: "quarantined".into(),
+            resolved_at: 1_800_000_201,
+        })
+        .await
+        .expect("unknown settle records");
+
+    let err = handle
+        .settle_rebalance_attempt(revops_db::fee_runway::RebalanceSettle {
+            request_id: "rb-ok".into(),
+            outcome: "rejected".into(),
+            outcome_detail: None,
+            fee_paid_sats: None,
+            payment_hash: None,
+            reservation_status: "released".into(),
+            resolved_at: 1_800_000_300,
+        })
+        .await
+        .expect_err("a second terminal write must refuse");
+    assert!(format!("{err:#}").contains("already terminal"), "{err:#}");
+
+    assert!(handle
+        .unresolved_rebalance_attempts()
+        .await
+        .unwrap()
+        .is_empty());
+    let reserved = handle
+        .active_rebalance_reserved_sats(1_800_000_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        reserved, 250_000,
+        "quarantined reservations keep counting; settled ones do not"
+    );
+}

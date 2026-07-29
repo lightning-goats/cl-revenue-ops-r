@@ -22,6 +22,11 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     "rust_fee_seed_events",
     "rust_fee_restart_markers",
     "rust_consumed_arm_nonces",
+    // Task 60: rebalance money-path evidence -- attempts are the
+    // intent/terminal ledger, reservations the budget-hold record. Both
+    // append-only-with-status-flips, never swept.
+    "rust_rebalance_attempts",
+    "rust_rebalance_reservations",
 ];
 
 /// Class C: current-state rows, bounded by key/upsert construction.

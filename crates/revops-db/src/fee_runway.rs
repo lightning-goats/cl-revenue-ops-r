@@ -308,6 +308,37 @@ CREATE TABLE IF NOT EXISTS rust_consumed_arm_nonces (
     binary_sha256 TEXT NOT NULL,
     arm_expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS rust_rebalance_attempts (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    source_channel TEXT NOT NULL,
+    dest_channel TEXT NOT NULL,
+    amount_sats INTEGER NOT NULL,
+    max_fee_sats INTEGER NOT NULL,
+    payment_hash TEXT,
+    trigger TEXT NOT NULL CHECK (trigger IN ('cycle','manual','manual_force')),
+    submitted_at INTEGER NOT NULL,
+    outcome TEXT CHECK (outcome IN
+        ('success','rejected','clean_failure_before_write','outcome_unknown')),
+    outcome_detail TEXT,
+    fee_paid_sats INTEGER,
+    completed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_rust_rebalance_attempts_outcome
+    ON rust_rebalance_attempts(outcome);
+
+CREATE TABLE IF NOT EXISTS rust_rebalance_reservations (
+    id INTEGER PRIMARY KEY,
+    attempt_request_id TEXT NOT NULL,
+    reserved_sats INTEGER NOT NULL,
+    reserved_at INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active','settled','released','quarantined')),
+    settled_fee_sats INTEGER,
+    resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_rust_rebalance_reservations_status
+    ON rust_rebalance_reservations(status);
 ";
 
 // ---------------------------------------------------------------------------
@@ -1957,4 +1988,179 @@ pub fn run_retention_sweep(
     }
     report.truncated = report.batches == RETENTION_MAX_BATCHES_PER_SWEEP;
     Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// Task 60: durable rebalance attempt/reservation rails (Class E)
+// ---------------------------------------------------------------------------
+
+/// One rebalance submission's pre-submit intent (Task 60 slice 1). The
+/// insert also creates the ACTIVE reservation in the SAME transaction --
+/// an attempt row without its reservation (or vice versa) must never be
+/// observable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebalanceAttemptIntent {
+    pub request_id: String,
+    pub source_channel: String,
+    pub dest_channel: String,
+    pub amount_sats: i64,
+    pub max_fee_sats: i64,
+    /// 'cycle' | 'manual' | 'manual_force' (CHECK-enforced).
+    pub trigger: String,
+    pub submitted_at: i64,
+}
+
+/// One attempt's TERMINAL settlement: outcome + reservation flip, applied
+/// in one transaction, exactly once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebalanceSettle {
+    pub request_id: String,
+    /// 'success' | 'rejected' | 'clean_failure_before_write' |
+    /// 'outcome_unknown' (CHECK-enforced).
+    pub outcome: String,
+    pub outcome_detail: Option<String>,
+    pub fee_paid_sats: Option<i64>,
+    pub payment_hash: Option<String>,
+    /// 'settled' | 'released' | 'quarantined' -- never back to 'active'.
+    pub reservation_status: String,
+    pub resolved_at: i64,
+}
+
+/// One `outcome IS NULL` attempt row, for restart reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRebalanceAttempt {
+    pub id: i64,
+    pub request_id: String,
+    pub source_channel: String,
+    pub dest_channel: String,
+    pub amount_sats: i64,
+    pub submitted_at: i64,
+    pub payment_hash: Option<String>,
+}
+
+/// Insert one rebalance intent row AND its `active` reservation
+/// atomically. Returns the attempt row id. A duplicate `request_id`
+/// surfaces the UNIQUE violation as a clean error (nothing written).
+pub fn insert_rebalance_attempt(conn: &Connection, intent: &RebalanceAttemptIntent) -> Result<i64> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin rebalance intent txn")?;
+    tx.execute(
+        "INSERT INTO rust_rebalance_attempts
+             (request_id, source_channel, dest_channel, amount_sats, max_fee_sats,
+              trigger, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            intent.request_id,
+            intent.source_channel,
+            intent.dest_channel,
+            intent.amount_sats,
+            intent.max_fee_sats,
+            intent.trigger,
+            intent.submitted_at
+        ],
+    )
+    .context("insert rebalance attempt intent (UNIQUE request_id)")?;
+    let attempt_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO rust_rebalance_reservations
+             (attempt_request_id, reserved_sats, reserved_at, status)
+         VALUES (?1, ?2, ?3, 'active')",
+        params![intent.request_id, intent.amount_sats, intent.submitted_at],
+    )
+    .context("insert active rebalance reservation")?;
+    tx.commit().context("commit rebalance intent txn")?;
+    Ok(attempt_id)
+}
+
+/// Apply one TERMINAL settlement atomically: the attempt's outcome and its
+/// reservation's flip commit together, and only if the attempt is not
+/// already terminal (`outcome IS NULL` guard -- the exactly-once rail).
+pub fn settle_rebalance_attempt(conn: &Connection, settle: &RebalanceSettle) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin rebalance settle txn")?;
+    let updated = tx
+        .execute(
+            "UPDATE rust_rebalance_attempts
+             SET outcome = ?2,
+                 outcome_detail = ?3,
+                 fee_paid_sats = ?4,
+                 payment_hash = COALESCE(?5, payment_hash),
+                 completed_at = ?6
+             WHERE request_id = ?1 AND outcome IS NULL",
+            params![
+                settle.request_id,
+                settle.outcome,
+                settle.outcome_detail,
+                settle.fee_paid_sats,
+                settle.payment_hash,
+                settle.resolved_at
+            ],
+        )
+        .context("settle rebalance attempt outcome")?;
+    if updated == 0 {
+        anyhow::bail!(
+            "rebalance attempt {} is already terminal (or unknown); refusing a second              terminal write",
+            settle.request_id
+        );
+    }
+    tx.execute(
+        "UPDATE rust_rebalance_reservations
+         SET status = ?2, settled_fee_sats = ?3, resolved_at = ?4
+         WHERE attempt_request_id = ?1 AND status = 'active'",
+        params![
+            settle.request_id,
+            settle.reservation_status,
+            settle.fee_paid_sats,
+            settle.resolved_at
+        ],
+    )
+    .context("flip rebalance reservation")?;
+    tx.commit().context("commit rebalance settle txn")?;
+    Ok(())
+}
+
+/// Every attempt whose terminal outcome was never recorded -- the restart
+/// reconciliation work list.
+pub fn unresolved_rebalance_attempts(conn: &Connection) -> Result<Vec<UnresolvedRebalanceAttempt>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, request_id, source_channel, dest_channel, amount_sats,
+                    submitted_at, payment_hash
+             FROM rust_rebalance_attempts
+             WHERE outcome IS NULL
+             ORDER BY id ASC",
+        )
+        .context("prepare unresolved rebalance attempts")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UnresolvedRebalanceAttempt {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                source_channel: row.get(2)?,
+                dest_channel: row.get(3)?,
+                amount_sats: row.get(4)?,
+                submitted_at: row.get(5)?,
+                payment_hash: row.get(6)?,
+            })
+        })
+        .context("query unresolved rebalance attempts")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read unresolved rebalance attempts")?;
+    Ok(rows)
+}
+
+/// Sats currently held against the rebalance budget: ACTIVE reservations
+/// plus QUARANTINED ones (an unknown outcome may still have spent the
+/// money -- releasing it would over-spend the budget), at or after `since`.
+pub fn active_rebalance_reserved_sats(conn: &Connection, since: i64) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(reserved_sats), 0)
+         FROM rust_rebalance_reservations
+         WHERE status IN ('active', 'quarantined') AND reserved_at >= ?1",
+        params![since],
+        |row| row.get(0),
+    )
+    .context("sum active rebalance reservations")
 }
