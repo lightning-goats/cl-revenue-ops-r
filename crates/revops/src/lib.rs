@@ -4,6 +4,10 @@
 //! unit-testing in isolation from the cln-plugin stdio handshake (which the
 //! `tests/manifest.rs` black-box test covers instead).
 
+pub mod capital_adapters;
+pub mod capital_boundaries;
+pub mod capital_evidence;
+pub mod capital_owner;
 pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;
@@ -43,6 +47,7 @@ pub mod rpc_lnplus_status;
 pub mod rpc_params;
 pub mod rpc_planner_candidate_sources;
 pub mod rpc_planner_candidates;
+pub mod rpc_planner_execute;
 pub mod rpc_planner_history;
 pub mod rpc_planner_status;
 pub mod rpc_policy;

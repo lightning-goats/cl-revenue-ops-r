@@ -80,6 +80,11 @@ struct State {
     rebalance_owner: Option<revops::rebalance_owner::RebalanceOwnerHandle>,
     rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter,
     rebalance_hard_cap_sats: i64,
+    /// Task 62: the serialized capital owner (adapters/governor
+    /// unassembled until Task 69's authority assembly -- planner-execute
+    /// sits on the Python-parity uninitialized arm); restart
+    /// reconciliation of orphan capital intents still runs.
+    capital_owner: Option<revops::capital_owner::CapitalOwnerHandle>,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -904,6 +909,9 @@ async fn main() -> Result<()> {
     let planner_candidates_name = rpc_name("planner-candidates");
     let planner_history_name = rpc_name("planner-history");
     let planner_status_name = rpc_name("planner-status");
+    // Task 62: the write-shaped planner cycle RPC (Python-parity
+    // uninitialized arm until Task 69 assembles the capital adapters).
+    let planner_execute_name = rpc_name("planner-execute");
 
     // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs
     // (cl-revenue-ops.py:4604-4676), each a completion acknowledgement
@@ -1671,6 +1679,29 @@ async fn main() -> Result<()> {
                     )),
                     Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
                 }
+            },
+        )
+        .rpcmethod(
+            &planner_execute_name,
+            "run one capacity-planner cycle through the capital owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                Ok(revops::rpc_planner_execute::handle_planner_execute(
+                    p.state().capital_owner.as_ref(),
+                    // Pre-cutover the adapters gate above always fires
+                    // first; this closure is unreachable until Task 69
+                    // assembles real evidence deps.
+                    || {
+                        Err(
+                            revops::capital_evidence::EvidenceRefusal::PeerChannelsUnavailable(
+                                "capital evidence not assembled (pre-cutover)".to_string(),
+                            ),
+                        )
+                    },
+                )
+                .await)
             },
         )
         .rpcmethod(
@@ -2747,6 +2778,42 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Task 62: the capital owner exists whenever the Rust-owned store
+    // does. Adapters/governor stay UNASSEMBLED until Task 69's authority
+    // assembly (planner-execute refuses on the Python-parity
+    // uninitialized arm); restart reconciliation of orphan capital
+    // intents still runs -- store plus read-only
+    // listfunds/listclosedchannels lookups.
+    let capital_owner = observer_db.clone().map(|store| {
+        revops::capital_owner::spawn_capital_owner(revops::capital_owner::CapitalOwnerDeps {
+            adapters: None,
+            governor: None,
+            budget: std::sync::Arc::new(revops::capital_owner::UnassembledCapitalBudget),
+            evidence: std::sync::Arc::new(revops::capital_owner::UnassembledCapitalEvidence),
+            store,
+            reconcile: std::sync::Arc::new(revops::capital_adapters::ClnCapitalReconcileRpc::new(
+                init_socket_path.clone(),
+                30,
+            )),
+            clock: Box::new(now_unix),
+        })
+    });
+    if let Some(owner) = capital_owner.clone() {
+        tokio::spawn(async move {
+            match owner.reconcile_on_start().await {
+                Ok(summary) => {
+                    if summary.settled_success + summary.quarantined > 0 {
+                        eprintln!(
+                            "revops: capital restart reconciliation: {} settled, {} quarantined",
+                            summary.settled_success, summary.quarantined
+                        );
+                    }
+                }
+                Err(e) => eprintln!("revops: capital restart reconciliation failed: {e:?}"),
+            }
+        });
+    }
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -2764,6 +2831,7 @@ async fn main() -> Result<()> {
         rebalance_owner,
         rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter::production(),
         rebalance_hard_cap_sats,
+        capital_owner,
     });
 
     let plugin = configured.start(state).await?;

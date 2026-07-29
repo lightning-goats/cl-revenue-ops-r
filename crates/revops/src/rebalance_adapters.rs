@@ -44,7 +44,13 @@ use serde_json::{json, Value};
 static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// One blocking JSON-RPC call over a fresh Unix-socket connection.
-fn call_blocking(
+/// Shared with `capital_adapters`, whose classifier leans on the message
+/// shapes below: `connect `/`serialize `/`set socket deadline` prefixes
+/// mean provably-nothing-sent, an error dict arrives as JSON text, and
+/// anything else is ambiguous (a changed shape degrades classification
+/// toward OutcomeUnknown -- the fail-closed direction -- never toward a
+/// false clean/success).
+pub(crate) fn call_blocking(
     socket_path: &PathBuf,
     timeout_seconds: u64,
     method: &str,
