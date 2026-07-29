@@ -148,6 +148,7 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     UnresolvedCapitalIntents(oneshot::Sender<Result<Vec<fee_runway::UnresolvedCapitalIntent>>>),
+    QuarantinedCapitalIntents(oneshot::Sender<Result<Vec<fee_runway::UnresolvedCapitalIntent>>>),
     ActiveCapitalReservedSats {
         since: i64,
         reply: oneshot::Sender<Result<i64>>,
@@ -1073,6 +1074,31 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 62: cross-restart registry seed -- intents whose reservation
+    /// is QUARANTINED (funds may be committed on-chain).
+    pub async fn quarantined_capital_intents(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedCapitalIntent>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::QuarantinedCapitalIntents(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the capital owner's OS thread.
+    pub fn blocking_quarantined_capital_intents(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedCapitalIntent>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::QuarantinedCapitalIntents(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Task 62: capital budget-window hold (active + quarantined).
     pub async fn active_capital_reserved_sats(&self, since: i64) -> Result<i64> {
         let (reply, rx) = oneshot::channel();
@@ -1665,6 +1691,10 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::UnresolvedCapitalIntents(reply) => {
                     let result = fee_runway::unresolved_capital_intents(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::QuarantinedCapitalIntents(reply) => {
+                    let result = fee_runway::quarantined_capital_intents(&conn);
                     let _ = reply.send(result);
                 }
                 Command::ActiveCapitalReservedSats { since, reply } => {

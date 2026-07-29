@@ -1164,3 +1164,60 @@ async fn capital_intent_reserves_atomically_and_settles_exactly_once() {
         "only the quarantined hold remains"
     );
 }
+
+/// Quarantined pairs survive restarts as registry seeds: the query joins
+/// intents to their QUARANTINED reservations (terminal rows whose funds
+/// may be committed on-chain), never settled/released/active ones.
+#[tokio::test]
+async fn quarantined_capital_intents_feed_the_registry_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_read_write(&dir.path().join("observer.db"))
+        .await
+        .unwrap();
+
+    for (id, kind) in [("q-1", "open"), ("q-2", "close"), ("q-3", "open")] {
+        handle
+            .insert_capital_intent(capital_intent(id, kind))
+            .await
+            .unwrap();
+    }
+    // q-1 quarantines, q-2 settles, q-3 stays unresolved.
+    handle
+        .settle_capital_intent(revops_db::fee_runway::CapitalSettle {
+            request_id: "q-1".into(),
+            outcome: "outcome_unknown".into(),
+            outcome_detail: Some("fundchannel reply lost".into()),
+            txid: None,
+            reservation_status: "quarantined".into(),
+            settled_sats: None,
+            resolved_at: 1_800_000_400,
+        })
+        .await
+        .unwrap();
+    handle
+        .settle_capital_intent(revops_db::fee_runway::CapitalSettle {
+            request_id: "q-2".into(),
+            outcome: "success".into(),
+            outcome_detail: None,
+            txid: Some("cc".into()),
+            reservation_status: "settled".into(),
+            settled_sats: Some(1_000_000),
+            resolved_at: 1_800_000_401,
+        })
+        .await
+        .unwrap();
+
+    let quarantined = handle.quarantined_capital_intents().await.unwrap();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0].request_id, "q-1");
+    assert_eq!(quarantined[0].kind, "open");
+
+    // The blocking sibling agrees (owner OS-thread path).
+    let handle2 = handle.clone();
+    let blocking =
+        tokio::task::spawn_blocking(move || handle2.blocking_quarantined_capital_intents())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(blocking.len(), 1);
+}

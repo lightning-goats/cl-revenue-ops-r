@@ -241,16 +241,20 @@ fn lnplus_observer_runtime_source_cannot_name_any_action_capability() {
     assert!(source.contains("ObserverLnPlusApi"));
 }
 
-/// Task 61 4C/4D: the quoted CLN RPC method literal `"fundchannel"` has
-/// exactly ONE sanctioned call site — the concrete chain adapter. Same
-/// allowlist discipline as `setchannel`.
+/// Task 61 4C/4D: the quoted CLN RPC method literal `"fundchannel"` is
+/// confined to the CONCRETE adapters -- the LN+ chain adapter and (Task
+/// 62) the capital transport adapter. Same allowlist discipline as
+/// `setchannel`: widening this list is a deliberate decision, never a
+/// side effect.
 #[test]
 fn fundchannel_call_literal_confined_to_the_lnplus_adapter() {
     let root = workspace_root();
     let mut violations = Vec::new();
     for path in non_test_rust_sources(&root) {
         let rel = relative_to(&root, &path);
-        if rel == "crates/revops/src/lnplus_adapters.rs" {
+        if rel == "crates/revops/src/lnplus_adapters.rs"
+            || rel == "crates/revops/src/capital_adapters.rs"
+        {
             continue;
         }
         let contents = std::fs::read_to_string(&path)
@@ -466,6 +470,29 @@ fn rebalance_rpcs_register_exactly_once_through_rpc_name() {
         "\"revenue-rebalance-cycle\"",
         "\"revenue-rebalance-debug\"",
         "\"revenue-r-rebalance",
+    ] {
+        assert!(
+            !main_src.contains(literal),
+            "main.rs must not hardcode the method name {literal}"
+        );
+    }
+}
+
+/// Task 62: `planner-execute` registers exactly once through
+/// `rpc_name()`, and main.rs hardcodes no raw method name for it.
+#[test]
+fn planner_execute_registers_exactly_once_through_rpc_name() {
+    let root = workspace_root();
+    let main_src =
+        std::fs::read_to_string(root.join("crates/revops/src/main.rs")).expect("read main.rs");
+    assert_eq!(
+        main_src.matches("rpc_name(\"planner-execute\")").count(),
+        1,
+        "planner-execute must be named exactly once through rpc_name()"
+    );
+    for literal in [
+        "\"revenue-planner-execute\"",
+        "\"revenue-r-planner-execute\"",
     ] {
         assert!(
             !main_src.contains(literal),

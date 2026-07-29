@@ -2343,6 +2343,40 @@ pub fn unresolved_capital_intents(conn: &Connection) -> Result<Vec<UnresolvedCap
     Ok(rows)
 }
 
+/// Every capital intent whose reservation is QUARANTINED: terminal rows
+/// whose funds may be committed on-chain. The owner's duplicate registry
+/// seeds from these across restarts -- a (kind, peer) pair with a
+/// quarantined prior intent must not admit a second submission (a lost
+/// fundchannel reply may still broadcast a channel to that peer).
+pub fn quarantined_capital_intents(conn: &Connection) -> Result<Vec<UnresolvedCapitalIntent>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.request_id, i.kind, i.peer_id, i.channel_id, i.amount_sats,
+                    i.submitted_at
+             FROM rust_capital_intents i
+             JOIN rust_capital_reservations r ON r.attempt_request_id = i.request_id
+             WHERE r.status = 'quarantined'
+             ORDER BY i.id ASC",
+        )
+        .context("prepare quarantined capital intents")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UnresolvedCapitalIntent {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                kind: row.get(2)?,
+                peer_id: row.get(3)?,
+                channel_id: row.get(4)?,
+                amount_sats: row.get(5)?,
+                submitted_at: row.get(6)?,
+            })
+        })
+        .context("query quarantined capital intents")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read quarantined capital intents")?;
+    Ok(rows)
+}
+
 /// Sats held against the capital budget: ACTIVE + QUARANTINED
 /// reservations at or after `since` (an unknown outcome may have spent
 /// on-chain funds -- releasing it would over-spend).

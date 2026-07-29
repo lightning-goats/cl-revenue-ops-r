@@ -126,6 +126,44 @@ impl CloseRpc for ClnCloseRpc {
     }
 }
 
+/// The READ-ONLY restart-reconciliation lookups (`listfunds`,
+/// `listclosedchannels`). Unlike the transports above, this is
+/// production-constructible: it can observe, never move funds.
+pub struct ClnCapitalReconcileRpc {
+    socket_path: PathBuf,
+    timeout_seconds: u64,
+}
+
+impl ClnCapitalReconcileRpc {
+    pub fn new(socket_path: PathBuf, timeout_seconds: u64) -> Self {
+        Self {
+            socket_path,
+            timeout_seconds,
+        }
+    }
+}
+
+impl crate::capital_owner::CapitalReconcileLookup for ClnCapitalReconcileRpc {
+    fn listfunds(&self) -> Result<Value, String> {
+        call_blocking(
+            &self.socket_path,
+            self.timeout_seconds,
+            "listfunds",
+            json!({}),
+        )
+        .map_err(|e| e.message)
+    }
+    fn listclosedchannels(&self) -> Result<Value, String> {
+        call_blocking(
+            &self.socket_path,
+            self.timeout_seconds,
+            "listclosedchannels",
+            json!({}),
+        )
+        .map_err(|e| e.message)
+    }
+}
+
 /// Message prefixes `call_blocking` emits ONLY before any request byte
 /// reaches the wire.
 const NOTHING_SENT_PREFIXES: [&str; 3] = ["connect ", "serialize ", "set socket deadline"];

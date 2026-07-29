@@ -371,14 +371,21 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
             "missing {rebalance}: {methods:?}"
         );
     }
-    // Exactly 31 rpc methods total (no leftover revenue-r-* names bleeding
+    // Task 62: the write-shaped planner cycle RPC (capital owner;
+    // Python-parity uninitialized arm until Task 69 authority assembly).
+    assert!(
+        methods.contains(&"revenue-planner-execute"),
+        "missing revenue-planner-execute: {methods:?}"
+    );
+    // Exactly 32 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
     // rebalance planner, Task 49's ten Batch A builders, Task 56's four
     // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
-    // (status/breaker-clear/abandon/backfill through the LN+ owner), and
-    // Task 60's three rebalance operator RPCs (cycle/debug/manual).
+    // (status/breaker-clear/abandon/backfill through the LN+ owner),
+    // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
+    // Task 62's planner-execute (capital owner).
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -386,7 +393,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        31,
+        32,
         "methods: {methods:?}"
     );
 
@@ -2323,6 +2330,18 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         capacity_report,
         serde_json::json!({"error": "Capacity planner not initialized"}),
         "must be Python's exact 1-key error shape: {capacity_report:?}"
+    );
+
+    // Task 62: planner-execute pre-cutover -- the capital adapters are
+    // never assembled in production, so the arm is Python's EXACT 1-key
+    // error shape (cl-revenue-ops.py:4699-4700), same as capacity-report
+    // above. NOT a success-shaped stub, NOT a typed Rust refusal.
+    let planner_execute =
+        call_after_init(false, None, home.path(), &[], "revenue-r-planner-execute");
+    assert_eq!(
+        planner_execute,
+        serde_json::json!({"error": "Capacity planner not initialized"}),
+        "must be Python's exact 1-key error shape: {planner_execute:?}"
     );
 
     // F1: no EconShadow config surface exists in Rust -- must NOT claim
