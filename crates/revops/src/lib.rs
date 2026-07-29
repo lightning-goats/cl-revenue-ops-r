@@ -22,6 +22,7 @@ pub mod loop_health;
 pub mod notify;
 pub mod options_table;
 pub mod python_authority;
+pub mod rebalance_adapters;
 pub mod rebalance_execution;
 pub mod rpc_analyze;
 pub mod rpc_boltz_budget;
