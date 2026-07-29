@@ -275,11 +275,11 @@ pub async fn handle_external_pay_ignores(deps: &BoltzRpcDeps) -> Value {
         return uninitialized();
     };
     let _ = owner;
-    // Ignores live in the Rust-owned store; the owner surface for
-    // mutating them lands with the operator RPCs (Task 66's ignore/
-    // unignore family). Reading is safe here.
-    json!({"ignored_external_swaps": [], "count": 0,
-           "note": "operator ignore mutations land with Task 66's ignore/unignore family"})
+    // Python's contract (cl-revenue-ops.py revenue-boltz-external-pay-ignores):
+    // {"action": "list", "ignores": [...]}. Parity means Python's KEYS, not
+    // names of my own choosing -- the parity matrix caught the invented
+    // `ignored_external_swaps`/`count` pair on its first real run.
+    json!({"action": "list", "ignores": []})
 }
 
 // -- 7/8. budget / wallet ---------------------------------------------------
@@ -450,18 +450,25 @@ pub async fn handle_deposit(deps: &BoltzRpcDeps, wallet_name: Option<&Value>) ->
 // -- 14/15. backup / backup-verify (mnemonic) -------------------------------
 
 pub async fn handle_backup(deps: &BoltzRpcDeps, include_mnemonic: bool) -> Value {
-    // The mnemonic verb travels ONLY through the armed capability: the
-    // query transport's allowlist refuses `swapmnemonic` outright, so a
-    // pre-cutover plugin cannot read the seed at all.
+    // Parity split found by the parity matrix: WITHOUT the mnemonic this
+    // is a READ (Python answers it with no capability at all), so gating
+    // it behind the action capability was over-gating. ONLY the mnemonic
+    // branch needs the capability -- the query transport's allowlist
+    // refuses `swapmnemonic` outright, so a pre-cutover plugin still
+    // cannot read the seed.
+    if !include_mnemonic {
+        if read_owner(deps).is_none() {
+            return uninitialized();
+        }
+        return json!({
+            "note": "Swap mnemonic omitted. Pass include_mnemonic=true to include.",
+            "pending_swaps": [],
+        });
+    }
     let Some(owner) = armed_owner(deps).await else {
         return uninitialized();
     };
     let _ = owner;
-    if !include_mnemonic {
-        return json!({
-            "note": "Swap mnemonic omitted. Pass include_mnemonic=true to include.",
-        });
-    }
     // Task 69 wires the capability-backed read; until then no assembled
     // capability exists, so this arm is unreachable in production. The
     // single sanctioned egress:
@@ -485,10 +492,14 @@ pub async fn handle_balance_recommendations(deps: &BoltzRpcDeps) -> Value {
     if read_owner(deps).is_none() {
         return uninitialized();
     }
+    // The harness reads `_gaps` OUT OF THE RESPONSE and skips exactly
+    // those paths, so a declared gap is tracked rather than counted as a
+    // mismatch. A bare `evidence_gap` string (my first attempt) is not
+    // that convention and read as a failure.
     json!({
         "recommendations": [],
-        "count": 0,
-        "evidence_gap": "balance recommendation analytics land with Task 67",
+        "budget": Value::Null,
+        "_gaps": ["budget", "recommendations"],
     })
 }
 
@@ -519,7 +530,9 @@ pub async fn handle_auto_cycle_status(deps: &BoltzRpcDeps) -> Value {
     json!({
         "boltz_enabled": enabled,
         "config": {
-            "auto_cycle_enabled": debug
+            // Python's key is `boltz_auto_cycle_enabled` (not
+            // `auto_cycle_enabled`) -- parity is Python's spelling.
+            "boltz_auto_cycle_enabled": debug
                 .as_ref()
                 .map(|d| d["auto_cycle_enabled"].clone())
                 .unwrap_or(json!(false)),
@@ -545,8 +558,10 @@ pub async fn handle_expansion_treasury_status(deps: &BoltzRpcDeps) -> Value {
         return uninitialized();
     }
     json!({
-        "status": "unavailable",
-        "evidence_gap": "treasury target/on-chain balance analytics land with Task 67",
+        "enabled": Value::Null,
+        "deficit_sats": Value::Null,
+        "budget": Value::Null,
+        "_gaps": ["enabled", "deficit_sats", "budget"],
     })
 }
 
@@ -556,8 +571,8 @@ pub async fn handle_expansion_treasury_recommendations(deps: &BoltzRpcDeps) -> V
     }
     json!({
         "recommendations": [],
-        "count": 0,
-        "evidence_gap": "treasury analytics land with Task 67",
+        "budget": Value::Null,
+        "_gaps": ["budget", "recommendations"],
     })
 }
 
