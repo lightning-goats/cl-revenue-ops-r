@@ -721,21 +721,12 @@ async fn resolved_config_json(
     let field_type = config_types::field_type_for(&db_key);
     let (db_override, python_value) = match revops::config_resolve::python_option_name(key) {
         Some(python_name) => {
-            let db_override = if revops::config_resolve::is_immutable_key(key) {
-                None
-            } else {
-                match &s.db {
-                    Some(handle) => queries::config_override(handle, &db_key)
-                        .await
-                        .unwrap_or_else(|e| {
-                            eprintln!("revops: config_override query failed for {db_key}: {e}");
-                            None
-                        })
-                        .and_then(|raw| revops::config_resolve::validate_override(&db_key, &raw)),
-                    None => None,
-                }
-            }
-            .map(cln_plugin::options::Value::String);
+            // Task 65 slice 3 (W10): a failed layer-(a) read surfaces as an
+            // error -- never as "no override".
+            let db_override = revops::config_resolve::read_db_override(s.db.as_ref(), key)
+                .await
+                .map_err(|detail| anyhow::anyhow!("config_override_read_failed: {detail}"))?
+                .map(cln_plugin::options::Value::String);
             let python_value = s
                 .python_options
                 .snapshot()
@@ -1291,39 +1282,27 @@ async fn main() -> Result<()> {
                                     // applying one, so this skips the query
                                     // entirely rather than fetching-then-
                                     // discarding.
-                                    let db_override =
-                                        if revops::config_resolve::is_immutable_key(key) {
-                                            None
-                                        } else {
-                                            match &s.db {
-                                                Some(handle) => {
-                                                    queries::config_override(handle, &db_key)
-                                                    .await
-                                                    .unwrap_or_else(|e| {
-                                                        eprintln!(
-                                                            "revops: config_override query \
-                                                             failed for {db_key}: {e}"
-                                                        );
-                                                        None
-                                                    })
-                                                    // CRITICAL 1: mirror
-                                                    // `Config._apply_override`'s
-                                                    // type/range/enum gate --
-                                                    // an override that fails
-                                                    // any check is skipped
-                                                    // (never surfaced), so
-                                                    // resolution falls
-                                                    // through to (b)/(c).
-                                                    .and_then(|raw| {
-                                                        revops::config_resolve::validate_override(
-                                                            &db_key, &raw,
-                                                        )
-                                                    })
-                                                }
-                                                None => None,
-                                            }
+                                    // Task 65 slice 3 (W10): a failed
+                                    // layer-(a) read is a typed error --
+                                    // never "no override". (The immutable
+                                    // skip and CRITICAL-1 validate gate
+                                    // live inside read_db_override.)
+                                    let db_override = match revops::config_resolve::read_db_override(
+                                        s.db.as_ref(),
+                                        key,
+                                    )
+                                    .await
+                                    {
+                                        Ok(value) => {
+                                            value.map(cln_plugin::options::Value::String)
                                         }
-                                        .map(cln_plugin::options::Value::String);
+                                        Err(detail) => {
+                                            return Ok(serde_json::json!({"error": {
+                                                "code": "config_override_read_failed",
+                                                "message": detail,
+                                            }}));
+                                        }
+                                    };
                                     let python_value = s
                                         .python_options
                                         .snapshot()

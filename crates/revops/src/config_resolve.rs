@@ -220,6 +220,33 @@ fn in_range(field: &str, value: f64) -> bool {
 /// no-default option with no DB override and no listconfigs entry, the
 /// same "no value at all" case the pre-existing fixture-only path already
 /// handled).
+/// Task 65 slice 3 (W10): the fail-closed layer-(a) read. A FAILED
+/// `config_overrides` read is an `Err` the caller must surface -- it
+/// never falls through as "no override" (which would silently resolve
+/// from the Python/fixture layers against the operator's intent).
+/// `None` db handle and immutable keys are LEGITIMATE no-layer-(a)
+/// states, not errors. The returned value is already
+/// [`validate_override`]-checked.
+pub async fn read_db_override(
+    db: Option<&revops_db::actor::DbHandle>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    if is_immutable_key(key) {
+        return Ok(None);
+    }
+    let Some(handle) = db else {
+        return Ok(None);
+    };
+    let db_key = db_override_key(key);
+    match revops_db::queries::config_override(handle, &db_key).await {
+        Err(e) => Err(format!(
+            "config_overrides read failed for {db_key}: {e:#} -- refusing to resolve \
+             (a failed read is not \"no override\")"
+        )),
+        Ok(raw) => Ok(raw.and_then(|raw| validate_override(&db_key, &raw))),
+    }
+}
+
 pub fn resolve_option_value(
     db_override: Option<options::Value>,
     python_value: Option<options::Value>,
