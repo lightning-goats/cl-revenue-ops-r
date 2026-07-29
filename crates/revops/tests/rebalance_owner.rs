@@ -147,7 +147,6 @@ fn params(amount: i64, force: bool) -> ManualRebalanceParams {
 struct Harness {
     handle: revops::rebalance_owner::RebalanceOwnerHandle,
     store: revops_db::owner::ObserverHandle,
-    engine: Arc<ScriptedEngine>,
     clock: Arc<AtomicI64>,
     _dir: tempfile::TempDir,
 }
@@ -178,10 +177,10 @@ async fn harness_with(
         },
         clock: Box::new(move || clock_for_owner.load(Ordering::SeqCst)),
     });
+    let _ = engine;
     Harness {
         handle,
         store,
-        engine,
         clock,
         _dir: dir,
     }
