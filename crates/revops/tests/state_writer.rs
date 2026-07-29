@@ -284,3 +284,58 @@ fn capability_is_unreachable_from_observer_surfaces() {
         "assemble() called outside the defining module/tests: {hits:?}"
     );
 }
+
+/// Task 65 slice 3 (W10): a FAILED layer-(a) config read surfaces as an
+/// error -- it must never fall through as "no override" and let
+/// resolution silently continue to the Python/fixture layers.
+#[tokio::test]
+async fn config_override_read_failure_is_an_error_not_no_override() {
+    // A production db WITHOUT config_overrides: the read fails.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("revenue_ops.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE channel_states (channel_id TEXT PRIMARY KEY);")
+        .unwrap();
+    let db = revops_db::actor::spawn_read_only(&path).await.unwrap();
+
+    let err = revops::config_resolve::read_db_override(Some(&db), "min-fee-ppm")
+        .await
+        .expect_err("a failed read must surface, never resolve to None");
+    assert!(err.contains("config_overrides"), "{err}");
+
+    // No db configured is a LEGITIMATE no-layer-(a) state, not an error.
+    assert_eq!(
+        revops::config_resolve::read_db_override(None, "min-fee-ppm")
+            .await
+            .expect("no db is a clean no-override"),
+        None
+    );
+
+    // An immutable key legitimately skips layer (a).
+    assert_eq!(
+        revops::config_resolve::read_db_override(Some(&db), "dry-run")
+            .await
+            .expect("immutable keys skip layer (a) without touching the db"),
+        None
+    );
+
+    // A healthy read returns the validated override.
+    let dir2 = tempfile::tempdir().unwrap();
+    let path2 = dir2.path().join("revenue_ops.db");
+    Connection::open(&path2)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE config_overrides (key TEXT PRIMARY KEY, value TEXT NOT NULL,
+                 version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
+             INSERT INTO config_overrides VALUES ('min_fee_ppm', '25', 1, 0);",
+        )
+        .unwrap();
+    let db2 = revops_db::actor::spawn_read_only(&path2).await.unwrap();
+    assert_eq!(
+        revops::config_resolve::read_db_override(Some(&db2), "min-fee-ppm")
+            .await
+            .expect("healthy read"),
+        Some("25".to_string())
+    );
+}
