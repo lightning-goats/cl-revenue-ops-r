@@ -122,6 +122,17 @@ enum Command {
         cursor: RetentionCursor,
         reply: oneshot::Sender<Result<RetentionReport>>,
     },
+    // -- Task 59 §5.3: durable cutover-arm nonce deny-ledger insert.
+    // Async-only (F6): startup orchestration awaits it on the runtime;
+    // no blocking sibling exists to panic a current-thread runtime --
+    InsertConsumedArmNonce {
+        nonce: String,
+        consumed_at: i64,
+        source_commit: String,
+        binary_sha256: String,
+        arm_expires_at: i64,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     // -- Task 5: SeedOnce seed events + restart markers (Task 42: the
     // standalone write path records REFUSALS only; successful seed
     // provenance rides FeeCycleCommit::pending_seed through the atomic
@@ -829,6 +840,36 @@ impl ObserverHandle {
         rx.await.context("observer actor dropped reply")?
     }
 
+    /// Task 59 §5.3: burn one cutover-arm nonce in the durable deny
+    /// ledger, DB-first (before any filesystem consumption). Returns
+    /// `Ok(true)` on insert, `Ok(false)` when the nonce was already
+    /// burned (the caller's `ReusedNonce`), `Err` for every other insert
+    /// failure (`ConsumeFailed` -- the arm file stays untouched).
+    /// Deliberately async-only (F6): no blocking sibling may exist for
+    /// this path, so it can never panic a current-thread runtime.
+    pub async fn insert_consumed_arm_nonce(
+        &self,
+        nonce: String,
+        consumed_at: i64,
+        source_commit: String,
+        binary_sha256: String,
+        arm_expires_at: i64,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertConsumedArmNonce {
+                nonce,
+                consumed_at,
+                source_commit,
+                binary_sha256,
+                arm_expires_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     /// Blocking sibling of [`ObserverHandle::run_retention_sweep`] for the
     /// scheduler's `std::thread`.
     pub fn blocking_run_retention_sweep(
@@ -1343,6 +1384,24 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::RunRetentionSweep { now, cursor, reply } => {
                     let result = fee_runway::run_retention_sweep(&conn, now, cursor);
+                    let _ = reply.send(result);
+                }
+                Command::InsertConsumedArmNonce {
+                    nonce,
+                    consumed_at,
+                    source_commit,
+                    binary_sha256,
+                    arm_expires_at,
+                    reply,
+                } => {
+                    let result = fee_runway::insert_consumed_nonce(
+                        &conn,
+                        &nonce,
+                        consumed_at,
+                        &source_commit,
+                        &binary_sha256,
+                        arm_expires_at,
+                    );
                     let _ = reply.send(result);
                 }
                 Command::RecordSeedRefusal { event, reply } => {

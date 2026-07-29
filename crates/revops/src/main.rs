@@ -460,6 +460,15 @@ pub struct StartupModeInputs<'a> {
     /// Whether the Rust-owned observer db (`revops-r-observer-db-path`) is
     /// configured and successfully opened THIS process lifetime.
     pub rust_state_store_configured: bool,
+    /// Task 59 §5.3: the durable cutover-arm nonce deny ledger (the
+    /// observer db's owner handle). REQUIRED whenever `cutover_arm` is
+    /// `Some` -- consumption is DB-first, and an arm with nowhere durable
+    /// to burn its nonce is refused (`ConsumeFailed`) with the file
+    /// untouched.
+    pub nonce_ledger: Option<&'a revops_db::owner::ObserverHandle>,
+    /// The startup clock reading the ledger row records as
+    /// `consumed_at`.
+    pub now: i64,
 }
 
 /// Every fail-closed reason [`resolve_startup_mode`] can return, each
@@ -480,6 +489,10 @@ pub enum StartupModeDenyReason {
     /// mode-matrix row, or `fee-stateful-shadow=true` with committed state
     /// but no seed-provenance event (see [`fee_mode::FeeModeDenyReason`]).
     Mode(fee_mode::FeeModeDenyReason),
+    /// Task 59 §5.4 (F7): this process already resolved its startup mode
+    /// once -- [`StartupResolutionToken::take`] returned `None`. A second
+    /// in-process resolution is refused regardless of fresh arms.
+    AlreadyResolved,
 }
 
 impl std::fmt::Display for StartupModeDenyReason {
@@ -492,6 +505,12 @@ impl std::fmt::Display for StartupModeDenyReason {
             ),
             Self::ArmInvalid(reason) => write!(f, "cutover_arm_invalid: {reason}"),
             Self::Mode(reason) => write!(f, "{reason}"),
+            Self::AlreadyResolved => write!(
+                f,
+                "already_resolved: this process already resolved its startup mode once; a \
+                 second in-process resolution is refused regardless of fresh arms (restart \
+                 for a fresh resolution)"
+            ),
         }
     }
 }
@@ -543,7 +562,14 @@ fn seed_binding_json(
 /// 3. **The Task 8 mode matrix**: [`fee_mode::validate_fee_mode`] over the
 ///    resolved flags, the (now possibly `Some`) consumed arm, and the
 ///    state/seed-event evidence.
-pub fn resolve_startup_mode(
+///
+/// Task 59 §5.4: the PRIVATE pure kernel -- no global state, no token,
+/// so the mode-matrix tests exercise it directly and stay
+/// order-independent. Arm consumption is DB-FIRST (§5.3): validate
+/// (pure), await the durable nonce burn, THEN rename -- a crash between
+/// the two leaves the nonce burned and the file present, denied
+/// `ReusedNonce` on retry.
+async fn resolve_startup_mode_kernel(
     inputs: StartupModeInputs<'_>,
 ) -> Result<ValidatedFeeMode, StartupModeDenyReason> {
     if (inputs.flags.fee_stateful_shadow || inputs.flags.fee_broadcast)
@@ -558,15 +584,86 @@ pub fn resolve_startup_mode(
     }
 
     let arm = match inputs.cutover_arm {
-        Some((arm_path, identity)) => Some(
-            cutover_arm::validate_and_consume(arm_path, inputs.consumed_arm_dir, &identity)
-                .map_err(StartupModeDenyReason::ArmInvalid)?,
-        ),
+        Some((arm_path, identity)) => {
+            let validated = cutover_arm::validate(arm_path, &identity)
+                .map_err(StartupModeDenyReason::ArmInvalid)?;
+            let Some(ledger) = inputs.nonce_ledger else {
+                // No durable deny ledger to burn the nonce in: refuse
+                // with the arm file untouched rather than consume
+                // filesystem-only (the F12 single-loss pair needs both).
+                return Err(StartupModeDenyReason::ArmInvalid(
+                    cutover_arm::CutoverArmDenyReason::ConsumeFailed(
+                        "no durable nonce ledger (observer db) available to burn the arm \
+                         nonce in; the arm file is untouched"
+                            .to_string(),
+                    ),
+                ));
+            };
+            match ledger
+                .insert_consumed_arm_nonce(
+                    validated.nonce().to_string(),
+                    inputs.now,
+                    validated.source_commit().to_string(),
+                    validated.binary_sha256().to_string(),
+                    validated.expires_at(),
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(StartupModeDenyReason::ArmInvalid(
+                        cutover_arm::CutoverArmDenyReason::ReusedNonce,
+                    ));
+                }
+                Err(e) => {
+                    return Err(StartupModeDenyReason::ArmInvalid(
+                        cutover_arm::CutoverArmDenyReason::ConsumeFailed(format!(
+                            "durable nonce-ledger insert failed ({e:#}); the arm file is \
+                             untouched and may be retried by the operator"
+                        )),
+                    ));
+                }
+            }
+            Some(
+                cutover_arm::consume_validated(validated, inputs.consumed_arm_dir)
+                    .map_err(StartupModeDenyReason::ArmInvalid)?,
+            )
+        }
         None => None,
     };
 
     fee_mode::validate_fee_mode(inputs.flags, arm, inputs.state, inputs.seed_binding)
         .map_err(StartupModeDenyReason::Mode)
+}
+
+/// Task 59 §5.4 (F7): minted at most once per process. Private field, no
+/// `Clone`, and deliberately NO reset/factory/`cfg(test)` constructor of
+/// any kind -- the action-surface scan pins that absence. Exactly one
+/// test (`same_process_second_resolution_refuses`) may touch this
+/// process-global.
+pub struct StartupResolutionToken {
+    _private: (),
+}
+
+impl StartupResolutionToken {
+    /// `Some` exactly once per process, `None` forever after.
+    pub fn take() -> Option<Self> {
+        static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        (!TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(Self { _private: () })
+    }
+}
+
+/// The ONLY public resolution path (Task 59 §5.4): consumes the
+/// process-global token by value and delegates to the private kernel.
+/// Production has exactly one call site; a second in-process resolution
+/// cannot obtain a token and is refused
+/// [`StartupModeDenyReason::AlreadyResolved`] at that call site.
+pub async fn resolve_startup_mode(
+    token: StartupResolutionToken,
+    inputs: StartupModeInputs<'_>,
+) -> Result<ValidatedFeeMode, StartupModeDenyReason> {
+    let _consumed = token;
+    resolve_startup_mode_kernel(inputs).await
 }
 
 /// A short, stable label for a [`ValidatedFeeMode`] -- surfaced in
@@ -2381,14 +2478,29 @@ async fn main() -> Result<()> {
         .unwrap_or_default()
         .join("cutover-consumed");
 
-    let mode = match resolve_startup_mode(StartupModeInputs {
-        flags,
-        cutover_arm: cutover_arm_path_expanded.as_deref().zip(cutover_identity),
-        consumed_arm_dir: &consumed_arm_dir,
-        state: &fee_state_snapshot,
-        seed_binding: &fee_seed_binding,
-        rust_state_store_configured,
-    }) {
+    // Task 59 §5.4: the one-per-process resolution token -- production's
+    // single call site. A `None` here would mean a second in-process
+    // resolution attempt: refused typed, never re-run.
+    let resolution = match StartupResolutionToken::take() {
+        Some(token) => {
+            resolve_startup_mode(
+                token,
+                StartupModeInputs {
+                    flags,
+                    cutover_arm: cutover_arm_path_expanded.as_deref().zip(cutover_identity),
+                    consumed_arm_dir: &consumed_arm_dir,
+                    state: &fee_state_snapshot,
+                    seed_binding: &fee_seed_binding,
+                    rust_state_store_configured,
+                    nonce_ledger: observer_db.as_ref(),
+                    now: now_unix(),
+                },
+            )
+            .await
+        }
+        None => Err(StartupModeDenyReason::AlreadyResolved),
+    };
+    let mode = match resolution {
         Ok(mode) => mode,
         Err(reason) => {
             configured
@@ -2995,18 +3107,21 @@ mod tests {
     }
 
     /// Full mode matrix: passive observer needs no Rust state and no arm.
-    #[test]
-    fn resolve_startup_mode_passive_observer_delegates_to_fee_mode() {
+    #[tokio::test]
+    async fn resolve_startup_mode_passive_observer_delegates_to_fee_mode() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
-        let result = resolve_startup_mode(StartupModeInputs {
+        let result = resolve_startup_mode_kernel(StartupModeInputs {
             flags: passive_flags(),
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: false,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .expect("passive observer needs no Rust state");
         assert!(matches!(result, ValidatedFeeMode::PassiveObserver(_)));
         assert_eq!(mode_label(&result), "passive_observer");
@@ -3016,18 +3131,21 @@ mod tests {
     /// configured Rust-owned store is refused BEFORE the mode matrix ever
     /// runs -- no arm is involved here, so this proves the gate exists
     /// independent of arm handling.
-    #[test]
-    fn resolve_startup_mode_shadow_requires_rust_state_store() {
+    #[tokio::test]
+    async fn resolve_startup_mode_shadow_requires_rust_state_store() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: shadow_flags(),
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: false,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3041,8 +3159,8 @@ mod tests {
     /// the cutover arm file is left COMPLETELY untouched (not even opened)
     /// when the mandatory-state gate refuses first. A broken deploy must
     /// never burn a one-time arm.
-    #[test]
-    fn resolve_startup_mode_live_requires_rust_state_store_before_touching_arm() {
+    #[tokio::test]
+    async fn resolve_startup_mode_live_requires_rust_state_store_before_touching_arm() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
         let arm_path = write_arm(
@@ -3052,14 +3170,17 @@ mod tests {
         );
         let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
 
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: live_flags(),
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: false,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3076,18 +3197,21 @@ mod tests {
 
     /// Arm absence in shadow (Step 1): a configured store, no arm supplied,
     /// virgin state -- accepted, deferring seeding to the first cycle.
-    #[test]
-    fn resolve_startup_mode_shadow_without_arm_when_store_configured() {
+    #[tokio::test]
+    async fn resolve_startup_mode_shadow_without_arm_when_store_configured() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
-        let result = resolve_startup_mode(StartupModeInputs {
+        let result = resolve_startup_mode_kernel(StartupModeInputs {
             flags: shadow_flags(),
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .expect("shadow row with a configured store and no arm is valid");
         match result {
             ValidatedFeeMode::AutonomousShadow(shadow) => assert_eq!(
@@ -3101,8 +3225,8 @@ mod tests {
     /// Arm consumption in live mode (Step 1): a valid arm, matching
     /// identity, and a configured store -- accepted, AND the arm file is
     /// actually gone from its original path (moved into `consumed_dir`).
-    #[test]
-    fn resolve_startup_mode_live_consumes_a_valid_arm() {
+    #[tokio::test]
+    async fn resolve_startup_mode_live_consumes_a_valid_arm() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
         let arm_path = write_arm(
@@ -3111,18 +3235,24 @@ mod tests {
             &valid_arm_json("live-nonce-consumed"),
         );
         let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
         let seed_binding = revops_db::fee_runway::SeedBindingState::VerifiedBound {
             cycle_id: "live-startup-seed-cycle".to_string(),
         };
 
-        let result = resolve_startup_mode(StartupModeInputs {
+        let result = resolve_startup_mode_kernel(StartupModeInputs {
             flags: live_flags(),
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &non_virgin_state(),
             seed_binding: &seed_binding,
             rust_state_store_configured: true,
+            nonce_ledger: Some(&ledger),
+            now: 1_800_000_000,
         })
+        .await
         .expect("live row with a valid arm, a configured store, and seeded state is valid");
         match result {
             ValidatedFeeMode::LiveAuthority(live) => {
@@ -3142,8 +3272,8 @@ mod tests {
 
     /// An invalid arm (wrong node id) is refused with `ArmInvalid`, never
     /// silently treated as "no arm supplied".
-    #[test]
-    fn resolve_startup_mode_invalid_arm_is_refused() {
+    #[tokio::test]
+    async fn resolve_startup_mode_invalid_arm_is_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
         let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("live-nonce-bad"));
@@ -3151,14 +3281,17 @@ mod tests {
         let mut identity = test_identity(owner_uid);
         identity.node_id = "some-other-node".to_string();
 
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: live_flags(),
             cutover_arm: Some((&arm_path, identity)),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3171,21 +3304,27 @@ mod tests {
     /// `fee_mode`'s own `ArmPresentInNonLiveMode` contract) and THEN the
     /// mode matrix denies it -- proving the arm-handling step runs
     /// unconditionally on the resolved flags, not only for the live row.
-    #[test]
-    fn resolve_startup_mode_arm_present_in_shadow_row_is_denied_after_consumption() {
+    #[tokio::test]
+    async fn resolve_startup_mode_arm_present_in_shadow_row_is_denied_after_consumption() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
         let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("stray-in-shadow"));
         let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
 
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: shadow_flags(),
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
+            nonce_ledger: Some(&ledger),
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3201,18 +3340,21 @@ mod tests {
 
     /// Shadow row, a non-virgin store with no seed event, delegates the
     /// `NeverSeeded` misconfiguration straight through from `fee_mode`.
-    #[test]
-    fn resolve_startup_mode_never_seeded_delegates_from_fee_mode() {
+    #[tokio::test]
+    async fn resolve_startup_mode_never_seeded_delegates_from_fee_mode() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: shadow_flags(),
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &non_virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3227,8 +3369,8 @@ mod tests {
     /// store would -- the collision guard's downstream effect on mode
     /// resolution is exactly "no writable Rust state", not a distinct
     /// error path.
-    #[test]
-    fn observer_db_collision_guard_feeds_missing_rust_state_gate() {
+    #[tokio::test]
+    async fn observer_db_collision_guard_feeds_missing_rust_state_gate() {
         let observer_path = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
         let production_path = PathBuf::from("/home/testuser/.lightning/revenue_ops.db");
         assert!(observer_db_path_collides_with_production(
@@ -3240,14 +3382,17 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: shadow_flags(),
             cutover_arm: None,
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured,
+            nonce_ledger: None,
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3265,21 +3410,27 @@ mod tests {
     /// seeded). The arm is still consumed (this is the arm-handling step
     /// running unconditionally, same posture as
     /// `resolve_startup_mode_arm_present_in_shadow_row_is_denied_after_consumption`).
-    #[test]
-    fn resolve_startup_mode_live_denies_virgin_store_even_with_valid_arm() {
+    #[tokio::test]
+    async fn resolve_startup_mode_live_denies_virgin_store_even_with_valid_arm() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let consumed_dir = tmp.path().join("consumed");
         let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("live-virgin-nonce"));
         let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
 
-        let err = resolve_startup_mode(StartupModeInputs {
+        let err = resolve_startup_mode_kernel(StartupModeInputs {
             flags: live_flags(),
             cutover_arm: Some((&arm_path, test_identity(owner_uid))),
             consumed_arm_dir: &consumed_dir,
             state: &virgin_state(),
             seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
             rust_state_store_configured: true,
+            nonce_ledger: Some(&ledger),
+            now: 1_800_000_000,
         })
+        .await
         .unwrap_err();
         assert!(matches!(
             err,
@@ -3289,6 +3440,239 @@ mod tests {
             !arm_path.exists(),
             "the arm is consumed even though the seeded-state gate ultimately denies it"
         );
+    }
+
+    /// Task 59 §5.3 test plumbing: live-mode inputs around one arm --
+    /// the shape every A-matrix test drives the kernel with.
+    async fn consume_arm_via_kernel(
+        arm_path: &std::path::Path,
+        consumed_dir: &std::path::Path,
+        ledger: &revops_db::owner::ObserverHandle,
+        owner_uid: u32,
+    ) -> Result<ValidatedFeeMode, StartupModeDenyReason> {
+        let seed_binding = revops_db::fee_runway::SeedBindingState::VerifiedBound {
+            cycle_id: "a-matrix-seed-cycle".to_string(),
+        };
+        resolve_startup_mode_kernel(StartupModeInputs {
+            flags: live_flags(),
+            cutover_arm: Some((arm_path, test_identity(owner_uid))),
+            consumed_arm_dir: consumed_dir,
+            state: &non_virgin_state(),
+            seed_binding: &seed_binding,
+            rust_state_store_configured: true,
+            nonce_ledger: Some(ledger),
+            now: 1_800_000_000,
+        })
+        .await
+    }
+
+    /// A1 (F12 single-loss pair, DB side): wiping/repointing the
+    /// consumed-arm DIRECTORY does not permit replay -- the durable DB
+    /// ledger still denies the burned nonce.
+    #[tokio::test]
+    async fn wiped_consumed_dir_does_not_permit_replay() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("a1-replay-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        consume_arm_via_kernel(&arm_path, &consumed_dir, &ledger, owner_uid)
+            .await
+            .expect("first consumption is valid");
+
+        // Wipe the filesystem ledger entirely and re-mint the same nonce.
+        std::fs::remove_dir_all(&consumed_dir).expect("wipe consumed dir");
+        let arm_path = write_arm(tmp.path(), "arm2.json", &valid_arm_json("a1-replay-nonce"));
+        let err = consume_arm_via_kernel(&arm_path, &consumed_dir, &ledger, owner_uid)
+            .await
+            .expect_err("a burned nonce must deny even with the consumed dir gone");
+        assert!(
+            matches!(
+                err,
+                StartupModeDenyReason::ArmInvalid(cutover_arm::CutoverArmDenyReason::ReusedNonce)
+            ),
+            "{err:?}"
+        );
+        assert!(arm_path.exists(), "a denied replay arm is never consumed");
+    }
+
+    /// A1b (F12 single-loss pair, filesystem side): replacing the observer
+    /// DB with a fresh one does not permit replay -- the consumed-dir
+    /// rename hits `EEXIST` and denies.
+    #[tokio::test]
+    async fn fresh_observer_db_does_not_permit_replay() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("a1b-replay-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        consume_arm_via_kernel(&arm_path, &consumed_dir, &ledger, owner_uid)
+            .await
+            .expect("first consumption is valid");
+
+        // A FRESH observer db (the DB ledger is gone) but the consumed
+        // dir survives: the rename target already exists.
+        let fresh_ledger = revops_db::owner::spawn_read_write(&tmp.path().join("fresh-ledger.db"))
+            .await
+            .expect("spawn fresh ledger");
+        let arm_path = write_arm(tmp.path(), "arm2.json", &valid_arm_json("a1b-replay-nonce"));
+        let err = consume_arm_via_kernel(&arm_path, &consumed_dir, &fresh_ledger, owner_uid)
+            .await
+            .expect_err("the surviving filesystem ledger must deny the replay");
+        assert!(
+            matches!(
+                err,
+                StartupModeDenyReason::ArmInvalid(cutover_arm::CutoverArmDenyReason::ReusedNonce)
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A2 (§5.3 crash window): nonce burned in the DB, rename never
+    /// performed (crash between) -- the next attempt denies `ReusedNonce`
+    /// and the arm file survives for the audit trail.
+    #[tokio::test]
+    async fn nonce_insert_before_rename_survives_crash_between() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("a2-crash-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        // Simulate the crash window: validate + durable burn, NO rename.
+        let validated =
+            cutover_arm::validate(&arm_path, &test_identity(owner_uid)).expect("arm validates");
+        assert!(ledger
+            .insert_consumed_arm_nonce(
+                validated.nonce().to_string(),
+                1_800_000_000,
+                validated.source_commit().to_string(),
+                validated.binary_sha256().to_string(),
+                validated.expires_at(),
+            )
+            .await
+            .expect("burn nonce"));
+        drop(validated); // the "crash": no consume_validated ever runs
+
+        let err = consume_arm_via_kernel(&arm_path, &consumed_dir, &ledger, owner_uid)
+            .await
+            .expect_err("the burned nonce must deny the retry");
+        assert!(
+            matches!(
+                err,
+                StartupModeDenyReason::ArmInvalid(cutover_arm::CutoverArmDenyReason::ReusedNonce)
+            ),
+            "{err:?}"
+        );
+        assert!(
+            arm_path.exists(),
+            "the arm file is preserved when the DB ledger denies"
+        );
+    }
+
+    /// §5.3: a ledger INSERT failure (not a conflict) refuses
+    /// `ConsumeFailed` with the arm file untouched -- operator-retryable.
+    #[tokio::test]
+    async fn ledger_insert_failure_preserves_the_arm_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let ledger_path = tmp.path().join("ledger.db");
+        let ledger = revops_db::owner::spawn_read_write(&ledger_path)
+            .await
+            .expect("spawn test nonce ledger");
+        {
+            let raw = rusqlite::Connection::open(&ledger_path).expect("raw open");
+            raw.execute_batch("DROP TABLE rust_consumed_arm_nonces;")
+                .expect("sabotage the ledger table");
+        }
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("a3-dbfail-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        let err = consume_arm_via_kernel(&arm_path, &consumed_dir, &ledger, owner_uid)
+            .await
+            .expect_err("a failed ledger insert must refuse");
+        assert!(
+            matches!(
+                err,
+                StartupModeDenyReason::ArmInvalid(
+                    cutover_arm::CutoverArmDenyReason::ConsumeFailed(_)
+                )
+            ),
+            "{err:?}"
+        );
+        assert!(
+            arm_path.exists(),
+            "the arm file is untouched when the ledger insert fails"
+        );
+        assert!(!consumed_dir.exists(), "nothing was consumed");
+    }
+
+    /// A6 (F6): the FULL async consumption path on a current-thread
+    /// runtime -- red under the revision-1 blocking-bridge shape (a
+    /// "cannot block the current thread" panic), green proves no blocking
+    /// bridge remains anywhere on this path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_runtime_consumption_no_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let ledger = revops_db::owner::spawn_read_write(&tmp.path().join("ledger.db"))
+            .await
+            .expect("spawn test nonce ledger");
+        let arm_path = write_arm(tmp.path(), "arm.json", &valid_arm_json("a6-ct-nonce"));
+        let owner_uid = std::fs::metadata(&arm_path).expect("stat arm").uid();
+
+        let mode = consume_arm_via_kernel(&arm_path, &consumed_dir, &ledger, owner_uid)
+            .await
+            .expect("full async consumption on a current-thread runtime");
+        assert!(matches!(mode, ValidatedFeeMode::LiveAuthority(_)));
+        assert!(consumed_dir.join("a6-ct-nonce").exists());
+    }
+
+    /// A5 (§5.4, R2-F3): the ONE test that touches the process-global
+    /// guard. First take succeeds and resolves; the second take returns
+    /// `None`, which production's single call site maps to the typed
+    /// `AlreadyResolved` refusal -- regardless of fresh arms.
+    #[tokio::test]
+    async fn same_process_second_resolution_refuses() {
+        let token = StartupResolutionToken::take()
+            .expect("the first take in this process must mint the token");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let consumed_dir = tmp.path().join("consumed");
+        let mode = resolve_startup_mode(
+            token,
+            StartupModeInputs {
+                flags: passive_flags(),
+                cutover_arm: None,
+                consumed_arm_dir: &consumed_dir,
+                state: &virgin_state(),
+                seed_binding: &revops_db::fee_runway::SeedBindingState::VirginStore,
+                rust_state_store_configured: false,
+                nonce_ledger: None,
+                now: 1_800_000_000,
+            },
+        )
+        .await
+        .expect("first resolution succeeds");
+        assert!(matches!(mode, ValidatedFeeMode::PassiveObserver(_)));
+
+        // A second in-process resolution cannot obtain a token -- even a
+        // fresh arm changes nothing (the round-1 F7 red: two calls with
+        // two fresh arms both succeeded).
+        assert!(
+            StartupResolutionToken::take().is_none(),
+            "the token is minted at most once per process"
+        );
+        let refusal = StartupModeDenyReason::AlreadyResolved;
+        assert!(format!("{refusal}").starts_with("already_resolved:"));
     }
 
     #[test]

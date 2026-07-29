@@ -1820,6 +1820,11 @@ pub fn latest_runway_snapshot(conn: &Connection) -> Result<Option<RunwaySnapshot
 
 /// Insert one burned cutover-arm nonce. This table is a deny ledger: no read
 /// path may use a row to grant authority.
+///
+/// Returns `Ok(true)` when the nonce was inserted, `Ok(false)` when the
+/// primary key already holds it (the caller's `ReusedNonce` refusal --
+/// distinguished typed, per Task 59 §5.3, from every other insert failure,
+/// which is `Err` and maps to `ConsumeFailed`).
 pub fn insert_consumed_nonce(
     conn: &Connection,
     nonce: &str,
@@ -1827,21 +1832,22 @@ pub fn insert_consumed_nonce(
     source_commit: &str,
     binary_sha256: &str,
     arm_expires_at: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO rust_consumed_arm_nonces
+) -> Result<bool> {
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO rust_consumed_arm_nonces
              (nonce, consumed_at, source_commit, binary_sha256, arm_expires_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            nonce,
-            consumed_at,
-            source_commit,
-            binary_sha256,
-            arm_expires_at
-        ],
-    )
-    .context("insert consumed cutover-arm nonce")?;
-    Ok(())
+            params![
+                nonce,
+                consumed_at,
+                source_commit,
+                binary_sha256,
+                arm_expires_at
+            ],
+        )
+        .context("insert consumed cutover-arm nonce")?;
+    Ok(inserted == 1)
 }
 
 #[derive(Clone, Copy)]
