@@ -495,3 +495,31 @@ async fn missing_engine_refuses_like_python_uninitialized() {
         .await
         .expect("reconciliation is store+lookup only");
 }
+
+/// Intent-before-execute: a submission whose intent write FAILS runs no
+/// execution at all -- the durable record precedes the wire, always.
+#[tokio::test]
+async fn intent_write_failure_prevents_execution() {
+    let engine = ScriptedEngine::returning(vec![dryrun_result()]);
+    let h = harness_with(engine.clone(), false, empty_reconcile()).await;
+
+    // Sabotage the INTENT write specifically (the attempts insert).
+    let raw = rusqlite::Connection::open(h._dir.path().join("observer.db")).unwrap();
+    raw.execute_batch(
+        "CREATE TRIGGER poison_intent BEFORE INSERT ON rust_rebalance_attempts
+         BEGIN SELECT RAISE(ABORT, 'injected intent failure'); END;",
+    )
+    .unwrap();
+
+    let err = h
+        .handle
+        .manual(params(250_000, false))
+        .await
+        .expect_err("a failed intent write refuses the submission");
+    assert!(matches!(err, RebalanceRefusal::StoreFailed(_)), "{err:?}");
+    assert_eq!(
+        engine.calls(),
+        0,
+        "the durable intent precedes the wire: no execution after a failed write"
+    );
+}
