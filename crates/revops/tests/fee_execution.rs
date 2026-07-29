@@ -25,7 +25,7 @@ use revops_db::owner::{spawn_read_write, ObserverHandle};
 use revops_fees::execution::SetChannelRequest;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -173,6 +173,17 @@ enum FakeBehavior {
     /// Accepts and reads the request, then never writes anything and
     /// never closes -- exercises the broadcaster's own timeout budget.
     HangForever,
+    /// Task 59 F4: park until `gate` flips, then answer with `result` --
+    /// lets a test wedge the store BETWEEN the intent write and the
+    /// terminal result write, deterministically.
+    GatedSuccess(Value, Arc<AtomicBool>),
+    /// Task 59 F4: park until `gate` flips, then reject -- same wedge
+    /// window as [`Self::GatedSuccess`] for the explicit-rejection arm.
+    GatedRejected {
+        code: i64,
+        message: String,
+        gate: Arc<AtomicBool>,
+    },
 }
 
 struct FakeClnServer {
@@ -252,6 +263,32 @@ impl FakeClnServer {
                         }
                         FakeBehavior::HangForever => {
                             std::future::pending::<()>().await;
+                        }
+                        FakeBehavior::GatedSuccess(result, gate) => {
+                            while !gate.load(Ordering::SeqCst) {
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                            }
+                            let body = json!({"jsonrpc": "2.0", "id": 1, "result": result});
+                            let mut out = serde_json::to_vec(&body).unwrap();
+                            out.extend_from_slice(b"\n\n");
+                            let _ = stream.write_all(&out).await;
+                        }
+                        FakeBehavior::GatedRejected {
+                            code,
+                            message,
+                            gate,
+                        } => {
+                            while !gate.load(Ordering::SeqCst) {
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                            }
+                            let body = json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "error": {"code": code, "message": message},
+                            });
+                            let mut out = serde_json::to_vec(&body).unwrap();
+                            out.extend_from_slice(b"\n\n");
+                            let _ = stream.write_all(&out).await;
                         }
                     }
                 });
@@ -1081,60 +1118,469 @@ async fn state_generation_check_agrees_with_the_committed_generation_after_a_rea
     .expect("the committed generation authorizes");
 }
 
-/// I7c: every store call on this path is budgeted. A wedged single-owner
-/// actor must DENY (fail closed, zero RPC calls) rather than hang the CLN
-/// handler that called in -- the RPC half was already budgeted, the store
-/// half was not.
-///
-/// The wedge is real, not simulated: a second connection holds a write
-/// transaction on the observer db, so the actor's `insert_broadcast_attempt`
-/// blocks. The broadcaster's budget (1s here) is well under
-/// `revops_db::BUSY_TIMEOUT_MS` (5s), so the budget fires first and the
-/// outcome is deterministic.
+/// Task 59 test plumbing: wait (from a side thread) until `expected`
+/// intent rows exist, take a write lock on the observer db, optionally
+/// open a fake-server gate, and hold the lock until `release` flips.
+fn wedge_after_intent(
+    db_path: PathBuf,
+    expected: i64,
+    gate: Option<Arc<AtomicBool>>,
+    release: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(60))
+            .unwrap();
+        loop {
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM rust_broadcast_attempts", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            if n >= expected {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        if let Some(gate) = gate {
+            gate.store(true, Ordering::SeqCst);
+        }
+        while !release.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = conn.execute_batch("ROLLBACK");
+    })
+}
+
+/// T1a (§3.2): the clamped store budget survives a REAL 2 s lock wait.
+/// Pre-fix red: today's 1 s operator budget denies the batch (and leaves
+/// an orphan intent) even though sqlite itself would have waited the
+/// lock out well inside `BUSY_TIMEOUT_MS`.
 #[tokio::test]
-async fn a_wedged_store_actor_denies_the_batch_instead_of_hanging() {
+async fn store_budget_never_undercuts_a_real_lock_wait() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
     let store = observer(tmp.path()).await;
-
-    // Everything that needs a responsive store happens BEFORE the wedge.
     let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
     let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 1, live_mode)
         .await
         .expect("no orphaned intents in a fresh store");
     let authorization = authorize_ok(&store).await;
 
-    // Wedge: hold a write transaction on the observer db from another
-    // connection. WAL keeps readers going, so the batch gets as far as
-    // persisting its intent -- and blocks there.
+    // A 2 s held write lock: a legitimate lock wait, not a wedge.
+    let db_path = tmp.path().join("observer.db");
+    let locker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(60))
+            .unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        conn.execute_batch("ROLLBACK").unwrap();
+    });
+    // Let the locker win the race for the write lock.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let receipt = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect("a 2 s legitimate lock wait must never deny the batch");
+    assert_eq!(receipt.outcomes.len(), 1);
+    assert_eq!(server.connection_count(), 1);
+    locker.join().unwrap();
+}
+
+/// T1b (§3.2, F9): an actor unresponsive past the clamped budget denies
+/// the batch as OUTCOME UNKNOWN -- the admitted intent write is queued
+/// and uncancellable, so "no write happened" would be a lie. The process
+/// poisons itself (conservative fail-closed) and refuses further batches.
+#[tokio::test]
+async fn unresponsive_actor_denies_within_clamped_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
+    let store = observer(tmp.path()).await;
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+    let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 1, live_mode)
+        .await
+        .expect("no orphaned intents in a fresh store");
+    let authorization = authorize_ok(&store).await;
+
+    // Wedge held for the whole test + TWO queued writes interleaved so
+    // the send-path quarantine READ still answers inside its own budget
+    // (behind one 5 s busy-error) while the intent write lands behind
+    // ~10 s of actor work -- its 7 s receipt budget fires first (F9).
     let blocker = rusqlite::Connection::open(tmp.path().join("observer.db")).unwrap();
     blocker
         .busy_timeout(std::time::Duration::from_secs(60))
         .unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let ahead = store.clone();
+    let queued_ahead = tokio::spawn(async move {
+        let _ = ahead
+            .insert_peer_connection_event("peer-ahead".into(), "connect".into(), 1_800_000_000)
+            .await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let ahead2 = store.clone();
+    let queued_ahead2 = tokio::spawn(async move {
+        // Enqueued while the quarantine read waits, so it sits BETWEEN
+        // that read and the intent write in the owner queue.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let _ = ahead2
+            .insert_peer_connection_event("peer-ahead-2".into(), "connect".into(), 1_800_000_001)
+            .await;
+    });
 
     let started = std::time::Instant::now();
     let err = broadcaster
         .broadcast_batch(authorization, &[one_request()])
         .await
-        .expect_err("a wedged store must deny the batch");
+        .expect_err("an unresponsive actor must deny the batch");
     let elapsed = started.elapsed();
 
     match &err {
         BroadcastError::Persistence(detail) => assert!(
-            detail.contains("budget") || detail.contains("timed out"),
-            "the deny reason must name the exceeded budget, got {detail}"
+            detail.contains("store_intent_outcome_unknown"),
+            "an admitted-then-expired intent write is UNKNOWN, got {detail}"
         ),
-        other => panic!("expected a persistence denial, got {other:?}"),
+        other => panic!("expected the typed unknown denial, got {other:?}"),
     }
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
-        "the budget must fire well before sqlite's own busy_timeout, took {elapsed:?}"
+        elapsed >= std::time::Duration::from_secs(6),
+        "the clamped floor must be respected, took only {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "the deny must arrive within the clamped budget plus the quarantine attempt, took {elapsed:?}"
     );
     assert_eq!(
         server.connection_count(),
         0,
-        "a batch that could not record its intent must send zero RPC calls"
+        "a batch whose intent outcome is unknown must send zero RPC calls"
     );
+
+    // Conservative fail-closed: the process is poisoned now.
     blocker.execute_batch("ROLLBACK").unwrap();
+    queued_ahead.await.unwrap();
+    queued_ahead2.await.unwrap();
+    // The budget-expired quarantine write was uncancellable and lands
+    // once the wedge lifts. Flush the actor queue, then clear it
+    // directly: the POISON must hold in memory, independent of any
+    // store-visible quarantine state.
+    store.last_forward_ts().await.unwrap();
+    let cleaner = rusqlite::Connection::open(tmp.path().join("observer.db")).unwrap();
+    cleaner
+        .execute(
+            "UPDATE rust_execution_quarantine SET cleared_at = entered_at \
+             WHERE cleared_at IS NULL",
+            [],
+        )
+        .unwrap();
+    let authorization = authorize_ok(&store).await;
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("poisoned after an unknown intent outcome");
+    assert!(matches!(err, BroadcastError::Poisoned), "{err:?}");
+    assert_eq!(server.connection_count(), 0);
+}
+
+/// T1c (F9): a FULL owner queue refuses admission as a CLEAN typed
+/// non-write (`store_admission_refused`, provably nothing enqueued, no
+/// poison) -- distinct from post-admission expiry, which is UNKNOWN.
+#[tokio::test]
+async fn admission_full_is_clean_deny_post_admission_expiry_is_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
+    let store = observer(tmp.path()).await;
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+    let broadcaster = Arc::new(
+        ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 1, live_mode)
+            .await
+            .expect("no orphaned intents in a fresh store"),
+    );
+    let authorization = authorize_ok(&store).await;
+
+    // Hold the actor on ONE slow write (5 s busy-error under the wedge),
+    // pre-fill the queue with 64 cheap READ commands, park the batch's
+    // quarantine read as the FIRST waiting sender, then park thousands
+    // more reads behind it. When the slow write ends, the drain admits
+    // the quarantine read early (FIFO) while the parked pool keeps the
+    // queue provably full for the intent `try_send`.
+    let blocker = rusqlite::Connection::open(tmp.path().join("observer.db")).unwrap();
+    blocker
+        .busy_timeout(std::time::Duration::from_secs(60))
+        .unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let ahead = store.clone();
+    let queued_ahead = tokio::spawn(async move {
+        let _ = ahead
+            .insert_peer_connection_event("peer-ahead".into(), "connect".into(), 1_800_000_000)
+            .await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut fillers = Vec::new();
+    for _ in 0..64 {
+        let handle = store.clone();
+        fillers.push(tokio::spawn(async move {
+            let _ = handle.last_forward_ts().await;
+        }));
+        tokio::task::yield_now().await;
+    }
+
+    let batch_broadcaster = Arc::clone(&broadcaster);
+    let batch = tokio::spawn(async move {
+        batch_broadcaster
+            .broadcast_batch(authorization, &[one_request()])
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    for _ in 0..3000 {
+        let handle = store.clone();
+        fillers.push(tokio::spawn(async move {
+            let _ = handle.last_forward_ts().await;
+        }));
+    }
+    tokio::task::yield_now().await;
+
+    let err = batch
+        .await
+        .unwrap()
+        .expect_err("a full owner queue must refuse admission");
+    match &err {
+        BroadcastError::Persistence(detail) => assert!(
+            detail.contains("store_admission_refused"),
+            "a refused admission is a clean typed non-write, got {detail}"
+        ),
+        other => panic!("expected the typed admission refusal, got {other:?}"),
+    }
+    assert_eq!(server.connection_count(), 0);
+
+    // NOT poisoned: nothing was enqueued, so nothing is uncertain.
+    blocker.execute_batch("ROLLBACK").unwrap();
+    queued_ahead.await.unwrap();
+    for filler in fillers {
+        let _ = filler.await;
+    }
+    let authorization = authorize_ok(&store).await;
+    broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect("a clean admission refusal must not poison the broadcaster");
+    assert_eq!(server.connection_count(), 1);
+}
+
+/// F4a (§3.4): a wedged result-write after RPC SUCCESS stops the batch,
+/// poisons the process, and returns the typed
+/// `ResultPersistenceUnknown` naming the outcome that could not be
+/// durably recorded.
+#[tokio::test]
+async fn wedged_result_write_after_success_stops_poisons_and_types() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gate = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let server = FakeClnServer::spawn(vec![FakeBehavior::GatedSuccess(
+        json!({"channels": []}),
+        gate.clone(),
+    )]);
+    let store = observer(tmp.path()).await;
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+    let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 30, live_mode)
+        .await
+        .expect("no orphaned intents in a fresh store");
+    let authorization = authorize_ok(&store).await;
+    let wedge = wedge_after_intent(
+        tmp.path().join("observer.db"),
+        1,
+        Some(gate),
+        release.clone(),
+    );
+
+    let mut second = one_request();
+    second.request_id = "req-2".to_string();
+    let requests = [one_request(), second];
+    let err = broadcaster
+        .broadcast_batch(authorization, &requests)
+        .await
+        .expect_err("an unrecordable terminal result must fail the batch");
+    match &err {
+        BroadcastError::ResultPersistenceUnknown {
+            request_id,
+            rpc_outcome,
+            detail,
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert_eq!(rpc_outcome, "success");
+            assert!(!detail.is_empty());
+        }
+        other => panic!("expected ResultPersistenceUnknown, got {other:?}"),
+    }
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "the batch must STOP: the second request is never attempted"
+    );
+
+    release.store(true, Ordering::SeqCst);
+    wedge.join().unwrap();
+    let authorization = authorize_ok(&store).await;
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("poisoned after an unrecordable terminal result");
+    assert!(matches!(err, BroadcastError::Poisoned), "{err:?}");
+    assert_eq!(server.connection_count(), 1);
+}
+
+/// F4b (§3.4): same contract after an EXPLICIT CLN rejection.
+#[tokio::test]
+async fn wedged_result_write_after_rejection_stops_poisons_and_types() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gate = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let server = FakeClnServer::spawn(vec![FakeBehavior::GatedRejected {
+        code: -32602,
+        message: "invalid channel".to_string(),
+        gate: gate.clone(),
+    }]);
+    let store = observer(tmp.path()).await;
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+    let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 30, live_mode)
+        .await
+        .expect("no orphaned intents in a fresh store");
+    let authorization = authorize_ok(&store).await;
+    let wedge = wedge_after_intent(
+        tmp.path().join("observer.db"),
+        1,
+        Some(gate),
+        release.clone(),
+    );
+
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("an unrecordable terminal result must fail the batch");
+    match &err {
+        BroadcastError::ResultPersistenceUnknown {
+            request_id,
+            rpc_outcome,
+            ..
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert_eq!(rpc_outcome, "rejected");
+        }
+        other => panic!("expected ResultPersistenceUnknown, got {other:?}"),
+    }
+
+    release.store(true, Ordering::SeqCst);
+    wedge.join().unwrap();
+    let authorization = authorize_ok(&store).await;
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("poisoned after an unrecordable terminal result");
+    assert!(matches!(err, BroadcastError::Poisoned), "{err:?}");
+}
+
+/// F4c (§3.4): same contract after a CLEAN transport failure (connect
+/// error -- no bytes ever left this process).
+///
+/// Timing: the wedge is held while the intent write is admitted, lifted
+/// for exactly long enough for the intent to commit, and re-taken before
+/// the batch task can run again -- guaranteed by FREEZING the
+/// single-threaded test executor (a synchronous sleep) across the
+/// release/re-take, so the batch cannot advance from the intent receipt
+/// to the result write while the store is briefly writable.
+#[tokio::test]
+async fn wedged_result_write_after_clean_failure_stops_poisons_and_types() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = observer(tmp.path()).await;
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+
+    // A nonexistent socket path: connect fails immediately and cleanly.
+    let sock_path = tmp.path().join("no-such-lightning-rpc");
+    let broadcaster = Arc::new(
+        ClnFeeBroadcaster::new(sock_path, store.clone(), 1, live_mode)
+            .await
+            .expect("no orphaned intents in a fresh store"),
+    );
+    let authorization = authorize_ok(&store).await;
+
+    let db_path = tmp.path().join("observer.db");
+    let release = Arc::new(AtomicBool::new(false));
+    let wedge_release = release.clone();
+    // Take the wedge HERE, synchronously, before the batch exists --
+    // then hand the held transaction to the timing thread.
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.busy_timeout(std::time::Duration::from_secs(60))
+        .unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let wedge = std::thread::spawn(move || {
+        // Hold through the intent write's admission, then let exactly
+        // that write commit...
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        conn.execute_batch("ROLLBACK").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM rust_broadcast_attempts", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            if n >= 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the intent write never landed"
+            );
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        // ...and re-take the wedge before the batch task can reach the
+        // result write (the test executor is frozen right now).
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        while !wedge_release.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = conn.execute_batch("ROLLBACK");
+    });
+
+    let batch_broadcaster = Arc::clone(&broadcaster);
+    let batch = tokio::spawn(async move {
+        batch_broadcaster
+            .broadcast_batch(authorization, &[one_request()])
+            .await
+    });
+    // Let the batch run up to the intent receipt (the actor is
+    // busy-waiting on the wedge), then freeze this single-threaded
+    // executor across the wedge's release/re-take window.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    std::thread::sleep(std::time::Duration::from_millis(2_000));
+
+    let err = batch
+        .await
+        .unwrap()
+        .expect_err("an unrecordable terminal result must fail the batch");
+    match &err {
+        BroadcastError::ResultPersistenceUnknown {
+            request_id,
+            rpc_outcome,
+            ..
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert_eq!(rpc_outcome, "clean_failure");
+        }
+        other => panic!("expected ResultPersistenceUnknown, got {other:?}"),
+    }
+
+    release.store(true, Ordering::SeqCst);
+    wedge.join().unwrap();
+    let authorization = authorize_ok(&store).await;
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("poisoned after an unrecordable terminal result");
+    assert!(matches!(err, BroadcastError::Poisoned), "{err:?}");
 }

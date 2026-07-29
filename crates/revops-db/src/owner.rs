@@ -199,6 +199,60 @@ enum Command {
     ListLoopHealth(oneshot::Sender<Result<Vec<crate::loop_health::LoopHealthRow>>>),
 }
 
+/// Task 59 §3.1: a typed admission refusal -- `try_send` returned
+/// Full/Closed, so the command was PROVABLY not enqueued and no side
+/// effect is possible. Callers may report a clean non-write
+/// (`store_admission_refused`).
+#[derive(Debug)]
+pub enum StoreAdmissionRefused {
+    /// The bounded owner queue is at capacity (the owner is busy
+    /// admitting real work -- retryable, never proof of a wedge).
+    QueueFull,
+    /// The owner task is gone; nothing can be enqueued at all.
+    ActorGone,
+}
+
+impl std::fmt::Display for StoreAdmissionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueFull => write!(f, "owner queue at capacity; nothing was enqueued"),
+            Self::ActorGone => write!(f, "owner actor gone; nothing was enqueued"),
+        }
+    }
+}
+
+/// Task 59 §3.1: an ADMITTED command's pending reply. The command is
+/// queued and uncancellable -- dropping this receipt does not stop it.
+#[derive(Debug)]
+pub struct StoreReceipt<T> {
+    rx: oneshot::Receiver<Result<T>>,
+}
+
+/// How an admitted command's bounded receipt wait resolved.
+#[derive(Debug)]
+pub enum StoreReceiptWait<T> {
+    /// The actor replied within budget: the ACTUAL result (a clean
+    /// actor-reported error included -- the transaction definitively
+    /// failed).
+    Replied(Result<T>),
+    /// Budget expired (or the reply was lost) AFTER admission: the
+    /// command may still execute. This must never be reported as "no
+    /// write happened" (`store_intent_outcome_unknown`).
+    OutcomeUnknown,
+}
+
+impl<T> StoreReceipt<T> {
+    /// Wait at most `budget` for the actor's reply. Expiry -- and a
+    /// dropped reply channel, which equally proves nothing about whether
+    /// the command ran -- classify as [`StoreReceiptWait::OutcomeUnknown`].
+    pub async fn within(self, budget: std::time::Duration) -> StoreReceiptWait<T> {
+        match tokio::time::timeout(budget, self.rx).await {
+            Ok(Ok(result)) => StoreReceiptWait::Replied(result),
+            Ok(Err(_)) | Err(_) => StoreReceiptWait::OutcomeUnknown,
+        }
+    }
+}
+
 /// Cheap, `Clone`-able handle to the observer-db owner task.
 #[derive(Clone, Debug)]
 pub struct ObserverHandle {
@@ -737,6 +791,25 @@ impl ObserverHandle {
             .context("observer actor gone (blocking)")?;
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 59 §3.1: two-phase live-path intent write. Admission either
+    /// transfers the command or refuses it typed -- Tokio's `try_send`
+    /// leaves no third state, so a refusal proves nothing was enqueued.
+    /// The returned receipt's bounded wait classifies expiry as
+    /// OUTCOME UNKNOWN, never as a clean failure.
+    pub fn try_insert_broadcast_attempt(
+        &self,
+        intent: BroadcastAttemptIntent,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .try_send(Command::InsertBroadcastAttempt { intent, reply })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => StoreAdmissionRefused::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => StoreAdmissionRefused::ActorGone,
+            })?;
+        Ok(StoreReceipt { rx })
     }
 
     /// Run one bounded Class-W retention sweep on the owner thread

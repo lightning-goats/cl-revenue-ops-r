@@ -88,7 +88,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use revops_db::fee_runway::{BroadcastAttemptIntent, BroadcastAttemptOutcome, QuarantineEntry};
-use revops_db::owner::ObserverHandle;
+use revops_db::owner::{ObserverHandle, StoreReceiptWait};
 use revops_fees::execution::SetChannelRequest;
 
 use crate::fee_mode::LiveMode;
@@ -112,6 +112,12 @@ pub const SETCHANNEL_METHOD: &str = "setchannel";
 /// broadcaster's own `timeout_seconds` instead, so the whole live path has
 /// exactly one operator-visible number.
 const AUTHORIZE_STORE_BUDGET: Duration = Duration::from_millis(revops_db::BUSY_TIMEOUT_MS + 2_000);
+
+/// Task 59 §3.1.1 floor rule: no store wait on the live path may undercut
+/// a single legitimate SQLite lock wait on an otherwise idle actor
+/// (`BUSY_TIMEOUT_MS` + 2 s = 7 s). This guarantees ONLY that; it does
+/// not bound end-to-end latency, and expiry never proves a wedge (F9).
+const STORE_BUDGET_FLOOR: Duration = Duration::from_millis(revops_db::BUSY_TIMEOUT_MS + 2_000);
 
 /// Budget ONE Rust-owned-store call and turn an expiry into a denial
 /// string (final-review finding I7, 2026-07-26).
@@ -431,6 +437,19 @@ pub enum BroadcastError {
     /// closed: an unrecorded intent must never be submitted, and an
     /// unrecorded result must never be silently dropped.
     Persistence(String),
+    /// Task 59 F4: the RPC outcome was OBSERVED but its terminal result
+    /// row could not be durably recorded (budget expiry or store error).
+    /// The batch stopped immediately, the process poisoned itself, and a
+    /// quarantine insert was attempted -- discovering this only at the
+    /// next restart would let arbitrarily many further mutations happen
+    /// on top of an unrecorded one.
+    ResultPersistenceUnknown {
+        request_id: String,
+        /// The observed-but-unrecorded RPC outcome
+        /// (`success`/`rejected`/`clean_failure`/`ambiguous`).
+        rpc_outcome: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for BroadcastError {
@@ -444,8 +463,10 @@ impl std::fmt::Display for BroadcastError {
             }
             Self::Poisoned => write!(
                 f,
-                "this process is poisoned after a quarantine-insert failure following an \
-                 ambiguous transport outcome; refusing all further batches until restart"
+                "this process is poisoned after a persistence-uncertainty event (an \
+                 unrecordable terminal result, an admitted store write whose outcome is \
+                 unknown, or a quarantine-insert failure); refusing all further batches \
+                 until restart"
             ),
             Self::Rejected { request_id, detail } => {
                 write!(
@@ -466,6 +487,15 @@ impl std::fmt::Display for BroadcastError {
             Self::Persistence(detail) => {
                 write!(f, "failed to persist broadcast intent/result: {detail}")
             }
+            Self::ResultPersistenceUnknown {
+                request_id,
+                rpc_outcome,
+                detail,
+            } => write!(
+                f,
+                "request {request_id}: RPC outcome `{rpc_outcome}` was observed but could not \
+                 be durably recorded ({detail}); the batch stopped and this process is poisoned"
+            ),
         }
     }
 }
@@ -634,18 +664,62 @@ impl ClnFeeBroadcaster {
                 params_json,
                 submitted_at,
             };
-            let attempt_id = budgeted(
-                self.store_budget(),
-                "the broadcast-attempt intent write",
-                self.store.insert_broadcast_attempt(intent),
-            )
-            .await
-            .map_err(BroadcastError::Persistence)?;
+            // Task 59 §3.1: two-phase admission/receipt. A refused
+            // admission provably enqueued nothing (clean non-write); an
+            // admitted-then-expired receipt is OUTCOME UNKNOWN -- the
+            // command is queued and uncancellable, so "no write happened"
+            // would be a lie, and this process conservatively poisons
+            // itself (restart reconciliation quarantines the orphan
+            // intent row if the write did land).
+            let receipt = match self.store.try_insert_broadcast_attempt(intent) {
+                Ok(receipt) => receipt,
+                Err(refused) => {
+                    return Err(BroadcastError::Persistence(format!(
+                        "store_admission_refused: {refused} -- a clean non-write; the batch \
+                         was denied before anything could be enqueued"
+                    )));
+                }
+            };
+            let attempt_id = match receipt.within(self.store_budget()).await {
+                StoreReceiptWait::Replied(Ok(id)) => id,
+                StoreReceiptWait::Replied(Err(e)) => {
+                    // The actor definitively answered: the intent
+                    // transaction failed. Nothing uncertain, nothing
+                    // enqueued beyond the failed write -- a clean deny.
+                    return Err(BroadcastError::Persistence(format!(
+                        "the broadcast-attempt intent write failed: {e:#}"
+                    )));
+                }
+                StoreReceiptWait::OutcomeUnknown => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    let detail = format!(
+                        "store_intent_outcome_unknown: the intent write for request {} was \
+                         admitted but produced no reply within the store budget; the write may \
+                         still land (restart reconciliation quarantines the orphan) and this \
+                         process is now poisoned",
+                        request.request_id
+                    );
+                    eprintln!("revops: {detail}");
+                    if let Err(quarantine_err) = self.quarantine(request, &detail).await {
+                        eprintln!(
+                            "revops: the quarantine insert after the unknown intent outcome \
+                             ALSO failed ({quarantine_err:#}); the poison stands"
+                        );
+                    }
+                    return Err(BroadcastError::Persistence(detail));
+                }
+            };
 
             match self.attempt_send(request).await {
                 SendOutcome::Success(response) => {
-                    self.record_result(attempt_id, BroadcastAttemptOutcome::Success, None)
-                        .await;
+                    if let Err(e) = self
+                        .record_result(attempt_id, BroadcastAttemptOutcome::Success, None)
+                        .await
+                    {
+                        return Err(self
+                            .result_persistence_unknown(request, attempt_id, "success", e)
+                            .await);
+                    }
                     outcomes.push(BatchRequestOutcome {
                         request_id: request.request_id.clone(),
                         channel_id: request.channel_id.clone(),
@@ -653,24 +727,36 @@ impl ClnFeeBroadcaster {
                     });
                 }
                 SendOutcome::Rejected(detail) => {
-                    self.record_result(
-                        attempt_id,
-                        BroadcastAttemptOutcome::Rejected,
-                        Some(detail.clone()),
-                    )
-                    .await;
+                    if let Err(e) = self
+                        .record_result(
+                            attempt_id,
+                            BroadcastAttemptOutcome::Rejected,
+                            Some(detail.clone()),
+                        )
+                        .await
+                    {
+                        return Err(self
+                            .result_persistence_unknown(request, attempt_id, "rejected", e)
+                            .await);
+                    }
                     return Err(BroadcastError::Rejected {
                         request_id: request.request_id.clone(),
                         detail,
                     });
                 }
                 SendOutcome::CleanFailure(detail) => {
-                    self.record_result(
-                        attempt_id,
-                        BroadcastAttemptOutcome::CleanFailure,
-                        Some(detail.clone()),
-                    )
-                    .await;
+                    if let Err(e) = self
+                        .record_result(
+                            attempt_id,
+                            BroadcastAttemptOutcome::CleanFailure,
+                            Some(detail.clone()),
+                        )
+                        .await
+                    {
+                        return Err(self
+                            .result_persistence_unknown(request, attempt_id, "clean_failure", e)
+                            .await);
+                    }
                     return Err(BroadcastError::CleanFailure {
                         request_id: request.request_id.clone(),
                         detail,
@@ -708,12 +794,29 @@ impl ClnFeeBroadcaster {
                             ),
                         });
                     }
-                    self.record_result(
-                        attempt_id,
-                        BroadcastAttemptOutcome::Ambiguous,
-                        Some(detail.clone()),
-                    )
-                    .await;
+                    if let Err(e) = self
+                        .record_result(
+                            attempt_id,
+                            BroadcastAttemptOutcome::Ambiguous,
+                            Some(detail.clone()),
+                        )
+                        .await
+                    {
+                        // The quarantine above already landed; poison and
+                        // surface the unrecorded terminal result without
+                        // inserting a second quarantine row.
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        eprintln!(
+                            "revops: TERMINAL RESULT WRITE FAILED for attempt {attempt_id} \
+                             (rpc outcome `ambiguous`): {e}; quarantine already recorded, \
+                             process poisoned"
+                        );
+                        return Err(BroadcastError::ResultPersistenceUnknown {
+                            request_id: request.request_id.clone(),
+                            rpc_outcome: "ambiguous".to_string(),
+                            detail: e,
+                        });
+                    }
                     return Err(BroadcastError::Ambiguous {
                         request_id: request.request_id.clone(),
                         detail,
@@ -725,20 +828,28 @@ impl ClnFeeBroadcaster {
     }
 
     /// The store budget for every call `broadcast_batch` and its helpers
-    /// make (final-review finding I7, 2026-07-26): the SAME number that
-    /// budgets the RPC half, so a broadcaster has exactly one
-    /// operator-visible timeout. See [`budgeted`].
+    /// make (final-review finding I7, 2026-07-26): the operator's
+    /// `timeout_seconds`, clamped up to [`STORE_BUDGET_FLOOR`] (Task 59
+    /// §3.2 -- a single legitimate SQLite lock wait must never be cut
+    /// short and misread as a wedge). The WIRE half keeps the operator's
+    /// raw number ([`Self::attempt_send`]).
     fn store_budget(&self) -> Duration {
-        Duration::from_secs(self.timeout_seconds)
+        Duration::from_secs(self.timeout_seconds).max(STORE_BUDGET_FLOOR)
     }
 
+    /// Task 59 F4: persist one TERMINAL broadcast-attempt result,
+    /// fallibly. An `Err` means the RPC outcome the process just observed
+    /// has no durable record -- the caller must stop the batch, poison,
+    /// and surface [`BroadcastError::ResultPersistenceUnknown`]; the old
+    /// log-and-continue body let arbitrarily many further mutations run
+    /// on top of an unrecorded one.
     async fn record_result(
         &self,
         attempt_id: i64,
         outcome: BroadcastAttemptOutcome,
         detail: Option<String>,
-    ) {
-        if let Err(e) = budgeted(
+    ) -> Result<(), String> {
+        budgeted(
             self.store_budget(),
             "the broadcast-attempt result write",
             self.store.record_broadcast_attempt_result(
@@ -749,12 +860,41 @@ impl ClnFeeBroadcaster {
             ),
         )
         .await
+    }
+
+    /// Task 59 F4: the one exit path for an unrecordable terminal result.
+    /// Stops the batch (by returning the typed error), poisons this
+    /// process FIRST, then ATTEMPTS a quarantine insert -- whose own
+    /// failure keeps the poison and is never assumed successful.
+    async fn result_persistence_unknown(
+        &self,
+        request: &PersistedFeeRequest,
+        attempt_id: i64,
+        rpc_outcome: &str,
+        detail: String,
+    ) -> BroadcastError {
+        self.poisoned.store(true, Ordering::SeqCst);
+        eprintln!(
+            "revops: TERMINAL RESULT WRITE FAILED for attempt {attempt_id} (rpc outcome \
+             `{rpc_outcome}`): {detail}; batch stopped, process poisoned, attempting quarantine"
+        );
+        if let Err(quarantine_err) = self
+            .quarantine(
+                request,
+                &format!("unrecordable terminal result (`{rpc_outcome}`): {detail}"),
+            )
+            .await
         {
             eprintln!(
-                "revops: broadcast attempt result record failed ({e}) for attempt {attempt_id}; \
-                 the intent row stays unresolved and will be treated as ambiguous on the next \
-                 restart"
+                "revops: the quarantine insert after the unrecordable terminal result ALSO \
+                 failed ({quarantine_err:#}); the poison stands and restart reconciliation \
+                 will quarantine the unresolved intent row"
             );
+        }
+        BroadcastError::ResultPersistenceUnknown {
+            request_id: request.request_id.clone(),
+            rpc_outcome: rpc_outcome.to_string(),
+            detail,
         }
     }
 
