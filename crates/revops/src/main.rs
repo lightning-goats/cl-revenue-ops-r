@@ -85,6 +85,12 @@ struct State {
     /// sits on the Python-parity uninitialized arm); restart
     /// reconciliation of orphan capital intents still runs.
     capital_owner: Option<revops::capital_owner::CapitalOwnerHandle>,
+    /// Task 63: the serialized Boltz owner (action capability
+    /// unassembled until Task 69 -- every fund-moving Boltz RPC sits on
+    /// the Python-parity uninitialized arm) plus the read-only QUERY
+    /// transport its read RPCs use.
+    boltz_owner: Option<revops::boltz_owner::BoltzOwnerHandle>,
+    boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -120,6 +126,16 @@ type SharedState = Arc<State>;
 /// to introspect the observer's own ingestion-db path was reading
 /// lightningd's config/CLI args directly. Same registration pattern as
 /// `observer`/`db-path` above.
+/// Task 63: the Boltz RPC handlers' dependency bundle, read out of the
+/// shared state per call.
+fn boltz_rpc_deps(p: &Plugin<SharedState>) -> revops::rpc_boltz_ops::BoltzRpcDeps {
+    revops::rpc_boltz_ops::BoltzRpcDeps {
+        owner: p.state().boltz_owner.clone(),
+        query: p.state().boltz_query.clone(),
+        now: now_unix(),
+    }
+}
+
 fn config_name_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     map.insert("observer".to_string(), opt_name("observer"));
@@ -913,6 +929,33 @@ async fn main() -> Result<()> {
     // uninitialized arm until Task 69 assembles the capital adapters).
     let planner_execute_name = rpc_name("planner-execute");
 
+    // Task 63: the exact 22 Python-equivalent Boltz RPCs (owner-backed;
+    // Python-parity uninitialized arm until Task 69 assembles the action
+    // capability).
+    let boltz_quote_name = rpc_name("boltz-quote");
+    let boltz_loop_out_name = rpc_name("boltz-loop-out");
+    let boltz_loop_in_name = rpc_name("boltz-loop-in");
+    let boltz_status_name = rpc_name("boltz-status");
+    let boltz_history_name = rpc_name("boltz-history");
+    let boltz_external_pay_ignores_name = rpc_name("boltz-external-pay-ignores");
+    let boltz_budget_name = rpc_name("boltz-budget");
+    let boltz_wallet_name = rpc_name("boltz-wallet");
+    let boltz_refund_name = rpc_name("boltz-refund");
+    let boltz_claim_name = rpc_name("boltz-claim");
+    let boltz_chainswap_name = rpc_name("boltz-chainswap");
+    let boltz_withdraw_name = rpc_name("boltz-withdraw");
+    let boltz_deposit_name = rpc_name("boltz-deposit");
+    let boltz_backup_name = rpc_name("boltz-backup");
+    let boltz_backup_verify_name = rpc_name("boltz-backup-verify");
+    let boltz_balance_recommendations_name = rpc_name("boltz-balance-recommendations");
+    let boltz_auto_cycle_status_name = rpc_name("boltz-auto-cycle-status");
+    let boltz_auto_cycle_run_now_name = rpc_name("boltz-auto-cycle-run-now");
+    let boltz_balance_cycle_name = rpc_name("boltz-balance-cycle");
+    let boltz_expansion_treasury_status_name = rpc_name("boltz-expansion-treasury-status");
+    let boltz_expansion_treasury_recommendations_name =
+        rpc_name("boltz-expansion-treasury-recommendations");
+    let boltz_expansion_treasury_cycle_name = rpc_name("boltz-expansion-treasury-cycle");
+
     // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs
     // (cl-revenue-ops.py:4604-4676), each a completion acknowledgement
     // through the LN+ owner's serialization lock.
@@ -1679,6 +1722,248 @@ async fn main() -> Result<()> {
                     )),
                     Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
                 }
+            },
+        )
+        .rpcmethod(
+            &boltz_quote_name,
+            "quote a Boltz swap (read-only through the query transport)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_quote(&deps, v.get("amount_sats"), v.get("swap_type"), v.get("currency")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_loop_out_name,
+            "submit a Boltz loop-out through the serialized owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_loop_out(&deps, v.get("amount_sats"), v.get("address"), v.get("channel_id"), v.get("peer_id"), v.get("currency"), v.get("routing_fee_limit_ppm")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_loop_in_name,
+            "submit a Boltz loop-in through the serialized owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_loop_in(&deps, v.get("amount_sats"), v.get("channel_id"), v.get("peer_id"), v.get("currency")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_status_name,
+            "per-swap Boltz status",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_status(&deps, v.get("swap_id")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_history_name,
+            "recent Boltz swaps with a cost summary",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_history(&deps, v.get("limit")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_external_pay_ignores_name,
+            "operator-ignored external swaps",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_external_pay_ignores(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_budget_name,
+            "Boltz fee budget status",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_budget(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_wallet_name,
+            "Boltz wallet list",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_wallet(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_refund_name,
+            "refund a Boltz swap through the serialized owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_refund(&deps, v.get("swap_id"), v.get("destination")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_claim_name,
+            "claim Boltz swaps through the serialized owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_claim(&deps, v.get("swap_ids"), v.get("destination")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_chainswap_name,
+            "submit a Boltz chain swap through the serialized owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_chainswap(&deps, v.get("amount_sats"), v.get("from_currency"), v.get("to_currency"), v.get("to_address"), v.get("to_wallet_name")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_withdraw_name,
+            "withdraw from a Boltz wallet through the serialized owner",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_withdraw(&deps, v.get("wallet_name"), v.get("destination"), v.get("currency"), v.get("amount_sats"), v.get("sat_per_vbyte"), v.get("sweep").and_then(serde_json::Value::as_bool).unwrap_or(false), v.get("confirm_sweep").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_deposit_name,
+            "Boltz wallet deposit address",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_deposit(&deps, v.get("wallet_name")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_backup_name,
+            "Boltz wallet backup (mnemonic omitted by default)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_backup(&deps, v.get("include_mnemonic").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_backup_verify_name,
+            "verify a Boltz backup mnemonic",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_backup_verify(&deps, v.get("swap_mnemonic")).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_balance_recommendations_name,
+            "Boltz balance-cycle recommendations",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_balance_recommendations(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_auto_cycle_status_name,
+            "Boltz auto-cycle state",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_auto_cycle_status(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_auto_cycle_run_now_name,
+            "run one Boltz auto-cycle pass",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_auto_cycle_run_now(&deps, v.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false), v.get("dry_run").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_balance_cycle_name,
+            "run one Boltz balance cycle",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_balance_cycle(&deps, v.get("dry_run").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_expansion_treasury_status_name,
+            "Boltz expansion treasury status",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_expansion_treasury_status(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_expansion_treasury_recommendations_name,
+            "Boltz expansion treasury recommendations",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_expansion_treasury_recommendations(&deps).await)
+            },
+        )
+        .rpcmethod(
+            &boltz_expansion_treasury_cycle_name,
+            "run one Boltz expansion treasury cycle",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
+                    return Ok(err);
+                }
+                let deps = boltz_rpc_deps(&p);
+                Ok(revops::rpc_boltz_ops::handle_expansion_treasury_cycle(&deps, v.get("dry_run").and_then(serde_json::Value::as_bool).unwrap_or(true)).await)
             },
         )
         .rpcmethod(
@@ -2814,6 +3099,50 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Task 63: the Boltz owner exists whenever the Rust-owned store does.
+    // The ACTION CAPABILITY stays unassembled until Task 69's authority
+    // assembly (every fund-moving Boltz RPC refuses on the Python-parity
+    // uninitialized arm); the read-only QUERY transport is
+    // production-constructible but ships DISABLED (py cfg.enabled
+    // default false), so it too refuses until an operator turns it on.
+    let boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync> =
+        std::sync::Arc::new(revops_boltz::process::ProcessBoltzCli::new(
+            revops_boltz::process::BoltzCliProcessConfig::default(),
+        ));
+    let boltz_owner = observer_db.clone().map(|store| {
+        revops::boltz_owner::spawn_boltz_owner(revops::boltz_owner::BoltzOwnerDeps {
+            capability: None,
+            governor: None,
+            query: boltz_query.clone(),
+            structural: std::sync::Arc::new(revops::boltz_owner::UnassembledStructuralSpend),
+            store,
+            config: revops::boltz_owner::BoltzOwnerConfig {
+                daily_budget_sats: 3_000, // py boltz_daily_budget_sats default
+                budget_window_hours: 24,
+                structural_envelope_sats: 0,
+                allow_concurrent_swaps: false,
+                default_cooldown_seconds: 3_600,
+                auto_cycle_enabled: false,
+            },
+            clock: Box::new(now_unix),
+        })
+    });
+    if let Some(owner) = boltz_owner.clone() {
+        tokio::spawn(async move {
+            match owner.reconcile_on_start().await {
+                Ok(summary) => {
+                    if summary.quarantined > 0 {
+                        eprintln!(
+                            "revops: boltz restart reconciliation: {} quarantined",
+                            summary.quarantined
+                        );
+                    }
+                }
+                Err(e) => eprintln!("revops: boltz restart reconciliation failed: {e:?}"),
+            }
+        });
+    }
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -2832,6 +3161,8 @@ async fn main() -> Result<()> {
         rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter::production(),
         rebalance_hard_cap_sats,
         capital_owner,
+        boltz_owner,
+        boltz_query,
     });
 
     let plugin = configured.start(state).await?;

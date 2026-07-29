@@ -377,7 +377,36 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-planner-execute"),
         "missing revenue-planner-execute: {methods:?}"
     );
-    // Exactly 32 rpc methods total (no leftover revenue-r-* names bleeding
+    // Task 63: the exact 22 Python-equivalent Boltz RPCs (owner-backed;
+    // Python-parity uninitialized arm until Task 69 assembles the action
+    // capability).
+    for boltz in [
+        "revenue-boltz-quote",
+        "revenue-boltz-loop-out",
+        "revenue-boltz-loop-in",
+        "revenue-boltz-status",
+        "revenue-boltz-history",
+        "revenue-boltz-external-pay-ignores",
+        "revenue-boltz-budget",
+        "revenue-boltz-wallet",
+        "revenue-boltz-refund",
+        "revenue-boltz-claim",
+        "revenue-boltz-chainswap",
+        "revenue-boltz-withdraw",
+        "revenue-boltz-deposit",
+        "revenue-boltz-backup",
+        "revenue-boltz-backup-verify",
+        "revenue-boltz-balance-recommendations",
+        "revenue-boltz-auto-cycle-status",
+        "revenue-boltz-auto-cycle-run-now",
+        "revenue-boltz-balance-cycle",
+        "revenue-boltz-expansion-treasury-status",
+        "revenue-boltz-expansion-treasury-recommendations",
+        "revenue-boltz-expansion-treasury-cycle",
+    ] {
+        assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
+    }
+    // Exactly 54 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
@@ -385,7 +414,8 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
     // (status/breaker-clear/abandon/backfill through the LN+ owner),
     // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
-    // Task 62's planner-execute (capital owner).
+    // Task 62's planner-execute (capital owner), and Task 63's 22 Boltz
+    // RPCs (serialized Boltz owner).
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -393,7 +423,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        32,
+        54,
         "methods: {methods:?}"
     );
 
@@ -2343,6 +2373,43 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         serde_json::json!({"error": "Capacity planner not initialized"}),
         "must be Python's exact 1-key error shape: {planner_execute:?}"
     );
+
+    // Task 63: the Boltz action capability is never assembled in
+    // production, so every fund-moving Boltz RPC returns Python's EXACT
+    // 1-key arm (cl-revenue-ops.py:7690-7692). The usage short-circuits
+    // fire FIRST for status/refund/claim, exactly like Python.
+    let boltz_loop_out = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-boltz-loop-out",
+        serde_json::json!({"amount_sats": 500_000}),
+    );
+    assert_eq!(
+        boltz_loop_out,
+        serde_json::json!({"error": "Boltz CLI integration not initialized"}),
+        "must be Python's exact 1-key error shape: {boltz_loop_out:?}"
+    );
+    let boltz_status = call_after_init(false, None, home.path(), &[], "revenue-r-boltz-status");
+    assert_eq!(
+        boltz_status["error"],
+        serde_json::json!(
+            "usage: revenue-boltz-status swap_id (per-swap status; see \
+             revenue-boltz-wallet/-budget/-history for global state)"
+        ),
+        "the usage short-circuit precedes the init guard: {boltz_status:?}"
+    );
+    // auto-cycle-status never errors (py parity) and reports disabled.
+    let auto_cycle = call_after_init(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-boltz-auto-cycle-status",
+    );
+    assert_eq!(auto_cycle["boltz_enabled"], serde_json::json!(false));
+    assert!(auto_cycle.get("error").is_none(), "{auto_cycle:?}");
 
     // F1: no EconShadow config surface exists in Rust -- must NOT claim
     // `enabled: false` (a hardcoded lie on any node where Python's real

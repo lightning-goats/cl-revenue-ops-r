@@ -34,6 +34,7 @@ pub mod rebalance_owner;
 pub mod rpc_analyze;
 pub mod rpc_boltz_budget;
 pub mod rpc_boltz_history;
+pub mod rpc_boltz_ops;
 pub mod rpc_boltz_status;
 pub mod rpc_capacity_report;
 pub mod rpc_capex_status;
