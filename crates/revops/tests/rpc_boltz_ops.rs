@@ -70,6 +70,7 @@ async fn absent_owner_returns_python_uninitialized_arm() {
         owner: None,
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let expected = json!({"error": UNINITIALIZED});
 
@@ -146,6 +147,7 @@ async fn usage_short_circuits_precede_the_initialization_guard() {
         owner: None,
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
 
     assert_eq!(
@@ -172,6 +174,7 @@ async fn auto_cycle_rpcs_use_status_shapes_not_the_error_arm() {
         owner: None,
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let run_now = ops::handle_auto_cycle_run_now(&deps, false, true).await;
     assert_eq!(run_now["status"], "disabled");
@@ -194,6 +197,7 @@ async fn unassembled_capability_is_also_the_uninitialized_arm() {
         owner: Some(owner),
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let expected = json!({"error": UNINITIALIZED});
     assert_eq!(
@@ -222,6 +226,7 @@ async fn read_rpcs_surface_query_transport_failures() {
         owner: Some(owner),
         query: Arc::new(SyncFake(cli)),
         now: NOW,
+        cfg: Default::default(),
     };
     let history = ops::handle_history(&deps, None).await;
     assert!(
@@ -248,6 +253,7 @@ async fn read_rpcs_build_kernel_payloads() {
         owner: Some(owner),
         query: Arc::new(SyncFake(cli)),
         now: NOW,
+        cfg: Default::default(),
     };
     let history = ops::handle_history(&deps, Some(&json!(10))).await;
     // The frozen kernel's shape: swaps + cost_summary (no invented
@@ -362,6 +368,7 @@ async fn backup_without_mnemonic_is_a_read_not_an_action() {
         owner: Some(owner),
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     // Read half: answers despite NO action capability, with Python's keys.
     let read = ops::handle_backup(&deps, false).await;
@@ -389,6 +396,7 @@ async fn analytics_gaps_use_the_gaps_array_convention() {
         owner: Some(owner),
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     for value in [
         ops::handle_balance_recommendations(&deps).await,
@@ -422,10 +430,53 @@ async fn external_pay_ignores_uses_pythons_keys() {
         owner: Some(owner),
         query: Arc::new(DeadCli),
         now: NOW,
+        cfg: Default::default(),
     };
     let value = ops::handle_external_pay_ignores(&deps).await;
     assert_eq!(value["action"], json!("list"));
     assert!(value["ignores"].is_array());
     assert!(value.get("ignored_external_swaps").is_none());
     assert!(value.get("count").is_none());
+}
+
+/// `auto-cycle-status` reports Python's 7-key config block from the
+/// RESOLVED config, and `boltz_enabled` is the CONFIGURED enablement
+/// (Python's `bool(boltz_manager and boltz_manager.enabled)`) -- not
+/// whether an action capability is assembled. Reporting the latter was
+/// the mismatch the parity matrix flagged.
+#[tokio::test]
+async fn auto_cycle_status_reports_pythons_config_block() {
+    let (owner, _dir) = unassembled_owner().await;
+    let cfg = revops::boltz_config::BoltzCfgSnapshot {
+        enabled: true,
+        auto_cycle_enabled: true,
+        auto_cycle_interval_minutes: 15,
+        auto_cycle_max_actions: 1,
+        auto_cycle_startup_delay_seconds: 120,
+        expansion_treasury_enabled: true,
+        expansion_treasury_onchain_target_sats: 1_000_000,
+        expansion_treasury_min_deficit_sats: 250_000,
+        ..Default::default()
+    };
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(DeadCli),
+        now: NOW,
+        cfg,
+    };
+    let v = ops::handle_auto_cycle_status(&deps).await;
+    // Configured-enabled, even though NO action capability is assembled.
+    assert_eq!(v["boltz_enabled"], json!(true));
+    let c = &v["config"];
+    assert_eq!(c["boltz_auto_cycle_enabled"], json!(true));
+    assert_eq!(c["boltz_auto_cycle_interval_minutes"], json!(15));
+    assert_eq!(c["boltz_auto_cycle_max_actions"], json!(1));
+    assert_eq!(c["boltz_auto_cycle_startup_delay_seconds"], json!(120));
+    assert_eq!(c["expansion_treasury_enabled"], json!(true));
+    assert_eq!(
+        c["expansion_treasury_onchain_target_sats"],
+        json!(1_000_000)
+    );
+    assert_eq!(c["expansion_treasury_min_deficit_sats"], json!(250_000));
+    assert!(v.get("error").is_none(), "this RPC never errors: {v:?}");
 }

@@ -135,3 +135,55 @@ async fn converts_into_the_transport_config() {
     assert_eq!(transport.datadir(), "/mnt/boltz");
     assert_eq!(transport.cli_path(), "/usr/local/bin/boltzcli");
 }
+
+/// The auto-cycle + treasury config block Python's
+/// `revenue-boltz-auto-cycle-status` reports must be RESOLVED, not
+/// defaulted: on lnnode 2026-07-29 Python has
+/// expansion-treasury-enabled=true and target=1_000_000 while the Rust
+/// fixture defaults are false and 5_000_000, so hardcoding defaults
+/// produces a mismatch.
+#[tokio::test]
+async fn auto_cycle_and_treasury_config_is_resolved_not_defaulted() {
+    let cfg = resolve_boltz_cfg(
+        None,
+        &python(&[
+            (
+                "revenue-ops-boltz-auto-cycle-interval-minutes",
+                OptValue::String("15".into()),
+            ),
+            (
+                "revenue-ops-boltz-auto-cycle-max-actions",
+                OptValue::String("1".into()),
+            ),
+            (
+                "revenue-ops-boltz-auto-cycle-startup-delay-seconds",
+                OptValue::String("120".into()),
+            ),
+            (
+                "revenue-ops-expansion-treasury-enabled",
+                OptValue::String("true".into()),
+            ),
+            (
+                "revenue-ops-expansion-treasury-onchain-target-sats",
+                OptValue::String("1000000".into()),
+            ),
+            (
+                "revenue-ops-expansion-treasury-min-deficit-sats",
+                OptValue::String("250000".into()),
+            ),
+        ]),
+    )
+    .await;
+    assert_eq!(cfg.auto_cycle_interval_minutes, 15);
+    assert_eq!(cfg.auto_cycle_max_actions, 1);
+    assert_eq!(cfg.auto_cycle_startup_delay_seconds, 120);
+    assert!(
+        cfg.expansion_treasury_enabled,
+        "Python's true must win over the Rust default false"
+    );
+    assert_eq!(
+        cfg.expansion_treasury_onchain_target_sats, 1_000_000,
+        "Python's 1M must win over the Rust default 5M"
+    );
+    assert_eq!(cfg.expansion_treasury_min_deficit_sats, 250_000);
+}

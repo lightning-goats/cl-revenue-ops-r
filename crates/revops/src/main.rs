@@ -91,6 +91,8 @@ struct State {
     /// transport its read RPCs use.
     boltz_owner: Option<revops::boltz_owner::BoltzOwnerHandle>,
     boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>,
+    /// The resolved Boltz config the transport above was built from.
+    boltz_cfg: revops::boltz_config::BoltzCfgSnapshot,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -133,6 +135,7 @@ fn boltz_rpc_deps(p: &Plugin<SharedState>) -> revops::rpc_boltz_ops::BoltzRpcDep
         owner: p.state().boltz_owner.clone(),
         query: p.state().boltz_query.clone(),
         now: now_unix(),
+        cfg: p.state().boltz_cfg.clone(),
     }
 }
 
@@ -3172,6 +3175,7 @@ async fn main() -> Result<()> {
         capital_owner,
         boltz_owner,
         boltz_query,
+        boltz_cfg,
     });
 
     let plugin = configured.start(state).await?;

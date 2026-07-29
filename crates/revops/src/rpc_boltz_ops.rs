@@ -36,6 +36,10 @@ pub struct BoltzRpcDeps {
     pub owner: Option<BoltzOwnerHandle>,
     pub query: Arc<dyn BoltzCli + Send + Sync>,
     pub now: i64,
+    /// The RESOLVED Boltz config -- the same snapshot the transport was
+    /// built from, so status can never report a config the transport is
+    /// not actually using.
+    pub cfg: crate::boltz_config::BoltzCfgSnapshot,
 }
 
 fn uninitialized() -> Value {
@@ -518,24 +522,29 @@ pub async fn handle_balance_cycle(deps: &BoltzRpcDeps, dry_run: bool) -> Value {
 }
 
 pub async fn handle_auto_cycle_status(deps: &BoltzRpcDeps) -> Value {
-    // py: this RPC NEVER errors -- it reports state.
+    // py: this RPC NEVER errors -- it reports state
+    // (cl-revenue-ops.py:9780-9797). `boltz_enabled` is Python's
+    // `bool(boltz_manager and boltz_manager.enabled)`, i.e. the
+    // CONFIGURED enablement -- not whether an action capability is
+    // assembled. Reporting capability-assembled here was the mismatch the
+    // parity matrix flagged.
     let debug = match deps.owner.as_ref() {
         Some(owner) => owner.debug().await,
         None => None,
     };
-    let enabled = debug
-        .as_ref()
-        .map(|d| d["capability_assembled"] == json!(true))
-        .unwrap_or(false);
+    let c = &deps.cfg;
     json!({
-        "boltz_enabled": enabled,
+        "boltz_enabled": deps.owner.is_some() && c.enabled,
+        // Python's exact 7-key config block, in its own key spellings,
+        // every value RESOLVED from the operator's options.
         "config": {
-            // Python's key is `boltz_auto_cycle_enabled` (not
-            // `auto_cycle_enabled`) -- parity is Python's spelling.
-            "boltz_auto_cycle_enabled": debug
-                .as_ref()
-                .map(|d| d["auto_cycle_enabled"].clone())
-                .unwrap_or(json!(false)),
+            "boltz_auto_cycle_enabled": c.auto_cycle_enabled,
+            "boltz_auto_cycle_interval_minutes": c.auto_cycle_interval_minutes,
+            "boltz_auto_cycle_max_actions": c.auto_cycle_max_actions,
+            "boltz_auto_cycle_startup_delay_seconds": c.auto_cycle_startup_delay_seconds,
+            "expansion_treasury_enabled": c.expansion_treasury_enabled,
+            "expansion_treasury_onchain_target_sats": c.expansion_treasury_onchain_target_sats,
+            "expansion_treasury_min_deficit_sats": c.expansion_treasury_min_deficit_sats,
         },
         "owner": debug.unwrap_or(json!(null)),
     })

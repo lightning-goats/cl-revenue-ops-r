@@ -40,6 +40,16 @@ pub struct BoltzCfgSnapshot {
     pub structural_budget_sats: i64,
     pub auto_cycle_enabled: bool,
     pub max_withdraw_sats: i64,
+    // The auto-cycle + treasury block Python's
+    // revenue-boltz-auto-cycle-status reports. Resolved, never
+    // defaulted: on lnnode Python has treasury enabled with a 1M target
+    // while the Rust fixture defaults are false / 5M.
+    pub auto_cycle_interval_minutes: i64,
+    pub auto_cycle_max_actions: i64,
+    pub auto_cycle_startup_delay_seconds: i64,
+    pub expansion_treasury_enabled: bool,
+    pub expansion_treasury_onchain_target_sats: i64,
+    pub expansion_treasury_min_deficit_sats: i64,
 }
 
 impl Default for BoltzCfgSnapshot {
@@ -55,6 +65,12 @@ impl Default for BoltzCfgSnapshot {
             structural_budget_sats: 0,
             auto_cycle_enabled: false,
             max_withdraw_sats: 10_000_000,
+            auto_cycle_interval_minutes: 15,
+            auto_cycle_max_actions: 1,
+            auto_cycle_startup_delay_seconds: 120,
+            expansion_treasury_enabled: false,
+            expansion_treasury_onchain_target_sats: 5_000_000,
+            expansion_treasury_min_deficit_sats: 250_000,
         }
     }
 }
@@ -166,6 +182,59 @@ pub async fn resolve_boltz_cfg(
             failures,
             "boltz-max-withdraw-sats",
             default.max_withdraw_sats,
+        )
+        .await
+        .max(0),
+        auto_cycle_interval_minutes: resolve_int(
+            db,
+            python_option_values,
+            failures,
+            "boltz-auto-cycle-interval-minutes",
+            default.auto_cycle_interval_minutes,
+        )
+        .await
+        .max(1),
+        auto_cycle_max_actions: resolve_int(
+            db,
+            python_option_values,
+            failures,
+            "boltz-auto-cycle-max-actions",
+            default.auto_cycle_max_actions,
+        )
+        .await
+        .max(0),
+        auto_cycle_startup_delay_seconds: resolve_int(
+            db,
+            python_option_values,
+            failures,
+            "boltz-auto-cycle-startup-delay-seconds",
+            default.auto_cycle_startup_delay_seconds,
+        )
+        .await
+        .max(0),
+        expansion_treasury_enabled: resolve_bool(
+            db,
+            python_option_values,
+            failures,
+            "expansion-treasury-enabled",
+            default.expansion_treasury_enabled,
+        )
+        .await,
+        expansion_treasury_onchain_target_sats: resolve_int(
+            db,
+            python_option_values,
+            failures,
+            "expansion-treasury-onchain-target-sats",
+            default.expansion_treasury_onchain_target_sats,
+        )
+        .await
+        .max(0),
+        expansion_treasury_min_deficit_sats: resolve_int(
+            db,
+            python_option_values,
+            failures,
+            "expansion-treasury-min-deficit-sats",
+            default.expansion_treasury_min_deficit_sats,
         )
         .await
         .max(0),
