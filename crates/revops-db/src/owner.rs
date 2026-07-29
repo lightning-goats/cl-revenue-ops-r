@@ -149,6 +149,50 @@ enum Command {
     },
     UnresolvedCapitalIntents(oneshot::Sender<Result<Vec<fee_runway::UnresolvedCapitalIntent>>>),
     QuarantinedCapitalIntents(oneshot::Sender<Result<Vec<fee_runway::UnresolvedCapitalIntent>>>),
+    // -- Task 63: durable Boltz rails + operational state --
+    InsertBoltzAttempt {
+        attempt: fee_runway::BoltzAttempt,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    SettleBoltzAttempt {
+        settle: fee_runway::BoltzSettle,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    UnresolvedBoltzAttempts(oneshot::Sender<Result<Vec<fee_runway::UnresolvedBoltzAttempt>>>),
+    QuarantinedBoltzAttempts(oneshot::Sender<Result<Vec<fee_runway::UnresolvedBoltzAttempt>>>),
+    ActiveBoltzReservedSats {
+        since: i64,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    SetBoltzCooldown {
+        channel_id: String,
+        last_action_ts: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    BoltzCooldowns(oneshot::Sender<Result<Vec<(String, i64)>>>),
+    AddBoltzIgnore {
+        swap_id: String,
+        note: String,
+        added_at: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    RemoveBoltzIgnore {
+        swap_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    BoltzIgnores(oneshot::Sender<Result<Vec<(String, String, i64)>>>),
+    UpsertBoltzJournal {
+        swap_id: String,
+        record: serde_json::Value,
+        source: String,
+        recorded_at: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    BoltzJournal(oneshot::Sender<Result<Vec<fee_runway::BoltzJournalEntry>>>),
+    DeleteBoltzJournalExcept {
+        keep_swap_ids: Vec<String>,
+        reply: oneshot::Sender<Result<usize>>,
+    },
     ActiveCapitalReservedSats {
         since: i64,
         reply: oneshot::Sender<Result<i64>>,
@@ -1099,6 +1143,320 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    // -- Task 63: durable Boltz rails + operational state --
+
+    /// Insert one Boltz attempt + ACTIVE fee reservation atomically.
+    pub async fn insert_boltz_attempt(&self, attempt: fee_runway::BoltzAttempt) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertBoltzAttempt { attempt, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Two-phase admission for the submit-path Boltz attempt.
+    pub fn try_insert_boltz_attempt(
+        &self,
+        attempt: fee_runway::BoltzAttempt,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .try_send(Command::InsertBoltzAttempt { attempt, reply })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => StoreAdmissionRefused::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => StoreAdmissionRefused::ActorGone,
+            })?;
+        Ok(StoreReceipt::from_rx(rx))
+    }
+
+    /// Exactly-once terminal Boltz settlement.
+    pub async fn settle_boltz_attempt(&self, settle: fee_runway::BoltzSettle) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SettleBoltzAttempt { settle, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_settle_boltz_attempt(&self, settle: fee_runway::BoltzSettle) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::SettleBoltzAttempt { settle, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn unresolved_boltz_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedBoltzAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UnresolvedBoltzAttempts(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_unresolved_boltz_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedBoltzAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UnresolvedBoltzAttempts(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn quarantined_boltz_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedBoltzAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::QuarantinedBoltzAttempts(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_quarantined_boltz_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedBoltzAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::QuarantinedBoltzAttempts(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn active_boltz_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveBoltzReservedSats { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_active_boltz_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ActiveBoltzReservedSats { since, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn set_boltz_cooldown(&self, channel_id: &str, last_action_ts: i64) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SetBoltzCooldown {
+                channel_id: channel_id.to_string(),
+                last_action_ts,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_set_boltz_cooldown(&self, channel_id: &str, last_action_ts: i64) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::SetBoltzCooldown {
+                channel_id: channel_id.to_string(),
+                last_action_ts,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn boltz_cooldowns(&self) -> Result<Vec<(String, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::BoltzCooldowns(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_boltz_cooldowns(&self) -> Result<Vec<(String, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::BoltzCooldowns(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn add_boltz_ignore(&self, swap_id: &str, note: &str, added_at: i64) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::AddBoltzIgnore {
+                swap_id: swap_id.to_string(),
+                note: note.to_string(),
+                added_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_add_boltz_ignore(
+        &self,
+        swap_id: &str,
+        note: &str,
+        added_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::AddBoltzIgnore {
+                swap_id: swap_id.to_string(),
+                note: note.to_string(),
+                added_at,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_remove_boltz_ignore(&self, swap_id: &str) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RemoveBoltzIgnore {
+                swap_id: swap_id.to_string(),
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn remove_boltz_ignore(&self, swap_id: &str) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RemoveBoltzIgnore {
+                swap_id: swap_id.to_string(),
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    pub async fn boltz_ignores(&self) -> Result<Vec<(String, String, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::BoltzIgnores(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_boltz_ignores(&self) -> Result<Vec<(String, String, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::BoltzIgnores(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn upsert_boltz_journal(
+        &self,
+        swap_id: &str,
+        record: serde_json::Value,
+        source: &str,
+        recorded_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UpsertBoltzJournal {
+                swap_id: swap_id.to_string(),
+                record,
+                source: source.to_string(),
+                recorded_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_upsert_boltz_journal(
+        &self,
+        swap_id: &str,
+        record: serde_json::Value,
+        source: &str,
+        recorded_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UpsertBoltzJournal {
+                swap_id: swap_id.to_string(),
+                record,
+                source: source.to_string(),
+                recorded_at,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn boltz_journal(&self) -> Result<Vec<fee_runway::BoltzJournalEntry>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::BoltzJournal(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the Boltz owner's OS thread.
+    pub fn blocking_boltz_journal(&self) -> Result<Vec<fee_runway::BoltzJournalEntry>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::BoltzJournal(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Blocking journal prune to the owner-computed keep set.
+    pub fn blocking_delete_boltz_journal_except(
+        &self,
+        keep_swap_ids: Vec<String>,
+    ) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::DeleteBoltzJournalExcept {
+                keep_swap_ids,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Task 62: capital budget-window hold (active + quarantined).
     pub async fn active_capital_reserved_sats(&self, since: i64) -> Result<i64> {
         let (reply, rx) = oneshot::channel();
@@ -1695,6 +2053,82 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::QuarantinedCapitalIntents(reply) => {
                     let result = fee_runway::quarantined_capital_intents(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::InsertBoltzAttempt { attempt, reply } => {
+                    let result = fee_runway::insert_boltz_attempt(&conn, &attempt);
+                    let _ = reply.send(result);
+                }
+                Command::SettleBoltzAttempt { settle, reply } => {
+                    let result = fee_runway::settle_boltz_attempt(&conn, &settle);
+                    let _ = reply.send(result);
+                }
+                Command::UnresolvedBoltzAttempts(reply) => {
+                    let result = fee_runway::unresolved_boltz_attempts(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::QuarantinedBoltzAttempts(reply) => {
+                    let result = fee_runway::quarantined_boltz_attempts(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::ActiveBoltzReservedSats { since, reply } => {
+                    let result = fee_runway::active_boltz_reserved_sats(&conn, since);
+                    let _ = reply.send(result);
+                }
+                Command::SetBoltzCooldown {
+                    channel_id,
+                    last_action_ts,
+                    reply,
+                } => {
+                    let result = fee_runway::set_boltz_cooldown(&conn, &channel_id, last_action_ts);
+                    let _ = reply.send(result);
+                }
+                Command::BoltzCooldowns(reply) => {
+                    let result = fee_runway::boltz_cooldowns(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::AddBoltzIgnore {
+                    swap_id,
+                    note,
+                    added_at,
+                    reply,
+                } => {
+                    let result = fee_runway::add_boltz_ignore(&conn, &swap_id, &note, added_at);
+                    let _ = reply.send(result);
+                }
+                Command::RemoveBoltzIgnore { swap_id, reply } => {
+                    let result = fee_runway::remove_boltz_ignore(&conn, &swap_id);
+                    let _ = reply.send(result);
+                }
+                Command::BoltzIgnores(reply) => {
+                    let result = fee_runway::boltz_ignores(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::UpsertBoltzJournal {
+                    swap_id,
+                    record,
+                    source,
+                    recorded_at,
+                    reply,
+                } => {
+                    let result = fee_runway::upsert_boltz_journal(
+                        &conn,
+                        &swap_id,
+                        &record,
+                        &source,
+                        recorded_at,
+                    );
+                    let _ = reply.send(result);
+                }
+                Command::BoltzJournal(reply) => {
+                    let result = fee_runway::boltz_journal(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::DeleteBoltzJournalExcept {
+                    keep_swap_ids,
+                    reply,
+                } => {
+                    let result = fee_runway::delete_boltz_journal_except(&conn, &keep_swap_ids);
                     let _ = reply.send(result);
                 }
                 Command::ActiveCapitalReservedSats { since, reply } => {

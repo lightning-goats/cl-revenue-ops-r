@@ -363,6 +363,11 @@ fn never_prune_membership_is_pinned_exactly() {
         "rust_rebalance_reservations",
         "rust_capital_intents",
         "rust_capital_reservations",
+        "rust_boltz_attempts",
+        "rust_boltz_reservations",
+        "rust_boltz_ignores",
+        "rust_boltz_cooldowns",
+        "rust_boltz_journal",
     ]
     .into_iter()
     .collect();
