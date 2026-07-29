@@ -5,6 +5,7 @@
 //! `tests/manifest.rs` black-box test covers instead).
 
 pub mod capital_boundaries;
+pub mod capital_evidence;
 pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;
