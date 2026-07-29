@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod owner;
 pub mod queries;
 pub mod retention;
+pub mod state_writer;
 
 /// The lock-wait budget every sqlite connection this plugin opens must
 /// carry. SQLite's default is 0 -- an immediate `SQLITE_BUSY` the instant
