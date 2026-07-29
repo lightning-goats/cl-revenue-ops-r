@@ -42,7 +42,7 @@ use revops::fee_execution::{
 };
 
 use revops::fee_mode::{validate_fee_mode, LiveMode, ModeFlags, ValidatedFeeMode};
-use revops::python_authority::PythonAuthorityOff;
+use revops::python_authority::{OpenBracket, PythonAuthorityClient};
 use revops_db::fee_runway::{BroadcastAttemptIntent, FeeStateSnapshot};
 use revops_db::owner::{spawn_read_write, ObserverHandle};
 use revops_fees::execution::SetChannelRequest;
@@ -592,6 +592,9 @@ enum FakeBehavior {
     /// Reads the whole request then closes without answering: bytes WERE
     /// received, so the true outcome is genuinely unknown -> ambiguous.
     DisconnectAfterReceipt,
+    /// Task 59: answer with an arbitrary `result` payload -- the fake
+    /// authority endpoint's `revenue-fee-authority-status` responses.
+    Json(Value),
 }
 
 /// A fake CLN JSON-RPC server bound UNDER THE REHEARSAL ROOT.
@@ -676,6 +679,13 @@ impl FakeCln {
                             .await
                         }
                         Some(FakeBehavior::DisconnectAfterReceipt) => drop(stream),
+                        Some(FakeBehavior::Json(result)) => {
+                            reply(
+                                &mut stream,
+                                json!({"jsonrpc":"2.0","id":1,"result": result}),
+                            )
+                            .await
+                        }
                         None => {
                             reply(
                                 &mut stream,
@@ -771,19 +781,36 @@ async fn open_store(iso: &Isolation) -> Result<ObserverHandle, Refusal> {
         .map_err(|e| Refusal::Input(format!("open copied observer db: {e}")))
 }
 
-fn stable_authority() -> (PythonAuthorityOff, PythonAuthorityOff) {
-    (
-        PythonAuthorityOff {
-            generation: 3,
-            transitioned_at: 1_799_000_000,
-            observed_at: 1_800_000_000,
-        },
-        PythonAuthorityOff {
-            generation: 3,
-            transitioned_at: 1_799_000_000,
-            observed_at: 1_800_000_010,
-        },
-    )
+/// Rehearsal wall-clock for authority readings (fixed, like every other
+/// rehearsal timestamp) and the open-time staleness bound.
+const AUTHORITY_NOW: i64 = 1_800_000_001;
+const AUTHORITY_MAX_AGE: i64 = 30;
+
+fn authority_status(generation: u64, transitioned_at: i64, observed_at: i64) -> Value {
+    json!({
+        "enabled": false,
+        "generation": generation,
+        "transitioned_at": transitioned_at,
+        "observed_at": observed_at,
+    })
+}
+
+/// Task 59: bind a DEDICATED fake authority endpoint (separate socket, so
+/// `FakeCln::mutation_calls` on the CLN fake keeps meaning "any call is a
+/// mutation attempt") and open a real bracket over it. The returned fake
+/// must outlive the authorize call -- the bracket's close re-reads it.
+async fn open_rehearsal_bracket(
+    cln_socket: &Path,
+    behaviors: Vec<FakeBehavior>,
+) -> Result<(FakeCln, OpenBracket), Refusal> {
+    let path = cln_socket.with_file_name("fake-authority.sock");
+    let fake = FakeCln::bind(&path, behaviors)?;
+    let client = PythonAuthorityClient::new(path, 5);
+    let bracket = client
+        .open_bracket(AUTHORITY_NOW, AUTHORITY_MAX_AGE)
+        .await
+        .map_err(|e| Refusal::Input(format!("open rehearsal authority bracket: {e}")))?;
+    Ok((fake, bracket))
 }
 
 fn one_request() -> PersistedFeeRequest {
@@ -874,18 +901,22 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
             // replaced.)
             let store = open_store(&iso).await?;
             let fake = FakeCln::bind(&iso.socket_path, vec![FakeBehavior::Success])?;
-            let (first, _) = stable_authority();
-            let unstable_second = PythonAuthorityOff {
-                generation: first.generation + 1,
-                transitioned_at: first.transitioned_at + 60,
-                observed_at: first.observed_at + 10,
-            };
+            // The bracket's close observes an epoch that MOVED between the
+            // two real fetches -- Python cannot be proven off.
+            let (_authority_fake, bracket) = open_rehearsal_bracket(
+                &iso.socket_path,
+                vec![
+                    FakeBehavior::Json(authority_status(3, 1_799_000_000, AUTHORITY_NOW - 1)),
+                    FakeBehavior::Json(authority_status(4, 1_799_000_060, AUTHORITY_NOW)),
+                ],
+            )
+            .await?;
             let denied = LiveBatchAuthorization::authorize(
                 &store,
                 "rehearsal-candidate-sha",
                 0,
-                &first,
-                &unstable_second,
+                bracket,
+                AUTHORITY_NOW,
                 true,
                 "rehearsal",
                 "idem-1",
@@ -967,7 +998,16 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
         gate @ ("state_flush_failure" | "governor_denial" | "ledger_failure") => {
             let store = open_store(&iso).await?;
             let fake = FakeCln::bind(&iso.socket_path, vec![FakeBehavior::Success])?;
-            let (first, second) = stable_authority();
+            // A valid bracket -- these gates deny BEFORE its close, so
+            // only the open fetch is ever consumed.
+            let (_authority_fake, bracket) = open_rehearsal_bracket(
+                &iso.socket_path,
+                vec![
+                    FakeBehavior::Json(authority_status(3, 1_799_000_000, AUTHORITY_NOW - 1)),
+                    FakeBehavior::Json(authority_status(3, 1_799_000_000, AUTHORITY_NOW)),
+                ],
+            )
+            .await?;
             // A fresh store's generation is 0; a stale candidate models state
             // that was never flushed.
             let (generation, governor_ok, reservation) = match gate {
@@ -980,8 +1020,8 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
                 &store,
                 "rehearsal-candidate-sha",
                 generation,
-                &first,
-                &second,
+                bracket,
+                AUTHORITY_NOW,
                 governor_ok,
                 "rehearsal",
                 reservation,
@@ -1037,13 +1077,20 @@ async fn rehearse(run: Run) -> Result<String, Refusal> {
                 ClnFeeBroadcaster::new(iso.socket_path.clone(), store.clone(), 5, live)
                     .await
                     .map_err(|e| Refusal::Input(format!("construct broadcaster: {e:?}")))?;
-            let (first, second) = stable_authority();
+            let (_authority_fake, bracket) = open_rehearsal_bracket(
+                &iso.socket_path,
+                vec![
+                    FakeBehavior::Json(authority_status(3, 1_799_000_000, AUTHORITY_NOW - 1)),
+                    FakeBehavior::Json(authority_status(3, 1_799_000_000, AUTHORITY_NOW)),
+                ],
+            )
+            .await?;
             let auth = LiveBatchAuthorization::authorize(
                 &store,
                 "rehearsal-candidate-sha",
                 0,
-                &first,
-                &second,
+                bracket,
+                AUTHORITY_NOW,
                 true,
                 "rehearsal",
                 "idem-1",

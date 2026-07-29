@@ -69,11 +69,36 @@ pub const AUTHORITY_STATUS_METHOD: &str = "revenue-fee-authority-status";
 /// legitimate cases (e.g. logging a reading after it's been consumed);
 /// [`validate_stable_epoch`] itself denies a cloned/duplicated reading via
 /// its `observed_at` bracketing check regardless.
+/// Task 59 F3: fields are PRIVATE -- the only constructor is
+/// [`validate_status`], so a value of this type IS proof a raw response
+/// passed every check. Forgery is a compile error:
+///
+/// ```compile_fail,E0451
+/// let forged = revops::python_authority::PythonAuthorityOff {
+///     generation: 0,
+///     transitioned_at: 0,
+///     observed_at: 0,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonAuthorityOff {
-    pub generation: u64,
-    pub transitioned_at: i64,
-    pub observed_at: i64,
+    generation: u64,
+    transitioned_at: i64,
+    observed_at: i64,
+}
+
+impl PythonAuthorityOff {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn transitioned_at(&self) -> i64 {
+        self.transitioned_at
+    }
+
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
 }
 
 /// Every fail-closed reason this module can return. Each is stable and
@@ -134,6 +159,14 @@ pub enum PythonAuthorityDenyReason {
         first_observed_at: i64,
         second_observed_at: i64,
     },
+    /// Task 59 R2-F2 (new variant -- existing codes never reworded): an
+    /// OPEN bracket went stale before its close -- either its monotonic
+    /// lifetime exceeded [`OPEN_BRACKET_MAX_LIFETIME`], or the FIRST
+    /// reading's wall-clock age at authorization time exceeded the same
+    /// `max_age_seconds` bound `validate_status` enforced at open. The
+    /// second fetch is SKIPPED: a refused stale bracket performs exactly
+    /// one total fetch.
+    StaleOpenBracket { age_seconds: i64, max_seconds: i64 },
 }
 
 impl PythonAuthorityDenyReason {
@@ -151,6 +184,7 @@ impl PythonAuthorityDenyReason {
             Self::StaleObservation { .. } => "python_authority_stale_observation",
             Self::UnstableEpoch { .. } => "python_authority_unstable_epoch",
             Self::NonAdvancingObservation { .. } => "python_authority_non_advancing_observation",
+            Self::StaleOpenBracket { .. } => "python_authority_stale_open_bracket",
         }
     }
 }
@@ -206,6 +240,15 @@ impl std::fmt::Display for PythonAuthorityDenyReason {
                 "{}: second read's observed_at ({second_observed_at}) did not strictly advance \
                  past the first's ({first_observed_at}) -- bracketing requires a genuinely \
                  later second fetch",
+                self.code(),
+            ),
+            Self::StaleOpenBracket {
+                age_seconds,
+                max_seconds,
+            } => write!(
+                f,
+                "{}: open bracket age {age_seconds}s exceeds the {max_seconds}s bound -- \
+                 refused before the second fetch; open a fresh bracket",
                 self.code(),
             ),
         }
@@ -396,6 +439,111 @@ impl PythonAuthorityClient {
     ) -> Result<PythonAuthorityOff, PythonAuthorityDenyReason> {
         let raw = self.fetch_raw_status().await?;
         validate_status(&raw, now, max_age_seconds)
+    }
+
+    /// Task 59 F5: perform fetch #1 and freeze it, the ORIGINATING
+    /// client, and a monotonic open stamp into an [`OpenBracket`].
+    /// Consumes the client: the bracket owns the only handle to the
+    /// endpoint its close will re-read, so the second fetch structurally
+    /// cannot be pointed anywhere else.
+    pub async fn open_bracket(
+        self,
+        now: i64,
+        max_age_seconds: i64,
+    ) -> Result<OpenBracket, PythonAuthorityDenyReason> {
+        let first = self.fetch_validated_status(now, max_age_seconds).await?;
+        Ok(OpenBracket {
+            client: self,
+            first,
+            opened_at: std::time::Instant::now(),
+            max_age_seconds,
+        })
+    }
+}
+
+/// Task 59 §4.2: how long an OPEN bracket may live (monotonic) before
+/// its close refuses without a second fetch.
+pub const OPEN_BRACKET_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Fetch #1 proof (Task 59 F5). NOT `Clone`. Holds the ORIGINATING
+/// client by value -- `close` re-reads exactly the endpoint that
+/// produced the first reading; no client parameter exists to point it
+/// anywhere else. Reuse after the consuming authorization is a compile
+/// error:
+///
+/// ```compile_fail,E0382
+/// async fn reuse(bracket: revops::python_authority::OpenBracket) {
+///     let moved = bracket;
+///     let _still_here = bracket; // use after move
+///     drop(moved);
+/// }
+/// ```
+#[derive(Debug)]
+pub struct OpenBracket {
+    client: PythonAuthorityClient,
+    first: PythonAuthorityOff,
+    opened_at: std::time::Instant,
+    /// The exact `max_age_seconds` bound `validate_status` enforced at
+    /// open -- stored so close revalidates the FIRST reading against the
+    /// SAME bound, structurally.
+    max_age_seconds: i64,
+}
+
+impl OpenBracket {
+    /// Task 59 F5: fetch #2 happens HERE, against `self.client`, as the
+    /// authorization path's LAST gate before minting. Consumes the
+    /// bracket: one two-fetch proof closes at most once.
+    ///
+    /// Stale-open refusal comes FIRST (R2-F2), on both arms
+    /// independently -- the monotonic open lifetime and the first
+    /// reading's wall-clock age against authorization-time `now` -- and
+    /// SKIPS fetch #2 entirely: a refused stale bracket has performed
+    /// exactly one total fetch, a successful close exactly two.
+    pub(crate) async fn close(
+        self,
+        now: i64,
+    ) -> Result<BracketedAuthorityOff, PythonAuthorityDenyReason> {
+        let open_age = self.opened_at.elapsed();
+        if open_age > OPEN_BRACKET_MAX_LIFETIME {
+            return Err(PythonAuthorityDenyReason::StaleOpenBracket {
+                age_seconds: open_age.as_secs() as i64,
+                max_seconds: OPEN_BRACKET_MAX_LIFETIME.as_secs() as i64,
+            });
+        }
+        let first_age = now - self.first.observed_at;
+        if first_age < 0 || first_age > self.max_age_seconds {
+            return Err(PythonAuthorityDenyReason::StaleOpenBracket {
+                age_seconds: first_age,
+                max_seconds: self.max_age_seconds,
+            });
+        }
+        let second = self
+            .client
+            .fetch_validated_status(now, self.max_age_seconds)
+            .await?;
+        validate_stable_epoch(&self.first, &second)?;
+        Ok(BracketedAuthorityOff { second })
+    }
+}
+
+/// Two-real-fetches proof (Task 59 F3): private fields, no public
+/// constructor, NOT `Clone` -- it exists only as [`OpenBracket::close`]'s
+/// success value, consumed by value exactly once inside the authorizer.
+/// Forgery is a compile error:
+///
+/// ```compile_fail,E0063
+/// let forged = revops::python_authority::BracketedAuthorityOff {};
+/// ```
+#[derive(Debug)]
+pub struct BracketedAuthorityOff {
+    second: PythonAuthorityOff,
+}
+
+impl BracketedAuthorityOff {
+    /// The second (closing) reading's generation -- the value the minted
+    /// authorization records as its Python-authority epoch.
+    pub(crate) fn second_generation(&self) -> u64 {
+        self.second.generation
     }
 }
 

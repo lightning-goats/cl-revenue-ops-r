@@ -92,9 +92,7 @@ use revops_db::owner::{ObserverHandle, StoreReceiptWait};
 use revops_fees::execution::SetChannelRequest;
 
 use crate::fee_mode::LiveMode;
-use crate::python_authority::{
-    validate_stable_epoch, PythonAuthorityDenyReason, PythonAuthorityOff,
-};
+use crate::python_authority::{OpenBracket, PythonAuthorityDenyReason};
 
 /// The only RPC method [`ClnFeeBroadcaster`] can ever call. A named
 /// constant (rather than an inline literal) for the same reason
@@ -274,7 +272,21 @@ pub struct LiveBatchAuthorization {
     python_authority_generation: u64,
     governor_reason_code: String,
     ledger_reservation_id: String,
+    /// Task 59 F5: mint stamp for the dispatch-freshness deadline --
+    /// `broadcast_batch` refuses a parked authorization older than
+    /// [`AUTHORIZATION_DISPATCH_FRESHNESS`]. `tokio::time::Instant` so
+    /// the deadline is testable under a paused clock; in production it
+    /// is the same monotonic clock.
+    minted_at: tokio::time::Instant,
 }
+
+/// Task 59 F5: how long a minted [`LiveBatchAuthorization`] may sit
+/// before dispatch refuses it -- an order of magnitude above the
+/// authorize-to-dispatch hop in the same async task, an order of
+/// magnitude below the Python-side staleness bound, so the window in
+/// which Python could re-enable behind a parked authorization is capped
+/// by construction.
+pub const AUTHORIZATION_DISPATCH_FRESHNESS: Duration = Duration::from_secs(30);
 
 impl LiveBatchAuthorization {
     /// Authorize one live batch. Check order (each a fail-closed, stable,
@@ -288,21 +300,36 @@ impl LiveBatchAuthorization {
     /// value by a bug or a race, which would make this authorizer a
     /// witness rather than a verifier. Both are read HERE, directly from
     /// `store`, so no caller can construct an authorization the store
-    /// itself disagrees with. `first_authority_reading`/
-    /// `second_authority_reading` remain injected: they come from the RPC
-    /// client (a later task's caller performs two genuinely separate
-    /// fetches), and their bracketing is enforced by
-    /// [`validate_stable_epoch`] (including
-    /// `NonAdvancingObservation`, which rejects a duplicated/non-advancing
-    /// pair) -- injecting them keeps this function testable against
-    /// fixtures without a live Python-authority RPC.
+    /// itself disagrees with.
+    ///
+    /// Task 59 F5/F3: the Python-authority proof arrives as an
+    /// [`OpenBracket`] consumed BY VALUE -- one two-fetch proof mints at
+    /// most one authorization, and its `close()` (the second endpoint
+    /// fetch, stale-open refusal first) runs HERE as the LAST gate before
+    /// minting. Bracket reuse is a compile error:
+    ///
+    /// ```compile_fail,E0382
+    /// async fn reuse(
+    ///     store: &revops_db::owner::ObserverHandle,
+    ///     bracket: revops::python_authority::OpenBracket,
+    /// ) {
+    ///     let _one = revops::fee_execution::LiveBatchAuthorization::authorize(
+    ///         store, "sha", 0, bracket, 0, true, "ok", "idem",
+    ///     )
+    ///     .await;
+    ///     let _two = revops::fee_execution::LiveBatchAuthorization::authorize(
+    ///         store, "sha", 0, bracket, 0, true, "ok", "idem",
+    ///     )
+    ///     .await;
+    /// }
+    /// ```
     #[allow(clippy::too_many_arguments)]
     pub async fn authorize(
         store: &ObserverHandle,
         candidate_sha256: impl Into<String>,
         candidate_state_generation: u64,
-        first_authority_reading: &PythonAuthorityOff,
-        second_authority_reading: &PythonAuthorityOff,
+        bracket: OpenBracket,
+        now: i64,
         governor_authorized: bool,
         governor_reason_code: impl Into<String>,
         ledger_reservation_id: impl Into<String>,
@@ -342,9 +369,6 @@ impl LiveBatchAuthorization {
             });
         }
 
-        validate_stable_epoch(first_authority_reading, second_authority_reading)
-            .map_err(LiveBatchDenyReason::PythonAuthority)?;
-
         let governor_reason_code = governor_reason_code.into();
         if !governor_authorized {
             return Err(LiveBatchDenyReason::GovernorDenied {
@@ -357,12 +381,23 @@ impl LiveBatchAuthorization {
             return Err(LiveBatchDenyReason::LedgerReservationMissing);
         }
 
+        // Task 59 F5: the LAST gate before minting -- the bracket's
+        // consuming close performs the second endpoint fetch (stale-open
+        // refusal first, skipping the fetch entirely), so the two-fetch
+        // proof completes immediately before the single-use
+        // authorization exists.
+        let bracketed = bracket
+            .close(now)
+            .await
+            .map_err(LiveBatchDenyReason::PythonAuthority)?;
+
         Ok(Self {
             candidate_sha256: candidate_sha256.into(),
             state_generation: current_state_generation,
-            python_authority_generation: second_authority_reading.generation,
+            python_authority_generation: bracketed.second_generation(),
             governor_reason_code,
             ledger_reservation_id,
+            minted_at: tokio::time::Instant::now(),
         })
     }
 
@@ -433,6 +468,10 @@ pub enum BroadcastError {
     /// Bytes may have reached lightningd but no definite answer came
     /// back. This is the ONLY outcome that quarantines execution.
     Ambiguous { request_id: String, detail: String },
+    /// Task 59 F5: the authorization sat parked past
+    /// [`AUTHORIZATION_DISPATCH_FRESHNESS`] -- refused at dispatch with
+    /// zero RPC calls; re-authorize with a fresh bracket.
+    AuthorizationStale { age_seconds: u64, max_seconds: u64 },
     /// The intent/result ledger itself could not be written. Fails
     /// closed: an unrecorded intent must never be submitted, and an
     /// unrecorded result must never be silently dropped.
@@ -483,6 +522,14 @@ impl std::fmt::Display for BroadcastError {
                 f,
                 "ambiguous transport outcome for request {request_id} -- execution quarantined: \
                  {detail}"
+            ),
+            Self::AuthorizationStale {
+                age_seconds,
+                max_seconds,
+            } => write!(
+                f,
+                "authorization parked {age_seconds}s exceeds the {max_seconds}s dispatch \
+                 freshness bound; re-authorize with a fresh bracket (zero RPC calls made)"
             ),
             Self::Persistence(detail) => {
                 write!(f, "failed to persist broadcast intent/result: {detail}")
@@ -614,6 +661,17 @@ impl ClnFeeBroadcaster {
         // doc comment), so nothing past this point may run.
         if self.poisoned.load(Ordering::SeqCst) {
             return Err(BroadcastError::Poisoned);
+        }
+        // Task 59 F5: dispatch-freshness deadline -- a parked
+        // authorization must never outlive the wall-clock window in
+        // which Python could have re-enabled behind it. In-memory,
+        // checked before any store read.
+        let authorization_age = authorization.minted_at.elapsed();
+        if authorization_age > AUTHORIZATION_DISPATCH_FRESHNESS {
+            return Err(BroadcastError::AuthorizationStale {
+                age_seconds: authorization_age.as_secs(),
+                max_seconds: AUTHORIZATION_DISPATCH_FRESHNESS.as_secs(),
+            });
         }
         // Defense in depth (review finding 3): `authorization` already
         // bound a quarantine-empty observation at construction time (now

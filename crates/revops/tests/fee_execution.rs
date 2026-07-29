@@ -19,7 +19,7 @@ use revops::fee_execution::{
     PersistedFeeRequest,
 };
 use revops::fee_mode::{validate_fee_mode, ModeFlags, ValidatedFeeMode};
-use revops::python_authority::PythonAuthorityOff;
+use revops::python_authority::{OpenBracket, PythonAuthorityClient, PythonAuthorityDenyReason};
 use revops_db::fee_runway::{BroadcastAttemptIntent, FeeStateSnapshot, QuarantineEntry};
 use revops_db::owner::{spawn_read_write, ObserverHandle};
 use revops_fees::execution::SetChannelRequest;
@@ -349,18 +349,20 @@ fn one_request() -> PersistedFeeRequest {
     }
 }
 
-fn stable_readings() -> (PythonAuthorityOff, PythonAuthorityOff) {
-    let first = PythonAuthorityOff {
-        generation: 3,
-        transitioned_at: 1_799_000_000,
-        observed_at: 1_800_000_000,
-    };
-    let second = PythonAuthorityOff {
-        generation: 3,
-        transitioned_at: 1_799_000_000,
-        observed_at: 1_800_000_010,
-    };
-    (first, second)
+/// Task 59 F5: a fresh two-behavior fake authority endpoint plus an OPEN
+/// bracket over it (one fetch consumed). The server must outlive the
+/// authorize call -- the bracket's close re-reads it.
+async fn open_bracket_ok() -> (FakeClnServer, OpenBracket) {
+    let authority = FakeClnServer::spawn(vec![
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 2)),
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 1)),
+    ]);
+    let client = PythonAuthorityClient::new(authority.socket_path(), 5);
+    let bracket = client
+        .open_bracket(AUTHORITY_NOW, AUTHORITY_MAX_AGE)
+        .await
+        .expect("open bracket");
+    (authority, bracket)
 }
 
 /// Fix round 1 (review finding 4): `authorize` now reads the
@@ -369,13 +371,13 @@ fn stable_readings() -> (PythonAuthorityOff, PythonAuthorityOff) {
 /// is always `0`, so every fixture below authorizes against `0` unless a
 /// test deliberately wants a mismatch.
 async fn authorize_ok(store: &ObserverHandle) -> LiveBatchAuthorization {
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     LiveBatchAuthorization::authorize(
         store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -429,13 +431,13 @@ async fn quarantine_active_denies_authorization_construction_with_zero_calls() {
         .await
         .unwrap();
 
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -451,13 +453,13 @@ async fn stale_state_generation_denies_authorization_with_zero_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
     let store = observer(tmp.path()).await;
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         6, // candidate was built against generation 6; the store is still 0
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -479,22 +481,28 @@ async fn unstable_python_authority_epoch_denies_authorization_with_zero_calls() 
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
     let store = observer(tmp.path()).await;
-    let first = PythonAuthorityOff {
-        generation: 3,
-        transitioned_at: 1_799_000_000,
-        observed_at: 1_800_000_000,
-    };
-    let second = PythonAuthorityOff {
-        generation: 4, // Python's authority state moved during the batch window
-        transitioned_at: 1_799_500_000,
-        observed_at: 1_800_000_010,
-    };
+    // Python's authority state moved during the bracket window: the
+    // close's second fetch observes a different epoch.
+    let authority = FakeClnServer::spawn(vec![
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 2)),
+        FakeBehavior::Success(json!({
+            "enabled": false,
+            "generation": 4,
+            "transitioned_at": 1_799_500_000,
+            "observed_at": AUTHORITY_NOW - 1,
+        })),
+    ]);
+    let client = PythonAuthorityClient::new(authority.socket_path(), 5);
+    let bracket = client
+        .open_bracket(AUTHORITY_NOW, AUTHORITY_MAX_AGE)
+        .await
+        .expect("open bracket");
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -510,13 +518,13 @@ async fn governor_denial_denies_authorization_with_zero_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
     let store = observer(tmp.path()).await;
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         false,
         "paused",
         "idem-1",
@@ -535,13 +543,13 @@ async fn missing_ledger_reservation_denies_authorization_with_zero_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeClnServer::spawn(vec![]);
     let store = observer(tmp.path()).await;
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "", // no reservation id
@@ -573,13 +581,13 @@ async fn quarantine_check_failure_denies_authorization_with_zero_calls() {
             .expect("drop the quarantine table out from under the actor");
     }
 
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -614,13 +622,13 @@ async fn state_generation_check_failure_denies_authorization_with_zero_calls() {
             .expect("drop the fee state generation table out from under the actor");
     }
 
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -730,13 +738,13 @@ async fn disconnect_after_submission_quarantines_and_blocks_next_batch() {
     // The NEXT batch is blocked: constructing a fresh authorization must
     // now deny on the active quarantine (read straight from the store),
     // with zero further calls.
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let deny = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-def",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-2",
@@ -913,13 +921,13 @@ async fn restart_restores_quarantine_before_the_arm_is_accepted() {
 
     // And the arm that was just accepted still cannot authorize anything
     // while that restored quarantine is active.
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let deny = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-ghi",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-3",
@@ -1081,13 +1089,13 @@ async fn state_generation_check_agrees_with_the_committed_generation_after_a_rea
 
     // Authorizing against the pre-commit generation is now stale, and the
     // reported `current` is the generation the commit produced.
-    let (first, second) = stable_readings();
+    let (_authority, bracket) = open_bracket_ok().await;
     let err = LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         0,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -1103,13 +1111,15 @@ async fn state_generation_check_agrees_with_the_committed_generation_after_a_rea
     );
     assert_eq!(server.connection_count(), 0);
 
-    // ... and authorizing against the committed generation still passes.
+    // ... and authorizing against the committed generation still passes
+    // (a bracket is single-use, so this takes a fresh one).
+    let (_authority, bracket) = open_bracket_ok().await;
     LiveBatchAuthorization::authorize(
         &store,
         "candidate-sha-abc",
         1,
-        &first,
-        &second,
+        bracket,
+        AUTHORITY_NOW,
         true,
         "authorized",
         "idem-1",
@@ -1583,4 +1593,195 @@ async fn wedged_result_write_after_clean_failure_stops_poisons_and_types() {
         .await
         .expect_err("poisoned after an unrecordable terminal result");
     assert!(matches!(err, BroadcastError::Poisoned), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Task 59 Area F: endpoint-bound, single-use authority bracketing
+// ---------------------------------------------------------------------------
+
+const AUTHORITY_NOW: i64 = 1_800_000_020;
+const AUTHORITY_MAX_AGE: i64 = 30;
+
+fn authority_payload(observed_at: i64) -> Value {
+    json!({
+        "enabled": false,
+        "generation": 3,
+        "transitioned_at": 1_799_000_000,
+        "observed_at": observed_at,
+    })
+}
+
+/// F5c (and F5a's same-endpoint contract): `open_bracket` performs
+/// exactly ONE fetch; the SECOND fetch happens inside `authorize` --
+/// against the same originating endpoint (`close` has no client
+/// parameter to point anywhere else) -- strictly during authorization,
+/// immediately before minting.
+#[tokio::test]
+async fn second_fetch_happens_inside_authorize() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = observer(tmp.path()).await;
+    let authority = FakeClnServer::spawn(vec![
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 2)),
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 1)),
+    ]);
+    let client = PythonAuthorityClient::new(authority.socket_path(), 5);
+    let bracket = client
+        .open_bracket(AUTHORITY_NOW, AUTHORITY_MAX_AGE)
+        .await
+        .expect("open bracket");
+    assert_eq!(
+        authority.connection_count(),
+        1,
+        "open performs exactly one fetch"
+    );
+
+    let authorization = LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        0,
+        bracket,
+        AUTHORITY_NOW,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect("bracketed authorization");
+    assert_eq!(
+        authority.connection_count(),
+        2,
+        "the second fetch happens INSIDE authorize, immediately before minting"
+    );
+    assert_eq!(authorization.python_authority_generation(), 3);
+}
+
+/// F5d (R2-F2): a stale OPEN bracket is refused BEFORE the second fetch
+/// -- exactly ONE total fetch for a refused stale bracket, and the NEW
+/// typed deny (never a reworded existing code).
+#[tokio::test]
+async fn stale_open_bracket_refused_before_second_fetch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = observer(tmp.path()).await;
+    let authority = FakeClnServer::spawn(vec![
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 2)),
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 1)),
+    ]);
+    let client = PythonAuthorityClient::new(authority.socket_path(), 5);
+    let bracket = client
+        .open_bracket(AUTHORITY_NOW, AUTHORITY_MAX_AGE)
+        .await
+        .expect("open bracket");
+
+    // Authorization-time `now` far past the first reading's max age: the
+    // bracket is stale-open and must refuse without fetch #2.
+    let err = LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        0,
+        bracket,
+        AUTHORITY_NOW + AUTHORITY_MAX_AGE + 31,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect_err("a stale open bracket must refuse");
+    match &err {
+        LiveBatchDenyReason::PythonAuthority(reason) => {
+            assert_eq!(reason.code(), "python_authority_stale_open_bracket");
+            assert!(matches!(
+                reason,
+                PythonAuthorityDenyReason::StaleOpenBracket { .. }
+            ));
+        }
+        other => panic!("expected the stale-open-bracket deny, got {other:?}"),
+    }
+    assert_eq!(
+        authority.connection_count(),
+        1,
+        "a refused stale bracket performs exactly ONE total fetch (the open)"
+    );
+}
+
+/// F14: two honest fetches inside Python's 1 s `observed_at` resolution
+/// deny as `NonAdvancingObservation` -- exactly TWO fetches, no
+/// automatic tight-loop retry anywhere.
+#[tokio::test]
+async fn same_second_second_read_denies_without_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = observer(tmp.path()).await;
+    let authority = FakeClnServer::spawn(vec![
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 1)),
+        FakeBehavior::Success(authority_payload(AUTHORITY_NOW - 1)),
+    ]);
+    let client = PythonAuthorityClient::new(authority.socket_path(), 5);
+    let bracket = client
+        .open_bracket(AUTHORITY_NOW, AUTHORITY_MAX_AGE)
+        .await
+        .expect("open bracket");
+
+    let err = LiveBatchAuthorization::authorize(
+        &store,
+        "candidate-sha-abc",
+        0,
+        bracket,
+        AUTHORITY_NOW,
+        true,
+        "authorized",
+        "idem-1",
+    )
+    .await
+    .expect_err("a non-advancing second read must deny");
+    match &err {
+        LiveBatchDenyReason::PythonAuthority(reason) => assert!(
+            matches!(
+                reason,
+                PythonAuthorityDenyReason::NonAdvancingObservation { .. }
+            ),
+            "{reason:?}"
+        ),
+        other => panic!("expected the non-advancing deny, got {other:?}"),
+    }
+    assert_eq!(
+        authority.connection_count(),
+        2,
+        "denied means denied: exactly two fetches, no retry loop"
+    );
+}
+
+/// F5b: a minted authorization parked past
+/// `AUTHORIZATION_DISPATCH_FRESHNESS` is refused AT DISPATCH with the
+/// typed `AuthorizationStale` -- capping the wall-clock window in which
+/// Python could re-enable behind a parked authorization.
+#[tokio::test]
+async fn stale_authorization_refused_at_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeClnServer::spawn(vec![FakeBehavior::Success(json!({"channels": []}))]);
+    let store = observer(tmp.path()).await;
+    let live_mode = real_live_mode(tmp.path(), &format!("nonce-{}", uuid_ish()));
+    let broadcaster = ClnFeeBroadcaster::new(server.socket_path(), store.clone(), 2, live_mode)
+        .await
+        .expect("no orphaned intents in a fresh store");
+    let authorization = authorize_ok(&store).await;
+
+    // Park the authorization past the dispatch freshness bound. The
+    // staleness gate is in-memory and checked before any store read, so
+    // the paused clock never interacts with a store budget.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+
+    let err = broadcaster
+        .broadcast_batch(authorization, &[one_request()])
+        .await
+        .expect_err("a parked authorization must refuse at dispatch");
+    assert!(
+        matches!(err, BroadcastError::AuthorizationStale { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        server.connection_count(),
+        0,
+        "a stale authorization sends zero RPC calls"
+    );
 }
