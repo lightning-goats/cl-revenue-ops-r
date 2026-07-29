@@ -164,23 +164,44 @@ pub fn settlement_for_boltz(
 /// until then (source-scan pinned). The withdraw hard cap lives INSIDE
 /// the capability so no caller can pass `i64::MAX` to disable it.
 pub struct BoltzActionCapability {
-    armed: ArmedBoltzCli,
+    transport: ActionTransport,
     max_withdraw_sats: i64,
 }
 
+enum ActionTransport {
+    Process(ArmedBoltzCli),
+    /// Test seam: scripted fakes stand in for the process transport.
+    Injected(std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>),
+}
+
 impl BoltzActionCapability {
-    /// Assemble the capability. Task 69's authority bracket is the only
-    /// sanctioned production caller; tests mint theirs against fake
-    /// executables.
+    /// Assemble the process-backed capability. Task 69's authority
+    /// bracket is the only sanctioned production caller (source-scan
+    /// pinned); the e2e proof mints one against fake executables.
     pub fn assemble(armed: ArmedBoltzCli, max_withdraw_sats: i64) -> Self {
         Self {
-            armed,
+            transport: ActionTransport::Process(armed),
             max_withdraw_sats,
         }
     }
 
-    pub fn armed(&self) -> &ArmedBoltzCli {
-        &self.armed
+    /// Assemble around an injected transport (scripted fakes in tests).
+    /// Same scan discipline: zero production callers.
+    pub fn assemble_injected(
+        transport: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>,
+        max_withdraw_sats: i64,
+    ) -> Self {
+        Self {
+            transport: ActionTransport::Injected(transport),
+            max_withdraw_sats,
+        }
+    }
+
+    pub fn armed(&self) -> &dyn revops_boltz::cli::BoltzCli {
+        match &self.transport {
+            ActionTransport::Process(armed) => armed,
+            ActionTransport::Injected(injected) => injected.as_ref(),
+        }
     }
 
     pub fn max_withdraw_sats(&self) -> i64 {
