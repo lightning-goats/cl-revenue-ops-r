@@ -65,6 +65,7 @@ pub mod rpc_spend_ledger;
 pub mod rpc_status;
 pub mod rpc_total_cost_budget;
 pub mod runtime;
+pub mod startup_snapshot;
 pub mod state_writer;
 
 #[cfg(test)]
