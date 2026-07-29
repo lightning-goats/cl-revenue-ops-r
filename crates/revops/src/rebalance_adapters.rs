@@ -269,3 +269,15 @@ impl ClnReconcileRpc {
         )
     }
 }
+
+/// Task 60 slice 4 seam: the owner's reconciliation lookup, trait-shaped
+/// so tests script it. The production impl is [`ClnReconcileRpc`].
+pub trait ReconcileLookup: Send + Sync {
+    fn listsendpays(&self, payment_hash: &str) -> Result<Value, RpcFailure>;
+}
+
+impl ReconcileLookup for ClnReconcileRpc {
+    fn listsendpays(&self, payment_hash: &str) -> Result<Value, RpcFailure> {
+        ClnReconcileRpc::listsendpays(self, payment_hash)
+    }
+}

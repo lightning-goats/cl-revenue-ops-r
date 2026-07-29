@@ -278,6 +278,27 @@ impl<T> StoreReceipt<T> {
             Ok(Err(_)) | Err(_) => StoreReceiptWait::OutcomeUnknown,
         }
     }
+
+    /// Blocking sibling of [`Self::within`] for an owner OS thread (Task
+    /// 60): bounded poll off any runtime. Same classification: expiry and
+    /// a dropped reply are both OUTCOME UNKNOWN.
+    pub fn blocking_within(mut self, budget: std::time::Duration) -> StoreReceiptWait<T> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match self.rx.try_recv() {
+                Ok(result) => return StoreReceiptWait::Replied(result),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return StoreReceiptWait::OutcomeUnknown;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    return StoreReceiptWait::OutcomeUnknown;
+                }
+            }
+        }
+    }
 }
 
 /// Cheap, `Clone`-able handle to the observer-db owner task.
@@ -923,6 +944,42 @@ impl ObserverHandle {
             .await
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::settle_rebalance_attempt`]
+    /// for the rebalance owner's OS thread.
+    pub fn blocking_settle_rebalance_attempt(
+        &self,
+        settle: fee_runway::RebalanceSettle,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::SettleRebalanceAttempt { settle, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::unresolved_rebalance_attempts`].
+    pub fn blocking_unresolved_rebalance_attempts(
+        &self,
+    ) -> Result<Vec<fee_runway::UnresolvedRebalanceAttempt>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UnresolvedRebalanceAttempts(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::active_rebalance_reserved_sats`].
+    pub fn blocking_active_rebalance_reserved_sats(&self, since: i64) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ActiveRebalanceReservedSats { since, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
     }
 
     /// Task 59 §5.3: burn one cutover-arm nonce in the durable deny

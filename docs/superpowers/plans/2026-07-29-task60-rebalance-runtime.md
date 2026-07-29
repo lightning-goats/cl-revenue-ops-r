@@ -202,9 +202,19 @@ future cutover task (source-scan pinned today — untouched).
   terminal refuses), unknown quarantines + suspends nothing, settle-failure
   suspends further submissions, reconcile-on-start settles a definite
   outcome and quarantines a pending one, force bypasses only soft gates.
-- [ ] GREEN: implement owner; register loop health (`LoopId::Rebalance`)
-  with wiring status.
-- [ ] Focused gates; commit slice.
+- [x] GREEN: implement owner. EXECUTED DEVIATIONS (disclosed): (a) no
+  `LoopId::Rebalance` variant -- expanding the loop registry from five to
+  eight is explicitly Task 67's scope; the owner registers no loop-health
+  row today. (b) `deps.engine` is `Option<...>`: production main.rs wires
+  `None` pre-cutover (full engine assembly needs production-equivalent
+  Facade/RebalanceStore impls that belong to the cutover surface), so the
+  RPCs keep Python's exact "Rebalancer not initialized" arm while every
+  owner rail is proven against scripted engines. (c) cycle executions are
+  recorded as post-hoc atomic attempt+terminal rows -- the frozen kernel
+  executes internally and cannot be intercepted for pre-submit intents
+  without breaking parity; the cutover task that injects live payment
+  capability must move the intent write ahead of the wire (module doc).
+- [x] Focused gates; commit slice.
 
 ### Slice 5: The three operator RPCs (Python-equivalent contracts)
 
