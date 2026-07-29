@@ -120,6 +120,37 @@ engagement gate must go green from cycle 2.
   `binary_sha256` in the window. A too-early `--since` otherwise blends two
   candidates into one verdict.
 
+### 2.5 Retention and the observer database (Task 59)
+
+The plugin runs a bounded Class-W retention sweep after each successful
+scheduled cycle commit. What it may and may not touch is classified in
+`crates/revops-db/src/retention.rs` and lint-enforced:
+
+- **Never pruned (append-only evidence and identity — the never-prune
+  list):** `rust_fee_cycles`, `rust_fee_requests`, `rust_fee_ledger`,
+  `rust_broadcast_attempts`, `rust_execution_quarantine`,
+  `rust_fee_seed_events`, `rust_fee_restart_markers`, and
+  `rust_consumed_arm_nonces` (the arm-nonce deny ledger). A row missing
+  from any of these is evidence of corruption or operator action, never
+  the sweep.
+- **Swept (windowed evidence only):** `rust_fee_shadow_outcomes`,
+  `rust_fee_trigger_events`, `rust_mempool_ma_comparison` (30-day
+  horizon) and `rust_runway_snapshots` (keep-last-90).
+  `rust_mempool_fee_history` is bounded at insert time and is not
+  double-managed.
+
+**VACUUM policy: the plugin NEVER runs `VACUUM` — there is no automatic
+compaction of any kind.** If an operator decides reclaiming disk is worth
+it, `VACUUM` may be run **only with the plugin stopped** (it rewrites the
+whole database file and takes locks the single-owner actor must never
+contend with), and only against the observer db, never the production db.
+
+**Backup policy:** a backup of the observer db (`revops-r-observer-db-path`)
+includes `rust_consumed_arm_nonces` by construction — it is a table in the
+same file. Any future selective-restore tooling MUST NOT exclude it: a
+restore that drops the nonce ledger silently re-permits every burned arm
+nonce (see §3.2's recovery procedure).
+
 ---
 
 ## 3. Manual handoff to live authority (NOT authorized by this plan)
@@ -142,14 +173,34 @@ It binds, and is checked against, the running process:
 Wrong node, wrong commit, wrong hash, too early, or expired: **denied, and the
 arm is not consumed** — every content check fails before the rename.
 
-### 3.2 Consumption is a rename, and it is one-way
+### 3.2 Consumption is a rename behind a durable nonce burn, and it is one-way
 
-A validated arm is consumed by `RENAME_NOREPLACE` into
-`<journal-dir>/cutover-consumed/<nonce>`. That directory **is** the replay
-ledger. It is pinned to `journal-dir`; if `journal-dir` cannot be resolved,
-startup hard-refuses rather than falling back to a relative path — a split
-ledger means one nonce is consumable twice. The consumed directory must be on
-the **same mount** as the arm, or the rename is not atomic.
+Consumption is dual-ledger and DB-first (Task 59): a validated arm's nonce
+is first burned durably into `rust_consumed_arm_nonces` in the observer db
+(a deny ledger — no read path ever grants authority from it), and only then
+is the file consumed by `RENAME_NOREPLACE` into
+`<journal-dir>/cutover-consumed/<nonce>`. Both ledgers deny replay
+independently: wiping the consumed directory OR replacing the observer db
+alone still refuses every burned nonce (the surviving ledger denies). The
+consumed directory is pinned to `journal-dir`; if `journal-dir` cannot be
+resolved, startup hard-refuses rather than falling back to a relative path —
+a split ledger means one nonce is consumable twice. The consumed directory
+must be on the **same mount** as the arm, or the rename is not atomic.
+
+**Residual trust boundary (F12) — what no local design closes:** a
+COORDINATED rollback (both ledgers restored from the same pre-consumption
+snapshot, or `revops-r-observer-db-path` AND the consumed-arm dir repointed
+together at fresh locations) is indistinguishable from a first boot.
+Mitigations, both mandatory:
+
+- The observer db path, production db path, and the consumed-arm dir (via
+  `revops-r-journal-dir`) are part of the candidate's recorded start-arg
+  identity — any repointing must show up as a start-arg diff at the next
+  check-in, never as silent config drift.
+- **Recovery procedure after ANY restore or repoint touching either
+  ledger:** treat every previously-minted nonce as burned; mint a fresh arm
+  (fresh nonce, fresh `not_before`/`expires_at`) after the restore; record
+  the event. Never re-present a pre-restore arm file.
 
 ### 3.3 Order of operations — the trap
 
@@ -161,9 +212,13 @@ Not "before setting `fee-broadcast=true`". Placing an arm for a node that has
 not seeded destroys that one-time arm on a startup that then refuses anyway,
 and you must mint a fresh one.
 
-The same shape applies to transient failures: the arm is consumed before
-`ClnFeeBroadcaster::new` runs, so a transient observer-DB error at startup
-**burns** the arm. This is fail-closed and the correct direction, but the
+Transient failures split two ways under the dual ledger (Task 59): a
+failed **nonce-ledger insert** refuses `consume_failed` with the arm file
+untouched — operator-retryable, nothing burned. But once the nonce IS
+burned (insert succeeded), any later failure — a crash before the rename,
+a mode-matrix denial, a transient error in `ClnFeeBroadcaster::new` —
+leaves that nonce dead: the next attempt denies `reused_nonce` and a fresh
+arm must be minted. This is fail-closed and the correct direction, but the
 operator must expect to mint again.
 
 ### 3.4 What live mode can and cannot do

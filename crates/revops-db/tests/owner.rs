@@ -793,3 +793,139 @@ fn observer_db_open_fails_loudly_when_wal_was_not_applied() {
         assert!(msg.contains("observer.db"), "{msg}");
     }
 }
+
+// -- Task 59 §3.1: two-phase admission/receipt for live-path writes --
+
+fn intent(request_id: &str) -> BroadcastAttemptIntent {
+    BroadcastAttemptIntent {
+        cycle_id: None,
+        channel_id: "1x1x0".into(),
+        request_id: request_id.into(),
+        method: "setchannel".into(),
+        params_json: "{}".into(),
+        submitted_at: 1_800_000_000,
+    }
+}
+
+/// §3.1.2 "not admitted": a full owner queue refuses admission
+/// IMMEDIATELY and typed -- provably nothing was enqueued, so the caller
+/// may report a clean non-write (`store_admission_refused`).
+#[tokio::test]
+async fn full_owner_queue_refuses_intent_admission_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    // Wedge the actor: a second connection holds a write transaction, so
+    // the FIRST queued command blocks on the busy timeout while the rest
+    // pile up in the bounded queue.
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker
+        .busy_timeout(std::time::Duration::from_secs(60))
+        .unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    // Fill the bounded queue (capacity 64) with fire-and-forget writes.
+    let mut pending = Vec::new();
+    for i in 0..70 {
+        let handle = handle.clone();
+        let mut row = sample();
+        row.timestamp += i;
+        pending.push(tokio::spawn(async move {
+            let _ = handle.insert_forward(row).await;
+        }));
+        tokio::task::yield_now().await;
+    }
+
+    // Wait until admission is actually refused (the queue is provably
+    // full) rather than sleeping a fixed time.
+    let mut refused = None;
+    for _ in 0..200 {
+        match handle.try_insert_broadcast_attempt(intent("full-queue")) {
+            Err(refusal) => {
+                refused = Some(refusal);
+                break;
+            }
+            Ok(_receipt) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    }
+    let refusal = refused.expect("a full bounded queue must refuse admission");
+    assert!(
+        matches!(refusal, revops_db::owner::StoreAdmissionRefused::QueueFull),
+        "{refusal:?}"
+    );
+
+    blocker.execute_batch("ROLLBACK").unwrap();
+    for task in pending {
+        let _ = task.await;
+    }
+}
+
+/// §3.1.2 "admitted, budget expired": once admitted, an expired receipt
+/// is OUTCOME UNKNOWN -- the command is queued and uncancellable and may
+/// still execute. It must never read as "no write happened".
+#[tokio::test]
+async fn admitted_receipt_expiry_is_outcome_unknown_and_may_still_land() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker
+        .busy_timeout(std::time::Duration::from_secs(60))
+        .unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let receipt = handle
+        .try_insert_broadcast_attempt(intent("expired-receipt"))
+        .expect("an idle queue admits");
+    let wait = receipt.within(std::time::Duration::from_millis(100)).await;
+    assert!(
+        matches!(wait, revops_db::owner::StoreReceiptWait::OutcomeUnknown),
+        "expiry after admission must be UNKNOWN, not a clean failure"
+    );
+
+    // Release the wedge: the queued, uncancellable command now executes,
+    // proving UNKNOWN was the only honest classification.
+    blocker.execute_batch("ROLLBACK").unwrap();
+    let mut landed = false;
+    for _ in 0..200 {
+        if handle.fee_broadcast_attempt_count().await.unwrap() == 1 {
+            landed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        landed,
+        "the admitted command must still land after the wedge lifts"
+    );
+}
+
+/// §3.1.2 "admitted, reply within budget": the receipt carries the
+/// actor's actual result both ways -- success and a clean actor-reported
+/// error (here: a duplicate request_id violating the UNIQUE constraint).
+#[tokio::test]
+async fn admitted_receipt_within_budget_carries_the_actual_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observer.db");
+    let handle = spawn_read_write(&path).await.unwrap();
+
+    let receipt = handle
+        .try_insert_broadcast_attempt(intent("carried"))
+        .expect("admits");
+    match receipt.within(std::time::Duration::from_secs(7)).await {
+        revops_db::owner::StoreReceiptWait::Replied(Ok(id)) => assert!(id > 0),
+        other => panic!("expected a replied success, got {other:?}"),
+    }
+
+    let receipt = handle
+        .try_insert_broadcast_attempt(intent("carried"))
+        .expect("admits");
+    match receipt.within(std::time::Duration::from_secs(7)).await {
+        revops_db::owner::StoreReceiptWait::Replied(Err(e)) => {
+            assert!(format!("{e:#}").to_lowercase().contains("unique"), "{e:#}")
+        }
+        other => panic!("a duplicate request_id is a CLEAN actor-reported error, got {other:?}"),
+    }
+}

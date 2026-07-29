@@ -12,6 +12,23 @@ use serde_json::json;
 
 const MAX_AGE: i64 = 30;
 
+/// Task 59 F3 fixture migration: readings are built through the ONLY
+/// constructor, `validate_status` -- fields are private, a literal is a
+/// compile error.
+fn reading(generation: u64, transitioned_at: i64, observed_at: i64) -> PythonAuthorityOff {
+    validate_status(
+        &json!({
+            "enabled": false,
+            "generation": generation,
+            "transitioned_at": transitioned_at,
+            "observed_at": observed_at,
+        }),
+        observed_at,
+        0,
+    )
+    .expect("fixture reading is valid by construction")
+}
+
 fn valid_response(now: i64) -> serde_json::Value {
     json!({
         "enabled": false,
@@ -30,14 +47,9 @@ fn valid_off_response_parses_into_python_authority_off() {
     let now = 2_000_000;
     let raw = valid_response(now);
     let status = validate_status(&raw, now, MAX_AGE).expect("valid off response must parse");
-    assert_eq!(
-        status,
-        PythonAuthorityOff {
-            generation: 3,
-            transitioned_at: now - 100,
-            observed_at: now - 1,
-        }
-    );
+    assert_eq!(status.generation(), 3);
+    assert_eq!(status.transitioned_at(), now - 100);
+    assert_eq!(status.observed_at(), now - 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,33 +213,15 @@ fn observation_from_the_future_is_denied() {
 
 #[test]
 fn matching_epoch_across_two_reads_is_stable() {
-    let first = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
-    let second = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        // observed_at may differ (a fresh read) -- only generation and
-        // transitioned_at must remain stable.
-        observed_at: 1_050,
-    };
+    let first = reading(5, 1_000, 1_001);
+    let second = reading(5, 1_000, 1_050);
     validate_stable_epoch(&first, &second).expect("identical epoch must be stable");
 }
 
 #[test]
 fn generation_change_between_reads_is_unstable_epoch() {
-    let first = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
-    let second = PythonAuthorityOff {
-        generation: 6,
-        transitioned_at: 1_000,
-        observed_at: 1_050,
-    };
+    let first = reading(5, 1_000, 1_001);
+    let second = reading(6, 1_000, 1_050);
     let err = validate_stable_epoch(&first, &second).unwrap_err();
     assert!(matches!(
         err,
@@ -237,16 +231,8 @@ fn generation_change_between_reads_is_unstable_epoch() {
 
 #[test]
 fn transitioned_at_change_between_reads_is_unstable_epoch() {
-    let first = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
-    let second = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_200,
-        observed_at: 1_250,
-    };
+    let first = reading(5, 1_000, 1_001);
+    let second = reading(5, 1_200, 1_250);
     let err = validate_stable_epoch(&first, &second).unwrap_err();
     assert!(matches!(
         err,
@@ -262,11 +248,7 @@ fn transitioned_at_change_between_reads_is_unstable_epoch() {
 /// though generation/transitioned_at trivially agree with themselves.
 #[test]
 fn same_reading_checked_against_itself_is_denied_as_non_advancing() {
-    let reading = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
+    let reading = reading(5, 1_000, 1_001);
     let err = validate_stable_epoch(&reading, &reading).unwrap_err();
     assert!(matches!(
         err,
@@ -279,16 +261,8 @@ fn same_reading_checked_against_itself_is_denied_as_non_advancing() {
 /// the check is on the VALUE, not on object identity.
 #[test]
 fn equal_observed_at_across_distinct_readings_is_denied_as_non_advancing() {
-    let first = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
-    let second = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
+    let first = reading(5, 1_000, 1_001);
+    let second = reading(5, 1_000, 1_001);
     let err = validate_stable_epoch(&first, &second).unwrap_err();
     assert!(matches!(
         err,
@@ -302,16 +276,8 @@ fn equal_observed_at_across_distinct_readings_is_denied_as_non_advancing() {
 /// earlier.
 #[test]
 fn second_observed_at_before_first_is_denied_as_non_advancing() {
-    let first = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_050,
-    };
-    let second = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
+    let first = reading(5, 1_000, 1_050);
+    let second = reading(5, 1_000, 1_001);
     let err = validate_stable_epoch(&first, &second).unwrap_err();
     assert!(matches!(
         err,
@@ -323,16 +289,8 @@ fn second_observed_at_before_first_is_denied_as_non_advancing() {
 /// the fix must not reject legitimate bracketing.
 #[test]
 fn strictly_advancing_observed_at_with_stable_epoch_is_still_accepted() {
-    let first = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_001,
-    };
-    let second = PythonAuthorityOff {
-        generation: 5,
-        transitioned_at: 1_000,
-        observed_at: 1_002,
-    };
+    let first = reading(5, 1_000, 1_001);
+    let second = reading(5, 1_000, 1_002);
     validate_stable_epoch(&first, &second)
         .expect("a strictly later second read with a stable epoch must be accepted");
 }

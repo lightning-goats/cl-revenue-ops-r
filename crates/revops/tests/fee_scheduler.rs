@@ -27,6 +27,7 @@ use revops::fee_scheduler::{
 };
 use revops::fee_state::STATE_JOURNAL_FILE_NAME;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
+use revops_db::retention::RetentionCursor;
 use revops_fees::cycle::{ChannelCycleState, ChannelFeeState, ChannelStateRow, FeeCfgSnapshot};
 use revops_fees::journal::JOURNAL_FILE_NAME;
 use revops_fees::market::FeePrior;
@@ -1366,6 +1367,14 @@ mod seedonce_restart {
         receipt: Arc<AtomicBool>,
     }
 
+    /// Task 59 slice 1: observe/inject the retention-sweep dispatch seam.
+    #[derive(Clone, Default)]
+    struct RetentionProbe {
+        fail: Arc<AtomicBool>,
+        fail_launch: Arc<AtomicBool>,
+        cursors: Arc<std::sync::Mutex<Vec<RetentionCursor>>>,
+    }
+
     struct TestStore {
         path: PathBuf,
         fail_commits: Arc<AtomicBool>,
@@ -1375,6 +1384,7 @@ mod seedonce_restart {
         /// hydration instead of degrading to "no evidence".
         fail_mempool: Arc<AtomicBool>,
         launch_failures: DispatchLaunchFailures,
+        retention: RetentionProbe,
     }
 
     impl TestStore {
@@ -1422,6 +1432,7 @@ mod seedonce_restart {
                 fail_commits,
                 fail_mempool: Arc::new(AtomicBool::new(false)),
                 launch_failures,
+                retention: RetentionProbe::default(),
             };
             store.conn(); // create + init schema
             store
@@ -1577,6 +1588,26 @@ mod seedonce_restart {
             on_done(RunwayStateStore::record_trigger_event(self, event));
             Ok(())
         }
+
+        fn dispatch_run_retention_sweep(
+            &self,
+            now: i64,
+            cursor: RetentionCursor,
+            on_done: revops::fee_state::StoreDispatchCallback<
+                revops_db::retention::RetentionReport,
+            >,
+        ) -> anyhow::Result<()> {
+            if self.retention.fail_launch.load(Ordering::SeqCst) {
+                anyhow::bail!("injected retention dispatch thread spawn failure");
+            }
+            self.retention.cursors.lock().unwrap().push(cursor);
+            if self.retention.fail.load(Ordering::SeqCst) {
+                on_done(Err(anyhow::anyhow!("injected retention sweep failure")));
+                return Ok(());
+            }
+            on_done(fee_runway::run_retention_sweep(&self.conn(), now, cursor));
+            Ok(())
+        }
     }
 
     /// F5 test plumbing: wire an owner's result-only sink to a local receiver
@@ -1648,6 +1679,7 @@ mod seedonce_restart {
         store_path: PathBuf,
         fail_commits: Arc<AtomicBool>,
         fail_mempool: Arc<AtomicBool>,
+        retention: RetentionProbe,
         cycles: i64,
     }
 
@@ -1691,11 +1723,13 @@ mod seedonce_restart {
         std::fs::create_dir_all(&fx.journal_dir).expect("journal dir");
         let fail_commits = Arc::new(AtomicBool::new(false));
         let fail_mempool = Arc::new(AtomicBool::new(false));
-        let store = TestStore::open_with_mempool_failure(
+        let mut store = TestStore::open_with_mempool_failure(
             &store_path,
             Arc::clone(&fail_commits),
             Arc::clone(&fail_mempool),
         );
+        let retention = RetentionProbe::default();
+        store.retention = retention.clone();
         let owner = owner_with_store(&fx, Some(Box::new(store)));
         SeedOnceHarness {
             fx,
@@ -1703,6 +1737,7 @@ mod seedonce_restart {
             store_path,
             fail_commits,
             fail_mempool,
+            retention,
             cycles: 0,
         }
     }
@@ -2632,6 +2667,112 @@ mod seedonce_restart {
             3,
             "the restarted cycle commits the next generation"
         );
+    }
+
+    /// Task 59 slice 1: a successful scheduled SeedOnce commit schedules
+    /// exactly ONE bounded retention sweep off the cycle owner, at most
+    /// one sweep is ever in flight, and the report's cursor is returned
+    /// to the owner for the NEXT sweep's fair continuation.
+    #[test]
+    fn scheduled_commit_schedules_retention_sweep_and_cursor_continues() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+        // One Class-W row old enough to be swept, so the first sweep's
+        // cursor genuinely advances past its table.
+        h.store_conn()
+            .execute(
+                "INSERT INTO rust_fee_trigger_events
+                     (trigger_type, received_at, coalesced, detail)
+                 VALUES ('test', 1000, 0, 'old row')",
+                [],
+            )
+            .expect("insert old trigger event");
+
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        assert_eq!(
+            h.retention.cursors.lock().unwrap().len(),
+            1,
+            "exactly one sweep per committed cycle"
+        );
+
+        // The report has not been pumped back to the owner yet: another
+        // committed cycle must NOT overlap a second sweep on a stale
+        // cursor.
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        assert_eq!(
+            h.retention.cursors.lock().unwrap().len(),
+            1,
+            "no overlapping sweep while one is in flight"
+        );
+
+        pump_store_results(&mut h.owner, &rx);
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        let cursors = h.retention.cursors.lock().unwrap().clone();
+        assert_eq!(cursors.len(), 2);
+        assert_eq!(cursors[0], RetentionCursor::default());
+        assert_ne!(
+            cursors[1], cursors[0],
+            "the second sweep must continue from the first report's cursor"
+        );
+        let old_rows: i64 = h
+            .store_conn()
+            .query_row(
+                "SELECT COUNT(*) FROM rust_fee_trigger_events WHERE received_at = 1000",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_rows, 0, "the old Class-W row was swept");
+        assert_eq!(h.owner.retention_failures(), 0);
+    }
+
+    /// Task 59 slice 1: retention failures are loud, counted on a
+    /// NEVER-reset red counter exposed in fee debug, and never fail or
+    /// block the successful fee cycle that scheduled them.
+    #[test]
+    fn retention_failure_never_fails_the_cycle_and_counter_never_resets() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+        h.retention.fail.store(true, Ordering::SeqCst);
+        let outcome = h.run_cycle();
+        assert!(
+            matches!(outcome, CycleOutcome::Ran { .. }),
+            "retention failure must never fail the cycle: {outcome:?}"
+        );
+        pump_store_results(&mut h.owner, &rx);
+        assert_eq!(h.owner.retention_failures(), 1);
+
+        h.retention.fail.store(false, Ordering::SeqCst);
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        pump_store_results(&mut h.owner, &rx);
+        assert_eq!(
+            h.owner.retention_failures(),
+            1,
+            "a later success never resets the counter"
+        );
+        let debug = h.owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert_eq!(debug["retention"]["failures"], 1);
+
+        // A dispatch launch failure is equally counted, equally harmless.
+        h.retention.fail_launch.store(true, Ordering::SeqCst);
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        assert_eq!(
+            h.owner.retention_failures(),
+            2,
+            "a launch failure is counted inline, without a store round-trip"
+        );
+    }
+
+    /// Task 59 slice 1: a FAILED scheduled commit schedules no sweep --
+    /// retention rides only successful scheduled cycle commits.
+    #[test]
+    fn failed_commit_schedules_no_retention_sweep() {
+        let mut h = seedonce_harness_with_one_channel();
+        let _rx = self_channel(&mut h.owner);
+        h.fail_commits.store(true, Ordering::SeqCst);
+        assert_eq!(h.run_cycle(), CycleOutcome::PersistenceFailed);
+        assert!(h.retention.cursors.lock().unwrap().is_empty());
+        assert_eq!(h.owner.retention_failures(), 0);
     }
 
     #[test]
@@ -4799,6 +4940,18 @@ mod seedonce_restart {
         ) -> anyhow::Result<()> {
             self.inner.dispatch_record_trigger_event(event, on_done)
         }
+
+        fn dispatch_run_retention_sweep(
+            &self,
+            now: i64,
+            cursor: RetentionCursor,
+            on_done: revops::fee_state::StoreDispatchCallback<
+                revops_db::retention::RetentionReport,
+            >,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .dispatch_run_retention_sweep(now, cursor, on_done)
+        }
     }
 
     /// F7 fixture bundle: python DB seeded with CHANNEL (`700x1x0`), a
@@ -4951,6 +5104,81 @@ mod seedonce_restart {
             owner.state().cycle_states[CHANNEL],
             memory_before,
             "the staged state was discarded fail-closed -- memory keeps the pre-A3 epoch"
+        );
+    }
+
+    /// T4 (Task 59 §3.6): a parked A3 occurrence's age is visible in
+    /// fee-debug, crosses the warn threshold without any cancellation,
+    /// and the surface clears when the occurrence settles.
+    #[test]
+    fn a3_pending_age_visible_after_threshold() {
+        let ParkedSeedOnce {
+            _fx,
+            mut owner,
+            rx,
+            store_path,
+            parked,
+        } = parked_seedonce_after_first_cycle();
+        pump_store_results(&mut owner, &rx);
+
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert!(
+            debug["initial_fee"]["oldest_pending_age_seconds"].is_null(),
+            "no pending occurrence, no age surface: {debug:?}"
+        );
+
+        let prior = FeePrior {
+            mean: 300,
+            std: 40,
+            source: "network".to_string(),
+        };
+        let evt = new_channel_prepared(
+            CHANNEL,
+            &peer_a(),
+            123,
+            FeeStrategy::Dynamic,
+            None,
+            Some(prior),
+            NOW + 10,
+        );
+        owner.handle_new_channel(evt);
+        pump_store_results(&mut owner, &rx); // idempotency -> decide -> commit PARKED
+        assert_eq!(owner.initial_fee_pending(), 1, "commit parked in flight");
+
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        let age = debug["initial_fee"]["oldest_pending_age_seconds"]
+            .as_i64()
+            .expect("a parked occurrence must surface its pending age");
+        assert!(
+            (0..=120).contains(&age),
+            "fresh occurrence, small age: {age}"
+        );
+
+        // Cross the warn threshold (no cancellation may exist -- only
+        // visibility): backdate the pending stamp past the constant.
+        owner.backdate_pending_initial_fees_for_tests(
+            revops::fee_scheduler::A3_PENDING_AGE_WARN_SECONDS + 30,
+        );
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        let age = debug["initial_fee"]["oldest_pending_age_seconds"]
+            .as_i64()
+            .expect("age surface must persist across the threshold");
+        assert!(
+            age > revops::fee_scheduler::A3_PENDING_AGE_WARN_SECONDS,
+            "backdated age must read past the warn threshold: {age}"
+        );
+        assert_eq!(
+            owner.initial_fee_pending(),
+            1,
+            "threshold crossing is visibility only -- NEVER a cancellation"
+        );
+
+        release_parked(&store_path, &parked);
+        pump_store_results(&mut owner, &rx);
+        let debug = owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert!(
+            debug["initial_fee"]["oldest_pending_age_seconds"].is_null(),
+            "settled occurrence clears the age surface: {debug:?}"
         );
     }
 
@@ -5865,6 +6093,18 @@ mod seedonce_restart {
             &self,
             _event: fee_runway::FeeTriggerEventRow,
             on_done: revops::fee_state::StoreDispatchCallback<()>,
+        ) -> anyhow::Result<()> {
+            drop(on_done);
+            Ok(())
+        }
+
+        fn dispatch_run_retention_sweep(
+            &self,
+            _now: i64,
+            _cursor: RetentionCursor,
+            on_done: revops::fee_state::StoreDispatchCallback<
+                revops_db::retention::RetentionReport,
+            >,
         ) -> anyhow::Result<()> {
             drop(on_done);
             Ok(())

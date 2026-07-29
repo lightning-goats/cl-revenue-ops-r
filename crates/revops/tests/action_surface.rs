@@ -382,3 +382,60 @@ fn scan_finds_a_realistic_number_of_source_files() {
         "scan must include the one guarded call site's own file"
     );
 }
+
+/// Task 59 A5b (R2-F3): the one-resolution guard's structural pins.
+/// Production text has exactly ONE token-gated `resolve_startup_mode`
+/// call site; the private kernel is referenced nowhere outside main.rs
+/// (definition + the wrapper's single delegation); and the token has no
+/// constructor, factory, or reset seam beyond the single mint inside
+/// `take()`.
+#[test]
+fn startup_resolution_guard_has_no_bypass_or_reset_seam() {
+    let root = workspace_root();
+    let main_path = root.join("crates/revops/src/main.rs");
+    let main_src = std::fs::read_to_string(&main_path).expect("read main.rs");
+
+    // Production text only: everything before main.rs's own test module.
+    let production = main_src
+        .split("#[cfg(test)]")
+        .next()
+        .expect("main.rs is non-empty");
+
+    assert_eq!(
+        production.matches("resolve_startup_mode(").count(),
+        2,
+        "exactly the wrapper's definition plus ONE production call site may name \
+         resolve_startup_mode("
+    );
+    assert_eq!(
+        production.matches("StartupResolutionToken::take()").count(),
+        1,
+        "exactly one production take() call site"
+    );
+    assert_eq!(
+        production.matches("resolve_startup_mode_kernel").count(),
+        2,
+        "the private kernel is referenced only by its definition and the wrapper's \
+         single delegation"
+    );
+    assert_eq!(
+        main_src.matches("_private: ()").count(),
+        2,
+        "the token is minted in exactly one place (its field declaration plus the \
+         single Self construction inside take()) -- no factory, no reset, no \
+         cfg(test) constructor"
+    );
+
+    // Workspace-wide: no other non-test source may reach the kernel.
+    for path in non_test_rust_sources(&root) {
+        if path == main_path {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path).expect("read source");
+        assert!(
+            !contents.contains("resolve_startup_mode_kernel"),
+            "{} must not reference the private startup-mode kernel",
+            relative_to(&root, &path)
+        );
+    }
+}

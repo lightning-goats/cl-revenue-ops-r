@@ -13,6 +13,7 @@ use crate::fee_runway::{
     MempoolSampleRow, QuarantineEntry, QuarantineRow, RunwaySnapshotRow,
 };
 use crate::notifications::{self, ForwardRow};
+use crate::retention::{RetentionCursor, RetentionReport};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
@@ -114,6 +115,24 @@ enum Command {
         reply: oneshot::Sender<Result<i64>>,
     },
     LatestRunwaySnapshot(oneshot::Sender<Result<Option<RunwaySnapshotRow>>>),
+    // -- Task 59: bounded Class-W retention sweep. The connection stays on
+    // the owner thread; only the cursor/report messages cross it --
+    RunRetentionSweep {
+        now: i64,
+        cursor: RetentionCursor,
+        reply: oneshot::Sender<Result<RetentionReport>>,
+    },
+    // -- Task 59 §5.3: durable cutover-arm nonce deny-ledger insert.
+    // Async-only (F6): startup orchestration awaits it on the runtime;
+    // no blocking sibling exists to panic a current-thread runtime --
+    InsertConsumedArmNonce {
+        nonce: String,
+        consumed_at: i64,
+        source_commit: String,
+        binary_sha256: String,
+        arm_expires_at: i64,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     // -- Task 5: SeedOnce seed events + restart markers (Task 42: the
     // standalone write path records REFUSALS only; successful seed
     // provenance rides FeeCycleCommit::pending_seed through the atomic
@@ -189,6 +208,60 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     ListLoopHealth(oneshot::Sender<Result<Vec<crate::loop_health::LoopHealthRow>>>),
+}
+
+/// Task 59 §3.1: a typed admission refusal -- `try_send` returned
+/// Full/Closed, so the command was PROVABLY not enqueued and no side
+/// effect is possible. Callers may report a clean non-write
+/// (`store_admission_refused`).
+#[derive(Debug)]
+pub enum StoreAdmissionRefused {
+    /// The bounded owner queue is at capacity (the owner is busy
+    /// admitting real work -- retryable, never proof of a wedge).
+    QueueFull,
+    /// The owner task is gone; nothing can be enqueued at all.
+    ActorGone,
+}
+
+impl std::fmt::Display for StoreAdmissionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueFull => write!(f, "owner queue at capacity; nothing was enqueued"),
+            Self::ActorGone => write!(f, "owner actor gone; nothing was enqueued"),
+        }
+    }
+}
+
+/// Task 59 §3.1: an ADMITTED command's pending reply. The command is
+/// queued and uncancellable -- dropping this receipt does not stop it.
+#[derive(Debug)]
+pub struct StoreReceipt<T> {
+    rx: oneshot::Receiver<Result<T>>,
+}
+
+/// How an admitted command's bounded receipt wait resolved.
+#[derive(Debug)]
+pub enum StoreReceiptWait<T> {
+    /// The actor replied within budget: the ACTUAL result (a clean
+    /// actor-reported error included -- the transaction definitively
+    /// failed).
+    Replied(Result<T>),
+    /// Budget expired (or the reply was lost) AFTER admission: the
+    /// command may still execute. This must never be reported as "no
+    /// write happened" (`store_intent_outcome_unknown`).
+    OutcomeUnknown,
+}
+
+impl<T> StoreReceipt<T> {
+    /// Wait at most `budget` for the actor's reply. Expiry -- and a
+    /// dropped reply channel, which equally proves nothing about whether
+    /// the command ran -- classify as [`StoreReceiptWait::OutcomeUnknown`].
+    pub async fn within(self, budget: std::time::Duration) -> StoreReceiptWait<T> {
+        match tokio::time::timeout(budget, self.rx).await {
+            Ok(Ok(result)) => StoreReceiptWait::Replied(result),
+            Ok(Err(_)) | Err(_) => StoreReceiptWait::OutcomeUnknown,
+        }
+    }
 }
 
 /// Cheap, `Clone`-able handle to the observer-db owner task.
@@ -731,6 +804,87 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 59 §3.1: two-phase live-path intent write. Admission either
+    /// transfers the command or refuses it typed -- Tokio's `try_send`
+    /// leaves no third state, so a refusal proves nothing was enqueued.
+    /// The returned receipt's bounded wait classifies expiry as
+    /// OUTCOME UNKNOWN, never as a clean failure.
+    pub fn try_insert_broadcast_attempt(
+        &self,
+        intent: BroadcastAttemptIntent,
+    ) -> std::result::Result<StoreReceipt<i64>, StoreAdmissionRefused> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .try_send(Command::InsertBroadcastAttempt { intent, reply })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => StoreAdmissionRefused::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => StoreAdmissionRefused::ActorGone,
+            })?;
+        Ok(StoreReceipt { rx })
+    }
+
+    /// Run one bounded Class-W retention sweep on the owner thread
+    /// (`fee_runway::run_retention_sweep`). Only the periodic-sweep subset
+    /// of `retention::WINDOWED_TABLES` is ever touched; the caller keeps
+    /// the returned cursor for the next sweep's fairness continuation.
+    pub async fn run_retention_sweep(
+        &self,
+        now: i64,
+        cursor: RetentionCursor,
+    ) -> Result<RetentionReport> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RunRetentionSweep { now, cursor, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 59 §5.3: burn one cutover-arm nonce in the durable deny
+    /// ledger, DB-first (before any filesystem consumption). Returns
+    /// `Ok(true)` on insert, `Ok(false)` when the nonce was already
+    /// burned (the caller's `ReusedNonce`), `Err` for every other insert
+    /// failure (`ConsumeFailed` -- the arm file stays untouched).
+    /// Deliberately async-only (F6): no blocking sibling may exist for
+    /// this path, so it can never panic a current-thread runtime.
+    pub async fn insert_consumed_arm_nonce(
+        &self,
+        nonce: String,
+        consumed_at: i64,
+        source_commit: String,
+        binary_sha256: String,
+        arm_expires_at: i64,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertConsumedArmNonce {
+                nonce,
+                consumed_at,
+                source_commit,
+                binary_sha256,
+                arm_expires_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling of [`ObserverHandle::run_retention_sweep`] for the
+    /// scheduler's `std::thread`.
+    pub fn blocking_run_retention_sweep(
+        &self,
+        now: i64,
+        cursor: RetentionCursor,
+    ) -> Result<RetentionReport> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::RunRetentionSweep { now, cursor, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
     /// Record one STANDALONE SeedOnce seed REFUSAL (Task 42: success
     /// provenance has no standalone path -- see
     /// [`fee_runway::record_seed_refusal`]).
@@ -1226,6 +1380,28 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::LatestRunwaySnapshot(reply) => {
                     let result = fee_runway::latest_runway_snapshot(&conn);
+                    let _ = reply.send(result);
+                }
+                Command::RunRetentionSweep { now, cursor, reply } => {
+                    let result = fee_runway::run_retention_sweep(&conn, now, cursor);
+                    let _ = reply.send(result);
+                }
+                Command::InsertConsumedArmNonce {
+                    nonce,
+                    consumed_at,
+                    source_commit,
+                    binary_sha256,
+                    arm_expires_at,
+                    reply,
+                } => {
+                    let result = fee_runway::insert_consumed_nonce(
+                        &conn,
+                        &nonce,
+                        consumed_at,
+                        &source_commit,
+                        &binary_sha256,
+                        arm_expires_at,
+                    );
                     let _ = reply.send(result);
                 }
                 Command::RecordSeedRefusal { event, reply } => {

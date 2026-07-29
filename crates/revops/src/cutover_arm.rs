@@ -324,14 +324,106 @@ pub fn hash_running_binary() -> std::io::Result<String> {
     Ok(hex)
 }
 
+/// Task 59 §5.3: everything through field validation, with NO filesystem
+/// mutation -- the pure first half of arm consumption. Its success value
+/// is the single-use capability [`consume_validated`] burns.
+///
+/// Production consumption is DB-first: `resolve_startup_mode` awaits the
+/// durable nonce-ledger insert BETWEEN this and [`consume_validated`], so
+/// a nonce is burned in the deny ledger before the filesystem ever
+/// changes.
+pub fn validate(
+    arm_path: &Path,
+    identity: &RunningIdentity,
+) -> Result<ValidatedArm, CutoverArmDenyReason> {
+    let arm = read_and_validate_fields(arm_path, identity)?;
+    Ok(ValidatedArm {
+        arm,
+        arm_path: arm_path.to_path_buf(),
+    })
+}
+
+/// Task 59 §5.3: a fully-validated, not-yet-consumed arm. Private fields,
+/// no `Clone`/`Serialize`, single use -- the only way to turn it into
+/// authority is [`consume_validated`], which destroys it. Forgery is a
+/// compile error:
+///
+/// ```compile_fail,E0451
+/// let forged = revops::cutover_arm::ValidatedArm {
+///     arm: unreachable!(),
+///     arm_path: std::path::PathBuf::new(),
+/// };
+/// ```
+#[derive(Debug)]
+pub struct ValidatedArm {
+    arm: CutoverArm,
+    arm_path: PathBuf,
+}
+
+impl ValidatedArm {
+    /// The arm's nonce -- what the durable deny ledger burns FIRST.
+    pub fn nonce(&self) -> &str {
+        &self.arm.nonce
+    }
+
+    /// The source commit the arm was bound to (ledger provenance).
+    pub fn source_commit(&self) -> &str {
+        &self.arm.source_commit
+    }
+
+    /// The binary hash the arm was bound to (ledger provenance).
+    pub fn binary_sha256(&self) -> &str {
+        &self.arm.binary_sha256
+    }
+
+    /// The arm's exclusive expiry (ledger provenance).
+    pub fn expires_at(&self) -> i64 {
+        self.arm.expires_at
+    }
+}
+
+/// Task 59 §5.3: the filesystem half -- atomic one-time consumption
+/// (RENAME_NOREPLACE + fsync) of an already-validated arm. Consumes the
+/// [`ValidatedArm`] by value: one validation, at most one consumption.
+pub fn consume_validated(
+    validated: ValidatedArm,
+    consumed_dir: &Path,
+) -> Result<LiveSessionArm, CutoverArmDenyReason> {
+    let ValidatedArm { arm, arm_path } = validated;
+    consume(&arm_path, consumed_dir, &arm)?;
+    let consumed_path = consumed_dir.join(&arm.nonce);
+    Ok(LiveSessionArm {
+        node_id: arm.node_id,
+        subsystem: arm.subsystem,
+        source_commit: arm.source_commit,
+        binary_sha256: arm.binary_sha256,
+        nonce: arm.nonce,
+        consumed_path,
+    })
+}
+
 /// Validate `arm_path` against `identity`, then atomically consume it into
 /// `consumed_dir`. See the module doc for the full contract; the check
 /// order below is the stable order callers and tests can rely on.
+///
+/// Task 59 §5.3: now the offline COMPOSITION of [`validate`] +
+/// [`consume_validated`], for tests and the rehearsal harness. Production
+/// consumption goes through `resolve_startup_mode`'s DB-first
+/// orchestration instead -- the action-surface scan pins that this
+/// composition has no production caller.
 pub fn validate_and_consume(
     arm_path: &Path,
     consumed_dir: &Path,
     identity: &RunningIdentity,
 ) -> Result<LiveSessionArm, CutoverArmDenyReason> {
+    let validated = validate(arm_path, identity)?;
+    consume_validated(validated, consumed_dir)
+}
+
+fn read_and_validate_fields(
+    arm_path: &Path,
+    identity: &RunningIdentity,
+) -> Result<CutoverArm, CutoverArmDenyReason> {
     // 1. Symlink / file-type check BEFORE opening anything (an `lstat`,
     //    never a `stat`): a directory, FIFO, socket, or device is refused
     //    here without ever being opened.
@@ -397,18 +489,7 @@ pub fn validate_and_consume(
     // 6. Validate every field against the running identity and clock.
     validate_fields(&arm, identity)?;
 
-    // 7. Atomic, one-time consumption.
-    consume(arm_path, consumed_dir, &arm)?;
-
-    let consumed_path = consumed_dir.join(&arm.nonce);
-    Ok(LiveSessionArm {
-        node_id: arm.node_id,
-        subsystem: arm.subsystem,
-        source_commit: arm.source_commit,
-        binary_sha256: arm.binary_sha256,
-        nonce: arm.nonce,
-        consumed_path,
-    })
+    Ok(arm)
 }
 
 fn validate_fields(
