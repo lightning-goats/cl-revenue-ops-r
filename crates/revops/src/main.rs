@@ -2886,11 +2886,29 @@ async fn main() -> Result<()> {
     let mut lnplus_cadence = None;
     let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
         None;
+    // Task 67: ONE boot identity per process, minted before any loop can
+    // record a pass. Loop health is judged against this id, so a prior
+    // boot's terminal evidence can never be inherited by this process.
+    let boot_identity = revops_db::loop_health::BootIdentity {
+        boot_id: format!("{}-{}", now_unix(), std::process::id()),
+        process_id: i64::from(std::process::id()),
+        source_commit: Some(revops::fee_scheduler::source_commit().to_string()),
+        binary_sha256: Some(revops::fee_scheduler::binary_sha256().to_string()),
+        started_at: now_unix(),
+    };
+    let boot_id = boot_identity.boot_id.clone();
+    if let Some(handle) = observer_db.clone() {
+        if let Err(error) = handle.record_boot_session(boot_identity.clone()).await {
+            eprintln!("revops: boot session record failed: {error:#}");
+        }
+    }
+
     let authority_runtime = match authority_plan {
         revops::fee_mode::AuthorityPlan::Live(broadcaster) => {
             if let Some(handle) = observer_db.clone() {
-                let store: Arc<dyn revops::loop_health::LoopHealthPersistence> =
-                    Arc::new(revops::loop_health::LoopHealthStore::new(handle));
+                let store: Arc<dyn revops::loop_health::LoopHealthPersistence> = Arc::new(
+                    revops::loop_health::LoopHealthStore::new(handle, boot_id.clone()),
+                );
                 if let Err(error) = revops::runtime::register_unwired_loops(store).await {
                     configured
                         .disable(&format!("loop-health registration failed: {error:#}"))
@@ -2914,9 +2932,11 @@ async fn main() -> Result<()> {
                     revops::runtime::ObserverRuntime::unavailable(observer_mode),
                 ),
                 Some(observer_handle) => {
-                    let store: Arc<dyn revops::loop_health::LoopHealthPersistence> = Arc::new(
-                        revops::loop_health::LoopHealthStore::new(observer_handle.clone()),
-                    );
+                    let store: Arc<dyn revops::loop_health::LoopHealthPersistence> =
+                        Arc::new(revops::loop_health::LoopHealthStore::new(
+                            observer_handle.clone(),
+                            boot_id.clone(),
+                        ));
                     let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
                     let mut lnplus_pass = None;

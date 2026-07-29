@@ -30,6 +30,11 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     // Task 62: capital (open/close/defib) money-path evidence.
     "rust_capital_intents",
     "rust_capital_reservations",
+    // Task 67: one row per process boot (id, pid, source commit, binary
+    // hash). This is the provenance loop health is judged against --
+    // pruning it would erase the evidence that says WHICH process
+    // produced a terminal.
+    "rust_boot_sessions",
     // Task 63: Boltz money-path evidence + durable operational state.
     // Attempts/reservations are the swap intent/terminal ledger and
     // budget holds; ignores are operator decisions; cooldowns must

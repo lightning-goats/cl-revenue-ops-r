@@ -18,6 +18,10 @@ pub struct ObserverRuntime {
     planner: Option<LoopHandle>,
     lnplus: Option<LoopHandle>,
     boltz: Option<LoopHandle>,
+    // Task 67: the three analytics/startup loops.
+    flow_analysis: Option<LoopHandle>,
+    startup_snapshot: Option<LoopHandle>,
+    financial_snapshot: Option<LoopHandle>,
 }
 
 /// Vetted observer passes accepted by production composition. Fields are
@@ -75,6 +79,9 @@ impl ObserverRuntime {
             planner: None,
             lnplus: None,
             boltz: None,
+            flow_analysis: None,
+            startup_snapshot: None,
+            financial_snapshot: None,
         }
     }
     pub async fn start(
@@ -123,6 +130,9 @@ impl ObserverRuntime {
             planner: take(LoopId::Planner),
             lnplus: take(LoopId::LnPlus),
             boltz: take(LoopId::Boltz),
+            flow_analysis: take(LoopId::FlowAnalysis),
+            startup_snapshot: take(LoopId::StartupSnapshot),
+            financial_snapshot: take(LoopId::FinancialSnapshot),
         })
     }
 
@@ -140,6 +150,9 @@ impl ObserverRuntime {
             LoopId::Planner => self.planner.clone(),
             LoopId::LnPlus => self.lnplus.clone(),
             LoopId::Boltz => self.boltz.clone(),
+            LoopId::FlowAnalysis => self.flow_analysis.clone(),
+            LoopId::StartupSnapshot => self.startup_snapshot.clone(),
+            LoopId::FinancialSnapshot => self.financial_snapshot.clone(),
         }
     }
 }

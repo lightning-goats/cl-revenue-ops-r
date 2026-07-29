@@ -253,20 +253,27 @@ enum Command {
     },
     BeginLoopPass {
         id: crate::loop_health::LoopId,
+        boot_id: String,
         now: i64,
         reply: oneshot::Sender<Result<u64>>,
     },
     FinishLoopPass {
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: String,
         now: i64,
         reply: oneshot::Sender<Result<()>>,
     },
     FailLoopPass {
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: String,
         now: i64,
         error: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    RecordBootSession {
+        identity: crate::loop_health::BootIdentity,
         reply: oneshot::Sender<Result<()>>,
     },
     IncrementLoopBackpressure {
@@ -1707,10 +1714,20 @@ impl ObserverHandle {
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
-    pub async fn begin_loop_pass(&self, id: crate::loop_health::LoopId, now: i64) -> Result<u64> {
+    pub async fn begin_loop_pass(
+        &self,
+        id: crate::loop_health::LoopId,
+        boot_id: &str,
+        now: i64,
+    ) -> Result<u64> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::BeginLoopPass { id, now, reply })
+            .send(Command::BeginLoopPass {
+                id,
+                boot_id: boot_id.to_string(),
+                now,
+                reply,
+            })
             .await
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
@@ -1719,6 +1736,7 @@ impl ObserverHandle {
         &self,
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: &str,
         now: i64,
     ) -> Result<()> {
         let (reply, rx) = oneshot::channel();
@@ -1726,6 +1744,7 @@ impl ObserverHandle {
             .send(Command::FinishLoopPass {
                 id,
                 generation,
+                boot_id: boot_id.to_string(),
                 now,
                 reply,
             })
@@ -1737,6 +1756,7 @@ impl ObserverHandle {
         &self,
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: &str,
         now: i64,
         error: String,
     ) -> Result<()> {
@@ -1745,6 +1765,7 @@ impl ObserverHandle {
             .send(Command::FailLoopPass {
                 id,
                 generation,
+                boot_id: boot_id.to_string(),
                 now,
                 error,
                 reply,
@@ -1753,6 +1774,19 @@ impl ObserverHandle {
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
+    /// Task 67: record this process's boot identity once at startup.
+    pub async fn record_boot_session(
+        &self,
+        identity: crate::loop_health::BootIdentity,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordBootSession { identity, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     pub async fn increment_loop_backpressure(
         &self,
         id: crate::loop_health::LoopId,
@@ -2210,29 +2244,41 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                         &conn, now,
                     ));
                 }
-                Command::BeginLoopPass { id, now, reply } => {
-                    let _ = reply.send(crate::loop_health::begin_loop_pass(&conn, id, now));
+                Command::BeginLoopPass {
+                    id,
+                    boot_id,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::begin_loop_pass(
+                        &conn, id, &boot_id, now,
+                    ));
                 }
                 Command::FinishLoopPass {
                     id,
                     generation,
+                    boot_id,
                     now,
                     reply,
                 } => {
                     let _ = reply.send(crate::loop_health::finish_loop_pass(
-                        &conn, id, generation, now,
+                        &conn, id, generation, &boot_id, now,
                     ));
                 }
                 Command::FailLoopPass {
                     id,
                     generation,
+                    boot_id,
                     now,
                     error,
                     reply,
                 } => {
                     let _ = reply.send(crate::loop_health::fail_loop_pass(
-                        &conn, id, generation, now, &error,
+                        &conn, id, generation, &boot_id, now, &error,
                     ));
+                }
+                Command::RecordBootSession { identity, reply } => {
+                    let _ = reply.send(crate::loop_health::record_boot_session(&conn, &identity));
                 }
                 Command::IncrementLoopBackpressure {
                     id,

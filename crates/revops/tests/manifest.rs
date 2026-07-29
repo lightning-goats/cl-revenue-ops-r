@@ -2112,11 +2112,13 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
         !gaps.contains(&"loops"),
         "durable loop inventory is wired: {gaps:?}"
     );
-    assert_eq!(result["loops"].as_array().unwrap().len(), 5);
-    assert_eq!(result["loops"][0]["loop_name"], "fee");
-    assert_eq!(result["loops"][0]["coalesced_total"], 10);
-    assert_eq!(result["loops"][4]["dropped_total"], 24);
-    assert_eq!(result["loops"][4]["wiring_status"], "not_wired");
+    // Task 67: the eight Python business/startup loops, live through the
+    // full plugin, in REQUIRED_LOOPS order.
+    assert_eq!(result["loops"].as_array().unwrap().len(), 8);
+    assert_eq!(result["loops"][0]["loop_name"], "flow-analysis");
+    assert_eq!(result["loops"][1]["loop_name"], "fee-adjustment");
+    assert_eq!(result["loops"][7]["loop_name"], "lnplus-watcher");
+    assert_eq!(result["loops"][7]["wiring_status"], "not_wired");
     // Task 50 correction round ("should NOT stay gaps"): boltz is no
     // longer a null+gap -- it's Python's own honest `{"enabled": false}`
     // answer with no Boltz manager wired.

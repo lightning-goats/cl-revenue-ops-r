@@ -352,10 +352,13 @@ mod tests {
                 })
                 .collect();
         let value = build_health_with_loops(200, None, None, None, Ok(&rows));
-        assert_eq!(value["loops"].as_array().unwrap().len(), 5);
-        assert_eq!(value["loops"][0]["loop_name"], "fee");
-        assert_eq!(value["loops"][1]["wiring_status"], "not_wired");
-        assert_eq!(value["loops"][4]["dropped_total"], 24);
+        // Task 67: eight loops, Python's label vocabulary, in
+        // REQUIRED_LOOPS order (flow-analysis first).
+        assert_eq!(value["loops"].as_array().unwrap().len(), 8);
+        assert_eq!(value["loops"][0]["loop_name"], "flow-analysis");
+        assert_eq!(value["loops"][1]["loop_name"], "fee-adjustment");
+        assert_eq!(value["loops"][0]["wiring_status"], "not_wired");
+        assert_eq!(value["loops"][7]["dropped_total"], 27);
         assert!(!value["_gaps"]
             .as_array()
             .unwrap()

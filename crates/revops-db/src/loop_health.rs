@@ -5,38 +5,53 @@ pub const MAX_ERROR_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum LoopId {
+    /// Task 67: the three previously-missing analytics/startup loops.
+    FlowAnalysis,
     Fee,
     Rebalance,
+    StartupSnapshot,
+    FinancialSnapshot,
+    Boltz,
     Planner,
     LnPlus,
-    Boltz,
 }
 
-pub const REQUIRED_LOOPS: [LoopId; 5] = [
+/// Python's exact eight business/startup loops, in its own thread-label
+/// order (cl-revenue-ops.py:3588-3600).
+pub const REQUIRED_LOOPS: [LoopId; 8] = [
+    LoopId::FlowAnalysis,
     LoopId::Fee,
     LoopId::Rebalance,
+    LoopId::StartupSnapshot,
+    LoopId::FinancialSnapshot,
+    LoopId::Boltz,
     LoopId::Planner,
     LoopId::LnPlus,
-    LoopId::Boltz,
 ];
 
 impl LoopId {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Fee => "fee",
-            Self::Rebalance => "rebalance",
-            Self::Planner => "planner",
-            Self::LnPlus => "lnplus",
-            Self::Boltz => "boltz",
+            Self::FlowAnalysis => "flow-analysis",
+            Self::Fee => "fee-adjustment",
+            Self::Rebalance => "rebalance-check",
+            Self::StartupSnapshot => "startup-snapshot",
+            Self::FinancialSnapshot => "financial-snapshot",
+            Self::Boltz => "boltz-auto-cycle",
+            Self::Planner => "capacity-planner",
+            Self::LnPlus => "lnplus-watcher",
         }
     }
     fn parse(raw: &str) -> Result<Self> {
         match raw {
-            "fee" => Ok(Self::Fee),
-            "rebalance" => Ok(Self::Rebalance),
-            "planner" => Ok(Self::Planner),
-            "lnplus" => Ok(Self::LnPlus),
-            "boltz" => Ok(Self::Boltz),
+            "flow-analysis" => Ok(Self::FlowAnalysis),
+            "fee-adjustment" => Ok(Self::Fee),
+            "rebalance-check" => Ok(Self::Rebalance),
+            "startup-snapshot" => Ok(Self::StartupSnapshot),
+            "financial-snapshot" => Ok(Self::FinancialSnapshot),
+            "boltz-auto-cycle" => Ok(Self::Boltz),
+            "capacity-planner" => Ok(Self::Planner),
+            "lnplus-watcher" => Ok(Self::LnPlus),
             other => bail!("unknown loop identity {other:?}"),
         }
     }
@@ -126,6 +141,10 @@ pub struct LoopHealthRow {
     pub coalesced_total: u64,
     pub dropped_total: u64,
     pub updated_at: i64,
+    /// The process that most recently BEGAN a pass.
+    pub boot_id: Option<String>,
+    /// The process that recorded the terminal.
+    pub terminal_boot_id: Option<String>,
 }
 
 impl LoopHealthRow {
@@ -146,11 +165,13 @@ impl LoopHealthRow {
             coalesced_total: 0,
             dropped_total: 0,
             updated_at,
+            boot_id: None,
+            terminal_boot_id: None,
         }
     }
 }
 
-const CANONICAL_COLUMNS: [&str; 15] = [
+const CANONICAL_COLUMNS: [&str; 17] = [
     "loop_name",
     "wiring_status",
     "generation",
@@ -166,6 +187,11 @@ const CANONICAL_COLUMNS: [&str; 15] = [
     "coalesced_total",
     "dropped_total",
     "updated_at",
+    // Task 67: boot binding. `boot_id` is the process that most recently
+    // BEGAN a pass; `terminal_boot_id` the process that recorded the
+    // terminal. Health is judged against the CURRENT boot only.
+    "boot_id",
+    "terminal_boot_id",
 ];
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
@@ -185,7 +211,16 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         last_error TEXT,
         coalesced_total INTEGER NOT NULL DEFAULT 0 CHECK (coalesced_total >= 0),
         dropped_total INTEGER NOT NULL DEFAULT 0 CHECK (dropped_total >= 0),
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        boot_id TEXT,
+        terminal_boot_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS rust_boot_sessions (
+        boot_id TEXT PRIMARY KEY,
+        process_id INTEGER NOT NULL,
+        source_commit TEXT,
+        binary_sha256 TEXT,
+        started_at INTEGER NOT NULL
     );",
     )
     .context("init rust_loop_health schema")?;
@@ -215,7 +250,7 @@ pub fn register_loop(conn: &Connection, id: LoopId, wiring: WiringStatus, now: i
     Ok(())
 }
 
-pub fn begin_loop_pass(conn: &Connection, id: LoopId, now: i64) -> Result<u64> {
+pub fn begin_loop_pass(conn: &Connection, id: LoopId, boot_id: &str, now: i64) -> Result<u64> {
     let tx = conn.unchecked_transaction()?;
     let state: Option<(String, String)> = tx
         .query_row(
@@ -236,8 +271,8 @@ pub fn begin_loop_pass(conn: &Connection, id: LoopId, now: i64) -> Result<u64> {
         None => bail!("loop {} is unregistered", id.as_str()),
     }
     tx.execute(
-        "UPDATE rust_loop_health SET generation=generation+1,last_started_at=?2,updated_at=?2 WHERE loop_name=?1",
-        params![id.as_str(), now],
+        "UPDATE rust_loop_health SET generation=generation+1,last_started_at=?2,updated_at=?2,boot_id=?3 WHERE loop_name=?1",
+        params![id.as_str(), now, boot_id],
     )?;
     let generation: i64 = tx.query_row(
         "SELECT generation FROM rust_loop_health WHERE loop_name=?1",
@@ -248,36 +283,51 @@ pub fn begin_loop_pass(conn: &Connection, id: LoopId, now: i64) -> Result<u64> {
     u64::try_from(generation).context("negative loop generation")
 }
 
-pub fn finish_loop_pass(conn: &Connection, id: LoopId, generation: u64, at: i64) -> Result<()> {
-    terminal_update(conn, id, generation, at, None)
+pub fn finish_loop_pass(
+    conn: &Connection,
+    id: LoopId,
+    generation: u64,
+    boot_id: &str,
+    at: i64,
+) -> Result<()> {
+    terminal_update(conn, id, generation, boot_id, at, None)
 }
 
 pub fn fail_loop_pass(
     conn: &Connection,
     id: LoopId,
     generation: u64,
+    boot_id: &str,
     at: i64,
     error: &str,
 ) -> Result<()> {
-    terminal_update(conn, id, generation, at, Some(&bounded_error(error)))
+    terminal_update(
+        conn,
+        id,
+        generation,
+        boot_id,
+        at,
+        Some(&bounded_error(error)),
+    )
 }
 
 fn terminal_update(
     conn: &Connection,
     id: LoopId,
     generation: u64,
+    boot_id: &str,
     at: i64,
     error: Option<&str>,
 ) -> Result<()> {
     let generation = i64::try_from(generation)?;
     let changed = match error {
         None => conn.execute(
-            "UPDATE rust_loop_health SET last_passed_at=?3,terminal_generation=?2,terminal_status='passed',updated_at=?3 WHERE loop_name=?1 AND generation=?2 AND terminal_generation < ?2",
-            params![id.as_str(), generation, at],
+            "UPDATE rust_loop_health SET last_passed_at=?3,terminal_generation=?2,terminal_status='passed',updated_at=?3,terminal_boot_id=?4 WHERE loop_name=?1 AND generation=?2 AND terminal_generation < ?2",
+            params![id.as_str(), generation, at, boot_id],
         )?,
         Some(error) => conn.execute(
-            "UPDATE rust_loop_health SET last_error_at=?3,last_error=?4,terminal_generation=?2,terminal_status='error',updated_at=?3 WHERE loop_name=?1 AND generation=?2 AND terminal_generation < ?2",
-            params![id.as_str(), generation, at, error],
+            "UPDATE rust_loop_health SET last_error_at=?3,last_error=?4,terminal_generation=?2,terminal_status='error',updated_at=?3,terminal_boot_id=?5 WHERE loop_name=?1 AND generation=?2 AND terminal_generation < ?2",
+            params![id.as_str(), generation, at, error, boot_id],
         )?,
     };
     if changed != 1 {
@@ -326,7 +376,7 @@ pub fn reconcile_incomplete_on_restart(conn: &Connection, now: i64) -> Result<us
 
 pub fn list_loop_health(conn: &Connection) -> Result<Vec<LoopHealthRow>> {
     let mut stmt = conn.prepare(
-        "SELECT loop_name,wiring_status,generation,terminal_generation,terminal_status,runtime_status,last_suspended_at,last_suspension_reason,last_started_at,last_passed_at,last_error_at,last_error,coalesced_total,dropped_total,updated_at FROM rust_loop_health ORDER BY CASE loop_name WHEN 'fee' THEN 0 WHEN 'rebalance' THEN 1 WHEN 'planner' THEN 2 WHEN 'lnplus' THEN 3 WHEN 'boltz' THEN 4 ELSE 99 END",
+        "SELECT loop_name,wiring_status,generation,terminal_generation,terminal_status,runtime_status,last_suspended_at,last_suspension_reason,last_started_at,last_passed_at,last_error_at,last_error,coalesced_total,dropped_total,updated_at,boot_id,terminal_boot_id FROM rust_loop_health ORDER BY CASE loop_name WHEN 'flow-analysis' THEN 0 WHEN 'fee-adjustment' THEN 1 WHEN 'rebalance-check' THEN 2 WHEN 'startup-snapshot' THEN 3 WHEN 'financial-snapshot' THEN 4 WHEN 'boltz-auto-cycle' THEN 5 WHEN 'capacity-planner' THEN 6 WHEN 'lnplus-watcher' THEN 7 ELSE 99 END",
     )?;
     let rows = stmt
         .query_map([], |row| {
@@ -346,6 +396,8 @@ pub fn list_loop_health(conn: &Connection) -> Result<Vec<LoopHealthRow>> {
                 row.get::<_, i64>(12)?,
                 row.get::<_, i64>(13)?,
                 row.get(14)?,
+                row.get(15)?,
+                row.get(16)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -367,6 +419,8 @@ pub fn list_loop_health(conn: &Connection) -> Result<Vec<LoopHealthRow>> {
                 coalesced,
                 dropped,
                 updated_at,
+                boot_id,
+                terminal_boot_id,
             )| {
                 Ok(LoopHealthRow {
                     loop_id: LoopId::parse(&id)?,
@@ -384,6 +438,8 @@ pub fn list_loop_health(conn: &Connection) -> Result<Vec<LoopHealthRow>> {
                     coalesced_total: u64::try_from(coalesced)?,
                     dropped_total: u64::try_from(dropped)?,
                     updated_at,
+                    boot_id,
+                    terminal_boot_id,
                 })
             },
         )
@@ -399,4 +455,131 @@ fn bounded_error(error: &str) -> String {
         end -= 1;
     }
     error[..end].to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Task 67: current-boot health binding
+// ---------------------------------------------------------------------------
+
+/// One loop's verdict FOR A GIVEN BOOT. The durable row is history; this
+/// is the only thing a health surface may report as a current state.
+///
+/// `NeverRunThisBoot` is deliberately distinct from both `Passed` and
+/// `Error`: a fresh process that has produced no evidence is not healthy
+/// and is not broken -- it has not run. Collapsing it into either
+/// direction is exactly the defect this type exists to prevent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootStatus {
+    NotWired,
+    Suspended,
+    /// This boot began a pass that has not reached a terminal.
+    Incomplete,
+    Passed,
+    Error,
+    /// This process has produced no terminal for this loop. Any prior
+    /// boot's terminal is history, never inherited.
+    NeverRunThisBoot,
+}
+
+impl BootStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotWired => "not_wired",
+            Self::Suspended => "suspended",
+            Self::Incomplete => "incomplete",
+            Self::Passed => "passed",
+            Self::Error => "error",
+            Self::NeverRunThisBoot => "never_run_this_boot",
+        }
+    }
+}
+
+/// Judge one durable row against the CURRENT boot.
+pub fn current_boot_status(row: &LoopHealthRow, boot_id: &str) -> BootStatus {
+    if row.wiring_status != WiringStatus::Ready {
+        return BootStatus::NotWired;
+    }
+    if row.runtime_status == RuntimeStatus::Suspended {
+        return BootStatus::Suspended;
+    }
+    // An in-flight generation counts only if THIS boot started it.
+    if row.generation > row.terminal_generation {
+        return if row.boot_id.as_deref() == Some(boot_id) {
+            BootStatus::Incomplete
+        } else {
+            BootStatus::NeverRunThisBoot
+        };
+    }
+    // A terminal counts only if THIS boot recorded it.
+    if row.terminal_boot_id.as_deref() != Some(boot_id) {
+        return BootStatus::NeverRunThisBoot;
+    }
+    match row.terminal_status {
+        TerminalStatus::Passed => BootStatus::Passed,
+        TerminalStatus::Error => BootStatus::Error,
+        TerminalStatus::None => BootStatus::NeverRunThisBoot,
+    }
+}
+
+/// Load one loop's durable row.
+pub fn load_loop(conn: &Connection, id: LoopId) -> Result<Option<LoopHealthRow>> {
+    Ok(list_loop_health(conn)?
+        .into_iter()
+        .find(|row| row.loop_id == id))
+}
+
+/// One process's identity. Minted once at startup and shared by every
+/// loop (and, at cutover, by the fee restart markers) so the two cannot
+/// drift apart.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootIdentity {
+    pub boot_id: String,
+    pub process_id: i64,
+    pub source_commit: Option<String>,
+    pub binary_sha256: Option<String>,
+    pub started_at: i64,
+}
+
+/// Record this boot's session. Idempotent: re-recording the same boot id
+/// is not a second session.
+pub fn record_boot_session(conn: &Connection, identity: &BootIdentity) -> Result<()> {
+    conn.execute(
+        "INSERT INTO rust_boot_sessions
+             (boot_id, process_id, source_commit, binary_sha256, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(boot_id) DO NOTHING",
+        params![
+            identity.boot_id,
+            identity.process_id,
+            identity.source_commit,
+            identity.binary_sha256,
+            identity.started_at
+        ],
+    )
+    .context("record boot session")?;
+    Ok(())
+}
+
+/// The most recent boot sessions, newest first.
+pub fn recent_boot_sessions(conn: &Connection, limit: i64) -> Result<Vec<BootIdentity>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT boot_id, process_id, source_commit, binary_sha256, started_at
+             FROM rust_boot_sessions ORDER BY started_at DESC, boot_id DESC LIMIT ?1",
+        )
+        .context("prepare boot sessions")?;
+    let rows = stmt
+        .query_map([limit], |row| {
+            Ok(BootIdentity {
+                boot_id: row.get(0)?,
+                process_id: row.get(1)?,
+                source_commit: row.get(2)?,
+                binary_sha256: row.get(3)?,
+                started_at: row.get(4)?,
+            })
+        })
+        .context("query boot sessions")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read boot sessions")?;
+    Ok(rows)
 }
