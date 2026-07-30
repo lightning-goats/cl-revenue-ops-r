@@ -30,6 +30,7 @@ pub mod lnplus_runtime;
 pub mod loop_health;
 pub mod notify;
 pub mod options_table;
+pub mod profitability_assembler;
 pub mod python_authority;
 pub mod rebalance_adapters;
 pub mod rebalance_execution;
