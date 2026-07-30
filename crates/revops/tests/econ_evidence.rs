@@ -165,6 +165,80 @@ fn malformed_listfunds_payloads_refuse() {
     }
 }
 
+/// Review finding F71-R6: presence is not validity. `parse_msat` is
+/// deliberately permissive -- it returns 0 for null, bools, arrays,
+/// objects and unparseable strings -- so a presence-only check followed by
+/// canonical parsing still fabricates a zero at this money boundary.
+/// Required amount fields must be VALID CLN msat representations.
+#[test]
+fn present_but_invalid_amounts_refuse() {
+    let invalid = [
+        json!("garbage"),
+        json!({}),
+        json!([]),
+        json!(null),
+        json!(true),
+        json!("12x34"),
+        json!("msat"),
+    ];
+    for bad in invalid {
+        let funds = json!({
+            "outputs": [{"status": "confirmed", "amount_msat": bad.clone()}],
+            "channels": []
+        });
+        let err = total_liquidating_value(TlvSources {
+            listfunds: Ok(funds),
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), "econ_listfunds_malformed", "{bad:?}");
+
+        let funds = json!({
+            "outputs": [],
+            "channels": [{"state": "CHANNELD_NORMAL",
+                          "our_amount_msat": bad.clone(), "amount_msat": 1_000i64}]
+        });
+        let err = total_liquidating_value(TlvSources {
+            listfunds: Ok(funds),
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), "econ_listfunds_malformed", "{bad:?}");
+    }
+}
+
+/// A VALID zero is still a measured zero. The refusal above must key on
+/// the value being unusable, not on it being zero -- an empty channel and
+/// a corrupt one are different facts.
+#[test]
+fn a_valid_zero_amount_is_accepted() {
+    for good in [json!(0), json!("0"), json!("0msat")] {
+        let funds = json!({
+            "outputs": [{"status": "confirmed", "amount_msat": good.clone()}],
+            "channels": [{"state": "CHANNELD_NORMAL",
+                          "our_amount_msat": good.clone(), "amount_msat": good.clone()}]
+        });
+        let tlv = total_liquidating_value(TlvSources {
+            listfunds: Ok(funds),
+        })
+        .unwrap_or_else(|e| panic!("valid zero {good:?} must be accepted, got {e:?}"));
+        assert_eq!(tlv.tlv_sats, 0);
+        assert_eq!(tlv.channel_count, 1, "the channel is real, just empty");
+    }
+}
+
+/// The canonical string form with the msat suffix parses to a real value.
+#[test]
+fn suffixed_string_amounts_parse() {
+    let funds = json!({
+        "outputs": [{"status": "confirmed", "amount_msat": "5000msat"}],
+        "channels": []
+    });
+    let tlv = total_liquidating_value(TlvSources {
+        listfunds: Ok(funds),
+    })
+    .expect("valid suffixed string");
+    assert_eq!(tlv.onchain_sats, 5);
+}
+
 /// An UNCONFIRMED output with a malformed amount is not an error -- it is
 /// excluded before its amount is ever read, so it cannot poison the total.
 /// Only the fields actually depended on are required.

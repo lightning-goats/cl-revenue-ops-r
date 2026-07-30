@@ -17,6 +17,38 @@ use revops_db::queries::PnlSummary;
 use revops_econ::pyfloat::py_round;
 use serde_json::Value;
 
+/// Review finding F71-R6: presence is not validity.
+///
+/// `revops_core::msat::parse_msat` is deliberately permissive -- it returns
+/// 0 for null, bools, arrays, objects and unparseable strings, which is the
+/// right global contract for a tolerant reader. At THIS boundary that
+/// permissiveness fabricates money evidence: `amount_msat: "garbage"` would
+/// become a confident zero. So required amounts are shape-validated first
+/// and only then handed to the canonical parser; `parse_msat` itself is
+/// unchanged and remains the sole accepted-format authority.
+///
+/// Accepted, matching what CLN actually emits: a JSON integer, or a string
+/// of optional sign + digits with an optional `msat` suffix. A VALID zero
+/// stays a measured zero -- an empty channel and a corrupt one are
+/// different facts.
+fn validated_msat(v: &Value, what: &str) -> Result<i64, EconRefusal> {
+    let ok = match v {
+        Value::Number(n) => n.is_i64() || n.is_u64(),
+        Value::String(s) => {
+            let body = s.trim().strip_suffix("msat").unwrap_or(s.trim());
+            let digits = body.strip_prefix('-').unwrap_or(body);
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    };
+    if !ok {
+        return Err(EconRefusal::MalformedListfunds(format!(
+            "listfunds {what} is not a valid msat value: {v}"
+        )));
+    }
+    Ok(parse_msat(v))
+}
+
 /// Balances round DOWN (`base_to_sats_floor`), from `revops-core`, whose
 /// rounding is fixture-verified against the real Python functions. Guarded
 /// for negatives because a malformed remote share can compute below zero
@@ -153,7 +185,7 @@ pub fn total_liquidating_value(sources: TlvSources) -> Result<TlvSummary, EconRe
         let amount = output
             .get("amount_msat")
             .ok_or_else(|| malformed("confirmed output has no amount_msat"))?;
-        onchain_sats += msat_to_sats_floor(parse_msat(amount));
+        onchain_sats += msat_to_sats_floor(validated_msat(amount, "confirmed output amount_msat")?);
     }
 
     let mut local_balance_sats = 0i64;
@@ -164,16 +196,18 @@ pub fn total_liquidating_value(sources: TlvSources) -> Result<TlvSummary, EconRe
         if channel.get("state").and_then(Value::as_str) != Some("CHANNELD_NORMAL") {
             continue;
         }
-        let ours = parse_msat(
+        let ours = validated_msat(
             channel
                 .get("our_amount_msat")
                 .ok_or_else(|| malformed("live channel has no our_amount_msat"))?,
-        );
-        let total = parse_msat(
+            "live channel our_amount_msat",
+        )?;
+        let total = validated_msat(
             channel
                 .get("amount_msat")
                 .ok_or_else(|| malformed("live channel has no amount_msat"))?,
-        );
+            "live channel amount_msat",
+        )?;
         // An impossible split means the evidence is wrong, not that the
         // remote side holds negative sats.
         if ours > total {
