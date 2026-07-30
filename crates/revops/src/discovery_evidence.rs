@@ -44,6 +44,11 @@ pub struct GraphSources {
     pub demand_flows: Vec<revops_capital::planner::cycle::FlowContribution>,
     pub demand_flow_sink_channels:
         BTreeMap<String, Vec<revops_capital::planner::demand_flow::SinkChannelEdge>>,
+    /// OUR channels only: scid -> the peer on the far end, from the
+    /// profitability set (py 1828-1835 builds this from
+    /// `all_profitability`, NOT from gossip). Keys may arrive in CLN's
+    /// `:` form and are normalized here.
+    pub our_channel_scid_to_peer: BTreeMap<String, String>,
     pub our_node_id: String,
     /// py's `max_pool` (default 32); evidence rather than a literal so a
     /// non-default config needs no crate edit.
@@ -74,6 +79,13 @@ fn msat(v: Option<&Value>) -> i64 {
     }
 }
 
+/// py 1835: `str(scid).replace(':', 'x')`. Route-pair rows are looked up
+/// in the `x` form, so an unnormalized key never matches and the strategy
+/// silently finds nothing.
+fn normalize_scid(scid: &str) -> String {
+    scid.replace(':', "x")
+}
+
 pub fn build_discovery_evidence(
     sources: GraphSources,
 ) -> Result<DiscoveryEvidence, DiscoveryRefusal> {
@@ -86,7 +98,17 @@ pub fn build_discovery_evidence(
 
     let mut neighbor_source: BTreeMap<String, Vec<NeighborEdge>> = BTreeMap::new();
     let mut graph_source: BTreeMap<String, Vec<GraphChannelEdge>> = BTreeMap::new();
-    let mut channel_to_peer: BTreeMap<String, String> = BTreeMap::new();
+    // Built from OUR channels, not from gossip. Gossip lists both
+    // directions of every channel, so reading `destination` resolves our
+    // own channel to whichever direction came first -- half the time to
+    // our OWN node id, which makes route-pair discovery score this node as
+    // a candidate peer and search its own neighbourhood. Found by mutation
+    // C2, which the previous both-endpoints test could not kill.
+    let channel_to_peer: BTreeMap<String, String> = sources
+        .our_channel_scid_to_peer
+        .iter()
+        .map(|(scid, peer)| (normalize_scid(scid), peer.clone()))
+        .collect();
 
     for ch in &channels {
         let Some(source) = ch.get("source").and_then(Value::as_str) else {
@@ -118,13 +140,6 @@ pub fn build_discovery_evidence(
                 active,
                 amount_msat,
             });
-
-        // Both endpoints, so a route-pair lookup from either side resolves.
-        if let Some(scid) = ch.get("short_channel_id").and_then(Value::as_str) {
-            channel_to_peer
-                .entry(scid.to_string())
-                .or_insert_with(|| destination.to_string());
-        }
     }
 
     // Patrons are the peers we actually have profitability for. A peer

@@ -1,7 +1,7 @@
 //! Task 67c slice 1: assemble `DiscoveryEvidence` from the ONE gossip
 //! prefetch the fee loop already performs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use revops::discovery_evidence::{build_discovery_evidence, DiscoveryRefusal, GraphSources};
 use serde_json::json;
@@ -26,6 +26,11 @@ fn sources(marginal: HashMap<String, f64>) -> GraphSources {
         marginal_roi_by_peer: marginal,
         demand_flows: Vec::new(),
         demand_flow_sink_channels: Default::default(),
+        our_channel_scid_to_peer: BTreeMap::from([
+            // Our channel with 02aa. Note the CLN ':' form -- Python
+            // normalizes it to 'x' before every lookup.
+            ("900:1:0".to_string(), "02aa".to_string()),
+        ]),
         our_node_id: "02us".into(),
         max_candidate_pool: revops::discovery_evidence::DEFAULT_MAX_CANDIDATE_POOL,
         now: NOW,
@@ -70,18 +75,58 @@ fn graph_edges_preserve_the_active_flag() {
     );
 }
 
-/// `channel_to_peer` maps an scid to the peer on the other end, so it must
-/// be built from BOTH endpoints -- a one-sided map silently loses half the
-/// route-pair lookups.
+/// `channel_to_peer` maps OUR channel scids to the PEER on the far end,
+/// built from our own profitability set -- NOT from the gossip
+/// `destination` field (py 1828-1835).
+///
+/// Gossip carries both directions of every channel, so reading
+/// `destination` resolves our own channel to whichever direction happened
+/// to be listed first: half the time, to OUR OWN node id. Route-pair
+/// discovery then scores our own node as a candidate peer and hunts for
+/// neighbours of ourselves. Nothing errors; the strategy just quietly
+/// searches the wrong neighbourhood.
 #[test]
-fn channel_to_peer_covers_both_endpoints() {
+fn channel_to_peer_maps_our_channels_to_the_far_peer() {
     let ev = build_discovery_evidence(sources(HashMap::new())).expect("assembles");
-    let mapped = ev.channel_to_peer.get("700x1x0").expect("scid mapped");
-    assert!(
-        mapped == "02aa" || mapped == "02bb",
-        "must map to one of the endpoints, got {mapped}"
+    assert_eq!(
+        ev.channel_to_peer.get("900x1x0").map(String::as_str),
+        Some("02aa"),
+        "must resolve to the PEER, never to our own node id: {:?}",
+        ev.channel_to_peer
     );
-    assert!(ev.channel_to_peer.contains_key("800x1x0"));
+    assert!(
+        !ev.channel_to_peer.values().any(|p| p == "02us"),
+        "our own node id must never be a mapped peer: {:?}",
+        ev.channel_to_peer
+    );
+}
+
+/// Scids are normalized from CLN's `:` form to the `x` form before being
+/// keyed, because route-pair rows are looked up in the `x` form (py 1835:
+/// `str(scid).replace(':', 'x')`). An unnormalized key never matches and
+/// the route-pair strategy silently finds nothing.
+#[test]
+fn scids_are_normalized_to_the_x_form() {
+    let ev = build_discovery_evidence(sources(HashMap::new())).expect("assembles");
+    assert!(
+        ev.channel_to_peer.contains_key("900x1x0"),
+        "':' must be normalized to 'x': {:?}",
+        ev.channel_to_peer
+    );
+    assert!(!ev.channel_to_peer.contains_key("900:1:0"));
+}
+
+/// Gossip-only channels -- ones we are not party to -- are NOT in the map.
+/// Python builds it exclusively from our own profitability set, so
+/// including the whole graph would resolve route pairs to strangers.
+#[test]
+fn foreign_channels_are_not_mapped() {
+    let ev = build_discovery_evidence(sources(HashMap::new())).expect("assembles");
+    assert!(
+        !ev.channel_to_peer.contains_key("700x1x0"),
+        "700x1x0 is a foreign gossip channel, not ours: {:?}",
+        ev.channel_to_peer
+    );
 }
 
 /// Patrons carry the marginal ROI that task 67b's assembler produced.
@@ -131,6 +176,11 @@ fn an_empty_but_readable_graph_is_a_valid_observation() {
         marginal_roi_by_peer: HashMap::new(),
         demand_flows: Vec::new(),
         demand_flow_sink_channels: Default::default(),
+        our_channel_scid_to_peer: BTreeMap::from([
+            // Our channel with 02aa. Note the CLN ':' form -- Python
+            // normalizes it to 'x' before every lookup.
+            ("900:1:0".to_string(), "02aa".to_string()),
+        ]),
         our_node_id: "02us".into(),
         max_candidate_pool: revops::discovery_evidence::DEFAULT_MAX_CANDIDATE_POOL,
         now: NOW,
