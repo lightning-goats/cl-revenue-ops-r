@@ -1,7 +1,8 @@
 //! Task 71 / F71-R27: the LIVE flow-analysis config resolver.
 //!
-//! `FlowPassConfig::default()` froze py's defaults into the binary at
-//! construction time. An operator who sets `revenue-ops-flow-interval` or
+//! The flow pass used to hold a `FlowPassConfig` built once at
+//! construction, whose `Default` froze py's defaults into the binary. An
+//! operator who set `revenue-ops-flow-interval` or
 //! writes a `source_threshold` override sees nothing change until the
 //! plugin restarts — and worse, the values silently disagree with what
 //! `revenue-r-config` reports, so the config surface becomes a lie about
@@ -25,6 +26,8 @@
 //! operator's node on defaults they explicitly replaced.
 
 use std::collections::BTreeMap;
+
+use crate::config_resolve::SnapshotFreshness;
 
 /// py `config.py:589,597,598,743` and `505`.
 pub const DEFAULT_SOURCE_THRESHOLD: f64 = 0.05;
@@ -57,6 +60,10 @@ pub struct FlowConfigSources {
     pub db_overrides: Result<BTreeMap<String, String>, String>,
     /// The `listconfigs` snapshot, keyed by FULL option name.
     pub listconfigs: BTreeMap<String, String>,
+    /// Whether that snapshot is lightningd's current answer, a retained
+    /// last-good answer, or no answer at all. An empty map is ambiguous on
+    /// its own (see [`SnapshotFreshness`]); this disambiguates it.
+    pub listconfigs_freshness: SnapshotFreshness,
 }
 
 /// One resolved pass's tunables, each with its provenance.
@@ -72,6 +79,10 @@ pub struct ResolvedFlowConfig {
     pub flow_window_days_from: ValueSource,
     pub htlc_congestion_threshold_from: ValueSource,
     pub flow_interval_from: ValueSource,
+    /// Carried through so a pass that ran on a RETAINED snapshot can say
+    /// so. Without this the last-good parity path is indistinguishable
+    /// from a fresh read, which is the "silent stale use" C71-6 forbids.
+    pub listconfigs_freshness: SnapshotFreshness,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +95,12 @@ pub enum FlowConfigRefusal {
     OutOfRange { key: String, raw: String },
     /// py `config.py:1143-1146`: sink must be strictly below source.
     InvertedBand { source: f64, sink: f64 },
+    /// `listconfigs` has NEVER been successfully read, and `key` has no DB
+    /// override, so its value would have to come from the source we never
+    /// read. Naming the key matters: it is the difference between "the
+    /// option layer is down" and "the option layer is down in a way that
+    /// changes what this pass would do".
+    ListconfigsUnavailable { key: String, option_name: String },
 }
 
 impl FlowConfigRefusal {
@@ -93,6 +110,7 @@ impl FlowConfigRefusal {
             Self::Unparseable { .. } => "flow_config_unparseable",
             Self::OutOfRange { .. } => "flow_config_out_of_range",
             Self::InvertedBand { .. } => "flow_config_inverted_band",
+            Self::ListconfigsUnavailable { .. } => "flow_config_listconfigs_unavailable",
         }
     }
 }
@@ -116,16 +134,46 @@ fn tiered<'a>(
     None
 }
 
+/// The fall-through case, shared by both typed resolvers.
+///
+/// Reaching a default is only legitimate when we actually asked the tiers
+/// above it. If the key HAS a listconfigs tier and that snapshot was never
+/// successfully fetched, the default is not "what lightningd says" — it is
+/// a value invented to stand in for an unread source, which is precisely
+/// the fabrication this module refuses everywhere else.
+///
+/// `LastGood` deliberately does NOT refuse: a retained snapshot is a real
+/// prior answer from the real source, and keeping it is what Python's own
+/// `_refresh_dynamic_config` does on a failed re-read. The staleness rides
+/// out on [`ResolvedFlowConfig::listconfigs_freshness`] instead.
+fn default_or_refuse<T>(
+    field: &str,
+    option_name: Option<&str>,
+    freshness: SnapshotFreshness,
+    default: T,
+) -> Result<(T, ValueSource), FlowConfigRefusal> {
+    match (option_name, freshness) {
+        (Some(name), SnapshotFreshness::NeverRefreshed) => {
+            Err(FlowConfigRefusal::ListconfigsUnavailable {
+                key: field.to_string(),
+                option_name: name.to_string(),
+            })
+        }
+        _ => Ok((default, ValueSource::Default)),
+    }
+}
+
 fn resolve_f64(
     overrides: &BTreeMap<String, String>,
     listconfigs: &BTreeMap<String, String>,
+    freshness: SnapshotFreshness,
     field: &str,
     option_name: Option<&str>,
     default: f64,
     range: (f64, f64),
 ) -> Result<(f64, ValueSource), FlowConfigRefusal> {
     let Some((raw, from)) = tiered(overrides, listconfigs, field, option_name) else {
-        return Ok((default, ValueSource::Default));
+        return default_or_refuse(field, option_name, freshness, default);
     };
     let parsed = raw
         .trim()
@@ -146,13 +194,14 @@ fn resolve_f64(
 fn resolve_i64(
     overrides: &BTreeMap<String, String>,
     listconfigs: &BTreeMap<String, String>,
+    freshness: SnapshotFreshness,
     field: &str,
     option_name: Option<&str>,
     default: i64,
     range: (i64, i64),
 ) -> Result<(i64, ValueSource), FlowConfigRefusal> {
     let Some((raw, from)) = tiered(overrides, listconfigs, field, option_name) else {
-        return Ok((default, ValueSource::Default));
+        return default_or_refuse(field, option_name, freshness, default);
     };
     let parsed = raw
         .trim()
@@ -178,10 +227,12 @@ pub fn resolve_flow_config(
         .db_overrides
         .map_err(FlowConfigRefusal::OverridesUnavailable)?;
     let lc = sources.listconfigs;
+    let freshness = sources.listconfigs_freshness;
 
     let (source_threshold, source_threshold_from) = resolve_f64(
         &overrides,
         &lc,
+        freshness,
         "source_threshold",
         None,
         DEFAULT_SOURCE_THRESHOLD,
@@ -190,6 +241,7 @@ pub fn resolve_flow_config(
     let (sink_threshold, sink_threshold_from) = resolve_f64(
         &overrides,
         &lc,
+        freshness,
         "sink_threshold",
         None,
         DEFAULT_SINK_THRESHOLD,
@@ -198,6 +250,7 @@ pub fn resolve_flow_config(
     let (flow_window_days, flow_window_days_from) = resolve_i64(
         &overrides,
         &lc,
+        freshness,
         "flow_window_days",
         Some("revenue-ops-flow-window-days"),
         DEFAULT_FLOW_WINDOW_DAYS,
@@ -206,6 +259,7 @@ pub fn resolve_flow_config(
     let (htlc_congestion_threshold, htlc_congestion_threshold_from) = resolve_f64(
         &overrides,
         &lc,
+        freshness,
         "htlc_congestion_threshold",
         Some("revenue-ops-htlc-congestion-threshold"),
         DEFAULT_HTLC_CONGESTION_THRESHOLD,
@@ -214,6 +268,7 @@ pub fn resolve_flow_config(
     let (flow_interval_seconds, flow_interval_from) = resolve_i64(
         &overrides,
         &lc,
+        freshness,
         "flow_interval",
         Some("revenue-ops-flow-interval"),
         DEFAULT_FLOW_INTERVAL_SECONDS,
@@ -242,5 +297,6 @@ pub fn resolve_flow_config(
         flow_window_days_from,
         htlc_congestion_threshold_from,
         flow_interval_from,
+        listconfigs_freshness: freshness,
     })
 }

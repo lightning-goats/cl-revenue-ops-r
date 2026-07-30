@@ -302,9 +302,54 @@ async fn try_fetch_python_option_values(
 /// consumer (`revenue-r-config` resolution and the fee scheduler's
 /// per-cycle cfg resolution) and refreshed before each dispatched fee
 /// cycle; a failed refresh KEEPS the last good snapshot.
+/// How much a [`PythonOptionCache`] snapshot can be trusted (F71-R27 /
+/// C71-6).
+///
+/// `snapshot()` alone cannot answer this. An empty map means either
+/// "lightningd holds no `revenue-ops-*` options" or "we have never
+/// successfully asked", and those two demand opposite behaviour: the first
+/// legitimately resolves to defaults, the second must refuse rather than
+/// fabricate a default out of a source that was never read. This is the
+/// same absent-vs-zero distinction the money boundaries already enforce,
+/// applied to the config layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotFreshness {
+    /// The most recent refresh succeeded; the snapshot is lightningd's
+    /// current resolved view.
+    Fresh,
+    /// A refresh failed, but an earlier one had succeeded, so the snapshot
+    /// is the last good one. This is the PARITY path, not a degradation:
+    /// Python's `_refresh_dynamic_config` likewise keeps the live `config`
+    /// object when the re-read fails. `consecutive_failures` is carried so
+    /// a lengthening outage is visible rather than a fixed flag.
+    LastGood { consecutive_failures: u32 },
+    /// No refresh has ever succeeded. The snapshot is empty and that
+    /// emptiness is evidence of nothing.
+    NeverRefreshed,
+}
+
+#[derive(Default)]
+struct CacheState {
+    values: HashMap<String, options::Value>,
+    succeeded_once: bool,
+    consecutive_failures: u32,
+}
+
+/// Derived from state the caller already holds a lock on, so the paired
+/// and single accessors cannot drift apart in how they classify.
+fn freshness_of(state: &CacheState) -> SnapshotFreshness {
+    match (state.succeeded_once, state.consecutive_failures) {
+        (false, _) => SnapshotFreshness::NeverRefreshed,
+        (true, 0) => SnapshotFreshness::Fresh,
+        (true, consecutive_failures) => SnapshotFreshness::LastGood {
+            consecutive_failures,
+        },
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PythonOptionCache {
-    inner: std::sync::Arc<std::sync::RwLock<HashMap<String, options::Value>>>,
+    inner: std::sync::Arc<std::sync::RwLock<CacheState>>,
 }
 
 impl PythonOptionCache {
@@ -320,7 +365,36 @@ impl PythonOptionCache {
         self.inner
             .read()
             .expect("option cache lock poisoned")
+            .values
             .clone()
+    }
+
+    /// Whether [`Self::snapshot`] is lightningd's answer, a retained last
+    /// good answer, or no answer at all. Consumers that must not fabricate
+    /// a default from an unread source branch on this.
+    pub fn freshness(&self) -> SnapshotFreshness {
+        freshness_of(&self.inner.read().expect("option cache lock poisoned"))
+    }
+
+    /// The values AND their freshness, taken under ONE read lock
+    /// (F71-R29).
+    ///
+    /// Any consumer that needs both must use this rather than calling
+    /// [`Self::snapshot`] and [`Self::freshness`] in sequence. This cache is
+    /// shared — the fee scheduler refreshes it before every cycle — so a
+    /// refresh can land between two separate lock acquisitions and pair
+    /// generation N's values with generation N+1's freshness. Both
+    /// directions are harmful, and both are silent:
+    ///
+    /// - empty values + `Fresh` reads as "lightningd holds no
+    ///   `revenue-ops-*` options", so the consumer resolves defaults from a
+    ///   snapshot it never actually saw — the exact fabrication
+    ///   [`SnapshotFreshness`] exists to prevent;
+    /// - stale values + `Fresh` reports a retained snapshot as current, so
+    ///   the last-good parity path stops being observable.
+    pub fn snapshot_with_freshness(&self) -> (HashMap<String, options::Value>, SnapshotFreshness) {
+        let state = self.inner.read().expect("option cache lock poisoned");
+        (state.values.clone(), freshness_of(&state))
     }
 
     /// Apply a fetch outcome: success replaces the snapshot wholesale
@@ -329,12 +403,18 @@ impl PythonOptionCache {
     /// fetch succeeded. Split from [`Self::refresh`] so the keep-on-
     /// failure contract is unit-testable without a socket.
     pub fn apply_fetch(&self, fetched: Result<HashMap<String, options::Value>, String>) -> bool {
+        let mut state = self.inner.write().expect("option cache lock poisoned");
         match fetched {
             Ok(map) => {
-                *self.inner.write().expect("option cache lock poisoned") = map;
+                state.values = map;
+                state.succeeded_once = true;
+                state.consecutive_failures = 0;
                 true
             }
             Err(e) => {
+                // Saturating so a very long outage cannot wrap the counter
+                // back to 0 and report `Fresh` on a snapshot that is not.
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
                 eprintln!(
                     "revops: listconfigs refresh failed ({e}); keeping the previous \
                      Python option snapshot"
@@ -405,6 +485,24 @@ pub fn parse_listconfigs_response(body: &Value) -> HashMap<String, options::Valu
         }
     }
     out
+}
+
+/// `options::Value` -> the text a text-parsing resolver should see.
+///
+/// Every registered `revenue-ops-*` option is declared to CLN as a string
+/// except one (`reservation-timeout-hours`, an int), so lightningd reports
+/// the same setting as `value_str` or `value_int` depending on the
+/// declaration rather than on the value. A consumer that only handled
+/// `String` would silently drop the int-typed option and resolve its
+/// default instead. `Boolean` renders as py's own `str(bool)` casing
+/// because that is what the DB-override tier stores for the same setting.
+pub fn option_value_to_string(value: &options::Value) -> Option<String> {
+    match value {
+        options::Value::String(s) => Some(s.clone()),
+        options::Value::Integer(i) => Some(i.to_string()),
+        options::Value::Boolean(b) => Some(if *b { "True" } else { "False" }.to_string()),
+        _ => None,
+    }
 }
 
 /// One `listconfigs` config entry -> `options::Value`, picking whichever

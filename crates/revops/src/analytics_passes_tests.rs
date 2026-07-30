@@ -22,6 +22,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::config_resolve::SnapshotFreshness;
 use revops_db::loop_health::{current_boot_status, BootStatus, LoopId, WiringStatus};
 use serde_json::{json, Value};
 
@@ -93,6 +94,34 @@ async fn observer_db(dir: &tempfile::TempDir) -> revops_db::owner::ObserverHandl
         .expect("spawn observer db")
 }
 
+/// Already-read config evidence for a pass under test. Tests inject the
+/// SOURCES, not a resolved config, so every assertion here runs through
+/// the same `resolve_flow_config` production uses -- a test that injected
+/// the resolved values would pass even if the resolver were never called.
+fn fixed_sources(
+    db: &[(&str, &str)],
+    lc: &[(&str, &str)],
+    freshness: SnapshotFreshness,
+) -> crate::flow_config::FlowConfigSources {
+    crate::flow_config::FlowConfigSources {
+        db_overrides: Ok(db
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()),
+        listconfigs: lc
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        listconfigs_freshness: freshness,
+    }
+}
+
+/// py's defaults, freshly read: the baseline for tests that are not about
+/// configuration at all.
+fn default_sources() -> crate::flow_config::FlowConfigSources {
+    fixed_sources(&[], &[], SnapshotFreshness::Fresh)
+}
+
 // ---------------------------------------------------------------------
 // FlowAnalysisPass
 // ---------------------------------------------------------------------
@@ -108,11 +137,11 @@ async fn flow_analysis_pass_routes_derived_state_to_the_observer_store_under_thi
     serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
     let observer = observer_db(&dir).await;
 
-    let pass = Arc::new(FlowAnalysisPass::new(
+    let pass = Arc::new(FlowAnalysisPass::for_tests(
         socket,
         observer.clone(),
         BOOT.to_string(),
-        crate::analytics_passes::FlowPassConfig::default(),
+        default_sources(),
     ));
 
     crate::loop_health::ObserverPass::run(pass.as_ref(), RequestKey::from("test"))
@@ -145,11 +174,11 @@ async fn flow_analysis_pass_fails_the_pass_when_peer_channels_is_unreadable() {
     serve(socket.clone(), vec![("getinfo", json!({"id": PEER}))]);
     let observer = observer_db(&dir).await;
 
-    let pass = FlowAnalysisPass::new(
+    let pass = FlowAnalysisPass::for_tests(
         socket,
         observer.clone(),
         BOOT.to_string(),
-        crate::analytics_passes::FlowPassConfig::default(),
+        default_sources(),
     );
 
     let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
@@ -177,11 +206,11 @@ async fn flow_analysis_pass_round_trips_every_kalman_field_across_passes() {
     serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
     let observer = observer_db(&dir).await;
 
-    let pass = FlowAnalysisPass::new(
+    let pass = FlowAnalysisPass::for_tests(
         socket,
         observer.clone(),
         BOOT.to_string(),
-        crate::analytics_passes::FlowPassConfig::default(),
+        default_sources(),
     );
     crate::loop_health::ObserverPass::run(&pass, RequestKey::from("first"))
         .await
@@ -255,11 +284,11 @@ async fn a_corrupt_persisted_temporal_profile_fails_the_pass() {
             .await
             .unwrap();
 
-        let pass = FlowAnalysisPass::new(
+        let pass = FlowAnalysisPass::for_tests(
             socket,
             observer.clone(),
             BOOT.to_string(),
-            crate::analytics_passes::FlowPassConfig::default(),
+            default_sources(),
         );
         let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("t"))
             .await
@@ -285,11 +314,11 @@ async fn an_absent_temporal_profile_is_a_fresh_start_not_a_refusal() {
     serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
     let observer = observer_db(&dir).await;
 
-    let pass = FlowAnalysisPass::new(
+    let pass = FlowAnalysisPass::for_tests(
         socket,
         observer.clone(),
         BOOT.to_string(),
-        crate::analytics_passes::FlowPassConfig::default(),
+        default_sources(),
     );
     crate::loop_health::ObserverPass::run(&pass, RequestKey::from("t"))
         .await
@@ -541,12 +570,13 @@ async fn composed_analytics_loops_are_ready_and_complete_a_current_boot_generati
     let observer = observer_db(&dir).await;
     let store = Arc::new(LoopHealthStore::new(observer.clone(), BOOT.to_string()));
 
-    let passes = ObserverPassSet::empty().with_flow_analysis(Arc::new(FlowAnalysisPass::new(
-        socket,
-        observer.clone(),
-        BOOT.to_string(),
-        crate::analytics_passes::FlowPassConfig::default(),
-    )));
+    let passes =
+        ObserverPassSet::empty().with_flow_analysis(Arc::new(FlowAnalysisPass::for_tests(
+            socket,
+            observer.clone(),
+            BOOT.to_string(),
+            default_sources(),
+        )));
     let runtime = ObserverRuntime::start(
         crate::fee_mode::ObserverMode::for_tests(true),
         store,
@@ -652,4 +682,554 @@ async fn a_prior_boots_financial_snapshot_is_never_served_as_current() {
         .expect("this boot has now measured");
     assert_eq!(row.boot_id, BOOT);
     assert_eq!(row.capacity_sats, 1_000_000);
+}
+
+// ---------------------------------------------------------------------
+// F71-R27 / C71-6: the flow pass resolves its tunables PER PASS from the
+// live sources, rather than from a config frozen at construction. Until these passed, an operator's `revenue-config set
+// source_threshold` or `setconfig revenue-ops-flow-interval` changed
+// nothing until the plugin was restarted -- and the config surface still
+// reported the new value, so the disagreement was invisible.
+// ---------------------------------------------------------------------
+
+/// A channel whose HTLC slots are ~72.5% full (350 of 483). Congestion is
+/// the cleanest config-driven classification flip available: it needs no
+/// forwarding history, and it is a strict `>` comparison against exactly
+/// one resolved tunable.
+fn congested_peer_channels() -> Value {
+    json!({"channels": [{
+        "state": "CHANNELD_NORMAL",
+        "short_channel_id": "100x1x0",
+        "peer_id": PEER,
+        "total_msat": 1_000_000_000_i64,
+        "spendable_msat": 400_000_000_i64,
+        "receivable_msat": 600_000_000_i64,
+        "max_accepted_htlcs": 483,
+        "htlcs": (0..350).map(|_| json!({})).collect::<Vec<_>>(),
+    }]})
+}
+
+/// The load-bearing R27 assertion: a non-default value must reach the
+/// CLASSIFIER. Same channel, same node state, two different resolved
+/// thresholds, two different persisted classifications.
+#[tokio::test]
+async fn a_config_override_reaches_the_classifier() {
+    async fn classify(override_threshold: Option<&str>) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lightning-rpc");
+        serve(
+            socket.clone(),
+            vec![("listpeerchannels", congested_peer_channels())],
+        );
+        let observer = observer_db(&dir).await;
+
+        let pass = FlowAnalysisPass::for_tests(
+            socket,
+            observer.clone(),
+            BOOT.to_string(),
+            fixed_sources(
+                &match override_threshold {
+                    Some(v) => vec![("htlc_congestion_threshold", v)],
+                    None => vec![],
+                },
+                &[],
+                SnapshotFreshness::Fresh,
+            ),
+        );
+        crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+            .await
+            .expect("a readable snapshot must produce a completed pass");
+        observer
+            .channel_flow_states()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.scid == "100x1x0")
+            .expect("the pass persisted a state")
+            .flow_state
+    }
+
+    // 350/483 = 0.7246, which is NOT above py's 0.8 default.
+    assert_ne!(
+        classify(None).await,
+        "congested",
+        "0.7246 utilization must not be congested under py's 0.8 default"
+    );
+    // The operator lowered the bar to 0.6. If the override never reaches
+    // the classifier, this is still the default classification.
+    assert_eq!(
+        classify(Some("0.6")).await,
+        "congested",
+        "an operator's htlc_congestion_threshold override must reach the classifier"
+    );
+}
+
+/// `flow_window_days` must reach the STORE READ, not just the arithmetic.
+/// A resolved window that never widens the query is a config knob that
+/// silently does nothing.
+#[tokio::test]
+async fn a_config_override_reaches_the_flow_window() {
+    async fn forward_count(window_days: &str) -> i64 {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lightning-rpc");
+        serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+        let observer = observer_db(&dir).await;
+
+        // One forward inside py's 7-day default, one only inside a wider
+        // window.
+        for age_days in [2_i64, 10_i64] {
+            observer
+                .insert_forward(revops_db::notifications::ForwardRow {
+                    in_channel: "200x1x0".to_string(),
+                    out_channel: "100x1x0".to_string(),
+                    in_msat: 1_000_000,
+                    out_msat: 999_000,
+                    fee_msat: 1_000,
+                    timestamp: crate::now_unix() - age_days * 86_400,
+                    resolved_time: crate::now_unix() - age_days * 86_400,
+                })
+                .await
+                .unwrap();
+        }
+
+        let pass = FlowAnalysisPass::for_tests(
+            socket,
+            observer.clone(),
+            BOOT.to_string(),
+            fixed_sources(
+                &[("flow_window_days", window_days)],
+                &[],
+                SnapshotFreshness::Fresh,
+            ),
+        );
+        crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+            .await
+            .expect("pass runs");
+        observer
+            .channel_flow_states()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.scid == "100x1x0")
+            .expect("the pass persisted a state")
+            .forward_count
+    }
+
+    assert_eq!(
+        forward_count("7").await,
+        1,
+        "py's 7-day window sees one forward"
+    );
+    assert_eq!(
+        forward_count("21").await,
+        2,
+        "a widened window must reach the bucket query, not only the divisor"
+    );
+}
+
+/// C71-6 names the cadence explicitly: the resolved interval must reach
+/// the NEXT sleep. A pass that classifies with the live value but sleeps
+/// on the compiled-in one is still half-frozen.
+#[tokio::test]
+async fn a_config_override_reaches_the_next_cadence() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::for_tests(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        fixed_sources(
+            &[],
+            &[("revenue-ops-flow-interval", "900")],
+            SnapshotFreshness::Fresh,
+        ),
+    );
+
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect("pass runs");
+    assert_eq!(
+        pass.interval_secs(),
+        900,
+        "the next cadence must use the interval resolved by the pass that just ran"
+    );
+}
+
+/// An option source that was NEVER successfully read must refuse the pass,
+/// not run it on fabricated defaults. A cold-start socket race would
+/// otherwise reclassify the whole fleet on values the operator replaced,
+/// and the only trace would be the classifications themselves.
+#[tokio::test]
+async fn an_unread_option_source_refuses_the_pass_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::for_tests(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        fixed_sources(&[], &[], SnapshotFreshness::NeverRefreshed),
+    );
+
+    let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect_err("an unread option source must refuse");
+    assert!(
+        format!("{err:#}").contains("flow_config_listconfigs_unavailable"),
+        "the failure must name the unread source, got: {err:#}"
+    );
+    assert!(
+        observer.channel_flow_states().await.unwrap().is_empty(),
+        "a refused pass must write NO state at all"
+    );
+}
+
+/// ...but a snapshot RETAINED across a failed refresh is Python's own
+/// behaviour (`_refresh_dynamic_config` keeps the live config object), so
+/// it runs. Refusing here would take the flow loop down for the duration
+/// of any lightningd hiccup, which Python never does.
+#[tokio::test]
+async fn a_last_good_option_snapshot_still_runs_the_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::for_tests(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        fixed_sources(
+            &[],
+            &[("revenue-ops-flow-interval", "900")],
+            SnapshotFreshness::LastGood {
+                consecutive_failures: 4,
+            },
+        ),
+    );
+
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect("the last good snapshot is a real prior answer from the real source");
+    assert_eq!(pass.interval_secs(), 900);
+    assert!(!observer.channel_flow_states().await.unwrap().is_empty());
+}
+
+/// A FAILED `config_overrides` read refuses too -- symmetric with the
+/// listconfigs tier. Resolving past it runs the node on defaults the
+/// operator explicitly replaced.
+#[tokio::test]
+async fn an_unreadable_override_table_refuses_the_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::for_tests(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        crate::flow_config::FlowConfigSources {
+            db_overrides: Err("config_overrides read failed: disk i/o error".to_string()),
+            listconfigs: std::collections::BTreeMap::new(),
+            listconfigs_freshness: SnapshotFreshness::Fresh,
+        },
+    );
+
+    let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect_err("an unreadable override table must refuse");
+    assert!(
+        format!("{err:#}").contains("flow_config_overrides_unavailable"),
+        "got: {err:#}"
+    );
+    assert!(observer.channel_flow_states().await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------
+// F71-R29: the tests above all drive `FlowConfigSource::Fixed`, which
+// means the PRODUCTION assembly -- refresh the shared cache, read every
+// config_overrides row, render lightningd's typed values to text, pair
+// values with freshness -- had no coverage at all. That is the same
+// producer-with-no-consumer shape F71-R16 was raised for, one level down:
+// a `Live` branch that no test enters can be arbitrarily wrong while every
+// `Fixed` test stays green.
+// ---------------------------------------------------------------------
+
+/// A production-shaped DB holding exactly the rows the flow pass reads.
+async fn overrides_db(
+    dir: &tempfile::TempDir,
+    rows: &[(&str, &str)],
+) -> revops_db::actor::DbHandle {
+    let path = dir.path().join("production.sqlite3");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE config_overrides (
+                 key TEXT PRIMARY KEY, value TEXT, version INTEGER, updated_at INTEGER);",
+        )
+        .unwrap();
+        for (i, (key, value)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO config_overrides (key, value, version, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, value, i as i64 + 1, NOW],
+            )
+            .unwrap();
+        }
+    }
+    revops_db::actor::spawn_read_only(&path).await.unwrap()
+}
+
+/// `listconfigs` as lightningd actually answers it. `value_int` is not
+/// decoration: CLN reports each option under the type it was REGISTERED
+/// with, so an int-declared option arrives as `value_int` no matter what
+/// the operator typed. A production assembly that only handled `value_str`
+/// would silently drop it and resolve the default instead.
+fn listconfigs_reply(entries: &[(&str, Value)]) -> Value {
+    let mut configs = serde_json::Map::new();
+    for (name, value) in entries {
+        configs.insert(name.to_string(), value.clone());
+    }
+    json!({ "configs": configs })
+}
+
+/// The whole production path, end to end: a real `listconfigs` RPC through
+/// the refreshable cache, a real `config_overrides` table read, and the
+/// resolved values reaching both the classifier and the next cadence.
+#[tokio::test]
+async fn the_live_config_assembly_reaches_the_classifier_and_the_cadence() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(
+        socket.clone(),
+        vec![
+            ("listpeerchannels", congested_peer_channels()),
+            (
+                "listconfigs",
+                listconfigs_reply(&[
+                    // int-declared, as CLN reports it
+                    ("revenue-ops-flow-interval", json!({"value_int": 900})),
+                    // string-declared, the common case
+                    (
+                        "revenue-ops-htlc-congestion-threshold",
+                        json!({"value_str": "0.9"}),
+                    ),
+                    // an unrelated option must not disturb resolution
+                    ("revenue-ops-min-fee-ppm", json!({"value_str": "40"})),
+                ]),
+            ),
+        ],
+    );
+    let observer = observer_db(&dir).await;
+    // The DB tier outranks listconfigs: 0.6 wins over lightningd's 0.9,
+    // so a pass that read only one tier lands on a different answer.
+    let db = overrides_db(&dir, &[("htlc_congestion_threshold", "0.6")]).await;
+
+    let pass = FlowAnalysisPass::live(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        Some(db),
+        crate::config_resolve::PythonOptionCache::empty(),
+    );
+
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect("the live assembly must produce a completed pass");
+
+    let row = observer
+        .channel_flow_states()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.scid == "100x1x0")
+        .expect("the pass persisted a state");
+    assert_eq!(
+        row.flow_state, "congested",
+        "the DB override (0.6) must win over lightningd's 0.9 and reach the classifier"
+    );
+    assert_eq!(
+        pass.interval_secs(),
+        900,
+        "an int-typed listconfigs value must reach the next cadence"
+    );
+}
+
+/// The cache starts empty, so the FIRST thing the live pass must do is
+/// refresh it. If it never did, `NeverRefreshed` would refuse every pass
+/// forever — which is why this cannot be asserted by the refusal test
+/// alone: only a pass that actually fetched can succeed here.
+#[tokio::test]
+async fn the_live_pass_refreshes_the_option_cache_before_resolving() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(
+        socket.clone(),
+        vec![
+            ("listpeerchannels", peer_channels()),
+            ("listconfigs", listconfigs_reply(&[])),
+        ],
+    );
+    let observer = observer_db(&dir).await;
+    let cache = crate::config_resolve::PythonOptionCache::empty();
+    assert_eq!(cache.freshness(), SnapshotFreshness::NeverRefreshed);
+
+    let pass = FlowAnalysisPass::live(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        Some(overrides_db(&dir, &[]).await),
+        cache.clone(),
+    );
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect("a reachable listconfigs must let the pass run");
+    assert_eq!(
+        cache.freshness(),
+        SnapshotFreshness::Fresh,
+        "the pass must refresh the SHARED cache, not a private copy"
+    );
+}
+
+/// A live pass whose `listconfigs` never answers must refuse rather than
+/// classify on defaults. This is the cold-start socket race, driven
+/// through the real RPC path rather than a fixed freshness value.
+#[tokio::test]
+async fn the_live_pass_refuses_when_listconfigs_has_never_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    // `listpeerchannels` is reachable; `listconfigs` is not.
+    serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::live(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        Some(overrides_db(&dir, &[]).await),
+        crate::config_resolve::PythonOptionCache::empty(),
+    );
+    let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect_err("an unanswered listconfigs must refuse the pass");
+    assert!(
+        format!("{err:#}").contains("flow_config_listconfigs_unavailable"),
+        "got: {err:#}"
+    );
+    assert!(observer.channel_flow_states().await.unwrap().is_empty());
+}
+
+/// No production database attached means the override tier is UNREADABLE,
+/// not empty. Treating it as empty would run the node on defaults the
+/// operator replaced, with no trace anywhere.
+#[tokio::test]
+async fn the_live_pass_refuses_when_no_production_database_is_attached() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(
+        socket.clone(),
+        vec![
+            ("listpeerchannels", peer_channels()),
+            ("listconfigs", listconfigs_reply(&[])),
+        ],
+    );
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::live(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        None,
+        crate::config_resolve::PythonOptionCache::empty(),
+    );
+    let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("test"))
+        .await
+        .expect_err("an unreadable override tier must refuse");
+    assert!(
+        format!("{err:#}").contains("flow_config_overrides_unavailable"),
+        "got: {err:#}"
+    );
+    assert!(observer.channel_flow_states().await.unwrap().is_empty());
+}
+
+/// A live pass RE-resolves every cycle. The second pass must see a value
+/// written after the first one ran — that is the entire point of R27, and
+/// no single-pass test can show it.
+#[tokio::test]
+async fn a_second_live_pass_picks_up_a_value_changed_since_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(
+        socket.clone(),
+        vec![
+            ("listpeerchannels", congested_peer_channels()),
+            ("listconfigs", listconfigs_reply(&[])),
+        ],
+    );
+    let observer = observer_db(&dir).await;
+
+    let db_path = dir.path().join("production.sqlite3");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE config_overrides (
+                 key TEXT PRIMARY KEY, value TEXT, version INTEGER, updated_at INTEGER);",
+        )
+        .unwrap();
+    }
+    let db = revops_db::actor::spawn_read_only(&db_path).await.unwrap();
+
+    let pass = FlowAnalysisPass::live(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        Some(db),
+        crate::config_resolve::PythonOptionCache::empty(),
+    );
+
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("first"))
+        .await
+        .expect("first pass runs on py's defaults");
+    let first = observer
+        .channel_flow_states()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.scid == "100x1x0")
+        .unwrap()
+        .flow_state;
+    assert_ne!(first, "congested", "0.7246 is below py's 0.8 default");
+
+    // The operator runs `revenue-config set` between cycles.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["htlc_congestion_threshold", "0.6", 1i64, NOW],
+        )
+        .unwrap();
+    }
+
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("second"))
+        .await
+        .expect("second pass runs");
+    let second = observer
+        .channel_flow_states()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.scid == "100x1x0")
+        .unwrap()
+        .flow_state;
+    assert_eq!(
+        second, "congested",
+        "a value set between cycles must take effect WITHOUT a plugin restart"
+    );
 }

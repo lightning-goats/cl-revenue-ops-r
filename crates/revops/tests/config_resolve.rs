@@ -195,6 +195,154 @@ mod python_option_cache {
             "a failed refresh must keep the last good snapshot"
         );
     }
+
+    // F71-R27 / C71-6: keeping the last good snapshot is only half the
+    // contract. `snapshot()` alone cannot distinguish "lightningd holds no
+    // `revenue-ops-*` options" from "we have never successfully asked" —
+    // both are an empty map. A consumer that resolves defaults out of the
+    // second case is fabricating a default from a source it never read.
+    // The freshness of the snapshot must therefore be observable.
+
+    #[test]
+    fn a_never_refreshed_cache_is_distinguishable_from_a_successful_empty_fetch() {
+        use revops::config_resolve::SnapshotFreshness;
+
+        let never = PythonOptionCache::empty();
+        assert_eq!(
+            never.freshness(),
+            SnapshotFreshness::NeverRefreshed,
+            "an untouched cache must not claim lightningd reported nothing"
+        );
+
+        // lightningd answered, and the answer was genuinely "no
+        // revenue-ops-* options set". Same empty map, different meaning.
+        let asked = PythonOptionCache::empty();
+        assert!(asked.apply_fetch(Ok(HashMap::new())));
+        assert_eq!(asked.freshness(), SnapshotFreshness::Fresh);
+        assert!(
+            asked.snapshot().is_empty() && never.snapshot().is_empty(),
+            "the two cases are indistinguishable by snapshot alone -- which is \
+             exactly why freshness has to be asked separately"
+        );
+    }
+
+    #[test]
+    fn a_failed_refresh_reports_last_good_and_counts_consecutive_failures() {
+        use revops::config_resolve::SnapshotFreshness;
+
+        let cache = PythonOptionCache::empty();
+        assert!(cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "50")]))));
+        assert_eq!(cache.freshness(), SnapshotFreshness::Fresh);
+
+        assert!(!cache.apply_fetch(Err("socket gone".to_string())));
+        assert_eq!(
+            cache.freshness(),
+            SnapshotFreshness::LastGood {
+                consecutive_failures: 1
+            }
+        );
+        assert!(!cache.apply_fetch(Err("still gone".to_string())));
+        assert_eq!(
+            cache.freshness(),
+            SnapshotFreshness::LastGood {
+                consecutive_failures: 2
+            },
+            "a lengthening outage must be visible, not a fixed flag"
+        );
+
+        // Healing resets the count: a stale-forever reading would make the
+        // signal useless for deciding when an outage stopped being benign.
+        assert!(cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "70")]))));
+        assert_eq!(cache.freshness(), SnapshotFreshness::Fresh);
+    }
+
+    /// F71-R29: the paired accessor must agree with the individual ones in
+    /// every state. A pair that disagrees with `snapshot()`/`freshness()`
+    /// would make the atomic path and the reporting path tell two
+    /// different stories about the same cache.
+    #[test]
+    fn the_paired_accessor_agrees_with_the_individual_accessors_in_every_state() {
+        use revops::config_resolve::SnapshotFreshness;
+
+        let cache = PythonOptionCache::empty();
+        for expected in [
+            SnapshotFreshness::NeverRefreshed,
+            SnapshotFreshness::Fresh,
+            SnapshotFreshness::LastGood {
+                consecutive_failures: 1,
+            },
+        ] {
+            // Drive the cache into `expected`.
+            match expected {
+                SnapshotFreshness::NeverRefreshed => {}
+                SnapshotFreshness::Fresh => {
+                    cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "50")])));
+                }
+                SnapshotFreshness::LastGood { .. } => {
+                    cache.apply_fetch(Err("socket gone".to_string()));
+                }
+            }
+            let (paired_values, paired_freshness) = cache.snapshot_with_freshness();
+            assert_eq!(paired_freshness, expected);
+            assert_eq!(paired_freshness, cache.freshness());
+            assert_eq!(paired_values.len(), cache.snapshot().len());
+        }
+    }
+
+    /// F71-R29, the race itself. A concurrent refresh must never be able to
+    /// hand a reader an EMPTY map labelled `Fresh` — that pair reads as
+    /// "lightningd holds no revenue-ops options" and makes a consumer
+    /// resolve defaults from a snapshot it never saw.
+    ///
+    /// This is opportunistic, not exhaustive: it can only ever FAIL on a
+    /// torn read, never on a correct one, so it is safe to keep, but it
+    /// does not by itself prove atomicity. The guarantee rests on
+    /// `snapshot_with_freshness` taking a single lock; see the note in the
+    /// R29 commit about what this does and does not pin.
+    #[test]
+    fn a_concurrent_refresh_never_yields_an_empty_snapshot_labelled_fresh() {
+        use revops::config_resolve::SnapshotFreshness;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        for _ in 0..200 {
+            let cache = PythonOptionCache::empty();
+            let stop = Arc::new(AtomicBool::new(false));
+
+            let writer = {
+                let cache = cache.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    cache.apply_fetch(Ok(map(&[("revenue-ops-min-fee-ppm", "50")])));
+                    stop.store(true, Ordering::Release);
+                })
+            };
+
+            while !stop.load(Ordering::Acquire) {
+                let (values, freshness) = cache.snapshot_with_freshness();
+                if freshness == SnapshotFreshness::Fresh {
+                    assert!(
+                        !values.is_empty(),
+                        "a `Fresh` label was paired with values from before the fetch"
+                    );
+                }
+            }
+            writer.join().unwrap();
+        }
+    }
+
+    /// A refresh that fails BEFORE any success stays `NeverRefreshed`.
+    /// Reporting `LastGood` here would name a good snapshot that does not
+    /// exist — the empty map it would be describing is not "last good", it
+    /// is "never read".
+    #[test]
+    fn a_failure_before_any_success_is_still_never_refreshed() {
+        use revops::config_resolve::SnapshotFreshness;
+
+        let cache = PythonOptionCache::empty();
+        assert!(!cache.apply_fetch(Err("socket gone".to_string())));
+        assert_eq!(cache.freshness(), SnapshotFreshness::NeverRefreshed);
+    }
 }
 
 // ---------------------------------------------------------------------------

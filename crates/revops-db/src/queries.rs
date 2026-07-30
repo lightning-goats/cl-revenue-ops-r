@@ -39,6 +39,33 @@ pub async fn config_override(handle: &DbHandle, key: &str) -> Result<Option<Stri
         .await
 }
 
+/// Port of `Database.get_all_config_overrides`
+/// (modules/database.py:7307-7315): `SELECT key, value FROM
+/// config_overrides`, with `_`-prefixed internal sentinel rows filtered out
+/// exactly as Python's own comprehension does (the LN+ breaker and backfill
+/// markers are written into this table by
+/// `modules/lnplus_swaps.py:876,924` and are not operator settings).
+///
+/// Callers that need SEVERAL overrides in one logical decision must use
+/// this rather than a `config_override` per key: production's DB is
+/// concurrently written by the Python plugin under WAL, so N independent
+/// reads can each land on a different snapshot. `source_threshold` and
+/// `sink_threshold` are validated against each other at write time
+/// (`config.py:1143-1146`), so reading them separately can observe a
+/// combination Python would have rejected.
+pub async fn all_config_overrides(handle: &DbHandle) -> Result<BTreeMap<String, String>> {
+    let rows = handle
+        .query_rows("SELECT key, value FROM config_overrides", vec![], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .await
+        .context("all_config_overrides")?;
+    Ok(rows
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with('_'))
+        .collect())
+}
+
 /// Lossy `SqlValue` -> `String`, defaulting to `default` on `NULL` and
 /// coercing any other storage class via its natural text representation
 /// (SQLite's own dynamic typing already allows a column to hold any class

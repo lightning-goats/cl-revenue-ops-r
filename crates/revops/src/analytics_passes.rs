@@ -43,6 +43,7 @@ use revops_analytics::kalman::{DailyBucket, KalmanFlowState, KalmanStateDict, Ne
 use revops_db::owner::ObserverHandle;
 use serde_json::{json, Value};
 
+use crate::config_resolve::PythonOptionCache;
 use crate::financial_snapshot::{
     plan_financial_snapshot, FinancialDeps, LifetimeStats, STARTUP_DELAY_SECONDS,
 };
@@ -100,31 +101,27 @@ async fn read_rpc(
 // FlowAnalysisPass
 // =====================================================================
 
-/// The tunables py reads from config for each flow pass.
-#[derive(Clone, Copy, Debug)]
-pub struct FlowPassConfig {
-    /// py `source_threshold` (config.py:597).
-    pub source_threshold: f64,
-    /// py `sink_threshold` (config.py:598).
-    pub sink_threshold: f64,
-    /// py `flow_window_days` (config.py:589).
-    pub window_days: i64,
-    /// py `htlc_congestion_threshold` (config.py:743).
-    pub htlc_congestion_threshold: f64,
-    /// py `max(60, flow_interval)`.
-    pub interval_secs: u64,
-}
-
-impl Default for FlowPassConfig {
-    fn default() -> Self {
-        Self {
-            source_threshold: 0.05,
-            sink_threshold: -0.05,
-            window_days: 7,
-            htlc_congestion_threshold: 0.8,
-            interval_secs: FLOW_DEFAULT_INTERVAL_SECONDS,
-        }
-    }
+/// Where a pass gets its config evidence (F71-R27 / C71-6).
+///
+/// This replaced a `FlowPassConfig` built once at construction. That
+/// struct's `Default` froze py's defaults into the binary, so
+/// `revenue-config set source_threshold` and `setconfig
+/// revenue-ops-flow-interval` both changed nothing until the plugin was
+/// restarted -- while `revenue-r-config` went on reporting the new value,
+/// which made the disagreement invisible from the outside.
+enum FlowConfigSource {
+    Live {
+        /// The production database, for the `config_overrides` tier. `None`
+        /// means the override tier is UNREADABLE, not empty: resolution
+        /// refuses rather than running on defaults the operator may have
+        /// replaced.
+        db: Option<revops_db::actor::DbHandle>,
+        /// The shared, refreshable `listconfigs` snapshot. Refreshed at the
+        /// top of every pass, mirroring py's `_refresh_dynamic_config`.
+        options: PythonOptionCache,
+    },
+    #[cfg(test)]
+    Fixed(crate::flow_config::FlowConfigSources),
 }
 
 /// The flow-analysis loop's concrete observer pass.
@@ -132,26 +129,106 @@ pub struct FlowAnalysisPass {
     socket_path: PathBuf,
     observer: ObserverHandle,
     boot_id: String,
-    cfg: FlowPassConfig,
+    config: FlowConfigSource,
+    /// The interval resolved by the most recent pass, for the cadence loop
+    /// to sleep on. Interior mutability because `ObserverPass::run` takes
+    /// `&self`: the alternative -- resolving the interval a second time in
+    /// the scheduler -- could sleep on a different value than the pass that
+    /// just ran actually used.
+    last_interval_secs: std::sync::atomic::AtomicU64,
 }
 
 impl FlowAnalysisPass {
-    pub fn new(
+    pub fn live(
         socket_path: PathBuf,
         observer: ObserverHandle,
         boot_id: String,
-        cfg: FlowPassConfig,
+        db: Option<revops_db::actor::DbHandle>,
+        options: PythonOptionCache,
     ) -> Self {
         Self {
             socket_path,
             observer,
             boot_id,
-            cfg,
+            config: FlowConfigSource::Live { db, options },
+            last_interval_secs: std::sync::atomic::AtomicU64::new(FLOW_DEFAULT_INTERVAL_SECONDS),
         }
     }
 
+    #[cfg(test)]
+    pub fn for_tests(
+        socket_path: PathBuf,
+        observer: ObserverHandle,
+        boot_id: String,
+        sources: crate::flow_config::FlowConfigSources,
+    ) -> Self {
+        Self {
+            socket_path,
+            observer,
+            boot_id,
+            config: FlowConfigSource::Fixed(sources),
+            last_interval_secs: std::sync::atomic::AtomicU64::new(FLOW_DEFAULT_INTERVAL_SECONDS),
+        }
+    }
+
+    /// The interval the LAST completed pass resolved, floored at py's
+    /// `max(60, flow_interval)`. Before the first pass this is py's
+    /// default, which is also the delay the very first sleep uses.
     pub fn interval_secs(&self) -> u64 {
-        self.cfg.interval_secs.max(FLOW_MIN_INTERVAL_SECONDS)
+        self.last_interval_secs
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(FLOW_MIN_INTERVAL_SECONDS)
+    }
+
+    /// Read both config tiers for ONE pass.
+    ///
+    /// The `listconfigs` refresh happens here rather than at construction
+    /// because py re-reads it per cycle; a one-shot init fetch would mean a
+    /// cold-start socket race froze the classifier's tunables for the whole
+    /// process lifetime. A refresh that FAILS is not an error here -- the
+    /// cache keeps its last good snapshot and reports the staleness, and
+    /// `resolve_flow_config` decides whether that is survivable.
+    async fn config_sources(&self) -> crate::flow_config::FlowConfigSources {
+        match &self.config {
+            FlowConfigSource::Live { db, options } => {
+                options.refresh(&self.socket_path).await;
+                let db_overrides = match db {
+                    Some(handle) => revops_db::queries::all_config_overrides(handle)
+                        .await
+                        .map_err(|e| format!("config_overrides read failed: {e:#}")),
+                    None => Err(
+                        "config_overrides unreadable: no production database is attached"
+                            .to_string(),
+                    ),
+                };
+                // F71-R29: ONE lock for both. The cache is shared with the
+                // fee scheduler, so reading values and freshness
+                // separately can pair one generation's values with
+                // another's provenance.
+                let (values, listconfigs_freshness) = options.snapshot_with_freshness();
+                crate::flow_config::FlowConfigSources {
+                    db_overrides,
+                    // `options::Value` carries lightningd's own type; the
+                    // resolver parses from text, so every variant is
+                    // rendered to its natural text form here rather than
+                    // matched twice in two places.
+                    listconfigs: values
+                        .into_iter()
+                        .filter_map(|(name, value)| {
+                            crate::config_resolve::option_value_to_string(&value)
+                                .map(|text| (name, text))
+                        })
+                        .collect(),
+                    listconfigs_freshness,
+                }
+            }
+            #[cfg(test)]
+            FlowConfigSource::Fixed(sources) => crate::flow_config::FlowConfigSources {
+                db_overrides: sources.db_overrides.clone(),
+                listconfigs: sources.listconfigs.clone(),
+                listconfigs_freshness: sources.listconfigs_freshness,
+            },
+        }
     }
 
     /// Assemble every channel's history from the Rust-owned stores.
@@ -160,10 +237,14 @@ impl FlowAnalysisPass {
     /// partial history would silently reset the filters of whichever
     /// channels the failed read covered, which looks identical to a
     /// genuinely new channel.
-    async fn history(&self, now: i64) -> Result<BTreeMap<String, ChannelHistory>, String> {
+    async fn history(
+        &self,
+        now: i64,
+        window_days: i64,
+    ) -> Result<BTreeMap<String, ChannelHistory>, String> {
         let buckets = self
             .observer
-            .daily_flow_buckets(now, self.cfg.window_days)
+            .daily_flow_buckets(now, window_days)
             .await
             .map_err(|e| format!("daily flow buckets unreadable: {e:#}"))?;
         let kalman = self
@@ -458,17 +539,36 @@ impl ObserverPass for FlowAnalysisPass {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let now = crate::now_unix();
+
+            // F71-R27: resolve BEFORE reading anything, because the
+            // resolved window decides what the history read even covers.
+            // A refusal here fails the pass without touching the store:
+            // running on fabricated defaults would silently reclassify the
+            // fleet, and the classifications are the only trace it would
+            // leave.
+            let cfg = crate::flow_config::resolve_flow_config(self.config_sources().await)
+                .map_err(|refusal| {
+                    anyhow::anyhow!("{}: {refusal:?}", refusal.code())
+                        .context("flow analysis config")
+                })?;
+            // The cadence sleeps on what THIS pass used, not on a second
+            // independent resolution that could disagree with it.
+            self.last_interval_secs.store(
+                cfg.flow_interval_seconds.max(0) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
             let peer_channels_raw =
                 read_rpc(&self.socket_path, "listpeerchannels", json!({})).await;
-            let history = self.history(now).await;
+            let history = self.history(now, cfg.flow_window_days).await;
 
             let result = run_flow_pass(FlowDeps {
                 peer_channels_raw,
                 history,
-                source_threshold: self.cfg.source_threshold,
-                sink_threshold: self.cfg.sink_threshold,
-                flow_window_days: self.cfg.window_days,
-                htlc_congestion_threshold: self.cfg.htlc_congestion_threshold,
+                source_threshold: cfg.source_threshold,
+                sink_threshold: cfg.sink_threshold,
+                flow_window_days: cfg.flow_window_days,
+                htlc_congestion_threshold: cfg.htlc_congestion_threshold,
                 now,
                 boot_id: &self.boot_id,
             })

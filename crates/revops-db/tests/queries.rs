@@ -17,10 +17,10 @@
 
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
-    active_spend_reservations, all_policies, closed_channels_summary, closure_costs_windows,
-    config_override, hot_channel_protection_override_peers, last_policy_change_timestamp,
-    lifetime_stats, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
-    policy_changes_since, policy_for_peer, spend_ledger_aggregates,
+    active_spend_reservations, all_config_overrides, all_policies, closed_channels_summary,
+    closure_costs_windows, config_override, hot_channel_protection_override_peers,
+    last_policy_change_timestamp, lifetime_stats, planner_actions, planner_candidates, pnl_summary,
+    policies_by_tag, policy_changes_since, policy_for_peer, spend_ledger_aggregates,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -291,6 +291,67 @@ async fn config_override_returns_none_when_absent() {
     std::fs::copy(fixture_path(), &path).unwrap();
     let handle = spawn_read_only(&path).await.unwrap();
     assert_eq!(config_override(&handle, "min_fee_ppm").await.unwrap(), None);
+}
+
+/// `all_config_overrides` port of `Database.get_all_config_overrides`
+/// (modules/database.py:7307-7315). The flow pass needs FIVE keys per
+/// cycle; reading them one at a time would take five independent WAL
+/// snapshots, and Python's plugin can commit a write between any two of
+/// them. That is not theoretical here: `source_threshold` and
+/// `sink_threshold` are a validated PAIR (config.py:1143-1146), so a torn
+/// read across an operator's paired update yields an inverted band that
+/// Python itself would have rejected at write time. One statement, one
+/// snapshot.
+#[tokio::test]
+async fn all_config_overrides_reads_every_row_in_one_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("all_overrides.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        for (i, (key, value)) in [
+            ("source_threshold", "0.25"),
+            ("sink_threshold", "-0.3"),
+            // Sentinel rows are filtered by Python's own comprehension.
+            ("_lnplus_breaker", "1800000000: tripped"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO config_overrides (key, value, version, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, value, i as i64 + 1, NOW],
+            )
+            .unwrap();
+        }
+    }
+    let handle = spawn_read_only(&path).await.unwrap();
+    let all = all_config_overrides(&handle).await.unwrap();
+
+    assert_eq!(
+        all.get("source_threshold").map(String::as_str),
+        Some("0.25")
+    );
+    assert_eq!(all.get("sink_threshold").map(String::as_str), Some("-0.3"));
+    assert!(
+        !all.contains_key("_lnplus_breaker"),
+        "Python filters `_`-prefixed sentinel rows out of the override map; \
+         leaking one here would offer an internal breaker marker to \
+         `hasattr`-style key matching"
+    );
+    assert_eq!(all.len(), 2);
+}
+
+/// An empty `config_overrides` table is `Ok({})`, never an error: no
+/// override is the normal state of a fresh node.
+#[tokio::test]
+async fn all_config_overrides_is_empty_not_an_error_when_nothing_is_overridden() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty_overrides.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+    assert!(all_config_overrides(&handle).await.unwrap().is_empty());
 }
 
 /// A different key's override row must not leak into an unrelated lookup
