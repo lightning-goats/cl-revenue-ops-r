@@ -10,6 +10,7 @@ pub mod boltz_owner;
 pub mod capital_adapters;
 pub mod capital_boundaries;
 pub mod capital_candidates;
+pub mod capital_efficiency;
 pub mod capital_evidence;
 pub mod capital_gates;
 pub mod capital_inputs;

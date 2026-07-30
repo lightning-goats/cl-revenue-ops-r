@@ -31,6 +31,7 @@ fn sources(marginal: HashMap<String, f64>) -> GraphSources {
             // normalizes it to 'x' before every lookup.
             ("900:1:0".to_string(), "02aa".to_string()),
         ]),
+        neighbor_capital_efficiency: None,
         our_node_id: "02us".into(),
         max_candidate_pool: revops::discovery_evidence::DEFAULT_MAX_CANDIDATE_POOL,
         now: NOW,
@@ -213,6 +214,7 @@ fn an_empty_but_readable_graph_is_a_valid_observation() {
             // normalizes it to 'x' before every lookup.
             ("900:1:0".to_string(), "02aa".to_string()),
         ]),
+        neighbor_capital_efficiency: None,
         our_node_id: "02us".into(),
         max_candidate_pool: revops::discovery_evidence::DEFAULT_MAX_CANDIDATE_POOL,
         now: NOW,
@@ -220,4 +222,61 @@ fn an_empty_but_readable_graph_is_a_valid_observation() {
     let ev = build_discovery_evidence(s).expect("empty is readable");
     assert!(ev.all_channels.is_empty());
     assert!(ev.neighbor_patron_source_channels.is_empty());
+}
+
+/// F71-R4: when a capital-efficiency snapshot exists it must reach the
+/// evidence, so the frozen kernel takes Python's COMMON path
+/// (`discover_from_neighbors_capital_efficiency`) rather than the fallback
+/// (`discover_from_neighbors`). Hardcoding `None` here silently ran a
+/// different discovery strategy and produced a different candidate set --
+/// with no error and no gap.
+#[test]
+fn capital_efficiency_reaches_the_evidence() {
+    use revops::capital_efficiency::{
+        efficiency_ranks, patron_pool_inputs, EfficiencyInput, PatronInput,
+    };
+
+    let ranks = efficiency_ranks(&[
+        EfficiencyInput {
+            scid: "700x1x0".into(),
+            capacity_sats: 1_000_000,
+            fees_earned_msat: 800_000_000,
+            marginal_profit_30d_sats: Some(5_000),
+        },
+        EfficiencyInput {
+            scid: "800x1x0".into(),
+            capacity_sats: 1_000_000,
+            fees_earned_msat: 10_000_000,
+            marginal_profit_30d_sats: Some(100),
+        },
+    ]);
+    let pool = patron_pool_inputs(
+        &[PatronInput {
+            peer_id: "02aa".into(),
+            scid: "700x1x0".into(),
+            volume_routed_sats: 5_000_000,
+            marginal_roi_percent: 250.0,
+        }],
+        &ranks,
+    );
+
+    let mut s = sources(HashMap::new());
+    s.neighbor_capital_efficiency = Some(pool);
+    let ev = build_discovery_evidence(s).expect("assembles");
+
+    let carried = ev
+        .neighbor_capital_efficiency
+        .as_ref()
+        .expect("Some selects the common strategy; None forces the fallback");
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].peer_id, "02aa");
+    assert_eq!(
+        carried[0].efficiency_rank,
+        Some(1.0),
+        "the top-ranked channel's rank must reach the kernel"
+    );
+
+    // And absence stays representable: a node with no snapshot.
+    let ev = build_discovery_evidence(sources(HashMap::new())).expect("assembles");
+    assert!(ev.neighbor_capital_efficiency.is_none());
 }

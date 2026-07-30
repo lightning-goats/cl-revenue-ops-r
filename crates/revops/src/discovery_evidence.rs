@@ -48,6 +48,16 @@ pub struct GraphSources {
     /// profitability set (py 1828-1835 builds this from
     /// `all_profitability`, NOT from gossip). Keys may arrive in CLN's
     /// `:` form and are normalized here.
+    /// F71-R4: patron pool inputs carrying each patron's capital-efficiency
+    /// rank. `Some(..)` selects the frozen kernel's COMMON path
+    /// (`discover_from_neighbors_capital_efficiency`); `None` forces the
+    /// FALLBACK (`discover_from_neighbors`). Python production injects the
+    /// analyzer, so hardcoding `None` -- as this module did -- silently ran
+    /// a different discovery strategy and produced a different candidate
+    /// set. `None` is now reserved for a node that genuinely has no
+    /// efficiency snapshot.
+    pub neighbor_capital_efficiency:
+        Option<Vec<revops_capital::planner::discovery::PatronPoolInput>>,
     pub our_channel_scid_to_peer: BTreeMap<String, String>,
     pub our_node_id: String,
     /// py's `max_pool` (default 32); evidence rather than a literal so a
@@ -160,7 +170,7 @@ pub fn build_discovery_evidence(
         // Python's ONE cache serves every caller; the same grouped map is
         // shared by the patron, graph and route-pair strategies.
         neighbor_patron_source_channels: neighbor_source.clone(),
-        neighbor_capital_efficiency: None,
+        neighbor_capital_efficiency: sources.neighbor_capital_efficiency,
         graph_cached_source_channels: graph_source,
         route_pair_rows,
         channel_to_peer,
