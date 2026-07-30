@@ -34,6 +34,7 @@ pub mod lnplus_adapters;
 pub mod lnplus_runtime;
 pub mod loop_health;
 pub mod notify;
+pub mod open_ev_evidence;
 pub mod options_table;
 pub mod profitability_assembler;
 pub mod python_authority;
