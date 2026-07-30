@@ -148,6 +148,11 @@ fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         recycle_block_height: 900_000,
         recycle_close_cost_sats: 1_000,
         now: NOW,
+        winner_channels: Vec::new(),
+        loser_channels: Vec::new(),
+        defib_gates: Default::default(),
+        close_gates: Default::default(),
+        open_guards: Default::default(),
     }
 }
 
@@ -205,10 +210,15 @@ async fn assembled_owner_runs_the_cycle_and_reports_gaps() {
     assert_eq!(response["planned"], 0);
     assert_eq!(response["results"], json!([]));
     let gaps = response["evidence_gaps"].as_array().expect("gap list");
+    // Task 67b closed winner_channels/loser_channels; planner-status must
+    // stop advertising them as gaps or it understates what the planner can
+    // now see.
     assert!(
-        gaps.iter().any(|g| g["field"] == "winner_channels"),
-        "{gaps:?}"
+        !gaps.iter().any(|g| g["field"] == "winner_channels"),
+        "winner_channels is supplied by task 67b: {gaps:?}"
     );
+    // The genuinely-remaining analytics gaps are still surfaced.
+    assert!(gaps.iter().any(|g| g["field"] == "discovery"), "{gaps:?}");
 
     // planner_enabled=false: the kernel skips; the response says so.
     let mut deps = healthy_deps(&healthy);

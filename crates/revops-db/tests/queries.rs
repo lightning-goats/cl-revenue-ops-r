@@ -1165,3 +1165,182 @@ fn spend_ledger_aggregate_default_is_honest_unknown_coverage() {
     assert_eq!(agg.covered_hours, None);
     assert_eq!(agg.coverage_status, "unknown");
 }
+
+// -- Task 67b slice 1: per-channel profitability inputs --
+
+/// THE DOUBLE-COUNT TRAP. A forward enters on one channel and exits on
+/// another. The EXIT channel earns the fee; the ENTRY channel gets
+/// `sourced_*` attribution for protection/valuation ONLY. Summing sourced
+/// into fleet revenue would count every forward twice.
+#[tokio::test]
+async fn per_channel_revenue_attributes_the_fee_to_the_exit_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE forwards (
+                id INTEGER PRIMARY KEY, in_channel TEXT, out_channel TEXT,
+                in_msat INTEGER, out_msat INTEGER, fee_msat INTEGER,
+                resolution_time REAL, timestamp INTEGER, resolved_time INTEGER
+             );
+             INSERT INTO forwards (in_channel,out_channel,in_msat,out_msat,fee_msat,timestamp)
+             VALUES ('700x1x0','800x1x0', 1000000, 999000, 1000, 2000),
+                    ('700x1x0','800x1x0', 2000000, 1998000, 2000, 3000),
+                    ('800x1x0','700x1x0',  500000,  499500,  500, 4000);",
+        )
+        .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+    let rev = revops_db::queries::per_channel_revenue(&handle, 0)
+        .await
+        .unwrap();
+
+    // 800x1x0 EXITED two forwards worth 3000 msat of fees.
+    let exit = rev.get("800x1x0").expect("exit channel present");
+    assert_eq!(exit.fees_earned_msat, 3_000, "exit channel earns the fee");
+    assert_eq!(exit.volume_routed_msat, 999_000 + 1_998_000);
+    assert_eq!(exit.forward_count, 2);
+    // ...and ENTERED one, so its sourced attribution is that one's fee.
+    assert_eq!(exit.sourced_fee_contribution_msat, 500);
+    assert_eq!(exit.sourced_forward_count, 1);
+
+    // 700x1x0 is the mirror image.
+    let entry = rev.get("700x1x0").expect("entry channel present");
+    assert_eq!(entry.fees_earned_msat, 500, "it exited exactly one forward");
+    assert_eq!(
+        entry.sourced_fee_contribution_msat, 3_000,
+        "entry-side attribution for the two it sourced"
+    );
+    assert_eq!(entry.sourced_forward_count, 2);
+
+    // The invariant that makes double-counting detectable: fleet fees are
+    // the sum of EARNED only, and equal the sum of SOURCED -- never their
+    // total.
+    let earned: i64 = rev.values().map(|r| r.fees_earned_msat).sum();
+    let sourced: i64 = rev.values().map(|r| r.sourced_fee_contribution_msat).sum();
+    assert_eq!(earned, 3_500);
+    assert_eq!(
+        earned, sourced,
+        "every forward is on both sides exactly once"
+    );
+}
+
+/// The 30-day window is a real filter, not the all-time total.
+#[tokio::test]
+async fn per_channel_revenue_windows_by_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE forwards (
+                id INTEGER PRIMARY KEY, in_channel TEXT, out_channel TEXT,
+                in_msat INTEGER, out_msat INTEGER, fee_msat INTEGER,
+                resolution_time REAL, timestamp INTEGER, resolved_time INTEGER
+             );
+             INSERT INTO forwards (in_channel,out_channel,in_msat,out_msat,fee_msat,timestamp)
+             VALUES ('700x1x0','800x1x0', 1000, 900, 100, 1000),
+                    ('700x1x0','800x1x0', 2000, 1900, 200, 9000);",
+        )
+        .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+    let all = revops_db::queries::per_channel_revenue(&handle, 0)
+        .await
+        .unwrap();
+    assert_eq!(all.get("800x1x0").unwrap().fees_earned_msat, 300);
+    let recent = revops_db::queries::per_channel_revenue(&handle, 5000)
+        .await
+        .unwrap();
+    assert_eq!(
+        recent.get("800x1x0").unwrap().fees_earned_msat,
+        200,
+        "the window excludes the older forward"
+    );
+}
+
+/// Costs come from channel_costs (open, capacity, opened_at) and
+/// rebalance_costs, with the 30-day rebalance window kept separate from
+/// the all-time figure -- marginal ROI depends on that distinction.
+#[tokio::test]
+async fn per_channel_costs_separate_open_from_rebalance_and_window_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channel_costs (
+                channel_id TEXT PRIMARY KEY, peer_id TEXT,
+                open_cost_sats INTEGER, capacity_sats INTEGER, opened_at INTEGER
+             );
+             CREATE TABLE rebalance_costs (
+                id INTEGER PRIMARY KEY, channel_id TEXT, peer_id TEXT,
+                cost_sats INTEGER, amount_sats INTEGER, timestamp INTEGER,
+                cost_msat INTEGER
+             );
+             INSERT INTO channel_costs VALUES ('700x1x0','02aa',2500,5000000,1000);
+             INSERT INTO rebalance_costs (channel_id,peer_id,cost_sats,amount_sats,timestamp,cost_msat)
+             VALUES ('700x1x0','02aa',100,50000,2000,100000),
+                    ('700x1x0','02aa',400,90000,9000,400000);",
+        )
+        .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+    let costs = revops_db::queries::per_channel_costs(&handle, 5000)
+        .await
+        .unwrap();
+    let c = costs.get("700x1x0").expect("channel present");
+    assert_eq!(c.peer_id, "02aa");
+    assert_eq!(c.open_cost_sats, 2_500);
+    assert_eq!(c.capacity_sats, 5_000_000);
+    assert_eq!(c.opened_at, 1_000);
+    assert_eq!(c.rebalance_cost_sats, 500, "all-time rebalance cost");
+    assert_eq!(
+        c.rebalance_cost_30d_sats, 400,
+        "the windowed figure excludes the older rebalance -- marginal ROI depends on it"
+    );
+}
+
+/// A channel with costs but no forwards still appears (it is a real,
+/// zero-revenue channel); a channel absent from BOTH sources is simply
+/// absent, never a fabricated zero row.
+#[tokio::test]
+async fn zero_revenue_channels_appear_but_unknown_ones_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE forwards (
+                id INTEGER PRIMARY KEY, in_channel TEXT, out_channel TEXT,
+                in_msat INTEGER, out_msat INTEGER, fee_msat INTEGER,
+                resolution_time REAL, timestamp INTEGER, resolved_time INTEGER
+             );
+             CREATE TABLE channel_costs (
+                channel_id TEXT PRIMARY KEY, peer_id TEXT,
+                open_cost_sats INTEGER, capacity_sats INTEGER, opened_at INTEGER
+             );
+             CREATE TABLE rebalance_costs (
+                id INTEGER PRIMARY KEY, channel_id TEXT, peer_id TEXT,
+                cost_sats INTEGER, amount_sats INTEGER, timestamp INTEGER,
+                cost_msat INTEGER
+             );
+             INSERT INTO channel_costs VALUES ('700x1x0','02aa',2500,5000000,1000);",
+        )
+        .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+    let rev = revops_db::queries::per_channel_revenue(&handle, 0)
+        .await
+        .unwrap();
+    let costs = revops_db::queries::per_channel_costs(&handle, 0)
+        .await
+        .unwrap();
+    assert!(rev.is_empty(), "no forwards means no revenue rows");
+    assert!(costs.contains_key("700x1x0"), "a costed channel is real");
+    assert!(
+        !costs.contains_key("999x9x9"),
+        "unknown channels are absent, not zeroed"
+    );
+}
