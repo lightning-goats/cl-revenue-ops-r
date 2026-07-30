@@ -91,6 +91,12 @@ pub struct EvidenceDeps<'a> {
     /// two largest of Task 62's eleven analytics gaps.
     pub winner_channels: Vec<revops_capital::planner::winners::WinnerCandidateEvidence>,
     pub loser_channels: Vec<revops_capital::planner::losers::LoserChannelEvidence>,
+    /// Task 67b: per-peer gate evidence. The kernel is FAIL-CLOSED on
+    /// these -- supplying them is what lets defibrillate and close
+    /// actually happen instead of being skipped as unevaluable.
+    pub defib_gates: BTreeMap<String, revops_capital::planner::cycle::DefibGate>,
+    pub close_gates: BTreeMap<String, revops_capital::planner::cycle::CloseGate>,
+    pub open_guards: BTreeMap<String, revops_capital::planner::cycle::OpenGuard>,
 }
 
 /// The assembly product: kernel-ready evidence plus the honest gap list.
@@ -175,14 +181,6 @@ pub fn assemble_cycle_evidence(
             reason: ANALYTICS_GAP,
         },
         EvidenceGap {
-            field: "defib_gates",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "close_gates",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
             field: "discovery",
             reason: ANALYTICS_GAP,
         },
@@ -199,10 +197,6 @@ pub fn assemble_cycle_evidence(
             reason: ANALYTICS_GAP,
         },
         EvidenceGap {
-            field: "open_guards",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
             field: "recycle_candidates",
             reason: ANALYTICS_GAP,
         },
@@ -216,10 +210,10 @@ pub fn assemble_cycle_evidence(
         loser_channels: deps.loser_channels,
         redeployment_winner_evs: Vec::new(),
         defibrillation_limit: deps.defibrillation_limit,
-        defib_gates: BTreeMap::new(),
+        defib_gates: deps.defib_gates,
         close_execution_enabled: deps.close_execution_enabled,
         close_limit: deps.close_limit,
-        close_gates: BTreeMap::new(),
+        close_gates: deps.close_gates,
         peer_channels,
         discovery: DiscoveryEvidence::default(),
         candidate_enrichment: BTreeMap::new(),
@@ -234,7 +228,7 @@ pub fn assemble_cycle_evidence(
         exploration_budget_sats: deps.exploration_budget_sats,
         estimated_open_cost_sats: deps.estimated_open_cost_sats,
         dual_fund_peers: BTreeSet::new(),
-        open_guards: BTreeMap::new(),
+        open_guards: deps.open_guards,
         recycle_block_height: deps.recycle_block_height,
         recycle_protected_peers: None,
         recycle_route_pair_scids: BTreeSet::new(),

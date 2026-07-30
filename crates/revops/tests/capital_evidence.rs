@@ -49,6 +49,9 @@ fn deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         now: NOW,
         winner_channels: Vec::new(),
         loser_channels: Vec::new(),
+        defib_gates: Default::default(),
+        close_gates: Default::default(),
+        open_guards: Default::default(),
     }
 }
 
