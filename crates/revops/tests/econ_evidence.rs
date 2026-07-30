@@ -292,7 +292,9 @@ fn malformed_but_ignored_rows_do_not_refuse() {
 /// one.
 #[test]
 fn accepted_values_still_go_through_the_canonical_parser() {
-    let src = include_str!("../src/econ_evidence.rs");
+    // F71-R9 moved the validator into the shared module; the guard follows
+    // it, since that is now the single place a fork could happen.
+    let src = include_str!("../src/msat_evidence.rs");
     assert!(
         src.contains("Ok(parse_msat(v))"),
         "validated_msat must convert accepted values via canonical parse_msat"

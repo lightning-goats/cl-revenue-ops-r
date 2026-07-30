@@ -12,53 +12,15 @@
 //! worth because an RPC timed out is a false statement about the
 //! operator's money. Task 71 forbids fabricated zeros explicitly.
 
-use revops_core::msat::{base_to_sats_floor, parse_msat};
+use crate::msat_evidence::validated_msat as shared_validated_msat;
+use revops_core::msat::base_to_sats_floor;
 use revops_db::queries::PnlSummary;
 use revops_econ::pyfloat::py_round;
 use serde_json::Value;
 
-/// Review finding F71-R6: presence is not validity.
-///
-/// `revops_core::msat::parse_msat` is deliberately permissive -- it returns
-/// 0 for null, bools, arrays, objects and unparseable strings, which is the
-/// right global contract for a tolerant reader. At THIS boundary that
-/// permissiveness fabricates money evidence: `amount_msat: "garbage"` would
-/// become a confident zero. So required amounts are shape-validated first
-/// and only then handed to the canonical parser; `parse_msat` itself is
-/// unchanged and remains the sole accepted-format authority.
-///
-/// Accepted, matching what CLN actually emits: a JSON integer, or a string
-/// of optional sign + digits with an optional `msat` suffix. A VALID zero
-/// stays a measured zero -- an empty channel and a corrupt one are
-/// different facts.
-fn validated_msat(v: &Value, what: &str) -> Result<i64, EconRefusal> {
-    // Shape check ONLY -- the value itself still comes from the canonical
-    // `parse_msat` below, which stays the sole accepted-format authority
-    // (F71-R6's instruction: validate here, do not fork the parser).
-    let acceptable = match v {
-        // F71-R7: `is_u64()` alone would admit values above i64::MAX,
-        // which the permissive parser then truncates -- fabricating a
-        // number instead of reporting unusable evidence.
-        Value::Number(n) => n.as_u64().is_some_and(|u| i64::try_from(u).is_ok()),
-        Value::String(s) => {
-            let body = s.trim().strip_suffix("msat").unwrap_or(s.trim());
-            // F71-R7: no sign is accepted at all. listfunds amounts are
-            // non-negative, and a negative would otherwise be silently
-            // clamped to zero by the floor conversion. Rejecting the '-'
-            // outright also stops "-1msat" slipping through.
-            !body.is_empty()
-                && body.bytes().all(|b| b.is_ascii_digit())
-                && body.parse::<i64>().is_ok()
-        }
-        _ => false,
-    };
-    if !acceptable {
-        return Err(EconRefusal::MalformedListfunds(format!(
-            "listfunds {what} is not a valid non-negative msat value: {v}"
-        )));
-    }
-    Ok(parse_msat(v))
-}
+// F71-R6/R7's shape validation now lives in `crate::msat_evidence`, shared
+// with `capital_evidence` (F71-R9). Keeping a second copy here would be the
+// same duplication F71-R2 caught in the P&L path.
 
 /// Balances round DOWN (`base_to_sats_floor`), from `revops-core`, whose
 /// rounding is fixture-verified against the real Python functions. Guarded
@@ -196,7 +158,10 @@ pub fn total_liquidating_value(sources: TlvSources) -> Result<TlvSummary, EconRe
         let amount = output
             .get("amount_msat")
             .ok_or_else(|| malformed("confirmed output has no amount_msat"))?;
-        onchain_sats += msat_to_sats_floor(validated_msat(amount, "confirmed output amount_msat")?);
+        onchain_sats += msat_to_sats_floor(
+            shared_validated_msat(amount, "listfunds confirmed output amount_msat")
+                .map_err(EconRefusal::MalformedListfunds)?,
+        );
     }
 
     let mut local_balance_sats = 0i64;
@@ -207,18 +172,20 @@ pub fn total_liquidating_value(sources: TlvSources) -> Result<TlvSummary, EconRe
         if channel.get("state").and_then(Value::as_str) != Some("CHANNELD_NORMAL") {
             continue;
         }
-        let ours = validated_msat(
+        let ours = shared_validated_msat(
             channel
                 .get("our_amount_msat")
                 .ok_or_else(|| malformed("live channel has no our_amount_msat"))?,
-            "live channel our_amount_msat",
-        )?;
-        let total = validated_msat(
+            "listfunds live channel our_amount_msat",
+        )
+        .map_err(EconRefusal::MalformedListfunds)?;
+        let total = shared_validated_msat(
             channel
                 .get("amount_msat")
                 .ok_or_else(|| malformed("live channel has no amount_msat"))?,
-            "live channel amount_msat",
-        )?;
+            "listfunds live channel amount_msat",
+        )
+        .map_err(EconRefusal::MalformedListfunds)?;
         // An impossible split means the evidence is wrong, not that the
         // remote side holds negative sats.
         if ours > total {

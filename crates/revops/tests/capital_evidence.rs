@@ -277,3 +277,71 @@ fn the_analytics_gap_marker_is_gone() {
         "ANALYTICS_GAP must be deleted now that every field is supplied"
     );
 }
+
+/// F71-R9: every CONSUMED field of every channel row is required. The
+/// assembler previously validated only that `channels` was an array, then
+/// defaulted `peer_id`/`state` to "" and the msat fields to 0 through
+/// `unwrap_or_default()` and a permissive parser. A malformed but
+/// SUCCESSFUL reply therefore became a healthy, low-exposure, low-balance
+/// cycle -- and those numbers feed the portfolio and exposure gates, so the
+/// planner would act on fabricated evidence without a single error.
+#[test]
+fn malformed_channel_rows_refuse() {
+    let budget = healthy_budget();
+    let bad_rows = [
+        // Required identity/state fields.
+        json!({"state": "CHANNELD_NORMAL", "to_us_msat": 1i64, "total_msat": 2i64}),
+        json!({"peer_id": "02aa", "to_us_msat": 1i64, "total_msat": 2i64}),
+        json!({"peer_id": 42, "state": "CHANNELD_NORMAL", "to_us_msat": 1i64, "total_msat": 2i64}),
+        // Required balances, absent or unusable.
+        json!({"peer_id": "02aa", "state": "CHANNELD_NORMAL", "total_msat": 2i64}),
+        json!({"peer_id": "02aa", "state": "CHANNELD_NORMAL", "to_us_msat": 1i64}),
+        json!({"peer_id": "02aa", "state": "CHANNELD_NORMAL",
+               "to_us_msat": "garbage", "total_msat": 2i64}),
+        json!({"peer_id": "02aa", "state": "CHANNELD_NORMAL",
+               "to_us_msat": -1i64, "total_msat": 2i64}),
+        // Impossible split: our share exceeds the channel total.
+        json!({"peer_id": "02aa", "state": "CHANNELD_NORMAL",
+               "to_us_msat": 3i64, "total_msat": 2i64}),
+    ];
+    for row in bad_rows {
+        let mut d = deps(&budget);
+        d.peer_channels_raw = Ok(json!({"channels": [row.clone()]}));
+        let err = assemble_cycle_evidence(d).expect_err("malformed row must refuse");
+        assert_eq!(
+            err.code(),
+            "capital_evidence_peer_channels_unavailable",
+            "{row:?}"
+        );
+    }
+}
+
+/// A genuinely EMPTY channels array stays a measured zero -- a node with no
+/// channels is a real state, distinct from a corrupt reply.
+#[test]
+fn an_empty_channels_array_is_a_measured_zero() {
+    let budget = healthy_budget();
+    let mut d = deps(&budget);
+    d.peer_channels_raw = Ok(json!({"channels": []}));
+    let assembled = assemble_cycle_evidence(d).expect("empty is valid evidence");
+    assert!(assembled.evidence.peer_channels.is_empty());
+    assert!(assembled.evidence.exposure_channels.is_empty());
+}
+
+/// Well-formed rows still parse, including the string msat forms CLN emits
+/// and a legitimate zero balance.
+#[test]
+fn well_formed_rows_including_string_msat_parse() {
+    let budget = healthy_budget();
+    let mut d = deps(&budget);
+    d.peer_channels_raw = Ok(json!({"channels": [
+        {"peer_id": "02aa", "state": "CHANNELD_NORMAL",
+         "to_us_msat": "600000000msat", "total_msat": "2000000000msat"},
+        {"peer_id": "02bb", "state": "CHANNELD_NORMAL",
+         "to_us_msat": 0i64, "total_msat": 1_000_000_000i64},
+    ]}));
+    let assembled = assemble_cycle_evidence(d).expect("well-formed");
+    assert_eq!(assembled.evidence.peer_channels[0].to_us_msat, 600_000_000);
+    assert_eq!(assembled.evidence.peer_channels[1].to_us_msat, 0);
+    assert_eq!(assembled.evidence.exposure_channels[1].peer_id, "02bb");
+}

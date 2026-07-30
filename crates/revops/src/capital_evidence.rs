@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use revops_capital::planner::cycle::{CycleEvidence, StoredPlannerAction};
 
 use crate::capital_producers::OpenSideEvidence;
+use crate::msat_evidence::{required_msat, required_str};
 use revops_capital::planner::portfolio_gate::ChannelBalance;
 use serde_json::Value;
 
@@ -117,21 +118,8 @@ pub struct AssembledEvidence {
     pub evidence: CycleEvidence,
     pub gaps: Vec<EvidenceGap>,
 }
-
-fn parse_msat(v: &Value) -> i64 {
-    match v {
-        Value::Number(n) => n
-            .as_i64()
-            .or_else(|| n.as_f64().map(|f| f.trunc() as i64))
-            .unwrap_or(0),
-        Value::String(s) => s
-            .trim()
-            .trim_end_matches("msat")
-            .parse::<i64>()
-            .unwrap_or(0),
-        _ => 0,
-    }
-}
+// The local permissive msat parser is GONE: `msat_evidence` is the single
+// validated boundary now (F71-R9).
 
 /// Assemble kernel evidence, fail-closed on every required source.
 pub fn assemble_cycle_evidence(
@@ -151,24 +139,36 @@ pub fn assemble_cycle_evidence(
         })?;
     let mut peer_channels = Vec::with_capacity(channels.len());
     let mut exposure_channels = Vec::with_capacity(channels.len());
-    for channel in channels {
-        let state = channel
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let total_msat = channel.get("total_msat").map(parse_msat).unwrap_or(0);
+    for (index, channel) in channels.iter().enumerate() {
+        // F71-R9: every CONSUMED field of every row is REQUIRED. These
+        // previously defaulted to "" / 0, so a malformed-but-successful
+        // reply became a healthy, low-exposure, low-balance cycle -- and
+        // these numbers feed the portfolio and exposure gates, so the
+        // planner would act on fabricated evidence with no error at all.
+        // A genuinely EMPTY channels array stays a measured zero.
+        let context = format!("listpeerchannels channel[{index}]");
+        let malformed = |detail: String| EvidenceRefusal::PeerChannelsUnavailable(detail);
+
+        let peer_id = required_str(channel, "peer_id", &context).map_err(malformed)?;
+        let state = required_str(channel, "state", &context).map_err(malformed)?;
+        let to_us_msat = required_msat(channel, "to_us_msat", &context).map_err(malformed)?;
+        let total_msat = required_msat(channel, "total_msat", &context).map_err(malformed)?;
+
+        // An impossible split means the evidence is wrong, not that the
+        // remote side holds negative sats.
+        if to_us_msat > total_msat {
+            return Err(EvidenceRefusal::PeerChannelsUnavailable(format!(
+                "{context} to_us_msat {to_us_msat} exceeds total_msat {total_msat}"
+            )));
+        }
+
         peer_channels.push(ChannelBalance {
             state: state.clone(),
-            to_us_msat: channel.get("to_us_msat").map(parse_msat).unwrap_or(0),
+            to_us_msat,
             total_msat,
         });
         exposure_channels.push(revops_capital::planner::cycle::ExposureChannel {
-            peer_id: channel
-                .get("peer_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            peer_id,
             state,
             total_msat,
         });
