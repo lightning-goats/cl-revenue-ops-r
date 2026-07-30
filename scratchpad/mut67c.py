@@ -174,7 +174,7 @@ for mid, desc, relpath, old, new, testname in MUTATIONS:
     res = run(f"cargo test -p {pkg(testname)} --test {testname}")
     verdict = "KILLED" if res.returncode != 0 else "SURVIVED"
     results.append((mid, verdict, desc))
-    revert()
+    revert(snapshots)
 
 print("\n=== TASK 67C MUTATION MATRIX ===")
 for mid, verdict, desc in results:
