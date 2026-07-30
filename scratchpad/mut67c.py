@@ -106,8 +106,8 @@ MUTATIONS = [
      "recycle_evidence"),
     ("C8", "a wired gap field silently reverts to empty",
      "crates/revops/src/capital_evidence.rs",
-     "        dual_fund_peers: deps.dual_fund_peers,",
-     "        dual_fund_peers: BTreeSet::new(),",
+     "        dual_fund_peers: open_side.dual_fund_peers,",
+     "        dual_fund_peers: Default::default(),",
      "capital_evidence"),
 ]
 

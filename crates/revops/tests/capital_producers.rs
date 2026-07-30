@@ -330,3 +330,34 @@ fn open_side_evidence_has_no_public_empty_constructor() {
         "no hand-written Default either"
     );
 }
+
+/// F71-R13, and the killing test for mutation C19, which SURVIVED the first
+/// clean-tree matrix: the bundle must carry the SAME discovery and
+/// enrichment instances that fed `discover_peers`. Swapping them for a
+/// default afterwards is silent -- candidates were derived from snapshot A
+/// while the kernel plans against snapshot B, and the gap list stays empty
+/// either way.
+#[test]
+fn the_bundle_carries_the_instances_that_fed_discovery() {
+    let e = build_open_side(sources()).expect("produces");
+
+    assert_eq!(
+        e.discovery().all_channels.len(),
+        1,
+        "the produced bundle must carry the discovery evidence it used"
+    );
+    assert_eq!(e.discovery().all_channels[0].peer_id, "02patron");
+    assert_eq!(e.discovery().our_node_id, "02us");
+    assert!(
+        e.discovery()
+            .neighbor_patron_source_channels
+            .contains_key("02patron"),
+        "the neighbour edges that produced 02cand must survive"
+    );
+
+    assert!(
+        e.candidate_enrichment().contains_key("02cand"),
+        "the enrichment that fed scoring must survive: {:?}",
+        e.candidate_enrichment().keys().collect::<Vec<_>>()
+    );
+}
