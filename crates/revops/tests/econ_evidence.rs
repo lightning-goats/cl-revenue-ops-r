@@ -285,6 +285,24 @@ fn malformed_but_ignored_rows_do_not_refuse() {
     assert_eq!(tlv.channel_count, 0);
 }
 
+/// Structural guard for review finding F71-R8: the money boundary
+/// validates SHAPE but must never fork the parser. If `validated_msat`
+/// stops routing accepted values through canonical `parse_msat`, a second
+/// accepted-format authority exists and can drift from the fixture-verified
+/// one.
+#[test]
+fn accepted_values_still_go_through_the_canonical_parser() {
+    let src = include_str!("../src/econ_evidence.rs");
+    assert!(
+        src.contains("Ok(parse_msat(v))"),
+        "validated_msat must convert accepted values via canonical parse_msat"
+    );
+    assert!(
+        !src.contains("body.parse::<i64>().ok()"),
+        "validated_msat must not return its own locally parsed integer"
+    );
+}
+
 /// Structural guard for review finding F71-R2: exactly ONE P&L arithmetic
 /// authority exists. `econ_evidence` must not regrow its own margin
 /// computation -- two implementations of the same financial contract drift,
