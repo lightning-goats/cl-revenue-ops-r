@@ -296,6 +296,10 @@ enum Command {
         row: crate::analytics::FinancialSnapshotRow,
         reply: oneshot::Sender<Result<i64>>,
     },
+    CurrentBootFinancialSnapshot {
+        boot_id: String,
+        reply: oneshot::Sender<Result<Option<crate::analytics::FinancialSnapshotRow>>>,
+    },
     FinancialSnapshots {
         limit: i64,
         reply: oneshot::Sender<Result<Vec<crate::analytics::FinancialSnapshotRow>>>,
@@ -2031,6 +2035,24 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 71 / F71-R28: the snapshot THIS boot took, or `None`. A
+    /// caller asking for CURRENT financial evidence must not be served a
+    /// prior process's numbers.
+    pub async fn current_boot_financial_snapshot(
+        &self,
+        boot_id: &str,
+    ) -> Result<Option<crate::analytics::FinancialSnapshotRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::CurrentBootFinancialSnapshot {
+                boot_id: boot_id.to_string(),
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     pub async fn financial_snapshots(
         &self,
         limit: i64,
@@ -2688,6 +2710,11 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::InsertFinancialSnapshot { row, reply } => {
                     let _ = reply.send(crate::analytics::insert_financial_snapshot(&conn, &row));
+                }
+                Command::CurrentBootFinancialSnapshot { boot_id, reply } => {
+                    let _ = reply.send(crate::analytics::current_boot_financial_snapshot(
+                        &conn, &boot_id,
+                    ));
                 }
                 Command::FinancialSnapshots { limit, reply } => {
                     let _ = reply.send(crate::analytics::financial_snapshots(&conn, limit));

@@ -471,6 +471,7 @@ async fn financial_snapshot_pass_writes_a_row_with_python_arithmetic() {
 
     let pass = FinancialSnapshotPass::for_tests(
         observer.clone(),
+        BOOT.to_string(),
         Ok(json!({
             "local_balance_sats": 700_000,
             "remote_balance_sats": 300_000,
@@ -506,6 +507,7 @@ async fn financial_snapshot_pass_refuses_incomplete_tlv_rather_than_recording_ze
 
     let pass = FinancialSnapshotPass::for_tests(
         observer.clone(),
+        BOOT.to_string(),
         Ok(json!({"local_balance_sats": 700_000})),
         Ok(crate::financial_snapshot::LifetimeStats {
             total_revenue_msat: 0,
@@ -582,4 +584,72 @@ async fn composed_analytics_loops_are_ready_and_complete_a_current_boot_generati
         BootStatus::Passed,
         "a triggered pass must complete a generation under THIS boot id"
     );
+}
+
+/// F71-R28: a snapshot carries the boot that took it, and a caller asking
+/// for CURRENT financial evidence gets `None` on a boot that has not
+/// measured yet — never the previous process's numbers.
+///
+/// The financial loop opens with a 300s startup delay, so EVERY boot has a
+/// window where the newest row belongs to a prior boot. That window is
+/// exactly when a dashboard is most likely to be read.
+#[tokio::test]
+async fn a_prior_boots_financial_snapshot_is_never_served_as_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let observer = observer_db(&dir).await;
+
+    // A previous process left a snapshot behind.
+    let prior = FinancialSnapshotPass::for_tests(
+        observer.clone(),
+        "boot-previous".to_string(),
+        Ok(json!({
+            "local_balance_sats": 1, "remote_balance_sats": 1,
+            "onchain_sats": 1, "channel_count": 1,
+        })),
+        Ok(crate::financial_snapshot::LifetimeStats {
+            total_revenue_msat: 0,
+            total_rebalance_cost_sats: 0,
+        }),
+        NOW - 86_400,
+    );
+    crate::loop_health::ObserverPass::run(&prior, RequestKey::from("old"))
+        .await
+        .unwrap();
+
+    // This boot has not run its financial pass yet.
+    assert!(
+        observer
+            .current_boot_financial_snapshot(BOOT)
+            .await
+            .unwrap()
+            .is_none(),
+        "a prior boot's snapshot must NOT answer for this boot"
+    );
+    // ...while the history question still has an answer.
+    assert_eq!(observer.financial_snapshots(10).await.unwrap().len(), 1);
+
+    // Once this boot measures, it answers.
+    let current = FinancialSnapshotPass::for_tests(
+        observer.clone(),
+        BOOT.to_string(),
+        Ok(json!({
+            "local_balance_sats": 700_000, "remote_balance_sats": 300_000,
+            "onchain_sats": 50_000, "channel_count": 4,
+        })),
+        Ok(crate::financial_snapshot::LifetimeStats {
+            total_revenue_msat: 1_999,
+            total_rebalance_cost_sats: 120,
+        }),
+        NOW,
+    );
+    crate::loop_health::ObserverPass::run(&current, RequestKey::from("now"))
+        .await
+        .unwrap();
+    let row = observer
+        .current_boot_financial_snapshot(BOOT)
+        .await
+        .unwrap()
+        .expect("this boot has now measured");
+    assert_eq!(row.boot_id, BOOT);
+    assert_eq!(row.capacity_sats, 1_000_000);
 }

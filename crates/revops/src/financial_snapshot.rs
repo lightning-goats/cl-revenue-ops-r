@@ -44,6 +44,9 @@ pub struct FinancialDeps {
     /// py `database.get_lifetime_stats()` (REQUIRED).
     pub lifetime: Result<LifetimeStats, String>,
     pub now: i64,
+    /// F71-R28: the process taking this snapshot, stamped onto the row so
+    /// a later reader can tell a CURRENT measurement from a prior boot's.
+    pub boot_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,5 +101,6 @@ pub fn plan_financial_snapshot(
         revenue_accumulated_sats: lifetime.total_revenue_msat.div_euclid(1000),
         rebalance_cost_accumulated_sats: lifetime.total_rebalance_cost_sats,
         channel_count,
+        boot_id: deps.boot_id,
     })
 }

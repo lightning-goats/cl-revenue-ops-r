@@ -482,3 +482,51 @@ fn a_failing_temporal_write_rolls_back_the_whole_pass() {
         "and so must its Kalman write"
     );
 }
+
+/// F71-R28/R28a: the current-boot lookup returns THIS boot's newest row
+/// and nothing else, and it does so without loading the series. The table
+/// is Class E / never-prune, so a lookup that materialized history would
+/// grow without limit for the life of the node.
+#[test]
+fn current_boot_financial_snapshot_picks_this_boots_newest_row() {
+    let conn = db();
+    let snap =
+        |taken_at: i64, capacity: i64, boot: &str| revops_db::analytics::FinancialSnapshotRow {
+            taken_at,
+            local_balance_sats: capacity / 2,
+            remote_balance_sats: capacity / 2,
+            onchain_sats: 0,
+            capacity_sats: capacity,
+            revenue_accumulated_sats: 0,
+            rebalance_cost_accumulated_sats: 0,
+            channel_count: 1,
+            boot_id: boot.to_string(),
+        };
+    // A long prior history plus two rows for this boot.
+    for day in 0..50 {
+        revops_db::analytics::insert_financial_snapshot(
+            &conn,
+            &snap(NOW - (100 - day) * DAY, 1_000, "boot-previous"),
+        )
+        .unwrap();
+    }
+    revops_db::analytics::insert_financial_snapshot(&conn, &snap(NOW - DAY, 111, "boot-now"))
+        .unwrap();
+    revops_db::analytics::insert_financial_snapshot(&conn, &snap(NOW, 222, "boot-now")).unwrap();
+    // A LATER row from a different boot must not win.
+    revops_db::analytics::insert_financial_snapshot(&conn, &snap(NOW + DAY, 999, "boot-other"))
+        .unwrap();
+
+    let row = revops_db::analytics::current_boot_financial_snapshot(&conn, "boot-now")
+        .unwrap()
+        .expect("this boot has measured");
+    assert_eq!(row.capacity_sats, 222, "the NEWEST row for THIS boot");
+    assert_eq!(row.boot_id, "boot-now");
+
+    assert!(
+        revops_db::analytics::current_boot_financial_snapshot(&conn, "boot-unseen")
+            .unwrap()
+            .is_none(),
+        "a boot that has not measured gets None, not someone else's row"
+    );
+}

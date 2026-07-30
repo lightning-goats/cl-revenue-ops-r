@@ -1478,6 +1478,7 @@ async fn analytics_stores_round_trip_and_upsert_replaces() {
                 revenue_accumulated_sats: revenue,
                 rebalance_cost_accumulated_sats: 200,
                 channel_count: 21,
+                boot_id: "boot-test".to_string(),
             })
             .await
             .unwrap();

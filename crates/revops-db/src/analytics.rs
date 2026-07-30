@@ -65,6 +65,12 @@ pub struct FinancialSnapshotRow {
     pub revenue_accumulated_sats: i64,
     pub rebalance_cost_accumulated_sats: i64,
     pub channel_count: i64,
+    /// F71-R28: the process that took this snapshot. Without it a reader
+    /// asking for CURRENT financial evidence is served whatever the last
+    /// boot left behind, indistinguishably from a snapshot this boot
+    /// actually took -- the stale-prior-boot failure Task 67 exists to
+    /// remove, on the one table that still lacked provenance.
+    pub boot_id: String,
 }
 
 const FLOW_STATE_COLUMNS: [&str; 14] = [
@@ -84,7 +90,7 @@ const FLOW_STATE_COLUMNS: [&str; 14] = [
     "boot_id",
 ];
 
-const SNAPSHOT_COLUMNS: [&str; 9] = [
+const SNAPSHOT_COLUMNS: [&str; 10] = [
     "id",
     "taken_at",
     "local_balance_sats",
@@ -94,6 +100,7 @@ const SNAPSHOT_COLUMNS: [&str; 9] = [
     "revenue_accumulated_sats",
     "rebalance_cost_accumulated_sats",
     "channel_count",
+    "boot_id",
 ];
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
@@ -133,7 +140,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             capacity_sats INTEGER NOT NULL,
             revenue_accumulated_sats INTEGER NOT NULL,
             rebalance_cost_accumulated_sats INTEGER NOT NULL,
-            channel_count INTEGER NOT NULL
+            channel_count INTEGER NOT NULL,
+            boot_id TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_rust_financial_snapshots_taken_at
             ON rust_financial_snapshots(taken_at);",
@@ -729,8 +737,8 @@ pub fn insert_financial_snapshot(conn: &Connection, row: &FinancialSnapshotRow) 
         "INSERT INTO rust_financial_snapshots
              (taken_at, local_balance_sats, remote_balance_sats, onchain_sats,
               capacity_sats, revenue_accumulated_sats,
-              rebalance_cost_accumulated_sats, channel_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+              rebalance_cost_accumulated_sats, channel_count, boot_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             row.taken_at,
             row.local_balance_sats,
@@ -739,11 +747,66 @@ pub fn insert_financial_snapshot(conn: &Connection, row: &FinancialSnapshotRow) 
             row.capacity_sats,
             row.revenue_accumulated_sats,
             row.rebalance_cost_accumulated_sats,
-            row.channel_count
+            row.channel_count,
+            row.boot_id
         ],
     )
     .context("insert financial snapshot")?;
     Ok(conn.last_insert_rowid())
+}
+
+/// The most recent snapshot taken by THIS boot, or `None`.
+///
+/// F71-R28. `financial_snapshots` answers "what is the most recent
+/// snapshot", which is a history question. A caller asking "what is the
+/// CURRENT financial position" needs a different answer: on a boot that
+/// has not yet reached its first financial pass, the honest reply is
+/// `None` -- "this process has not measured yet" -- not the previous
+/// process's numbers, which are indistinguishable from fresh ones once
+/// they leave this function.
+///
+/// The financial loop's own cadence is a 300s startup delay, so EVERY
+/// boot has a window where the newest row is a prior boot's. That window
+/// is exactly when a dashboard is most likely to be read.
+/// F71-R28a: this is a bounded single-row lookup, NOT a scan. The first
+/// draft loaded the whole table and filtered in Rust, on a series this
+/// module's own header classifies Class E / never-prune -- so the cost
+/// grew without limit for the life of the node, to answer a question about
+/// one row. `ORDER BY taken_at DESC` rides the existing
+/// `idx_rust_financial_snapshots_taken_at` index, and this boot's row is
+/// at the top of it, so `LIMIT 1` stops almost immediately.
+pub fn current_boot_financial_snapshot(
+    conn: &Connection,
+    boot_id: &str,
+) -> Result<Option<FinancialSnapshotRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT taken_at, local_balance_sats, remote_balance_sats, onchain_sats,
+                    capacity_sats, revenue_accumulated_sats,
+                    rebalance_cost_accumulated_sats, channel_count, boot_id
+             FROM rust_financial_snapshots WHERE boot_id = ?1
+             ORDER BY taken_at DESC, id DESC LIMIT 1",
+        )
+        .context("prepare current-boot financial snapshot")?;
+    let mut rows = stmt
+        .query_map([boot_id], |row| {
+            Ok(FinancialSnapshotRow {
+                taken_at: row.get(0)?,
+                local_balance_sats: row.get(1)?,
+                remote_balance_sats: row.get(2)?,
+                onchain_sats: row.get(3)?,
+                capacity_sats: row.get(4)?,
+                revenue_accumulated_sats: row.get(5)?,
+                rebalance_cost_accumulated_sats: row.get(6)?,
+                channel_count: row.get(7)?,
+                boot_id: row.get(8)?,
+            })
+        })
+        .context("query current-boot financial snapshot")?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => Ok(Some(row.context("read current-boot financial snapshot")?)),
+    }
 }
 
 /// The most recent snapshots, newest first.
@@ -752,7 +815,7 @@ pub fn financial_snapshots(conn: &Connection, limit: i64) -> Result<Vec<Financia
         .prepare(
             "SELECT taken_at, local_balance_sats, remote_balance_sats, onchain_sats,
                     capacity_sats, revenue_accumulated_sats,
-                    rebalance_cost_accumulated_sats, channel_count
+                    rebalance_cost_accumulated_sats, channel_count, boot_id
              FROM rust_financial_snapshots ORDER BY taken_at DESC, id DESC LIMIT ?1",
         )
         .context("prepare financial snapshots")?;
@@ -767,6 +830,7 @@ pub fn financial_snapshots(conn: &Connection, limit: i64) -> Result<Vec<Financia
                 revenue_accumulated_sats: row.get(5)?,
                 rebalance_cost_accumulated_sats: row.get(6)?,
                 channel_count: row.get(7)?,
+                boot_id: row.get(8)?,
             })
         })
         .context("query financial snapshots")?

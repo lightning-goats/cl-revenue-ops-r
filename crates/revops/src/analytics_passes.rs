@@ -603,17 +603,21 @@ enum FinancialSources {
 /// The financial-snapshot loop's concrete observer pass.
 pub struct FinancialSnapshotPass {
     observer: ObserverHandle,
+    /// F71-R28: stamped onto every row this process writes.
+    boot_id: String,
     sources: FinancialSources,
 }
 
 impl FinancialSnapshotPass {
     pub fn live(
         observer: ObserverHandle,
+        boot_id: String,
         socket_path: PathBuf,
         db: Option<revops_db::actor::DbHandle>,
     ) -> Self {
         Self {
             observer,
+            boot_id,
             sources: FinancialSources::Live { socket_path, db },
         }
     }
@@ -621,12 +625,14 @@ impl FinancialSnapshotPass {
     #[cfg(test)]
     pub fn for_tests(
         observer: ObserverHandle,
+        boot_id: String,
         tlv_raw: Result<Value, String>,
         lifetime: Result<LifetimeStats, String>,
         now: i64,
     ) -> Self {
         Self {
             observer,
+            boot_id,
             sources: FinancialSources::Fixed {
                 tlv_raw,
                 lifetime,
@@ -695,6 +701,7 @@ impl ObserverPass for FinancialSnapshotPass {
                 tlv_raw,
                 lifetime,
                 now,
+                boot_id: self.boot_id.clone(),
             })
             .map_err(|refusal| {
                 anyhow::anyhow!("{}: {refusal:?}", refusal.code())
