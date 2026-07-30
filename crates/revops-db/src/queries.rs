@@ -19,6 +19,7 @@ use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_core::msat::{base_to_sats_ceil, base_to_sats_floor, py_round2};
 use rusqlite::{types::Value as SqlValue, Row};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// Port of `Database.get_config_override` (modules/database.py:7316-7322):
 /// `SELECT value FROM config_overrides WHERE key = ?`. `key` is the Python
@@ -1103,4 +1104,159 @@ pub async fn pnl_summary(handle: &DbHandle, window_days_in: i64, now: i64) -> Re
         volume_sats,
         forward_count,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Task 67b: per-channel profitability inputs
+// ---------------------------------------------------------------------------
+
+/// Per-channel revenue, msat-native, split by ATTRIBUTION SIDE.
+///
+/// The EXIT channel earns the fee (`fees_earned_msat`). The `sourced_*`
+/// fields are ENTRY-side attribution, used for protection and valuation
+/// only — summing them into fleet revenue double-counts every forward,
+/// because each forward appears on exactly one channel's earned side and
+/// exactly one channel's sourced side.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PerChannelRevenue {
+    pub fees_earned_msat: i64,
+    pub volume_routed_msat: i64,
+    pub forward_count: i64,
+    pub sourced_volume_msat: i64,
+    pub sourced_fee_contribution_msat: i64,
+    pub sourced_forward_count: i64,
+}
+
+/// Per-channel costs. The 30-day rebalance figure is kept SEPARATE from
+/// the all-time one: marginal ROI is defined over ongoing rebalance cost
+/// with no sunk open cost, so conflating them silently changes every
+/// winner/loser verdict.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PerChannelCosts {
+    pub peer_id: String,
+    pub open_cost_sats: i64,
+    pub capacity_sats: i64,
+    pub opened_at: i64,
+    pub rebalance_cost_sats: i64,
+    pub rebalance_cost_30d_sats: i64,
+}
+
+/// Aggregate `forwards` per channel, from `since` (inclusive; 0 = all).
+pub async fn per_channel_revenue(
+    handle: &DbHandle,
+    since: i64,
+) -> Result<HashMap<String, PerChannelRevenue>> {
+    let mut out: HashMap<String, PerChannelRevenue> = HashMap::new();
+
+    // EXIT side: this channel earned the fee.
+    let earned = handle
+        .query_rows(
+            "SELECT out_channel, COALESCE(SUM(fee_msat),0), COALESCE(SUM(out_msat),0), COUNT(*)
+             FROM forwards
+             WHERE out_channel IS NOT NULL AND timestamp >= ?1
+             GROUP BY out_channel",
+            vec![SqlValue::Integer(since)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .await?;
+    for (scid, fees, volume, count) in earned {
+        let e = out.entry(scid).or_default();
+        e.fees_earned_msat = fees;
+        e.volume_routed_msat = volume;
+        e.forward_count = count;
+    }
+
+    // ENTRY side: attribution only, NEVER summed into fleet revenue.
+    let sourced = handle
+        .query_rows(
+            "SELECT in_channel, COALESCE(SUM(fee_msat),0), COALESCE(SUM(in_msat),0), COUNT(*)
+             FROM forwards
+             WHERE in_channel IS NOT NULL AND timestamp >= ?1
+             GROUP BY in_channel",
+            vec![SqlValue::Integer(since)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .await?;
+    for (scid, fees, volume, count) in sourced {
+        let e = out.entry(scid).or_default();
+        e.sourced_fee_contribution_msat = fees;
+        e.sourced_volume_msat = volume;
+        e.sourced_forward_count = count;
+    }
+    Ok(out)
+}
+
+/// Per-channel costs. `window_since` bounds the 30-day rebalance figure.
+pub async fn per_channel_costs(
+    handle: &DbHandle,
+    window_since: i64,
+) -> Result<HashMap<String, PerChannelCosts>> {
+    let mut out: HashMap<String, PerChannelCosts> = HashMap::new();
+
+    let opens = handle
+        .query_rows(
+            "SELECT channel_id, COALESCE(peer_id,''), COALESCE(open_cost_sats,0),
+                    COALESCE(capacity_sats,0), COALESCE(opened_at,0)
+             FROM channel_costs",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .await?;
+    for (scid, peer_id, open_cost, capacity, opened_at) in opens {
+        let e = out.entry(scid).or_default();
+        e.peer_id = peer_id;
+        e.open_cost_sats = open_cost;
+        e.capacity_sats = capacity;
+        e.opened_at = opened_at;
+    }
+
+    let rebals = handle
+        .query_rows(
+            "SELECT channel_id, COALESCE(peer_id,''), COALESCE(SUM(cost_sats),0),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN cost_sats ELSE 0 END),0)
+             FROM rebalance_costs
+             WHERE channel_id IS NOT NULL
+             GROUP BY channel_id",
+            vec![SqlValue::Integer(window_since)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .await?;
+    for (scid, peer_id, total, windowed) in rebals {
+        let e = out.entry(scid).or_default();
+        if e.peer_id.is_empty() {
+            e.peer_id = peer_id;
+        }
+        e.rebalance_cost_sats = total;
+        e.rebalance_cost_30d_sats = windowed;
+    }
+    Ok(out)
 }
