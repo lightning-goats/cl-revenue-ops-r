@@ -1487,3 +1487,35 @@ async fn analytics_stores_round_trip_and_upsert_replaces() {
         .unwrap();
     assert_eq!(blocking.len(), 1);
 }
+
+/// A10, found by the task-67 mutation matrix SURVIVING: the analytics
+/// canonical-column refusal had no test proving it refuses. A noncanonical
+/// shape must be a hard error, never a silent acceptance -- same posture
+/// as `loop_health::init_schema`, because there is no honest value to
+/// backfill for a column no prior writer produced.
+#[test]
+fn analytics_schema_refuses_a_noncanonical_shape() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE rust_channel_flow_states (
+            scid TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL
+        );",
+    )
+    .unwrap();
+    let err = revops_db::analytics::init_schema(&conn)
+        .expect_err("a noncanonical analytics table must REFUSE, not be accepted");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("noncanonical rust_channel_flow_states"),
+        "the refusal must name the offending table: {text}"
+    );
+    assert!(
+        text.contains("fabricating analytics evidence"),
+        "the refusal must say WHY migration is refused: {text}"
+    );
+
+    let clean = rusqlite::Connection::open_in_memory().unwrap();
+    revops_db::analytics::init_schema(&clean).expect("canonical shape is accepted");
+    revops_db::analytics::init_schema(&clean).expect("init_schema is idempotent");
+}
