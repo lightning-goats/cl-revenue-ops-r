@@ -129,6 +129,38 @@ fn foreign_channels_are_not_mapped() {
     );
 }
 
+/// Mutation C10 SURVIVED the first matrix: discovery read `amount_msat`
+/// through a hand-rolled helper with no test covering the non-integer
+/// forms CLN actually emits. Same class as review finding F71-R1 in the
+/// sibling enrichment site -- a dropped capacity silently changes which
+/// neighbours look worth opening to.
+#[test]
+fn edge_amounts_accept_every_cln_msat_form() {
+    let mut s = sources(HashMap::new());
+    s.gossip_channels = Ok(json!([
+        {"source":"02aa","destination":"02s","short_channel_id":"701x1x0",
+         "amount_msat":"5000000000msat","fee_per_millionth":100,"active":true},
+        {"source":"02aa","destination":"02b","short_channel_id":"702x1x0",
+         "amount_msat":"4000000000","fee_per_millionth":100,"active":true},
+        {"source":"02aa","destination":"02f","short_channel_id":"703x1x0",
+         "amount_msat":3_000_000_000.0,"fee_per_millionth":100,"active":true},
+    ])
+    .as_array()
+    .unwrap()
+    .clone());
+    let ev = build_discovery_evidence(s).expect("assembles");
+    let mut amounts: Vec<i64> = ev.neighbor_patron_source_channels["02aa"]
+        .iter()
+        .map(|e| e.amount_msat)
+        .collect();
+    amounts.sort_unstable();
+    assert_eq!(
+        amounts,
+        vec![3_000_000_000, 4_000_000_000, 5_000_000_000],
+        "suffixed string, bare string and float forms must all parse"
+    );
+}
+
 /// Patrons carry the marginal ROI that task 67b's assembler produced.
 #[test]
 fn patrons_carry_marginal_roi_from_profitability() {
