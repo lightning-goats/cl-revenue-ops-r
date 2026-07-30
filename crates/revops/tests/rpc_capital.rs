@@ -153,6 +153,15 @@ fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         defib_gates: Default::default(),
         close_gates: Default::default(),
         open_guards: Default::default(),
+        discovery: Default::default(),
+        candidate_enrichment: Default::default(),
+        open_candidate_evidence: Default::default(),
+        dual_fund_peers: Default::default(),
+        redeployment_winner_evs: Vec::new(),
+        recycle_candidates: Vec::new(),
+        recycle_protected_peers: None,
+        recycle_route_pair_scids: Default::default(),
+        recycle_close_protection: Default::default(),
     }
 }
 
@@ -217,8 +226,13 @@ async fn assembled_owner_runs_the_cycle_and_reports_gaps() {
         !gaps.iter().any(|g| g["field"] == "winner_channels"),
         "winner_channels is supplied by task 67b: {gaps:?}"
     );
-    // The genuinely-remaining analytics gaps are still surfaced.
-    assert!(gaps.iter().any(|g| g["field"] == "discovery"), "{gaps:?}");
+    // Task 67c closed the remaining six, so planner-status now advertises
+    // NO gaps. The list stays in the response shape: a future gap must be
+    // surfaced here rather than silently shrinking the plan.
+    assert!(
+        gaps.is_empty(),
+        "task 67c closed every gap; planner-status still advertises: {gaps:?}"
+    );
 
     // planner_enabled=false: the kernel skips; the response says so.
     let mut deps = healthy_deps(&healthy);

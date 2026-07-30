@@ -52,6 +52,17 @@ fn deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         defib_gates: Default::default(),
         close_gates: Default::default(),
         open_guards: Default::default(),
+        discovery: Default::default(),
+        candidate_enrichment: Default::default(),
+        open_candidate_evidence: Default::default(),
+        dual_fund_peers: Default::default(),
+        redeployment_winner_evs: Vec::new(),
+        recycle_candidates: Vec::new(),
+        // Default to the FAIL-CLOSED protection state, matching what a
+        // caller that never read policies would honestly have.
+        recycle_protected_peers: None,
+        recycle_route_pair_scids: Default::default(),
+        recycle_close_protection: Default::default(),
     }
 }
 
@@ -109,10 +120,13 @@ fn healthy_assembly_feeds_the_frozen_kernel() {
             "{closed} is supplied by task 67b and must not be a declared gap: {gap_fields:?}"
         );
     }
-    // The remaining analytics gaps are still honestly declared.
-    for expected in ["discovery", "recycle_candidates"] {
-        assert!(gap_fields.contains(&expected), "missing gap for {expected}");
-    }
+    // Task 67c closed the remaining SIX. There are now no declared gaps at
+    // all: the planner's evidence is complete, so a gap reappearing here is
+    // a regression in the open side, not an honest disclosure.
+    assert!(
+        gap_fields.is_empty(),
+        "task 67c closed every gap; still declared: {gap_fields:?}"
+    );
 
     // The frozen kernel is total over the assembled evidence: with empty
     // candidate sets it plans NO actions (and does not skip -- the
@@ -144,4 +158,89 @@ fn healthy_assembly_feeds_the_frozen_kernel() {
     let plan = plan_cycle(&assembled.evidence);
     assert!(plan.skipped);
     assert_eq!(plan.skip_reason.as_deref(), Some("planner disabled"));
+}
+
+/// Task 67c: all six formerly-gapped fields carry through to the frozen
+/// kernel. Passing them is what makes the planner able to OPEN and RECYCLE
+/// rather than running, finding nothing, and reporting success.
+#[test]
+fn task_67c_fields_reach_the_kernel() {
+    use revops_capital::planner::candidate_score::CandidateEnrichmentEvidence;
+    use revops_capital::planner::cycle::{OpenCandidateEvidence, RecycleCandidateOwned};
+    use revops_capital::planner::ev::OpenEvInputs;
+
+    let ev_template = OpenEvInputs {
+        channel_size_sats: 2_000_000,
+        closed_channel_daily_net_est_sats: None,
+        observed_node_daily_ppm: Some(15.0),
+        open_cost_sats: 1_400,
+        close_cost_sats: 400,
+        inbound_median_fee_ppm: Some(120.0),
+        min_annual_roi_pct: 1.0,
+    };
+    let enrichment = CandidateEnrichmentEvidence {
+        reputation: None,
+        closed_channel_profit: None,
+        uptime_pct: Some(100.0),
+        has_clearnet_address: true,
+        inbound_median_fee_ppm: Some(120.0),
+        dest_channel_capacities_sats: vec![3_000_000],
+        is_sink_adjacent: false,
+        demand_flow_role: None,
+    };
+
+    let budget = healthy_budget();
+    let mut d = deps(&budget);
+    d.candidate_enrichment = BTreeMap::from([("02cc".to_string(), enrichment.clone())]);
+    d.open_candidate_evidence = BTreeMap::from([(
+        "02cc".to_string(),
+        OpenCandidateEvidence {
+            peer_dest_channel_capacities_sats: vec![3_000_000],
+            open_ev_template: ev_template,
+            enrichment,
+        },
+    )]);
+    d.dual_fund_peers = ["02cc".to_string()].into_iter().collect();
+    d.redeployment_winner_evs = vec![("02aa".to_string(), 4_200.0)];
+    d.recycle_candidates = vec![RecycleCandidateOwned {
+        peer_id: "02cc".to_string(),
+        score: 0.9,
+        open_ev_template: ev_template,
+    }];
+    d.recycle_protected_peers = Some(["02protected".to_string()].into_iter().collect());
+    d.recycle_route_pair_scids = ["900000x1x0".to_string()].into_iter().collect();
+
+    let assembled = assemble_cycle_evidence(d).expect("healthy assembly");
+    let e = &assembled.evidence;
+
+    assert!(e.candidate_enrichment.contains_key("02cc"));
+    assert!(e.open_candidate_evidence.contains_key("02cc"));
+    assert!(e.dual_fund_peers.contains("02cc"));
+    assert_eq!(
+        e.redeployment_winner_evs,
+        vec![("02aa".to_string(), 4_200.0)]
+    );
+    assert_eq!(e.recycle_candidates.len(), 1);
+    assert_eq!(e.recycle_route_pair_scids.len(), 1);
+    assert!(
+        e.recycle_protected_peers
+            .as_ref()
+            .expect("protection state carried")
+            .contains("02protected"),
+        "the protection set must survive assembly -- dropping it to None \
+         would block every recycle, and dropping it to empty would expose \
+         protected peers"
+    );
+    assert!(assembled.gaps.is_empty());
+}
+
+/// The gap marker itself is DELETED, not merely unused. A constant left
+/// behind is a live invitation to re-declare a gap that no longer exists.
+#[test]
+fn the_analytics_gap_marker_is_gone() {
+    let src = include_str!("../src/capital_evidence.rs");
+    assert!(
+        !src.contains("ANALYTICS_GAP"),
+        "ANALYTICS_GAP must be deleted now that every field is supplied"
+    );
 }

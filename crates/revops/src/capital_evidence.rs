@@ -11,17 +11,20 @@
 //!   nullable-evidence complaint).
 //! - **Analytics-owner-derived** (winners, losers, defib/close gates,
 //!   discovery, enrichment, open candidates, recycle inputs): their
-//!   Python sources are the profitability/flow analyzer subsystems that
-//!   Task 67 ports. Until those owners exist, the assembler fills them
-//!   EMPTY and reports each as a typed [`EvidenceGap`] carried alongside
-//!   the evidence -- `revenue-r-planner-status` surfaces the gap list,
-//!   so an empty plan is attributable, never a silent "nothing to do".
-//!   The frozen kernel is total over empty candidate sets (it plans no
-//!   actions), which the assembly test pins.
+//!   Python sources are the profitability/flow analyzer subsystems.
+//!   Tasks 67b and 67c ported those owners, so every one of these is now
+//!   SUPPLIED and the gap list is empty by construction. [`EvidenceGap`]
+//!   remains as the mechanism for declaring a future gap honestly --
+//!   `revenue-r-planner-status` surfaces the list, so an empty plan stays
+//!   attributable rather than a silent "nothing to do".
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use revops_capital::planner::cycle::{CycleEvidence, DiscoveryEvidence, StoredPlannerAction};
+use revops_capital::planner::candidate_score::CandidateEnrichmentEvidence;
+use revops_capital::planner::cycle::{
+    CycleEvidence, DiscoveryEvidence, OpenCandidateEvidence, RecycleCandidateOwned,
+    StoredPlannerAction,
+};
 use revops_capital::planner::portfolio_gate::ChannelBalance;
 use serde_json::Value;
 
@@ -33,14 +36,6 @@ pub struct EvidenceGap {
     pub field: &'static str,
     pub reason: &'static str,
 }
-
-/// Task 67b closed `winner_channels`/`loser_channels`. The nine fields
-/// still listed below need discovery, enrichment and recycle inputs that
-/// remain unported -- named accurately rather than left pointing at a task
-/// that has already shipped.
-const ANALYTICS_GAP: &str =
-    "needs discovery/enrichment/recycle inputs not yet ported (winners and losers ARE \
-     now supplied by the Task 67b profitability + flow assemblers)";
 
 /// Typed assembly refusals -- each names its failed source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +92,23 @@ pub struct EvidenceDeps<'a> {
     pub defib_gates: BTreeMap<String, revops_capital::planner::cycle::DefibGate>,
     pub close_gates: BTreeMap<String, revops_capital::planner::cycle::CloseGate>,
     pub open_guards: BTreeMap<String, revops_capital::planner::cycle::OpenGuard>,
+
+    /// Task 67c: the open side. Built by the slice 1-4 assemblers
+    /// (`discovery_evidence`, `enrichment_evidence`, `open_ev_evidence`,
+    /// `recycle_evidence`) and passed in, keeping this function pure and
+    /// every failure path drivable from tests.
+    pub discovery: DiscoveryEvidence,
+    pub candidate_enrichment: BTreeMap<String, CandidateEnrichmentEvidence>,
+    pub open_candidate_evidence: BTreeMap<String, OpenCandidateEvidence>,
+    pub dual_fund_peers: BTreeSet<String>,
+    pub redeployment_winner_evs: Vec<(String, f64)>,
+    pub recycle_candidates: Vec<RecycleCandidateOwned>,
+    /// Three-way, from [`crate::recycle_evidence::recycle_protected_peers`]:
+    /// `None` = source failed, everything protected; `Some(empty)` = nothing
+    /// protected. The frozen kernel branches on exactly this distinction.
+    pub recycle_protected_peers: Option<BTreeSet<String>>,
+    pub recycle_route_pair_scids: BTreeSet<String>,
+    pub recycle_close_protection: BTreeMap<String, Option<String>>,
 }
 
 /// The assembly product: kernel-ready evidence plus the honest gap list.
@@ -175,32 +187,11 @@ pub fn assemble_cycle_evidence(
         Err(reason) => (false, Some(reason)),
     };
 
-    let gaps = vec![
-        EvidenceGap {
-            field: "redeployment_winner_evs",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "discovery",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "candidate_enrichment",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "open_candidate_evidence",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "dual_fund_peers",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "recycle_candidates",
-            reason: ANALYTICS_GAP,
-        },
-    ];
+    // Task 67c closed the last six. The planner's evidence is now
+    // complete, so this list is empty BY CONSTRUCTION rather than by
+    // omission -- `EvidenceGap` stays as the mechanism for declaring a
+    // future gap honestly.
+    let gaps: Vec<EvidenceGap> = Vec::new();
 
     let evidence = CycleEvidence {
         planner_enabled: deps.planner_enabled,
@@ -208,32 +199,32 @@ pub fn assemble_cycle_evidence(
         fee_gate_reason,
         winner_channels: deps.winner_channels,
         loser_channels: deps.loser_channels,
-        redeployment_winner_evs: Vec::new(),
+        redeployment_winner_evs: deps.redeployment_winner_evs,
         defibrillation_limit: deps.defibrillation_limit,
         defib_gates: deps.defib_gates,
         close_execution_enabled: deps.close_execution_enabled,
         close_limit: deps.close_limit,
         close_gates: deps.close_gates,
         peer_channels,
-        discovery: DiscoveryEvidence::default(),
-        candidate_enrichment: BTreeMap::new(),
+        discovery: deps.discovery,
+        candidate_enrichment: deps.candidate_enrichment,
         now: deps.now,
         backoff_actions,
         exposure_channels,
         max_channel_sats: deps.max_channel_sats,
         min_channel_sats: deps.min_channel_sats,
-        open_candidate_evidence: BTreeMap::new(),
+        open_candidate_evidence: deps.open_candidate_evidence,
         available_sats: budget.available_sats,
         max_opens_per_cycle: deps.max_opens_per_cycle,
         exploration_budget_sats: deps.exploration_budget_sats,
         estimated_open_cost_sats: deps.estimated_open_cost_sats,
-        dual_fund_peers: BTreeSet::new(),
+        dual_fund_peers: deps.dual_fund_peers,
         open_guards: deps.open_guards,
         recycle_block_height: deps.recycle_block_height,
-        recycle_protected_peers: None,
-        recycle_route_pair_scids: BTreeSet::new(),
-        recycle_close_protection: BTreeMap::new(),
-        recycle_candidates: Vec::new(),
+        recycle_protected_peers: deps.recycle_protected_peers,
+        recycle_route_pair_scids: deps.recycle_route_pair_scids,
+        recycle_close_protection: deps.recycle_close_protection,
+        recycle_candidates: deps.recycle_candidates,
         recycle_close_cost_sats: deps.recycle_close_cost_sats,
     };
 
