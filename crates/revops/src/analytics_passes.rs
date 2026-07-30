@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use anyhow::{Context, Result};
-use revops_analytics::flow::EmaBucket;
-use revops_analytics::kalman::{DailyBucket, KalmanFlowState, KalmanStateDict};
+use revops_analytics::flow::{EmaBucket, HourlyHistogramBucket, TemporalProfile};
+use revops_analytics::kalman::{DailyBucket, KalmanFlowState, KalmanStateDict, NetFlowEntry};
 use revops_db::owner::ObserverHandle;
 use serde_json::{json, Value};
 
@@ -70,6 +70,10 @@ pub use crate::financial_snapshot::SNAPSHOT_INTERVAL_SECONDS as FINANCIAL_INTERV
 pub const FINANCIAL_STARTUP_DELAY_SECONDS: u64 = STARTUP_DELAY_SECONDS as u64;
 
 const RPC_TIMEOUT_SECONDS: u64 = 30;
+
+/// py `_compute_raw_kalman_observation` filters raw entries to the last
+/// 86400s, so the fetch window matches exactly (flow_analysis.py:1402-1408).
+const RAW_OBSERVATION_WINDOW_SECONDS: i64 = 86_400;
 
 /// One read-only RPC, timeout-bounded. Errors are stringly-typed on
 /// purpose: they flow straight into the planners' `Result`-shaped inputs,
@@ -105,6 +109,8 @@ pub struct FlowPassConfig {
     pub sink_threshold: f64,
     /// py `flow_window_days` (config.py:589).
     pub window_days: i64,
+    /// py `htlc_congestion_threshold` (config.py:743).
+    pub htlc_congestion_threshold: f64,
     /// py `max(60, flow_interval)`.
     pub interval_secs: u64,
 }
@@ -115,6 +121,7 @@ impl Default for FlowPassConfig {
             source_threshold: 0.05,
             sink_threshold: -0.05,
             window_days: 7,
+            htlc_congestion_threshold: 0.8,
             interval_secs: FLOW_DEFAULT_INTERVAL_SECONDS,
         }
     }
@@ -169,6 +176,14 @@ impl FlowAnalysisPass {
             .channel_flow_states()
             .await
             .map_err(|e| format!("channel flow states unreadable: {e:#}"))?;
+        // F71-R19: the raw 24h per-forward window the Kalman filter
+        // actually observes. py fetches exactly 24h here because the
+        // consumer filters to <= 86400s anyway.
+        let raw = self
+            .observer
+            .continuous_net_flow(now - RAW_OBSERVATION_WINDOW_SECONDS)
+            .await
+            .map_err(|e| format!("continuous net flow unreadable: {e:#}"))?;
 
         let mut history: BTreeMap<String, ChannelHistory> = BTreeMap::new();
         for (scid, daily) in buckets {
@@ -193,6 +208,61 @@ impl FlowAnalysisPass {
                 })
                 .collect();
         }
+        for (scid, rows) in raw {
+            history.entry(scid).or_default().raw_entries = rows
+                .into_iter()
+                .map(|r| NetFlowEntry {
+                    timestamp: r.timestamp as f64,
+                    net_msat: r.net_msat,
+                })
+                .collect();
+        }
+        // F71-R20: the DTS posterior variance py digs out of each
+        // channel's `v2_state_json` before deciding whether to widen the
+        // flow thresholds. Nested-first, flat fallback, matching py's
+        // `(v2.get('fee_state') or {}).get('thompson_state') or
+        // v2.get('thompson_state', {})`.
+        let fee_state = self
+            .observer
+            .load_latest_fee_state()
+            .await
+            .map_err(|e| format!("fee strategy state unreadable: {e:#}"))?;
+        for row in fee_state.rows {
+            let entry = history.entry(row.channel_id).or_default();
+            if let Some(variance) = posterior_variance(&row.v2_state_json) {
+                entry.posterior_variance = Some(variance);
+            }
+            // F71-R25b: the temporal profile's `dominant_bucket` is owned
+            // by the fee controller's size profiling, not by this pass.
+            entry.dominant_bucket_override = dominant_size_bucket(&row.v2_state_json);
+        }
+        // F71-R25: the hour-of-day histogram and the persisted temporal
+        // profile the frozen kernel EMA-blends it into.
+        let histograms = self
+            .observer
+            .hourly_flow_histogram(now, revops_db::analytics::TEMPORAL_HISTOGRAM_WINDOW_DAYS)
+            .await
+            .map_err(|e| format!("hourly flow histogram unreadable: {e:#}"))?;
+        for (scid, buckets) in histograms {
+            let mut converted = [HourlyHistogramBucket::default(); 24];
+            for (slot, bucket) in buckets.iter().enumerate() {
+                converted[slot] = HourlyHistogramBucket {
+                    out_sats: bucket.out_sats as f64,
+                    in_sats: bucket.in_sats as f64,
+                    count: bucket.count as f64,
+                };
+            }
+            history.entry(scid).or_default().hourly_histogram = Some(converted);
+        }
+        let profiles = self
+            .observer
+            .temporal_profiles()
+            .await
+            .map_err(|e| format!("temporal profiles unreadable: {e:#}"))?;
+        for (scid, encoded, _updated_at) in profiles {
+            let profile = decode_temporal(&scid, &encoded)?;
+            history.entry(scid).or_default().temporal_profile = Some(profile);
+        }
         for (scid, encoded, _updated_at) in kalman {
             history.entry(scid).or_default().kalman = Some(decode_kalman(&encoded));
         }
@@ -201,9 +271,143 @@ impl FlowAnalysisPass {
             entry.previous_state = Some(row.flow_state);
             entry.previous_ratio = row.flow_ratio;
             entry.previous_ratio_at = row.updated_at;
+            // F71-R21: the balance classifier's veto reads the PREVIOUS
+            // cycle's Kalman estimate, which is why R20's separate column
+            // had to exist before this could be sourced at all.
+            entry.previous_kalman_ratio = row.kalman_flow_ratio;
         }
         Ok(history)
     }
+}
+
+/// Dig `posterior_variance` out of a channel's `v2_state_json`.
+///
+/// Py wraps the whole dig in a bare `try/except` and falls through to "no
+/// widening" on ANY failure, so an unparseable envelope returning `None`
+/// here is faithful rather than lossy. A missing key is py's `10000`
+/// default, which its `> 10000` test then rejects -- identical in effect
+/// to `None`, so it is not synthesized.
+fn posterior_variance(v2_state_json: &str) -> Option<f64> {
+    let v2: Value = serde_json::from_str(v2_state_json).ok()?;
+    let thompson = v2
+        .get("fee_state")
+        .and_then(|f| f.get("thompson_state"))
+        .or_else(|| v2.get("thompson_state"))?;
+    thompson.get("posterior_variance").and_then(Value::as_f64)
+}
+
+/// Pick the size bucket with the highest `revenue_share` from a channel's
+/// `v2_state_json` (py flow_analysis.py:1713-1723).
+///
+/// `None` reproduces py's `except: pass` -- size profiling unavailable, so
+/// the stored profile keeps whatever label it already had. That is
+/// distinct from `Some("unknown")`, which is py's own answer when the
+/// buckets ARE present but none carries a positive share: the fee
+/// controller looked and could not name a dominant bucket.
+pub(crate) fn dominant_size_bucket(v2_state_json: &str) -> Option<String> {
+    let v2: Value = serde_json::from_str(v2_state_json).ok()?;
+    let buckets = v2.get("size_buckets")?.as_object()?;
+    let mut max_share = 0.0f64;
+    let mut dominant = "unknown".to_string();
+    for (label, data) in buckets {
+        let share = data
+            .get("revenue_share")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if share > max_share {
+            max_share = share;
+            dominant = label.clone();
+        }
+    }
+    Some(dominant)
+}
+
+/// `TemporalProfile` is in the same frozen crate as `KalmanFlowState` and
+/// likewise derives no serde traits, so it is encoded field by field. The
+/// derived fields (`peak_hours`, `quiet_hours`, `burstiness`,
+/// `diurnal_strength`) are RECOMPUTED by the kernel from the hourly arrays
+/// on every update, so they are stored for readers but never trusted on
+/// the way back in.
+fn encode_temporal(p: &TemporalProfile) -> Value {
+    json!({
+        "hourly_out": p.hourly_out.to_vec(),
+        "hourly_in": p.hourly_in.to_vec(),
+        "hourly_count": p.hourly_count.to_vec(),
+        "peak_hours": p.peak_hours,
+        "quiet_hours": p.quiet_hours,
+        "burstiness": p.burstiness,
+        "diurnal_strength": p.diurnal_strength,
+        "dominant_bucket": p.dominant_bucket,
+        "observation_days": p.observation_days,
+        "last_observation_day": p.last_observation_day,
+        "last_updated": p.last_updated,
+    })
+}
+
+/// Decode a PERSISTED temporal profile, refusing anything malformed.
+///
+/// F71-R25a. My first draft defaulted a corrupt, short, or non-numeric
+/// stored profile into a fresh zero profile, with a comment calling that
+/// "the honest reading". It is not. An all-zero `hourly_out` is exactly
+/// what the frozen kernel tests for its `is_first` branch, so a corrupt
+/// row does not degrade gracefully — it makes the kernel DISCARD the
+/// channel's accumulated history, take the new histogram verbatim, and
+/// leave `observation_days` frozen, silently weakening the graduation
+/// check that gates predictive pre-positioning and demand-based sizing.
+///
+/// Note the deliberate asymmetry with [`decode_kalman`], which IS
+/// permissive: `KalmanFlowState::from_dict` carries documented,
+/// audit-fixed semantics (I-7) that this port mirrors on purpose.
+/// `TemporalProfile::from_dict` has no such contract — py just does
+/// `d.get(k, default)[:24]`, truncating without ever checking length.
+///
+/// An ABSENT row is NOT malformed: a channel with no stored profile has
+/// genuinely never been observed, and `TemporalProfile::default()` is the
+/// correct, meaningful answer for it.
+fn decode_temporal(scid: &str, encoded: &Value) -> Result<TemporalProfile, String> {
+    let hours = |key: &str| -> Result<[f64; 24], String> {
+        let values = encoded
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("temporal profile for {scid} has no {key} array"))?;
+        if values.len() != 24 {
+            return Err(format!(
+                "temporal profile for {scid} has {} {key} buckets, expected exactly 24",
+                values.len()
+            ));
+        }
+        let mut out = [0.0f64; 24];
+        for (slot, value) in values.iter().enumerate() {
+            out[slot] = value.as_f64().ok_or_else(|| {
+                format!("temporal profile for {scid} has a non-numeric {key}[{slot}]: {value}")
+            })?;
+        }
+        Ok(out)
+    };
+    let counter = |key: &str| -> Result<i64, String> {
+        encoded
+            .get(key)
+            .ok_or_else(|| format!("temporal profile for {scid} has no {key}"))?
+            .as_i64()
+            .ok_or_else(|| format!("temporal profile for {scid} has a non-integer {key}"))
+    };
+
+    let mut profile = TemporalProfile {
+        hourly_out: hours("hourly_out")?,
+        hourly_in: hours("hourly_in")?,
+        hourly_count: hours("hourly_count")?,
+        ..Default::default()
+    };
+    profile.observation_days = counter("observation_days")?;
+    profile.last_observation_day = counter("last_observation_day")?;
+    profile.last_updated = counter("last_updated")?;
+    profile.dominant_bucket = encoded
+        .get("dominant_bucket")
+        .ok_or_else(|| format!("temporal profile for {scid} has no dominant_bucket"))?
+        .as_str()
+        .ok_or_else(|| format!("temporal profile for {scid} has a non-string dominant_bucket"))?
+        .to_string();
+    Ok(profile)
 }
 
 /// `KalmanFlowState` lives in the FROZEN analytics crate and derives no
@@ -263,6 +467,8 @@ impl ObserverPass for FlowAnalysisPass {
                 history,
                 source_threshold: self.cfg.source_threshold,
                 sink_threshold: self.cfg.sink_threshold,
+                flow_window_days: self.cfg.window_days,
+                htlc_congestion_threshold: self.cfg.htlc_congestion_threshold,
                 now,
                 boot_id: &self.boot_id,
             })
@@ -277,8 +483,13 @@ impl ObserverPass for FlowAnalysisPass {
                 .iter()
                 .map(|(scid, state)| (scid.clone(), encode_kalman(state)))
                 .collect();
+            let temporal = result
+                .temporal
+                .iter()
+                .map(|(scid, profile)| (scid.clone(), encode_temporal(profile)))
+                .collect();
             self.observer
-                .persist_flow_pass(result.states, kalman, now)
+                .persist_flow_pass(result.states, kalman, temporal, result.observed_scids, now)
                 .await
                 .context("persist flow pass")?;
             Ok(())

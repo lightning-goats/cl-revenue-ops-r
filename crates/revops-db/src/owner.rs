@@ -314,12 +314,29 @@ enum Command {
         since: i64,
         reply: oneshot::Sender<Result<std::collections::BTreeSet<String>>>,
     },
+    HourlyFlowHistogram {
+        now: i64,
+        window_days: i64,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<
+            Result<std::collections::BTreeMap<String, [crate::analytics::HourlyFlowBucket; 24]>>,
+        >,
+    },
+    ContinuousNetFlow {
+        since: i64,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<
+            Result<std::collections::BTreeMap<String, Vec<crate::analytics::NetFlowRow>>>,
+        >,
+    },
     // F71-R18: one flow pass, one transaction. See
     // `analytics::persist_flow_pass` for why per-row writes are not an
     // acceptable substitute here.
     PersistFlowPass {
         states: Vec<crate::analytics::ChannelFlowStateRow>,
         kalman: Vec<(String, serde_json::Value)>,
+        temporal: Vec<(String, serde_json::Value)>,
+        retain_scids: std::collections::BTreeSet<String>,
         updated_at: i64,
         reply: oneshot::Sender<Result<usize>>,
     },
@@ -2060,12 +2077,49 @@ impl ObserverHandle {
         rx.await.context("observer actor dropped reply")?
     }
 
+    /// Task 71 / F71-R25: the 24-bucket hour-of-day histogram the frozen
+    /// temporal kernel consumes. See [`crate::analytics::hourly_flow_histogram`].
+    #[allow(clippy::type_complexity)]
+    pub async fn hourly_flow_histogram(
+        &self,
+        now: i64,
+        window_days: i64,
+    ) -> Result<std::collections::BTreeMap<String, [crate::analytics::HourlyFlowBucket; 24]>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::HourlyFlowHistogram {
+                now,
+                window_days,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R19: the raw 24h per-forward entries the Kalman
+    /// filter actually observes. See [`crate::analytics::continuous_net_flow`].
+    #[allow(clippy::type_complexity)]
+    pub async fn continuous_net_flow(
+        &self,
+        since: i64,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::analytics::NetFlowRow>>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ContinuousNetFlow { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     /// Task 71 / F71-R18: persist one COMPLETE flow pass atomically.
     /// Returns the number of state rows written.
     pub async fn persist_flow_pass(
         &self,
         states: Vec<crate::analytics::ChannelFlowStateRow>,
         kalman: Vec<(String, serde_json::Value)>,
+        temporal: Vec<(String, serde_json::Value)>,
+        retain_scids: std::collections::BTreeSet<String>,
         updated_at: i64,
     ) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
@@ -2073,6 +2127,8 @@ impl ObserverHandle {
             .send(Command::PersistFlowPass {
                 states,
                 kalman,
+                temporal,
+                retain_scids,
                 updated_at,
                 reply,
             })
@@ -2647,14 +2703,35 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                         window_days,
                     ));
                 }
+                Command::HourlyFlowHistogram {
+                    now,
+                    window_days,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::hourly_flow_histogram(
+                        &conn,
+                        now,
+                        window_days,
+                    ));
+                }
+                Command::ContinuousNetFlow { since, reply } => {
+                    let _ = reply.send(crate::analytics::continuous_net_flow(&conn, since));
+                }
                 Command::PersistFlowPass {
                     states,
                     kalman,
+                    temporal,
+                    retain_scids,
                     updated_at,
                     reply,
                 } => {
                     let _ = reply.send(crate::analytics::persist_flow_pass(
-                        &mut conn, &states, &kalman, updated_at,
+                        &mut conn,
+                        &states,
+                        &kalman,
+                        &temporal,
+                        &retain_scids,
+                        updated_at,
                     ));
                 }
                 Command::PeersWithRecentConnectionHistory { since, reply } => {

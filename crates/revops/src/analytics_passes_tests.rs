@@ -80,7 +80,10 @@ fn peer_channels() -> Value {
         "short_channel_id": "100x1x0",
         "peer_id": PEER,
         "total_msat": 1_000_000_000_i64,
-        "to_us_msat": 400_000_000_i64,
+        // F71-R19/R20: spendable/receivable are the REQUIRED balance
+        // fields; `to_us_msat` is not what py reads.
+        "spendable_msat": 400_000_000_i64,
+        "receivable_msat": 600_000_000_i64,
     }]})
 }
 
@@ -205,6 +208,191 @@ async fn flow_analysis_pass_round_trips_every_kalman_field_across_passes() {
             "kalman encoding dropped `{field}`; the filter would silently reset each pass"
         );
     }
+}
+
+/// F71-R25a: a PRESENT but malformed persisted temporal profile must
+/// refuse. Defaulting it to a fresh zero profile is not graceful
+/// degradation — an all-zero `hourly_out` is precisely what the frozen
+/// kernel tests for its `is_first` branch, so a corrupt row makes it
+/// DISCARD the channel's accumulated history and freeze
+/// `observation_days`, silently weakening the graduation check.
+#[tokio::test]
+async fn a_corrupt_persisted_temporal_profile_fails_the_pass() {
+    for (label, corrupt) in [
+        (
+            "short array",
+            json!({
+                "hourly_out": [0.0, 1.0], "hourly_in": vec![0.0; 24],
+                "hourly_count": vec![0.0; 24], "dominant_bucket": "",
+                "observation_days": 3, "last_observation_day": 0, "last_updated": 0,
+            }),
+        ),
+        (
+            "non-numeric bucket",
+            json!({
+                "hourly_out": (0..24).map(|i| if i == 5 { json!("x") } else { json!(0.0) })
+                    .collect::<Vec<_>>(),
+                "hourly_in": vec![0.0; 24], "hourly_count": vec![0.0; 24],
+                "dominant_bucket": "", "observation_days": 3,
+                "last_observation_day": 0, "last_updated": 0,
+            }),
+        ),
+        (
+            "missing counter",
+            json!({
+                "hourly_out": vec![0.0; 24], "hourly_in": vec![0.0; 24],
+                "hourly_count": vec![0.0; 24], "dominant_bucket": "",
+                "last_observation_day": 0, "last_updated": 0,
+            }),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lightning-rpc");
+        serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+        let observer = observer_db(&dir).await;
+        observer
+            .upsert_temporal_profile("100x1x0", corrupt, NOW)
+            .await
+            .unwrap();
+
+        let pass = FlowAnalysisPass::new(
+            socket,
+            observer.clone(),
+            BOOT.to_string(),
+            crate::analytics_passes::FlowPassConfig::default(),
+        );
+        let err = crate::loop_health::ObserverPass::run(&pass, RequestKey::from("t"))
+            .await
+            .expect_err(label);
+        assert!(
+            format!("{err:#}").contains("flow_history_unavailable"),
+            "{label}: a corrupt stored profile must fail the pass, got: {err:#}"
+        );
+        assert!(
+            observer.channel_flow_states().await.unwrap().is_empty(),
+            "{label}: a refused pass writes nothing"
+        );
+    }
+}
+
+/// The ABSENT case is NOT malformed: a channel with no stored profile has
+/// genuinely never been observed, and a fresh default is the correct
+/// answer for it.
+#[tokio::test]
+async fn an_absent_temporal_profile_is_a_fresh_start_not_a_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lightning-rpc");
+    serve(socket.clone(), vec![("listpeerchannels", peer_channels())]);
+    let observer = observer_db(&dir).await;
+
+    let pass = FlowAnalysisPass::new(
+        socket,
+        observer.clone(),
+        BOOT.to_string(),
+        crate::analytics_passes::FlowPassConfig::default(),
+    );
+    crate::loop_health::ObserverPass::run(&pass, RequestKey::from("t"))
+        .await
+        .expect("no stored profile is a legitimate first observation");
+    assert!(
+        !observer.temporal_profiles().await.unwrap().is_empty(),
+        "the pass produced and persisted a profile"
+    );
+}
+
+// ---------------------------------------------------------------------
+// F71-R25c: the size_buckets PARSER itself
+// ---------------------------------------------------------------------
+
+/// The owner-side test feeds `dominant_bucket_override` directly, so it
+/// never exercises this parsing at all — a version that took the FIRST
+/// bucket rather than the highest-revenue one would pass it. These pin the
+/// parser (py flow_analysis.py:1713-1723).
+#[test]
+fn dominant_size_bucket_picks_the_highest_revenue_share() {
+    use crate::analytics_passes::dominant_size_bucket;
+
+    // Winner is alphabetically LAST: catches "take the first bucket".
+    let last_wins = json!({"size_buckets": {
+        "aaa_small": {"revenue_share": 0.1},
+        "zzz_large": {"revenue_share": 0.9},
+    }})
+    .to_string();
+    assert_eq!(
+        dominant_size_bucket(&last_wins).as_deref(),
+        Some("zzz_large")
+    );
+
+    // Winner is alphabetically FIRST: catches "take the last bucket".
+    let first_wins = json!({"size_buckets": {
+        "aaa_large": {"revenue_share": 0.9},
+        "zzz_small": {"revenue_share": 0.1},
+    }})
+    .to_string();
+    assert_eq!(
+        dominant_size_bucket(&first_wins).as_deref(),
+        Some("aaa_large")
+    );
+
+    // Three buckets, winner in the middle of both orderings.
+    let middle_wins = json!({"size_buckets": {
+        "aaa": {"revenue_share": 0.2},
+        "mmm": {"revenue_share": 0.7},
+        "zzz": {"revenue_share": 0.1},
+    }})
+    .to_string();
+    assert_eq!(dominant_size_bucket(&middle_wins).as_deref(), Some("mmm"));
+}
+
+/// py starts at `max_share = 0.0` and only replaces on `share > max_share`,
+/// so buckets that exist but carry no positive share yield the literal
+/// string "unknown" — the fee controller LOOKED and could not name one.
+/// That is a real answer, and deliberately not the same as `None`.
+#[test]
+fn present_but_shareless_buckets_are_unknown_not_absent() {
+    use crate::analytics_passes::dominant_size_bucket;
+
+    let empty = json!({"size_buckets": {}}).to_string();
+    assert_eq!(dominant_size_bucket(&empty).as_deref(), Some("unknown"));
+
+    let all_zero = json!({"size_buckets": {
+        "small": {"revenue_share": 0.0},
+        "large": {"revenue_share": 0.0},
+    }})
+    .to_string();
+    assert_eq!(dominant_size_bucket(&all_zero).as_deref(), Some("unknown"));
+
+    // py: `data.get("revenue_share", 0.0) if isinstance(data, dict) else 0.0`
+    let non_dict = json!({"size_buckets": {"small": 5, "large": "x"}}).to_string();
+    assert_eq!(dominant_size_bucket(&non_dict).as_deref(), Some("unknown"));
+
+    // A missing `revenue_share` key inside a real dict is also 0.0.
+    let missing_share = json!({"size_buckets": {"small": {"other": 1.0}}}).to_string();
+    assert_eq!(
+        dominant_size_bucket(&missing_share).as_deref(),
+        Some("unknown")
+    );
+}
+
+/// `None` is py's `except: pass` — size profiling unavailable, so the
+/// stored profile's existing label is KEPT rather than overwritten with
+/// "unknown". Collapsing these two would erase a real label every time the
+/// fee state was merely unreadable.
+#[test]
+fn absent_or_unparseable_size_buckets_are_none_not_unknown() {
+    use crate::analytics_passes::dominant_size_bucket;
+
+    assert_eq!(dominant_size_bucket(&json!({}).to_string()), None);
+    assert_eq!(
+        dominant_size_bucket(&json!({"thompson_state": {}}).to_string()),
+        None
+    );
+    assert_eq!(dominant_size_bucket("not json at all"), None);
+    // Present but not an object: py's `.items()` would raise -> except.
+    assert_eq!(
+        dominant_size_bucket(&json!({"size_buckets": [1, 2]}).to_string()),
+        None
+    );
 }
 
 // ---------------------------------------------------------------------

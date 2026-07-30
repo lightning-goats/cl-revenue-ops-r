@@ -33,9 +33,20 @@ pub struct ChannelFlowStateRow {
     pub peer_id: String,
     pub flow_state: String,
     pub balance_position: String,
+    /// The EMA-derived net-flow ratio, py `FlowMetrics.flow_ratio`.
     pub flow_ratio: f64,
     pub velocity: f64,
+    /// The EMA-side data-quality confidence, py `FlowMetrics.confidence`
+    /// (count factor x recency factor, bounded 0.1..1.0).
     pub confidence: f64,
+    /// F71-R20: the Kalman estimate is a SEPARATE quantity from the EMA
+    /// ratio and must not overwrite it -- py `FlowMetrics` carries both.
+    pub kalman_flow_ratio: f64,
+    pub kalman_velocity: f64,
+    /// Kalman UNCERTAINTY. Note this is the inverse of `confidence`:
+    /// storing one in the other's column inverts the meaning of the row.
+    pub kalman_uncertainty: f64,
+    pub kalman_regime_change: bool,
     pub forward_count: i64,
     pub updated_at: i64,
     /// The process that wrote this row.
@@ -56,7 +67,7 @@ pub struct FinancialSnapshotRow {
     pub channel_count: i64,
 }
 
-const FLOW_STATE_COLUMNS: [&str; 10] = [
+const FLOW_STATE_COLUMNS: [&str; 14] = [
     "scid",
     "peer_id",
     "flow_state",
@@ -64,6 +75,10 @@ const FLOW_STATE_COLUMNS: [&str; 10] = [
     "flow_ratio",
     "velocity",
     "confidence",
+    "kalman_flow_ratio",
+    "kalman_velocity",
+    "kalman_uncertainty",
+    "kalman_regime_change",
     "forward_count",
     "updated_at",
     "boot_id",
@@ -91,6 +106,10 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             flow_ratio REAL NOT NULL,
             velocity REAL NOT NULL,
             confidence REAL NOT NULL,
+            kalman_flow_ratio REAL NOT NULL,
+            kalman_velocity REAL NOT NULL,
+            kalman_uncertainty REAL NOT NULL,
+            kalman_regime_change INTEGER NOT NULL,
             forward_count INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             boot_id TEXT NOT NULL
@@ -256,8 +275,9 @@ pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -
     conn.execute(
         "INSERT INTO rust_channel_flow_states
              (scid, peer_id, flow_state, balance_position, flow_ratio, velocity,
-              confidence, forward_count, updated_at, boot_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+              confidence, kalman_flow_ratio, kalman_velocity, kalman_uncertainty,
+              kalman_regime_change, forward_count, updated_at, boot_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(scid) DO UPDATE SET
              peer_id = excluded.peer_id,
              flow_state = excluded.flow_state,
@@ -265,6 +285,10 @@ pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -
              flow_ratio = excluded.flow_ratio,
              velocity = excluded.velocity,
              confidence = excluded.confidence,
+             kalman_flow_ratio = excluded.kalman_flow_ratio,
+             kalman_velocity = excluded.kalman_velocity,
+             kalman_uncertainty = excluded.kalman_uncertainty,
+             kalman_regime_change = excluded.kalman_regime_change,
              forward_count = excluded.forward_count,
              updated_at = excluded.updated_at,
              boot_id = excluded.boot_id",
@@ -276,6 +300,10 @@ pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -
             row.flow_ratio,
             row.velocity,
             row.confidence,
+            row.kalman_flow_ratio,
+            row.kalman_velocity,
+            row.kalman_uncertainty,
+            row.kalman_regime_change,
             row.forward_count,
             row.updated_at,
             row.boot_id
@@ -283,6 +311,187 @@ pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -
     )
     .context("upsert channel flow state")?;
     Ok(())
+}
+
+/// One forward's signed contribution to a channel, for the Kalman
+/// filter's raw observation window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetFlowRow {
+    pub timestamp: i64,
+    /// POSITIVE when this channel sent (out_channel), NEGATIVE when it
+    /// received (in_channel). The sign is the whole signal.
+    pub net_msat: i64,
+}
+
+/// Port of py `database.get_continuous_net_flow_all` (database.py:5142).
+///
+/// Task 71 / F71-R19. The Kalman filter does NOT observe the EMA-smoothed
+/// ratio: `_compute_raw_kalman_observation` deliberately "bypasses the EMA
+/// pipeline to provide an unsmoothed observation that satisfies the Kalman
+/// filter's measurement assumptions". It reads individual forwards over a
+/// rolling 24h window, sums their signed net flow, and divides by capacity.
+/// Feeding it the EMA ratio instead — as the first Rust owner did — makes
+/// the filter observe an already-filtered signal, which violates its
+/// measurement model and changes every downstream classification.
+///
+/// Py fetches a 24h window here rather than the full `flow_window_days`
+/// span precisely because the consumer filters to <= 86400s anyway
+/// (flow_analysis.py:1402-1408).
+pub fn continuous_net_flow(
+    conn: &Connection,
+    since: i64,
+) -> Result<std::collections::BTreeMap<String, Vec<NetFlowRow>>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT out_channel AS channel_id, timestamp, out_msat AS net_msat
+             FROM ingested_forwards WHERE timestamp >= ?1
+             UNION ALL
+             SELECT in_channel AS channel_id, timestamp, -in_msat AS net_msat
+             FROM ingested_forwards WHERE timestamp >= ?1
+             ORDER BY channel_id, timestamp DESC",
+        )
+        .context("prepare continuous net flow query")?;
+    let rows = stmt
+        .query_map([since], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read continuous net flow")?;
+
+    let mut out: std::collections::BTreeMap<String, Vec<NetFlowRow>> =
+        std::collections::BTreeMap::new();
+    for (channel_id, timestamp, net_msat) in rows {
+        if channel_id.is_empty() {
+            continue;
+        }
+        out.entry(channel_id).or_default().push(NetFlowRow {
+            timestamp,
+            net_msat,
+        });
+    }
+    Ok(out)
+}
+
+/// One hour-of-day bucket of a channel's flow, AVERAGED per day with
+/// data (py divides each bucket by `days_with_data`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HourlyFlowBucket {
+    pub out_sats: i64,
+    pub in_sats: i64,
+    pub count: i64,
+}
+
+/// py `TEMPORAL_HISTOGRAM_WINDOW_DAYS` (flow_analysis.py:288).
+pub const TEMPORAL_HISTOGRAM_WINDOW_DAYS: i64 = 7;
+
+/// Port of py `database.get_hourly_forward_histogram_all`
+/// (database.py:1890-1955): a 24-bucket hour-of-day histogram per channel.
+///
+/// Task 71 / F71-R25. The temporal store was dead CRUD -- the tables and
+/// the frozen `update_temporal_profile` kernel both existed, and nothing
+/// produced the histogram that feeds them.
+///
+/// Two py details that are easy to lose:
+/// * `hour_utc = CAST(((timestamp % 86400) / 3600) AS INTEGER)`, so bins
+///   are UTC hour-of-day, not local and not relative to `now`.
+/// * Each bucket is divided by that channel's DAYS-WITH-DATA (UNION-deduped
+///   across both directions, floored at 1), making the histogram a per-day
+///   AVERAGE rather than a window total. py fixed a real bug here (F5): the
+///   window total compared against a per-day threshold let ~1.4
+///   forwards/day graduate a channel.
+pub fn hourly_flow_histogram(
+    conn: &Connection,
+    now: i64,
+    window_days: i64,
+) -> Result<std::collections::BTreeMap<String, [HourlyFlowBucket; 24]>> {
+    let mut out: std::collections::BTreeMap<String, [HourlyFlowBucket; 24]> =
+        std::collections::BTreeMap::new();
+    if window_days <= 0 {
+        return Ok(out);
+    }
+    let since = now - window_days * 86_400;
+
+    // Days-with-data per channel. UNION (not ALL) dedupes (channel, day)
+    // pairs across the two directions, exactly as py does.
+    let mut days_by_channel: std::collections::BTreeMap<String, i64> =
+        std::collections::BTreeMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, COUNT(*) FROM (
+                     SELECT in_channel AS channel_id, timestamp / 86400 AS day
+                     FROM ingested_forwards WHERE timestamp >= ?1
+                     UNION
+                     SELECT out_channel AS channel_id, timestamp / 86400 AS day
+                     FROM ingested_forwards WHERE timestamp >= ?1
+                 ) GROUP BY channel_id",
+            )
+            .context("prepare days-with-data query")?;
+        let rows = stmt
+            .query_map([since], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read days-with-data")?;
+        for (channel_id, days) in rows {
+            days_by_channel.insert(channel_id, days.max(1));
+        }
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT channel_id, hour_utc, SUM(out_sats), SUM(in_sats), SUM(cnt)
+             FROM (
+                 SELECT in_channel AS channel_id,
+                        CAST(((timestamp % 86400) / 3600) AS INTEGER) AS hour_utc,
+                        0 AS out_sats, SUM(in_msat) / 1000 AS in_sats, COUNT(*) AS cnt
+                 FROM ingested_forwards WHERE timestamp >= ?1
+                 GROUP BY in_channel, hour_utc
+                 UNION ALL
+                 SELECT out_channel AS channel_id,
+                        CAST(((timestamp % 86400) / 3600) AS INTEGER) AS hour_utc,
+                        SUM(out_msat) / 1000 AS out_sats, 0 AS in_sats, COUNT(*) AS cnt
+                 FROM ingested_forwards WHERE timestamp >= ?1
+                 GROUP BY out_channel, hour_utc
+             )
+             GROUP BY channel_id, hour_utc ORDER BY channel_id, hour_utc",
+        )
+        .context("prepare hourly histogram query")?;
+    let rows = stmt
+        .query_map([since], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read hourly histogram")?;
+
+    for (channel_id, hour, total_out, total_in, total_count) in rows {
+        if channel_id.is_empty() {
+            continue;
+        }
+        let days = days_by_channel
+            .get(&channel_id)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let hour = hour.rem_euclid(24) as usize;
+        let histogram = out
+            .entry(channel_id)
+            .or_insert([HourlyFlowBucket::default(); 24]);
+        histogram[hour].out_sats = total_out.div_euclid(days);
+        histogram[hour].in_sats = total_in.div_euclid(days);
+        histogram[hour].count = total_count.div_euclid(days);
+    }
+    Ok(out)
 }
 
 /// Persist ONE complete flow pass — every derived state row and every
@@ -299,10 +508,28 @@ pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -
 ///
 /// All-or-nothing removes the question: either the whole pass is durable
 /// or none of it is, and the failed pass fails the loop generation.
+/// `retain_scids` is every short-channel-id the live snapshot carried, in
+/// ANY state (F71-R24). Rows for scids outside it belong to channels that
+/// no longer exist and are purged from BOTH analytics tables inside this
+/// same transaction -- py pairs `channel_states` and `kalman_state`
+/// deletion the same way, under its own `BEGIN IMMEDIATE`
+/// (database.py:6614-6645).
+///
+/// The retention set is deliberately the OBSERVED set, not the ANALYSED
+/// set. F71-R21 stops analysing anything that is not `CHANNELD_NORMAL`, so
+/// reconciling against analysed channels would delete the accumulated
+/// Kalman state of every channel briefly in a transient state -- state
+/// that takes many observations to rebuild and cannot be recovered.
+///
+/// An EMPTY retention set purges everything, which is correct: the caller
+/// only reaches this point with a validated `channels` array, so empty
+/// means the node genuinely has no channels, not that the read failed.
 pub fn persist_flow_pass(
     conn: &mut Connection,
     states: &[ChannelFlowStateRow],
     kalman: &[(String, serde_json::Value)],
+    temporal: &[(String, serde_json::Value)],
+    retain_scids: &std::collections::BTreeSet<String>,
     updated_at: i64,
 ) -> Result<usize> {
     let tx = conn.transaction().context("open flow pass transaction")?;
@@ -314,8 +541,50 @@ pub fn persist_flow_pass(
         upsert_kalman_state(&tx, scid, state, updated_at)
             .with_context(|| format!("flow pass: persist kalman state for {scid}"))?;
     }
+    // F71-R25: the temporal profile is derived from the SAME snapshot as
+    // the flow state and Kalman filter, so it commits with them. Persisting
+    // it separately would let a crash leave a channel's temporal profile
+    // describing a different pass than its flow state.
+    for (scid, profile) in temporal {
+        upsert_temporal_profile(&tx, scid, profile, updated_at)
+            .with_context(|| format!("flow pass: persist temporal profile for {scid}"))?;
+    }
+    reconcile_closed_channels(&tx, retain_scids).context("flow pass: reconcile closed channels")?;
     tx.commit().context("commit flow pass transaction")?;
     Ok(states.len())
+}
+
+/// Drop analytics rows for channels absent from the live snapshot.
+fn reconcile_closed_channels(
+    conn: &Connection,
+    retain_scids: &std::collections::BTreeSet<String>,
+) -> Result<usize> {
+    let mut removed = 0usize;
+    for table in [
+        "rust_channel_flow_states",
+        "rust_kalman_state",
+        "rust_temporal_profiles",
+    ] {
+        let mut stmt = conn
+            .prepare(&format!("SELECT scid FROM {table}"))
+            .with_context(|| format!("prepare {table} scid scan"))?;
+        let existing = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .with_context(|| format!("read {table} scids"))?;
+        drop(stmt);
+        for scid in existing {
+            if !retain_scids.contains(&scid) {
+                conn.execute(
+                    &format!("DELETE FROM {table} WHERE scid = ?1"),
+                    params![scid],
+                )
+                .with_context(|| format!("delete closed channel {scid} from {table}"))?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// All channel flow states, scid-ordered.
@@ -323,7 +592,8 @@ pub fn channel_flow_states(conn: &Connection) -> Result<Vec<ChannelFlowStateRow>
     let mut stmt = conn
         .prepare(
             "SELECT scid, peer_id, flow_state, balance_position, flow_ratio, velocity,
-                    confidence, forward_count, updated_at, boot_id
+                    confidence, kalman_flow_ratio, kalman_velocity, kalman_uncertainty,
+                    kalman_regime_change, forward_count, updated_at, boot_id
              FROM rust_channel_flow_states ORDER BY scid ASC",
         )
         .context("prepare channel flow states")?;
@@ -337,9 +607,13 @@ pub fn channel_flow_states(conn: &Connection) -> Result<Vec<ChannelFlowStateRow>
                 flow_ratio: row.get(4)?,
                 velocity: row.get(5)?,
                 confidence: row.get(6)?,
-                forward_count: row.get(7)?,
-                updated_at: row.get(8)?,
-                boot_id: row.get(9)?,
+                kalman_flow_ratio: row.get(7)?,
+                kalman_velocity: row.get(8)?,
+                kalman_uncertainty: row.get(9)?,
+                kalman_regime_change: row.get(10)?,
+                forward_count: row.get(11)?,
+                updated_at: row.get(12)?,
+                boot_id: row.get(13)?,
             })
         })
         .context("query channel flow states")?

@@ -14,11 +14,10 @@
 //! connection history" set, the batched form of py
 //! `has_recent_connection_history`.
 
-use std::collections::BTreeSet;
-
 use revops_db::analytics::{
-    channel_flow_states, daily_flow_buckets, kalman_states, persist_flow_pass,
-    upsert_channel_flow_state, upsert_kalman_state, ChannelFlowStateRow,
+    channel_flow_states, daily_flow_buckets, hourly_flow_histogram, kalman_states,
+    persist_flow_pass, temporal_profiles, upsert_channel_flow_state, upsert_kalman_state,
+    upsert_temporal_profile, ChannelFlowStateRow,
 };
 use revops_db::notifications::{
     init_schema, insert_forward_ignore_dup, insert_peer_connection_event,
@@ -26,6 +25,7 @@ use revops_db::notifications::{
 };
 use rusqlite::Connection;
 use serde_json::json;
+use std::collections::BTreeSet;
 
 const NOW: i64 = 1_800_000_000;
 const DAY: i64 = 86_400;
@@ -198,6 +198,10 @@ fn recent_connection_history_includes_the_exact_boundary() {
 // persist_flow_pass — F71-R18: one pass, one transaction
 // -------------------------------------------------------------------
 
+fn retain<const N: usize>(scids: [&str; N]) -> BTreeSet<String> {
+    scids.iter().map(|s| s.to_string()).collect()
+}
+
 fn state_row(scid: &str, boot_id: &str) -> ChannelFlowStateRow {
     ChannelFlowStateRow {
         scid: scid.into(),
@@ -207,6 +211,10 @@ fn state_row(scid: &str, boot_id: &str) -> ChannelFlowStateRow {
         flow_ratio: 0.25,
         velocity: 0.0,
         confidence: 0.5,
+        kalman_flow_ratio: 0.0,
+        kalman_velocity: 0.0,
+        kalman_uncertainty: 0.0,
+        kalman_regime_change: false,
         forward_count: 3,
         updated_at: NOW,
         boot_id: boot_id.into(),
@@ -223,6 +231,8 @@ fn persist_flow_pass_writes_every_state_and_kalman_row() {
             ("aaa".to_string(), json!({"flow_ratio": 0.1})),
             ("bbb".to_string(), json!({"flow_ratio": 0.2})),
         ],
+        &[],
+        &retain(["aaa", "bbb"]),
         NOW,
     )
     .expect("persist a complete pass");
@@ -254,6 +264,8 @@ fn persist_flow_pass_rolls_back_completely_when_a_kalman_write_fails() {
         &mut conn,
         &[state_row("aaa", "boot-now"), state_row("bbb", "boot-now")],
         &[("aaa".to_string(), json!({"flow_ratio": 0.1}))],
+        &[],
+        &retain(["aaa", "bbb"]),
         NOW,
     )
     .expect_err("a failed pass must refuse, not half-commit");
@@ -275,6 +287,198 @@ fn persist_flow_pass_rolls_back_completely_when_a_kalman_write_fails() {
 #[test]
 fn persist_flow_pass_accepts_a_genuinely_empty_pass() {
     let mut conn = db();
-    assert_eq!(persist_flow_pass(&mut conn, &[], &[], NOW).unwrap(), 0);
+    assert_eq!(
+        persist_flow_pass(&mut conn, &[], &[], &[], &retain([]), NOW).unwrap(),
+        0
+    );
     assert!(channel_flow_states(&conn).unwrap().is_empty());
+}
+
+// -------------------------------------------------------------------
+// F71-R24: closed-channel reconciliation, inside the same transaction
+// -------------------------------------------------------------------
+
+/// A channel that has left `listpeerchannels` is gone. Its rows must be
+/// purged from EVERY analytics table — py deletes `channel_states` and
+/// `kalman_state` together under one `BEGIN IMMEDIATE`
+/// (database.py:6614-6645).
+#[test]
+fn closed_channels_are_purged_from_every_analytics_table() {
+    let mut conn = db();
+    upsert_channel_flow_state(&conn, &state_row("closed", "boot-old")).unwrap();
+    upsert_kalman_state(&conn, "closed", &json!({"flow_ratio": 0.5}), NOW - DAY).unwrap();
+    upsert_temporal_profile(&conn, "closed", &json!({"observation_days": 9}), NOW - DAY).unwrap();
+
+    persist_flow_pass(
+        &mut conn,
+        &[state_row("live", "boot-now")],
+        &[("live".to_string(), json!({"flow_ratio": 0.1}))],
+        &[("live".to_string(), json!({"observation_days": 1}))],
+        &retain(["live"]),
+        NOW,
+    )
+    .expect("persist a pass that no longer sees `closed`");
+
+    assert!(channel_flow_states(&conn)
+        .unwrap()
+        .iter()
+        .all(|s| s.scid == "live"));
+    assert!(kalman_states(&conn)
+        .unwrap()
+        .iter()
+        .all(|(s, _, _)| s == "live"));
+    assert!(temporal_profiles(&conn)
+        .unwrap()
+        .iter()
+        .all(|(s, _, _)| s == "live"));
+}
+
+/// The load-bearing distinction. F71-R21 stops ANALYSING channels that are
+/// not `CHANNELD_NORMAL`, but such a channel still EXISTS. Reconciling
+/// against the analysed set instead of the observed set would delete the
+/// accumulated Kalman state of every channel briefly in a transient state
+/// — state that takes many observations to rebuild and cannot be recovered.
+#[test]
+fn a_transient_state_channel_is_retained_even_though_it_was_not_analysed() {
+    let mut conn = db();
+    upsert_kalman_state(&conn, "transient", &json!({"flow_ratio": 0.42}), NOW - DAY).unwrap();
+    upsert_channel_flow_state(&conn, &state_row("transient", "boot-old")).unwrap();
+
+    // The pass analysed only `live`, but BOTH scids were observed in the
+    // snapshot — `transient` was merely skipped as not CHANNELD_NORMAL.
+    persist_flow_pass(
+        &mut conn,
+        &[state_row("live", "boot-now")],
+        &[("live".to_string(), json!({"flow_ratio": 0.1}))],
+        &[],
+        &retain(["live", "transient"]),
+        NOW,
+    )
+    .expect("persist a pass that observed but did not analyse `transient`");
+
+    let kalman = kalman_states(&conn).unwrap();
+    let kept = kalman
+        .iter()
+        .find(|(s, _, _)| s == "transient")
+        .expect("an observed-but-unanalysed channel keeps its Kalman state");
+    assert_eq!(kept.1, json!({"flow_ratio": 0.42}), "and it is UNCHANGED");
+}
+
+/// Reconciliation is inside the pass transaction: if the pass fails,
+/// nothing is deleted either.
+#[test]
+fn a_failed_pass_deletes_nothing() {
+    let mut conn = db();
+    upsert_channel_flow_state(&conn, &state_row("closed", "boot-old")).unwrap();
+    conn.execute_batch("DROP TABLE rust_kalman_state").unwrap();
+
+    persist_flow_pass(
+        &mut conn,
+        &[state_row("live", "boot-now")],
+        &[("live".to_string(), json!({"flow_ratio": 0.1}))],
+        &[],
+        &retain(["live"]),
+        NOW,
+    )
+    .expect_err("the pass must fail");
+
+    assert_eq!(
+        channel_flow_states(&conn).unwrap().len(),
+        1,
+        "the closed channel's row must survive a FAILED pass"
+    );
+    assert_eq!(channel_flow_states(&conn).unwrap()[0].scid, "closed");
+}
+
+// -------------------------------------------------------------------
+// F71-R25: the hour-of-day histogram that feeds the temporal kernel
+// -------------------------------------------------------------------
+
+/// py bins on `CAST(((timestamp % 86400) / 3600) AS INTEGER)` — UTC
+/// hour-of-day, NOT an age-relative bin like the daily buckets.
+#[test]
+fn histogram_bins_on_utc_hour_of_day() {
+    let conn = db();
+    // NOW is a multiple of 86400*... pick timestamps with known hours.
+    let midnight = (NOW / 86_400) * 86_400;
+    insert_forward_ignore_dup(
+        &conn,
+        &forward("aaa", "bbb", 5_000, 4_000, midnight + 3_600),
+    )
+    .unwrap();
+    insert_forward_ignore_dup(
+        &conn,
+        &forward("aaa", "bbb", 7_000, 6_000, midnight + 5 * 3_600),
+    )
+    .unwrap();
+
+    let hist = hourly_flow_histogram(&conn, NOW, 7).expect("read histogram");
+    let aaa = &hist["aaa"];
+    assert_eq!(aaa[1].in_sats, 5, "hour 1 UTC");
+    assert_eq!(aaa[5].in_sats, 7, "hour 5 UTC");
+    assert_eq!(aaa[2].in_sats, 0, "an untouched hour is a measured zero");
+}
+
+/// Each bucket is divided by the channel's DAYS-WITH-DATA, making it a
+/// per-day average. py's F5 fix: comparing a window TOTAL against a
+/// per-day threshold let ~1.4 forwards/day graduate a channel.
+#[test]
+fn histogram_buckets_are_averaged_per_day_with_data() {
+    let conn = db();
+    let midnight = (NOW / 86_400) * 86_400;
+    // Same UTC hour on two different days -> 2 days with data.
+    insert_forward_ignore_dup(
+        &conn,
+        &forward("aaa", "bbb", 10_000, 9_000, midnight + 3_600),
+    )
+    .unwrap();
+    insert_forward_ignore_dup(
+        &conn,
+        &forward("aaa", "bbb", 10_000, 9_000, midnight - 86_400 + 3_600),
+    )
+    .unwrap();
+
+    let hist = hourly_flow_histogram(&conn, NOW, 7).unwrap();
+    assert_eq!(
+        hist["aaa"][1].count, 1,
+        "2 forwards across 2 days averages to 1/day, not a total of 2"
+    );
+    assert_eq!(hist["aaa"][1].in_sats, 10, "20 sats over 2 days");
+}
+
+/// F71-R25b: the temporal write is inside the same transaction, so a
+/// failure THERE must roll back the state and Kalman writes that already
+/// succeeded ahead of it. The existing rollback test drops the Kalman
+/// table, which fails earlier in the sequence and so cannot prove this.
+#[test]
+fn a_failing_temporal_write_rolls_back_the_whole_pass() {
+    let mut conn = db();
+    upsert_channel_flow_state(&conn, &state_row("aaa", "boot-previous")).unwrap();
+    upsert_kalman_state(&conn, "aaa", &json!({"flow_ratio": 0.9}), NOW - DAY).unwrap();
+    // The temporal store disappears; states and Kalman are written first.
+    conn.execute_batch("DROP TABLE rust_temporal_profiles")
+        .unwrap();
+
+    let err = persist_flow_pass(
+        &mut conn,
+        &[state_row("aaa", "boot-now"), state_row("bbb", "boot-now")],
+        &[("aaa".to_string(), json!({"flow_ratio": 0.1}))],
+        &[("aaa".to_string(), json!({"observation_days": 4}))],
+        &retain(["aaa", "bbb"]),
+        NOW,
+    )
+    .expect_err("a failing temporal write must refuse the whole pass");
+    assert!(format!("{err:#}").contains("temporal profile"), "{err:#}");
+
+    let states = channel_flow_states(&conn).unwrap();
+    assert_eq!(states.len(), 1, "bbb must NOT have been committed");
+    assert_eq!(
+        states[0].boot_id, "boot-previous",
+        "aaa's state write must roll back even though it succeeded first"
+    );
+    assert_eq!(
+        kalman_states(&conn).unwrap()[0].1,
+        json!({"flow_ratio": 0.9}),
+        "and so must its Kalman write"
+    );
 }
