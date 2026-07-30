@@ -34,8 +34,13 @@ pub struct EvidenceGap {
     pub reason: &'static str,
 }
 
+/// Task 67b closed `winner_channels`/`loser_channels`. The nine fields
+/// still listed below need discovery, enrichment and recycle inputs that
+/// remain unported -- named accurately rather than left pointing at a task
+/// that has already shipped.
 const ANALYTICS_GAP: &str =
-    "derived by the Python profitability/flow analyzers; Rust owners land with Task 67";
+    "needs discovery/enrichment/recycle inputs not yet ported (winners and losers ARE \
+     now supplied by the Task 67b profitability + flow assemblers)";
 
 /// Typed assembly refusals -- each names its failed source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +86,11 @@ pub struct EvidenceDeps<'a> {
     pub recycle_block_height: i64,
     pub recycle_close_cost_sats: i64,
     pub now: i64,
+    /// Task 67b: winners/losers from the frozen kernels, now that the
+    /// profitability and flow assemblers exist. Passing them CLOSES the
+    /// two largest of Task 62's eleven analytics gaps.
+    pub winner_channels: Vec<revops_capital::planner::winners::WinnerCandidateEvidence>,
+    pub loser_channels: Vec<revops_capital::planner::losers::LoserChannelEvidence>,
 }
 
 /// The assembly product: kernel-ready evidence plus the honest gap list.
@@ -161,14 +171,6 @@ pub fn assemble_cycle_evidence(
 
     let gaps = vec![
         EvidenceGap {
-            field: "winner_channels",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
-            field: "loser_channels",
-            reason: ANALYTICS_GAP,
-        },
-        EvidenceGap {
             field: "redeployment_winner_evs",
             reason: ANALYTICS_GAP,
         },
@@ -210,8 +212,8 @@ pub fn assemble_cycle_evidence(
         planner_enabled: deps.planner_enabled,
         fee_gate_ok,
         fee_gate_reason,
-        winner_channels: Vec::new(),
-        loser_channels: Vec::new(),
+        winner_channels: deps.winner_channels,
+        loser_channels: deps.loser_channels,
         redeployment_winner_evs: Vec::new(),
         defibrillation_limit: deps.defibrillation_limit,
         defib_gates: BTreeMap::new(),

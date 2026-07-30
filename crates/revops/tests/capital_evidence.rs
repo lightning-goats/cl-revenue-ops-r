@@ -47,6 +47,8 @@ fn deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         recycle_block_height: 900_000,
         recycle_close_cost_sats: 1_000,
         now: NOW,
+        winner_channels: Vec::new(),
+        loser_channels: Vec::new(),
     }
 }
 
@@ -95,12 +97,17 @@ fn healthy_assembly_feeds_the_frozen_kernel() {
     assert_eq!(assembled.evidence.available_sats, 2_000_000);
 
     let gap_fields: Vec<&str> = assembled.gaps.iter().map(|g| g.field).collect();
-    for expected in [
-        "winner_channels",
-        "loser_channels",
-        "discovery",
-        "recycle_candidates",
-    ] {
+    // Task 67b CLOSED these two: winners/losers are now supplied by the
+    // profitability + flow assemblers, so they must NO LONGER be declared
+    // gaps. A gap that reappears here means the analytics regressed.
+    for closed in ["winner_channels", "loser_channels"] {
+        assert!(
+            !gap_fields.contains(&closed),
+            "{closed} is supplied by task 67b and must not be a declared gap: {gap_fields:?}"
+        );
+    }
+    // The remaining analytics gaps are still honestly declared.
+    for expected in ["discovery", "recycle_candidates"] {
         assert!(gap_fields.contains(&expected), "missing gap for {expected}");
     }
 

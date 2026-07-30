@@ -9,6 +9,7 @@ pub mod boltz_config;
 pub mod boltz_owner;
 pub mod capital_adapters;
 pub mod capital_boundaries;
+pub mod capital_candidates;
 pub mod capital_evidence;
 pub mod capital_owner;
 pub mod config_resolve;
