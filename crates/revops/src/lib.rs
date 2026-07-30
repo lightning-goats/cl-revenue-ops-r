@@ -22,6 +22,8 @@ pub mod fee_mode;
 pub mod fee_scheduler;
 pub mod fee_state;
 pub mod fee_triggers;
+pub mod financial_snapshot;
+pub mod flow_owner;
 pub mod hydration;
 pub mod lnplus_adapters;
 pub mod lnplus_runtime;
@@ -64,6 +66,7 @@ pub mod rpc_spend_ledger;
 pub mod rpc_status;
 pub mod rpc_total_cost_budget;
 pub mod runtime;
+pub mod startup_snapshot;
 pub mod state_writer;
 
 #[cfg(test)]

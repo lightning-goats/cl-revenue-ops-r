@@ -132,6 +132,55 @@ fn flow_metrics_to_json(m: &FlowMetrics) -> Value {
     })
 }
 
+/// Task 67 slice 6b: serve a single channel's analysis from the flow
+/// owner's PERSISTED state (`rust_channel_flow_states`).
+///
+/// The store holds the classification projection, not every `FlowMetrics`
+/// field. The unpersisted fields are emitted as `null` and DECLARED in
+/// `_gaps` — the project's convention, which the parity harness reads out
+/// of the response to skip exactly those paths. Defaulting them to zero
+/// would be indistinguishable from a genuinely idle channel, which is the
+/// nullable-evidence failure this port keeps guarding against.
+///
+/// A channel with no row is Python's own `{"channel": ..., "analysis":
+/// null}` — a real answer, not a marker and not an error.
+pub fn build_analyze_from_persisted(
+    channel_id_raw: Option<&Value>,
+    row: Option<&revops_db::analytics::ChannelFlowStateRow>,
+) -> Value {
+    // Reuse the existing validation/normalization by delegating the
+    // channel-id handling, then replace the analysis body.
+    let shell = build_analyze(channel_id_raw, MetricsLookup::Ready(None));
+    if shell.get("error").is_some() && shell.get("channel").is_none() {
+        // A malformed channel_id (or the no-channel_id refusal) — return
+        // that verdict untouched.
+        return shell;
+    }
+    let Some(row) = row else {
+        return shell;
+    };
+    let mut out = shell;
+    out["analysis"] = json!({
+        "peer_id": row.peer_id,
+        "state": row.flow_state,
+        "balance_position": row.balance_position,
+        "flow_ratio": row.flow_ratio,
+        "velocity": row.velocity,
+        "confidence": row.confidence,
+        "forward_count": row.forward_count,
+        "updated_at": row.updated_at,
+        "boot_id": row.boot_id,
+        // Not persisted by the flow owner's projection. Declared, never
+        // zeroed.
+        "sats_in": Value::Null,
+        "sats_out": Value::Null,
+        "capacity": Value::Null,
+        "daily_volume": Value::Null,
+        "_gaps": ["sats_in", "sats_out", "capacity", "daily_volume"],
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

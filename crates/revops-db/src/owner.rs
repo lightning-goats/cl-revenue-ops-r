@@ -253,20 +253,55 @@ enum Command {
     },
     BeginLoopPass {
         id: crate::loop_health::LoopId,
+        boot_id: String,
         now: i64,
         reply: oneshot::Sender<Result<u64>>,
     },
     FinishLoopPass {
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: String,
         now: i64,
         reply: oneshot::Sender<Result<()>>,
     },
     FailLoopPass {
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: String,
         now: i64,
         error: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    // -- Task 67: analytics durable stores --
+    UpsertChannelFlowState {
+        row: crate::analytics::ChannelFlowStateRow,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ChannelFlowStates(oneshot::Sender<Result<Vec<crate::analytics::ChannelFlowStateRow>>>),
+    UpsertKalmanState {
+        scid: String,
+        state: serde_json::Value,
+        updated_at: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    KalmanStates(oneshot::Sender<Result<Vec<(String, serde_json::Value, i64)>>>),
+    UpsertTemporalProfile {
+        scid: String,
+        profile: serde_json::Value,
+        updated_at: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    TemporalProfiles(oneshot::Sender<Result<Vec<(String, serde_json::Value, i64)>>>),
+    InsertFinancialSnapshot {
+        row: crate::analytics::FinancialSnapshotRow,
+        reply: oneshot::Sender<Result<i64>>,
+    },
+    FinancialSnapshots {
+        limit: i64,
+        reply: oneshot::Sender<Result<Vec<crate::analytics::FinancialSnapshotRow>>>,
+    },
+    RecordBootSession {
+        identity: crate::loop_health::BootIdentity,
         reply: oneshot::Sender<Result<()>>,
     },
     IncrementLoopBackpressure {
@@ -1707,10 +1742,20 @@ impl ObserverHandle {
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
-    pub async fn begin_loop_pass(&self, id: crate::loop_health::LoopId, now: i64) -> Result<u64> {
+    pub async fn begin_loop_pass(
+        &self,
+        id: crate::loop_health::LoopId,
+        boot_id: &str,
+        now: i64,
+    ) -> Result<u64> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::BeginLoopPass { id, now, reply })
+            .send(Command::BeginLoopPass {
+                id,
+                boot_id: boot_id.to_string(),
+                now,
+                reply,
+            })
             .await
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
@@ -1719,6 +1764,7 @@ impl ObserverHandle {
         &self,
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: &str,
         now: i64,
     ) -> Result<()> {
         let (reply, rx) = oneshot::channel();
@@ -1726,6 +1772,7 @@ impl ObserverHandle {
             .send(Command::FinishLoopPass {
                 id,
                 generation,
+                boot_id: boot_id.to_string(),
                 now,
                 reply,
             })
@@ -1737,6 +1784,7 @@ impl ObserverHandle {
         &self,
         id: crate::loop_health::LoopId,
         generation: u64,
+        boot_id: &str,
         now: i64,
         error: String,
     ) -> Result<()> {
@@ -1745,6 +1793,7 @@ impl ObserverHandle {
             .send(Command::FailLoopPass {
                 id,
                 generation,
+                boot_id: boot_id.to_string(),
                 now,
                 error,
                 reply,
@@ -1753,6 +1802,233 @@ impl ObserverHandle {
             .context("observer actor gone")?;
         rx.await.context("observer actor dropped reply")?
     }
+    // -- Task 67: analytics durable stores --
+
+    pub async fn upsert_channel_flow_state(
+        &self,
+        row: crate::analytics::ChannelFlowStateRow,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UpsertChannelFlowState { row, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_upsert_channel_flow_state(
+        &self,
+        row: crate::analytics::ChannelFlowStateRow,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UpsertChannelFlowState { row, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn channel_flow_states(&self) -> Result<Vec<crate::analytics::ChannelFlowStateRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChannelFlowStates(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_channel_flow_states(
+        &self,
+    ) -> Result<Vec<crate::analytics::ChannelFlowStateRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ChannelFlowStates(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn upsert_kalman_state(
+        &self,
+        scid: &str,
+        state: serde_json::Value,
+        updated_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UpsertKalmanState {
+                scid: scid.to_string(),
+                state,
+                updated_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_upsert_kalman_state(
+        &self,
+        scid: &str,
+        state: serde_json::Value,
+        updated_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UpsertKalmanState {
+                scid: scid.to_string(),
+                state,
+                updated_at,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn kalman_states(&self) -> Result<Vec<(String, serde_json::Value, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::KalmanStates(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_kalman_states(&self) -> Result<Vec<(String, serde_json::Value, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::KalmanStates(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn upsert_temporal_profile(
+        &self,
+        scid: &str,
+        profile: serde_json::Value,
+        updated_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::UpsertTemporalProfile {
+                scid: scid.to_string(),
+                profile,
+                updated_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_upsert_temporal_profile(
+        &self,
+        scid: &str,
+        profile: serde_json::Value,
+        updated_at: i64,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::UpsertTemporalProfile {
+                scid: scid.to_string(),
+                profile,
+                updated_at,
+                reply,
+            })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn temporal_profiles(&self) -> Result<Vec<(String, serde_json::Value, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::TemporalProfiles(reply))
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_temporal_profiles(&self) -> Result<Vec<(String, serde_json::Value, i64)>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::TemporalProfiles(reply))
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn insert_financial_snapshot(
+        &self,
+        row: crate::analytics::FinancialSnapshotRow,
+    ) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::InsertFinancialSnapshot { row, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_insert_financial_snapshot(
+        &self,
+        row: crate::analytics::FinancialSnapshotRow,
+    ) -> Result<i64> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::InsertFinancialSnapshot { row, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    pub async fn financial_snapshots(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::analytics::FinancialSnapshotRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::FinancialSnapshots { limit, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Blocking sibling for the analytics owner threads.
+    pub fn blocking_financial_snapshots(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::analytics::FinancialSnapshotRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::FinancialSnapshots { limit, reply })
+            .context("observer actor gone (blocking)")?;
+        rx.blocking_recv()
+            .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 67: record this process's boot identity once at startup.
+    pub async fn record_boot_session(
+        &self,
+        identity: crate::loop_health::BootIdentity,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RecordBootSession { identity, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     pub async fn increment_loop_backpressure(
         &self,
         id: crate::loop_health::LoopId,
@@ -2210,29 +2486,79 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                         &conn, now,
                     ));
                 }
-                Command::BeginLoopPass { id, now, reply } => {
-                    let _ = reply.send(crate::loop_health::begin_loop_pass(&conn, id, now));
+                Command::BeginLoopPass {
+                    id,
+                    boot_id,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::loop_health::begin_loop_pass(
+                        &conn, id, &boot_id, now,
+                    ));
                 }
                 Command::FinishLoopPass {
                     id,
                     generation,
+                    boot_id,
                     now,
                     reply,
                 } => {
                     let _ = reply.send(crate::loop_health::finish_loop_pass(
-                        &conn, id, generation, now,
+                        &conn, id, generation, &boot_id, now,
                     ));
                 }
                 Command::FailLoopPass {
                     id,
                     generation,
+                    boot_id,
                     now,
                     error,
                     reply,
                 } => {
                     let _ = reply.send(crate::loop_health::fail_loop_pass(
-                        &conn, id, generation, now, &error,
+                        &conn, id, generation, &boot_id, now, &error,
                     ));
+                }
+                Command::UpsertChannelFlowState { row, reply } => {
+                    let _ = reply.send(crate::analytics::upsert_channel_flow_state(&conn, &row));
+                }
+                Command::ChannelFlowStates(reply) => {
+                    let _ = reply.send(crate::analytics::channel_flow_states(&conn));
+                }
+                Command::UpsertKalmanState {
+                    scid,
+                    state,
+                    updated_at,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::upsert_kalman_state(
+                        &conn, &scid, &state, updated_at,
+                    ));
+                }
+                Command::KalmanStates(reply) => {
+                    let _ = reply.send(crate::analytics::kalman_states(&conn));
+                }
+                Command::UpsertTemporalProfile {
+                    scid,
+                    profile,
+                    updated_at,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::upsert_temporal_profile(
+                        &conn, &scid, &profile, updated_at,
+                    ));
+                }
+                Command::TemporalProfiles(reply) => {
+                    let _ = reply.send(crate::analytics::temporal_profiles(&conn));
+                }
+                Command::InsertFinancialSnapshot { row, reply } => {
+                    let _ = reply.send(crate::analytics::insert_financial_snapshot(&conn, &row));
+                }
+                Command::FinancialSnapshots { limit, reply } => {
+                    let _ = reply.send(crate::analytics::financial_snapshots(&conn, limit));
+                }
+                Command::RecordBootSession { identity, reply } => {
+                    let _ = reply.send(crate::loop_health::record_boot_session(&conn, &identity));
                 }
                 Command::IncrementLoopBackpressure {
                     id,

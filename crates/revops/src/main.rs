@@ -93,6 +93,9 @@ struct State {
     boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>,
     /// The resolved Boltz config the transport above was built from.
     boltz_cfg: revops::boltz_config::BoltzCfgSnapshot,
+    /// Task 67: THIS process's boot identity. Loop health is judged
+    /// against it so a prior boot's pass is never inherited.
+    boot_id: String,
     /// Task 44 / A3: the `lightning-rpc` socket path, resolved once at
     /// init (same value the fee-cycle scheduler's `SchedulerConfig` uses)
     /// -- so the `channel_state_changed` subscription's async preparation
@@ -2178,7 +2181,7 @@ async fn main() -> Result<()> {
                 // falls back to below (F11) -- reusing it here for the
                 // upfront no-DB case keeps both degraded paths consistent.
                 let Some(handle) = &s.db else {
-                    return Ok(revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone())));
+                    return Ok(revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()), &p.state().boot_id));
                 };
                 // Task 50 correction round, F11: Python's `revenue_health`
                 // try/excepts EACH section independently (cl-revenue-ops.py:
@@ -2201,9 +2204,10 @@ async fn main() -> Result<()> {
                     Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health_with_loops(
                         now, Some(&pnl_1d), Some(&pnl_7d), None,
                         loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()),
+                        &p.state().boot_id,
                     )),
                     Err(e) => {
-                        let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()));
+                        let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()), &p.state().boot_id);
                         out["financials"] = serde_json::json!({"error": e.to_string()});
                         // This is a LIVE failure, not a declared "not
                         // wired yet" gap -- `_gaps` must not carry it (a
@@ -2889,11 +2893,29 @@ async fn main() -> Result<()> {
     let mut lnplus_cadence = None;
     let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
         None;
+    // Task 67: ONE boot identity per process, minted before any loop can
+    // record a pass. Loop health is judged against this id, so a prior
+    // boot's terminal evidence can never be inherited by this process.
+    let boot_identity = revops_db::loop_health::BootIdentity {
+        boot_id: format!("{}-{}", now_unix(), std::process::id()),
+        process_id: i64::from(std::process::id()),
+        source_commit: Some(revops::fee_scheduler::source_commit().to_string()),
+        binary_sha256: Some(revops::fee_scheduler::binary_sha256().to_string()),
+        started_at: now_unix(),
+    };
+    let boot_id = boot_identity.boot_id.clone();
+    if let Some(handle) = observer_db.clone() {
+        if let Err(error) = handle.record_boot_session(boot_identity.clone()).await {
+            eprintln!("revops: boot session record failed: {error:#}");
+        }
+    }
+
     let authority_runtime = match authority_plan {
         revops::fee_mode::AuthorityPlan::Live(broadcaster) => {
             if let Some(handle) = observer_db.clone() {
-                let store: Arc<dyn revops::loop_health::LoopHealthPersistence> =
-                    Arc::new(revops::loop_health::LoopHealthStore::new(handle));
+                let store: Arc<dyn revops::loop_health::LoopHealthPersistence> = Arc::new(
+                    revops::loop_health::LoopHealthStore::new(handle, boot_id.clone()),
+                );
                 if let Err(error) = revops::runtime::register_unwired_loops(store).await {
                     configured
                         .disable(&format!("loop-health registration failed: {error:#}"))
@@ -2917,9 +2939,11 @@ async fn main() -> Result<()> {
                     revops::runtime::ObserverRuntime::unavailable(observer_mode),
                 ),
                 Some(observer_handle) => {
-                    let store: Arc<dyn revops::loop_health::LoopHealthPersistence> = Arc::new(
-                        revops::loop_health::LoopHealthStore::new(observer_handle.clone()),
-                    );
+                    let store: Arc<dyn revops::loop_health::LoopHealthPersistence> =
+                        Arc::new(revops::loop_health::LoopHealthStore::new(
+                            observer_handle.clone(),
+                            boot_id.clone(),
+                        ));
                     let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
                     let mut lnplus_pass = None;
@@ -3176,6 +3200,7 @@ async fn main() -> Result<()> {
         boltz_owner,
         boltz_query,
         boltz_cfg,
+        boot_id: boot_id.clone(),
     });
 
     let plugin = configured.start(state).await?;

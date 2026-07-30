@@ -78,13 +78,21 @@ pub trait LoopHealthPersistence: Send + Sync + 'static {
     fn is_available(&self) -> bool;
 }
 
+/// Task 67: every pass write carries THIS PROCESS's boot id, so health
+/// can be judged against the current boot rather than inheriting a prior
+/// process's terminal evidence.
 #[derive(Clone)]
 pub struct LoopHealthStore {
     handle: revops_db::owner::ObserverHandle,
+    boot_id: String,
 }
 impl LoopHealthStore {
-    pub fn new(handle: revops_db::owner::ObserverHandle) -> Self {
-        Self { handle }
+    pub fn new(handle: revops_db::owner::ObserverHandle, boot_id: String) -> Self {
+        Self { handle, boot_id }
+    }
+
+    pub fn boot_id(&self) -> &str {
+        &self.boot_id
     }
 }
 
@@ -108,7 +116,7 @@ impl LoopHealthPersistence for LoopHealthStore {
         id: LoopId,
         now: i64,
     ) -> Pin<Box<dyn Future<Output = Result<u64>> + Send + 'a>> {
-        Box::pin(async move { self.handle.begin_loop_pass(id, now).await })
+        Box::pin(async move { self.handle.begin_loop_pass(id, &self.boot_id, now).await })
     }
     fn finish<'a>(
         &'a self,
@@ -116,7 +124,11 @@ impl LoopHealthPersistence for LoopHealthStore {
         generation: u64,
         now: i64,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move { self.handle.finish_loop_pass(id, generation, now).await })
+        Box::pin(async move {
+            self.handle
+                .finish_loop_pass(id, generation, &self.boot_id, now)
+                .await
+        })
     }
     fn fail<'a>(
         &'a self,
@@ -127,7 +139,7 @@ impl LoopHealthPersistence for LoopHealthStore {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             self.handle
-                .fail_loop_pass(id, generation, now, error.to_string())
+                .fail_loop_pass(id, generation, &self.boot_id, now, error.to_string())
                 .await
         })
     }

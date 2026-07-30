@@ -382,6 +382,8 @@ fn never_prune_membership_is_pinned_exactly() {
         "rust_boltz_ignores",
         "rust_boltz_cooldowns",
         "rust_boltz_journal",
+        "rust_boot_sessions",
+        "rust_financial_snapshots",
     ]
     .into_iter()
     .collect();

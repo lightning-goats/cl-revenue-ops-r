@@ -4,6 +4,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
 pub mod actor;
+pub mod analytics;
 pub mod budget;
 pub mod fee_runway;
 pub mod loop_health;

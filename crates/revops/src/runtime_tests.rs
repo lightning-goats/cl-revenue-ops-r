@@ -236,13 +236,14 @@ async fn one_loop(store: Arc<MemoryStore>, pass: Arc<BlockingPass>) -> LoopHandl
 }
 
 #[tokio::test]
-async fn registers_exact_five_identities_without_noop_owners() {
+async fn registers_exact_eight_identities_without_noop_owners() {
     let store = Arc::new(MemoryStore::default());
     let runtime = ObserverRuntime::start_for_tests(store.clone(), BTreeMap::new())
         .await
         .unwrap();
-    assert_eq!(REQUIRED_LOOPS.len(), 5);
-    assert_eq!(store.rows.lock().unwrap().len(), 5);
+    // Task 67: the registry is Python's eight business/startup loops.
+    assert_eq!(REQUIRED_LOOPS.len(), 8);
+    assert_eq!(store.rows.lock().unwrap().len(), 8);
     for id in REQUIRED_LOOPS {
         assert_eq!(store.row(id).wiring_status, WiringStatus::NotWired);
         assert!(
@@ -253,7 +254,7 @@ async fn registers_exact_five_identities_without_noop_owners() {
 }
 
 #[tokio::test]
-async fn fake_passes_exercise_all_five_loop_identities() {
+async fn fake_passes_exercise_all_eight_loop_identities() {
     let store = Arc::new(MemoryStore::default());
     let mut passes: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
     let mut concrete = Vec::new();
