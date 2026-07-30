@@ -71,12 +71,13 @@ impl DiscoveryRefusal {
     }
 }
 
+/// Delegates to the canonical, fixture-verified parser rather than
+/// hand-rolling a third copy (review finding F71-R1 found the same class of
+/// defect in the sibling enrichment site). The local version this replaced
+/// dropped FLOAT-encoded amounts to 0, where `parse_msat` truncates them as
+/// Python's `int()` does.
 fn msat(v: Option<&Value>) -> i64 {
-    match v {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
-        Some(Value::String(s)) => s.trim().trim_end_matches("msat").parse().unwrap_or(0),
-        _ => 0,
-    }
+    v.map(revops_core::msat::parse_msat).unwrap_or(0)
 }
 
 /// py 1835: `str(scid).replace(':', 'x')`. Route-pair rows are looked up

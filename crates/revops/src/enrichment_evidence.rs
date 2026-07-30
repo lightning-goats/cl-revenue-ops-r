@@ -22,6 +22,7 @@ use revops_capital::planner::candidate_score::{
     CandidateEnrichmentEvidence, ClosedChannelProfitSummary, DemandFlowRole, PeerReputation,
 };
 use revops_capital::planner::demand_flow::FlowRole;
+use revops_core::msat::{base_to_sats_floor, parse_msat};
 use serde_json::Value;
 
 /// `get_peer_uptime_percent`'s window (py 2137: `duration_seconds=604800`).
@@ -205,9 +206,15 @@ fn dest_capacities_sats(gossip: &[Value], peer_id: &str) -> Vec<i64> {
         .iter()
         .filter(|c| c.get("destination").and_then(Value::as_str) == Some(peer_id))
         .filter(|c| c.get("active").and_then(Value::as_bool).unwrap_or(false))
-        .filter_map(|c| c.get("amount_msat").and_then(Value::as_i64))
+        // Review finding F71-R1: `amount_msat` arrives as EITHER a JSON
+        // integer or a string such as "2000000000msat" -- the shared
+        // prefetch preserves the raw reply, and Python reads it with
+        // `parse_msat`. `as_i64` silently drops every string form, which
+        // erases the 5M/10M large-channel bonus (py 2181-2185) and
+        // reorders open candidates with no error and no refusal.
+        .map(|c| parse_msat(c.get("amount_msat").unwrap_or(&Value::Null)))
         .filter(|msat| *msat > 0)
-        .map(|msat| msat / 1_000)
+        .map(|msat| base_to_sats_floor(msat as u64) as i64)
         .collect()
 }
 

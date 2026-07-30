@@ -188,6 +188,36 @@ fn inbound_fee_needs_three_samples() {
     assert_eq!(inbound_fee_ppm(&three), Some(200.0));
 }
 
+/// Review finding F71-R1: `amount_msat` must go through the canonical
+/// msat parser, which accepts BOTH the integer and the string form.
+///
+/// `listchannels` JSON is preserved raw by the shared prefetch and CLN
+/// emits string-encoded amounts such as "2000000000msat"; Python reads
+/// them with `parse_msat`. Accepting only integers silently drops every
+/// string-encoded capacity, which erases the 5M/10M large-channel scoring
+/// bonus (py 2181-2185) and reorders open candidates with no refusal and
+/// no error.
+#[test]
+fn destination_capacities_accept_string_encoded_msat() {
+    let mut s = sources();
+    s.gossip_channels = Ok(json!([
+        {"source":"02zz","destination":"02aa","amount_msat":"12000000000msat","active":true},
+        {"source":"02yy","destination":"02aa","amount_msat":"6000000000","active":true},
+        {"source":"02xx","destination":"02aa","amount_msat":3_000_000_000i64,"active":true},
+    ])
+    .as_array()
+    .unwrap()
+    .clone());
+    let e = build_enrichment(&["02aa".to_string()], s).expect("assembles");
+    let mut caps = e["02aa"].dest_channel_capacities_sats.clone();
+    caps.sort_unstable();
+    assert_eq!(
+        caps,
+        vec![3_000_000, 6_000_000, 12_000_000],
+        "string forms, with and without the msat suffix, must parse"
+    );
+}
+
 /// Destination capacities are pre-filtered exactly as Python's list
 /// comprehension does: ACTIVE and amount_msat > 0.
 #[test]
