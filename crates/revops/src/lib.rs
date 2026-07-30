@@ -45,6 +45,7 @@ pub mod notify;
 pub mod open_ev_evidence;
 pub mod options_table;
 pub mod profitability_assembler;
+pub mod profitability_evidence;
 pub mod python_authority;
 pub mod rebalance_adapters;
 pub mod rebalance_execution;
@@ -91,6 +92,8 @@ mod analytics_cadence_tests;
 mod analytics_passes_tests;
 #[cfg(test)]
 mod flow_evidence_tests;
+#[cfg(test)]
+mod profitability_evidence_tests;
 #[cfg(test)]
 mod runtime_tests;
 

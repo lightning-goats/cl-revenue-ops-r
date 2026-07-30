@@ -40,6 +40,30 @@ enum Command {
         params: Vec<SqlValue>,
         reply: oneshot::Sender<Result<Option<String>>>,
     },
+    /// F71-R23 / C71-19: one channel's production history (last routing
+    /// time + diagnostic-rebalance stats) as ONE observation. A dedicated
+    /// typed command rather than two `query_row` calls, because the two
+    /// halves feed one verdict and the production DB is concurrently
+    /// written by Python under WAL -- separate round trips could pair rows
+    /// from different snapshots.
+    ChannelHistory {
+        scid: String,
+        now: i64,
+        diag_days: i64,
+        reply: oneshot::Sender<Result<crate::profitability_history::ChannelHistory>>,
+    },
+    /// F71-R23 / C71-21: every production-side profitability input for the
+    /// WHOLE fleet, as one observation. Same reasoning as
+    /// [`Command::ChannelHistory`] one scope wider -- revenue, costs and
+    /// history are the numerator, denominator and liveness gate of a single
+    /// verdict, so composing them from separate turns lets a Python write
+    /// land in between and yields a fleet state that existed at no instant.
+    ProfitabilitySnapshot {
+        now: i64,
+        window_days: i64,
+        diag_days: i64,
+        reply: oneshot::Sender<Result<crate::profitability_history::ProfitabilitySnapshot>>,
+    },
     /// Type-erased job for [`DbHandle::query_row`]. Rust enums can't carry
     /// a generic variant, so the job closure captures its own (typed)
     /// oneshot reply sender and does the query + reply-send internally;
@@ -106,6 +130,50 @@ impl DbHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Command::QueryOptionalString { sql, params, reply })
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+
+    /// F71-R23: one channel's production history as a single observation.
+    /// See [`Command::ChannelHistory`] for why this is its own command
+    /// rather than two `query_row` calls.
+    pub async fn channel_history(
+        &self,
+        scid: &str,
+        now: i64,
+        diag_days: i64,
+    ) -> Result<crate::profitability_history::ChannelHistory> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChannelHistory {
+                scid: scid.to_string(),
+                now,
+                diag_days,
+                reply,
+            })
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+
+    /// F71-R23 / C71-21: the fleet's whole production-side profitability
+    /// input set as a single observation. See
+    /// [`Command::ProfitabilitySnapshot`].
+    pub async fn profitability_snapshot(
+        &self,
+        now: i64,
+        window_days: i64,
+        diag_days: i64,
+    ) -> Result<crate::profitability_history::ProfitabilitySnapshot> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ProfitabilitySnapshot {
+                now,
+                window_days,
+                diag_days,
+                reply,
+            })
             .await
             .context("actor gone")?;
         rx.await.context("actor dropped reply")?
@@ -236,6 +304,29 @@ pub async fn spawn_read_only(path: &Path) -> Result<DbHandle> {
                 Command::QueryOptionalString { sql, params, reply } => {
                     let result = run_query_optional_string(&conn, sql, &params);
                     let _ = reply.send(result);
+                }
+                Command::ChannelHistory {
+                    scid,
+                    now,
+                    diag_days,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::profitability_history::read_channel_history(
+                        &conn, &scid, now, diag_days,
+                    ));
+                }
+                Command::ProfitabilitySnapshot {
+                    now,
+                    window_days,
+                    diag_days,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::profitability_history::read_profitability_snapshot(
+                        &conn,
+                        now,
+                        window_days,
+                        diag_days,
+                    ));
                 }
                 Command::Exec(job) => job(&conn),
             }

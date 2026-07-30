@@ -10,6 +10,7 @@ pub mod fee_runway;
 pub mod loop_health;
 pub mod notifications;
 pub mod owner;
+pub mod profitability_history;
 pub mod queries;
 pub mod retention;
 pub mod state_writer;
