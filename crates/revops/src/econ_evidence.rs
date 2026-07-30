@@ -32,18 +32,29 @@ use serde_json::Value;
 /// stays a measured zero -- an empty channel and a corrupt one are
 /// different facts.
 fn validated_msat(v: &Value, what: &str) -> Result<i64, EconRefusal> {
-    let ok = match v {
-        Value::Number(n) => n.is_i64() || n.is_u64(),
+    // Shape check ONLY -- the value itself still comes from the canonical
+    // `parse_msat` below, which stays the sole accepted-format authority
+    // (F71-R6's instruction: validate here, do not fork the parser).
+    let acceptable = match v {
+        // F71-R7: `is_u64()` alone would admit values above i64::MAX,
+        // which the permissive parser then truncates -- fabricating a
+        // number instead of reporting unusable evidence.
+        Value::Number(n) => n.as_u64().is_some_and(|u| i64::try_from(u).is_ok()),
         Value::String(s) => {
             let body = s.trim().strip_suffix("msat").unwrap_or(s.trim());
-            let digits = body.strip_prefix('-').unwrap_or(body);
-            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            // F71-R7: no sign is accepted at all. listfunds amounts are
+            // non-negative, and a negative would otherwise be silently
+            // clamped to zero by the floor conversion. Rejecting the '-'
+            // outright also stops "-1msat" slipping through.
+            !body.is_empty()
+                && body.bytes().all(|b| b.is_ascii_digit())
+                && body.parse::<i64>().is_ok()
         }
         _ => false,
     };
-    if !ok {
+    if !acceptable {
         return Err(EconRefusal::MalformedListfunds(format!(
-            "listfunds {what} is not a valid msat value: {v}"
+            "listfunds {what} is not a valid non-negative msat value: {v}"
         )));
     }
     Ok(parse_msat(v))

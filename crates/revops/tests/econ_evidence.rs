@@ -205,6 +205,35 @@ fn present_but_invalid_amounts_refuse() {
     }
 }
 
+/// Review finding F71-R7: listfunds amounts are non-negative and this
+/// implementation is i64. A negative required amount would be silently
+/// clamped to zero by the floor conversion, and a u64 above i64::MAX is
+/// lossy through the permissive parser -- both fabricate a number rather
+/// than reporting that the evidence is unusable.
+#[test]
+fn negative_and_out_of_range_amounts_refuse() {
+    let bad = [
+        json!(-1),
+        json!("-1"),
+        json!("-1msat"),
+        // u64 above i64::MAX.
+        json!(18_446_744_073_709_551_615u64),
+        json!("18446744073709551615"),
+        json!("18446744073709551615msat"),
+    ];
+    for v in bad {
+        let funds = json!({
+            "outputs": [{"status": "confirmed", "amount_msat": v.clone()}],
+            "channels": []
+        });
+        let err = total_liquidating_value(TlvSources {
+            listfunds: Ok(funds),
+        })
+        .expect_err("must refuse");
+        assert_eq!(err.code(), "econ_listfunds_malformed", "{v:?}");
+    }
+}
+
 /// A VALID zero is still a measured zero. The refusal above must key on
 /// the value being unusable, not on it being zero -- an empty channel and
 /// a corrupt one are different facts.
