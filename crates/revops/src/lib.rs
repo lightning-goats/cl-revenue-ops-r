@@ -4,6 +4,7 @@
 //! unit-testing in isolation from the cln-plugin stdio handshake (which the
 //! `tests/manifest.rs` black-box test covers instead).
 
+pub mod analytics_cadence;
 pub mod analytics_passes;
 pub mod boltz_boundaries;
 pub mod boltz_config;
@@ -83,6 +84,8 @@ pub mod runtime;
 pub mod startup_snapshot;
 pub mod state_writer;
 
+#[cfg(test)]
+mod analytics_cadence_tests;
 #[cfg(test)]
 mod analytics_passes_tests;
 #[cfg(test)]

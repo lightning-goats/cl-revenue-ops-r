@@ -2891,6 +2891,11 @@ async fn main() -> Result<()> {
     });
     let mut fee_cadence = None;
     let mut lnplus_cadence = None;
+    // Task 71 / R26: the three analytics cadences. Built during
+    // composition, started only after `configured.start()` returns.
+    let mut flow_cadence = None;
+    let mut startup_snapshot_cadence = None;
+    let mut financial_cadence = None;
     let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
         None;
     // Task 67: ONE boot identity per process, minted before any loop can
@@ -2947,6 +2952,39 @@ async fn main() -> Result<()> {
                     let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
                     let mut lnplus_pass = None;
+                    // Task 71 / R26: the three analytics owners. Unlike the
+                    // fee and LN+ passes these are NOT gated on
+                    // autonomous-shadow authority: they issue read-only
+                    // RPCs, run the frozen kernels, and write only to the
+                    // Rust-owned observer store, so they hold no action
+                    // capability for a passive observer to escalate.
+                    //
+                    // `db` is the READ-ONLY production handle. Passing it
+                    // as `Some` is what makes `config_overrides` a readable
+                    // tier; `None` makes the flow resolver refuse rather
+                    // than silently run on defaults an operator replaced.
+                    let flow_pass = Arc::new(revops::analytics_passes::FlowAnalysisPass::live(
+                        init_socket_path.clone(),
+                        observer_handle.clone(),
+                        boot_id.clone(),
+                        db.clone(),
+                        python_options.clone(),
+                    ));
+                    passes = passes.with_flow_analysis(flow_pass.clone());
+                    passes = passes.with_startup_snapshot(Arc::new(
+                        revops::analytics_passes::StartupSnapshotPass::live(
+                            init_socket_path.clone(),
+                            observer_handle.clone(),
+                        ),
+                    ));
+                    passes = passes.with_financial_snapshot(Arc::new(
+                        revops::analytics_passes::FinancialSnapshotPass::live(
+                            observer_handle.clone(),
+                            boot_id.clone(),
+                            init_socket_path.clone(),
+                            db.clone(),
+                        ),
+                    ));
                     if autonomous_shadow {
                         // Task 61 4D: the REAL LN+ observer pass, against
                         // the Rust observer parallel-state DB (collision
@@ -3040,6 +3078,32 @@ async fn main() -> Result<()> {
                     ) {
                         lnplus_cadence = Some(
                             revops::lnplus_runtime::LnPlusCadenceActivation::new(handle, pass),
+                        );
+                    }
+                    // Task 71 / R26. Every one of these is INERT until
+                    // `activate()` below, which runs only after
+                    // `configured.start()` has returned: a flow pass that
+                    // landed mid-handshake would read a socket lightningd
+                    // has not finished answering on.
+                    if let Some(handle) =
+                        runtime.handle(revops_db::loop_health::LoopId::FlowAnalysis)
+                    {
+                        flow_cadence = Some(revops::analytics_cadence::FlowCadenceActivation::new(
+                            handle, flow_pass,
+                        ));
+                    }
+                    if let Some(handle) =
+                        runtime.handle(revops_db::loop_health::LoopId::StartupSnapshot)
+                    {
+                        startup_snapshot_cadence = Some(
+                            revops::analytics_cadence::StartupSnapshotActivation::new(handle),
+                        );
+                    }
+                    if let Some(handle) =
+                        runtime.handle(revops_db::loop_health::LoopId::FinancialSnapshot)
+                    {
+                        financial_cadence = Some(
+                            revops::analytics_cadence::FinancialCadenceActivation::new(handle),
                         );
                     }
                     revops::runtime::AuthorityRuntime::Observer(runtime)
@@ -3210,6 +3274,19 @@ async fn main() -> Result<()> {
     }
     if let Some(lnplus_cadence) = lnplus_cadence {
         lnplus_cadence.activate();
+    }
+    // Task 71 / R26: py starts its analytics threads at the very end of
+    // `init`, after the plugin is serving (cl-revenue-ops.py:3588-3600).
+    // Activation AFTER `start()` reproduces that ordering exactly, and it
+    // is the reason each activation is inert until this point.
+    if let Some(flow_cadence) = flow_cadence {
+        flow_cadence.activate();
+    }
+    if let Some(startup_snapshot_cadence) = startup_snapshot_cadence {
+        startup_snapshot_cadence.activate();
+    }
+    if let Some(financial_cadence) = financial_cadence {
+        financial_cadence.activate();
     }
 
     // Startup hydration runs as a background task, off the init-handshake
