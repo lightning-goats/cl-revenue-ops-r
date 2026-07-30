@@ -17,6 +17,7 @@ pub mod capital_owner;
 pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;
+pub mod discovery_evidence;
 pub mod fee_config;
 pub mod fee_evidence;
 pub mod fee_execution;
