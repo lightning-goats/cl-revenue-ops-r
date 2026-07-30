@@ -33,6 +33,7 @@ pub fn apply_redeployment_ev_demotion(losers: &mut [Loser], winners: &[Redeploym
         }
         let (ev, _best_peer, _winner_ev) = calculate_redeployment_ev(
             loser.marginal_profit_30d_sats,
+            loser.capacity,
             loser.estimated_closure_cost_sats,
             winners,
         );

@@ -201,7 +201,7 @@ fn task_67c_fields_reach_the_kernel() {
         },
     )]);
     d.dual_fund_peers = ["02cc".to_string()].into_iter().collect();
-    d.redeployment_winner_evs = vec![("02aa".to_string(), 4_200.0)];
+    d.redeployment_winner_evs = vec![("02aa".to_string(), ev_template)];
     d.recycle_candidates = vec![RecycleCandidateOwned {
         peer_id: "02cc".to_string(),
         score: 0.9,
@@ -216,10 +216,10 @@ fn task_67c_fields_reach_the_kernel() {
     assert!(e.candidate_enrichment.contains_key("02cc"));
     assert!(e.open_candidate_evidence.contains_key("02cc"));
     assert!(e.dual_fund_peers.contains("02cc"));
-    assert_eq!(
-        e.redeployment_winner_evs,
-        vec![("02aa".to_string(), 4_200.0)]
-    );
+    // F71-R10: a TEMPLATE, not a precomputed scalar -- the loser's
+    // capacity is substituted at pricing time.
+    assert_eq!(e.redeployment_winner_evs.len(), 1);
+    assert_eq!(e.redeployment_winner_evs[0].0, "02aa");
     assert_eq!(e.recycle_candidates.len(), 1);
     assert_eq!(e.recycle_route_pair_scids.len(), 1);
     assert!(

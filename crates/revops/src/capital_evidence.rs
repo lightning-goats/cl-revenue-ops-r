@@ -101,7 +101,9 @@ pub struct EvidenceDeps<'a> {
     pub candidate_enrichment: BTreeMap<String, CandidateEnrichmentEvidence>,
     pub open_candidate_evidence: BTreeMap<String, OpenCandidateEvidence>,
     pub dual_fund_peers: BTreeSet<String>,
-    pub redeployment_winner_evs: Vec<(String, f64)>,
+    /// F71-R10: per-winner open-EV TEMPLATES, not precomputed scalars --
+    /// the loser's capacity is substituted when that loser is priced.
+    pub redeployment_winner_evs: Vec<(String, revops_capital::planner::ev::OpenEvInputs)>,
     pub recycle_candidates: Vec<RecycleCandidateOwned>,
     /// Three-way, from [`crate::recycle_evidence::recycle_protected_peers`]:
     /// `None` = source failed, everything protected; `Some(empty)` = nothing
