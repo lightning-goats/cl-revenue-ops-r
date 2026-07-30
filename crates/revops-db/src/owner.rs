@@ -278,6 +278,15 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     ChannelFlowStates(oneshot::Sender<Result<Vec<crate::analytics::ChannelFlowStateRow>>>),
+    /// F71-R23 / C71-14: the flow loop's health AND one channel's row, in
+    /// a single actor turn. Deliberately NOT two commands -- see
+    /// [`crate::analytics::flow_evidence_snapshot`] for what tears when a
+    /// flow pass runs between them. There is no single-row read command on
+    /// purpose: it would be the primitive that reintroduces the tear.
+    FlowEvidenceSnapshot {
+        scid: String,
+        reply: oneshot::Sender<Result<crate::analytics::FlowEvidenceSnapshot>>,
+    },
     UpsertKalmanState {
         scid: String,
         state: serde_json::Value,
@@ -1882,6 +1891,26 @@ impl ObserverHandle {
         rx.await.context("observer actor dropped reply")?
     }
 
+    /// F71-R23 / C71-14: the flow loop's health and one channel's row as a
+    /// single observation. The pair is what the caller reasons about, so
+    /// the pair is what the store returns -- reading the two halves with
+    /// separate awaits lets a flow pass land in between and produces a
+    /// combination that was never true.
+    pub async fn flow_evidence_snapshot(
+        &self,
+        scid: &str,
+    ) -> Result<crate::analytics::FlowEvidenceSnapshot> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::FlowEvidenceSnapshot {
+                scid: scid.to_string(),
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     /// Blocking sibling for the analytics owner threads.
     pub fn blocking_channel_flow_states(
         &self,
@@ -2681,6 +2710,9 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::ChannelFlowStates(reply) => {
                     let _ = reply.send(crate::analytics::channel_flow_states(&conn));
+                }
+                Command::FlowEvidenceSnapshot { scid, reply } => {
+                    let _ = reply.send(crate::analytics::flow_evidence_snapshot(&mut conn, &scid));
                 }
                 Command::UpsertKalmanState {
                     scid,

@@ -637,6 +637,62 @@ pub fn channel_flow_state(conn: &Connection, scid: &str) -> Result<Option<Channe
         .find(|row| row.scid == scid))
 }
 
+/// The two facts `revenue-r-analyze` needs, read together.
+///
+/// F71-R23 / C71-14: a reader that fetches these SEPARATELY is asking two
+/// questions at two different instants and then reporting the pair as if
+/// it were one observation. The flow pass writes both -- it bumps the loop
+/// generation, upserts rows, then records the terminal -- so a pass
+/// starting between the two reads produces answers that were never
+/// simultaneously true. Both directions are wrong and both are silent:
+///
+/// - health read first (`Passed`, generation N), then the row read lands
+///   after generation N+1 has already deleted it via closed-channel
+///   reconciliation -> the surface reports Python's legitimate
+///   "analysis: null" for a channel pass N really did track.
+/// - health read first (`Passed`, generation N), then the row read picks
+///   up a row generation N+1 has already half-written -> the surface
+///   serves an in-flight pass's numbers under the completed pass's
+///   authority, which is the exact "no partial pass counts as evidence"
+///   guarantee this gate exists to provide.
+///
+/// One command, one transaction, one snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowEvidenceSnapshot {
+    /// The flow-analysis loop's durable health row, if it is registered.
+    pub flow_loop: Option<crate::loop_health::LoopHealthRow>,
+    /// The requested channel's flow row, if the store holds one.
+    pub row: Option<ChannelFlowStateRow>,
+}
+
+pub fn flow_evidence_snapshot(conn: &mut Connection, scid: &str) -> Result<FlowEvidenceSnapshot> {
+    // A deferred transaction so both SELECTs see one database state, the
+    // same reasoning `DbHandle::query_row` documents for multi-column
+    // aggregates.
+    let tx = conn
+        .transaction()
+        .context("open flow evidence read transaction")?;
+    let flow_loop = crate::loop_health::load_loop(&tx, crate::loop_health::LoopId::FlowAnalysis)
+        .context("flow evidence: read flow-analysis loop health")?;
+
+    // C71-15: an unregistered flow loop is decided HERE, before the row is
+    // touched. The precedence is not merely an optimisation -- the row
+    // query can FAIL (missing or damaged `rust_channel_flow_states`), and
+    // a failure would surface as `store_unavailable`, which reads as
+    // transient. That would mask `loop_unregistered`: a permanent wiring
+    // defect needing operator action, reported as something to retry. The
+    // row cannot change the verdict, so it is not read.
+    let row = if flow_loop.is_some() {
+        channel_flow_state(&tx, scid)
+            .with_context(|| format!("flow evidence: read flow state for {scid}"))?
+    } else {
+        None
+    };
+
+    tx.finish().context("finish flow evidence read")?;
+    Ok(FlowEvidenceSnapshot { flow_loop, row })
+}
+
 fn upsert_json(
     conn: &Connection,
     table: &str,

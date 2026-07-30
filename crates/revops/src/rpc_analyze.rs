@@ -190,6 +190,73 @@ pub fn build_analyze_from_persisted(
     out
 }
 
+/// F71-R23: the normalized SCID this request should look up, or `None`
+/// when there is nothing to look up (absent, non-string, empty, or
+/// malformed `channel_id`).
+///
+/// Callers gate the store read on this so a caller passing garbage never
+/// reaches the database — the parameter verdict is a pure function of the
+/// parameter, and `build_analyze_from_evidence` re-derives it anyway.
+pub fn analyze_target_scid(channel_id_raw: Option<&Value>) -> Option<String> {
+    let id = match channel_id_raw {
+        Some(Value::String(s)) => s.as_str(),
+        _ => return None,
+    };
+    // Python truthiness: an empty string behaves the same as absent.
+    if id.is_empty() || !matches_scid_format(id) {
+        return None;
+    }
+    Some(normalize_scid(id))
+}
+
+/// F71-R23: serve the channel from CURRENT-BOOT flow evidence, or say why
+/// there is none.
+///
+/// The parameter verdict comes first and is independent of loop health: a
+/// caller passing a non-SCID gets Python's own format error whether or not
+/// the flow loop has run.
+///
+/// A refusal deliberately carries NO `analysis` key. Python's real
+/// unknown-channel answer is `{"channel": ..., "analysis": null}`, so a
+/// refusal that also presented `analysis: null` would be read as a genuine
+/// "no data" by any caller that looks at the field the answer lives in --
+/// and `error` is exactly what such a caller is not checking. Omitting the
+/// key makes that read fail loudly instead of quietly wrong. (Same
+/// reasoning as `rpc_profitability`'s not-wired shapes declining to reuse
+/// `summary`/`channels_by_class`.)
+pub fn build_analyze_from_evidence(
+    channel_id_raw: Option<&Value>,
+    evidence: Result<
+        &crate::flow_evidence::FlowEvidence,
+        &crate::flow_evidence::FlowEvidenceRefusal,
+    >,
+) -> Value {
+    use crate::flow_evidence::FlowEvidence;
+
+    match evidence {
+        Ok(FlowEvidence::Current(row)) => build_analyze_from_persisted(channel_id_raw, Some(row)),
+        Ok(FlowEvidence::NoSuchChannel) => build_analyze_from_persisted(channel_id_raw, None),
+        Err(refusal) => {
+            // Run the parameter gate through the same path every other
+            // branch uses, so a malformed SCID cannot be masked by the
+            // refusal.
+            let shell = build_analyze(channel_id_raw, MetricsLookup::Ready(None));
+            let Some(channel) = shell.get("channel").cloned() else {
+                return shell;
+            };
+            let mut out = json!({
+                "channel": channel,
+                "error": refusal.code(),
+                "detail": refusal.detail(),
+            });
+            if let Some(status) = refusal.boot_status() {
+                out["boot_status"] = json!(status.as_str());
+            }
+            out
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2253,20 +2253,36 @@ async fn main() -> Result<()> {
             &analyze_name,
             "read-only flow analysis for a single channel_id (SCID); the whole-fleet \
              sweep (no channel_id) is a mutating background job and is NOT ported here",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
                 }
-                // Task 50 correction round, F5: `metrics` needs a
-                // `FlowMetrics` assembly pipeline (live channel +
-                // forward-history evidence through revops_analytics::flow)
-                // that does not exist yet -- `NotWired` marks that this
-                // request never actually looked anything up, so the
-                // builder can distinguish it from a genuine "channel
-                // unknown to the flow analyzer" answer.
-                Ok(revops::rpc_analyze::build_analyze(
+                // F71-R23: served from the flow pass's own persisted
+                // state, gated on THIS boot having completed a pass. The
+                // old wiring answered `NotWired` unconditionally; the
+                // store has held real rows since F71-R22, so the marker
+                // had become a false statement about this port rather
+                // than an honest gap.
+                //
+                // A malformed/absent `channel_id` never reaches the
+                // store: its verdict is a pure function of the parameter.
+                let s = p.state();
+                let Some(scid) = revops::rpc_analyze::analyze_target_scid(v.get("channel_id"))
+                else {
+                    return Ok(revops::rpc_analyze::build_analyze(
+                        v.get("channel_id"),
+                        revops::rpc_analyze::MetricsLookup::Ready(None),
+                    ));
+                };
+                let evidence = revops::flow_evidence::current_boot_flow_evidence(
+                    s.observer_db.as_ref(),
+                    &scid,
+                    &s.boot_id,
+                )
+                .await;
+                Ok(revops::rpc_analyze::build_analyze_from_evidence(
                     v.get("channel_id"),
-                    revops::rpc_analyze::MetricsLookup::NotWired,
+                    evidence.as_ref(),
                 ))
             },
         )

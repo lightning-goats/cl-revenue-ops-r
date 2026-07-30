@@ -2344,10 +2344,16 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
     let analyze_no_id = call_after_init(false, None, home.path(), &[], "revenue-r-analyze");
     assert_eq!(analyze_no_id["error"], serde_json::json!("not_yet_ported"));
 
-    // F5: with a channel_id, `metrics` is unwired (main.rs always passes
-    // `None`) -- the response must carry a `not_yet_ported` marker so it
-    // cannot collide with Python's real unknown-channel answer, which is
-    // the SAME `{"channel": ..., "analysis": null}` shape with NO error key.
+    // F71-R23: with a channel_id, analyze is no longer a declared gap --
+    // it is served from the flow pass's persisted state. This harness
+    // calls immediately after init, so the flow loop is registered but its
+    // first pass (30s, F71-R26) has not completed, and the honest answer
+    // is a LIVE refusal naming that state.
+    //
+    // The original F5 intent still holds and is now stronger: Python's
+    // real unknown-channel answer is `{"channel": ..., "analysis": null}`
+    // with no error key, and this response cannot be mistaken for it
+    // because it carries no `analysis` key at all.
     let analyze_with_id = call_after_init_with_params(
         false,
         None,
@@ -2357,11 +2363,23 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         serde_json::json!({"channel_id": "123x456x789"}),
     );
     assert_eq!(analyze_with_id["channel"], serde_json::json!("123x456x789"));
-    assert_eq!(analyze_with_id["analysis"], serde_json::Value::Null);
     assert_eq!(
         analyze_with_id["error"],
+        serde_json::json!("flow_evidence_no_pass_this_boot"),
+        "a live not-ready state must not be reported as an unported gap: {analyze_with_id:?}"
+    );
+    assert_eq!(
+        analyze_with_id["boot_status"],
+        serde_json::json!("never_run_this_boot")
+    );
+    assert!(
+        analyze_with_id.get("analysis").is_none(),
+        "must not collide with Python's real unknown-channel null: {analyze_with_id:?}"
+    );
+    assert_ne!(
+        analyze_with_id["error"],
         serde_json::json!("not_yet_ported"),
-        "must be marked, not collide with Python's real unknown-channel null: {analyze_with_id:?}"
+        "analyze is wired now; claiming otherwise is a false statement about this port"
     );
 
     // F2: no capacity planner exists -- must be Python's EXACT error shape
