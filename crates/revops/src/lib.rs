@@ -18,6 +18,7 @@ pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;
 pub mod discovery_evidence;
+pub mod econ_evidence;
 pub mod enrichment_evidence;
 pub mod fee_config;
 pub mod fee_evidence;
