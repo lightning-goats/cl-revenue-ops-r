@@ -142,6 +142,115 @@ fn assert_canonical(conn: &Connection, table: &str, expected: &[&str]) -> Result
     Ok(())
 }
 
+/// One day's aggregated flow for one channel. Index 0 in the vector is
+/// the most recent 24h, index 1 the 24h before that, and so on -- the
+/// order the frozen EMA kernel requires.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlowDailyBucket {
+    pub in_sats: i64,
+    pub out_sats: i64,
+    pub count: i64,
+    pub last_ts: i64,
+}
+
+/// Port of py `database.get_daily_flow_buckets` (database.py:5008) over
+/// the Rust plugin's OWN `ingested_forwards` table.
+///
+/// Task 71 / F71-R16: the flow-analysis pass's daily/EMA buckets had no
+/// Rust producer at all, so `FlowDeps::history` could only ever be
+/// hand-built in a test. Without this, a wired pass would hand every
+/// channel an EMPTY bucket list -- which the frozen kernels read as
+/// "no observations", collapsing the whole fleet to `confidence = 0.0`
+/// and the balance-ratio fallback. That is a fabricated-empty-evidence
+/// failure, not a missing feature.
+///
+/// Three py behaviours that look incidental and are not:
+///
+/// * Bins are ROLLING age-in-days from `now`
+///   (`CAST((now - timestamp) / 86400 AS INTEGER)`), not calendar days.
+/// * A channel seen even once gets its FULL `window_days` vector, zero-
+///   padded. The decay and volatility kernels short-circuit on
+///   `len() < 3`, so the padding changes their output.
+/// * A channel with no forwards in the window is ABSENT from the map --
+///   never a zero-filled vector. Absent means "no evidence"; a zero
+///   bucket means "measured no flow".
+pub fn daily_flow_buckets(
+    conn: &Connection,
+    now: i64,
+    window_days: i64,
+) -> Result<std::collections::BTreeMap<String, Vec<FlowDailyBucket>>> {
+    let mut out: std::collections::BTreeMap<String, Vec<FlowDailyBucket>> =
+        std::collections::BTreeMap::new();
+    if window_days <= 0 {
+        return Ok(out);
+    }
+    let start_time = now - window_days * 86_400;
+
+    // Each forward contributes to TWO channels: `in_channel` receives, and
+    // `out_channel` sends. py UNIONs the two projections then regroups, so
+    // a channel that is both sides of the same forward sums both.
+    let mut stmt = conn
+        .prepare(
+            "WITH flow AS (
+                 SELECT in_channel AS channel_id,
+                        CAST((?1 - timestamp) / 86400 AS INTEGER) AS age_days,
+                        SUM(in_msat) AS in_msat, 0 AS out_msat,
+                        COUNT(*) AS cnt, MAX(timestamp) AS last_ts
+                 FROM ingested_forwards WHERE timestamp >= ?2
+                 GROUP BY in_channel, age_days
+                 UNION ALL
+                 SELECT out_channel AS channel_id,
+                        CAST((?1 - timestamp) / 86400 AS INTEGER) AS age_days,
+                        0 AS in_msat, SUM(out_msat) AS out_msat,
+                        COUNT(*) AS cnt, MAX(timestamp) AS last_ts
+                 FROM ingested_forwards WHERE timestamp >= ?2
+                 GROUP BY out_channel, age_days
+             )
+             SELECT channel_id, age_days,
+                    SUM(in_msat), SUM(out_msat), SUM(cnt), MAX(last_ts)
+             FROM flow
+             WHERE age_days >= 0 AND age_days < ?3
+             GROUP BY channel_id, age_days",
+        )
+        .context("prepare daily flow bucket query")?;
+
+    let rows = stmt
+        .query_map(params![now, start_time, window_days], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read daily flow buckets")?;
+
+    for (channel_id, age_days, in_msat, out_msat, count, last_ts) in rows {
+        if channel_id.is_empty() {
+            continue;
+        }
+        let Ok(index) = usize::try_from(age_days) else {
+            continue;
+        };
+        if age_days >= window_days {
+            continue;
+        }
+        let buckets = out
+            .entry(channel_id)
+            .or_insert_with(|| vec![FlowDailyBucket::default(); window_days as usize]);
+        let bucket = &mut buckets[index];
+        // py `base_to_sats_floor` per bucket per direction.
+        bucket.in_sats += in_msat.div_euclid(1_000);
+        bucket.out_sats += out_msat.div_euclid(1_000);
+        bucket.count += count;
+        bucket.last_ts = bucket.last_ts.max(last_ts);
+    }
+    Ok(out)
+}
+
 /// Upsert one channel's flow state (current-state semantics).
 pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -> Result<()> {
     conn.execute(
@@ -174,6 +283,39 @@ pub fn upsert_channel_flow_state(conn: &Connection, row: &ChannelFlowStateRow) -
     )
     .context("upsert channel flow state")?;
     Ok(())
+}
+
+/// Persist ONE complete flow pass — every derived state row and every
+/// updated Kalman state — in a single transaction.
+///
+/// Task 71 / F71-R18. The per-row alternative (N `upsert_channel_flow_state`
+/// plus N `upsert_kalman_state` calls) is not merely slower, it is
+/// undetectably wrong on partial failure. `rust_channel_flow_states`
+/// carries a `boot_id`, so a half-written state set is at least
+/// *visible*; `rust_kalman_state` carries NO boot_id and no provenance at
+/// all, so a half-written filter set is indistinguishable from a complete
+/// one. The next pass would then resume some channels from this boot's
+/// filter and others from a previous boot's, silently and permanently.
+///
+/// All-or-nothing removes the question: either the whole pass is durable
+/// or none of it is, and the failed pass fails the loop generation.
+pub fn persist_flow_pass(
+    conn: &mut Connection,
+    states: &[ChannelFlowStateRow],
+    kalman: &[(String, serde_json::Value)],
+    updated_at: i64,
+) -> Result<usize> {
+    let tx = conn.transaction().context("open flow pass transaction")?;
+    for row in states {
+        upsert_channel_flow_state(&tx, row)
+            .with_context(|| format!("flow pass: persist state for {}", row.scid))?;
+    }
+    for (scid, state) in kalman {
+        upsert_kalman_state(&tx, scid, state, updated_at)
+            .with_context(|| format!("flow pass: persist kalman state for {scid}"))?;
+    }
+    tx.commit().context("commit flow pass transaction")?;
+    Ok(states.len())
 }
 
 /// All channel flow states, scid-ordered.

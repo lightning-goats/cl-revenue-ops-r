@@ -300,6 +300,29 @@ enum Command {
         limit: i64,
         reply: oneshot::Sender<Result<Vec<crate::analytics::FinancialSnapshotRow>>>,
     },
+    // -- Task 71 / F71-R16: the two analytics READS the concrete passes
+    // need. Everything else the passes touch already existed. --
+    DailyFlowBuckets {
+        now: i64,
+        window_days: i64,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<
+            Result<std::collections::BTreeMap<String, Vec<crate::analytics::FlowDailyBucket>>>,
+        >,
+    },
+    PeersWithRecentConnectionHistory {
+        since: i64,
+        reply: oneshot::Sender<Result<std::collections::BTreeSet<String>>>,
+    },
+    // F71-R18: one flow pass, one transaction. See
+    // `analytics::persist_flow_pass` for why per-row writes are not an
+    // acceptable substitute here.
+    PersistFlowPass {
+        states: Vec<crate::analytics::ChannelFlowStateRow>,
+        kalman: Vec<(String, serde_json::Value)>,
+        updated_at: i64,
+        reply: oneshot::Sender<Result<usize>>,
+    },
     RecordBootSession {
         identity: crate::loop_health::BootIdentity,
         reply: oneshot::Sender<Result<()>>,
@@ -2016,6 +2039,62 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 71 / F71-R16: the flow pass's own daily/EMA bucket inputs.
+    /// See [`crate::analytics::daily_flow_buckets`] for the py parity
+    /// contract (rolling age bins, zero-padded window, absent-not-zero).
+    #[allow(clippy::type_complexity)]
+    pub async fn daily_flow_buckets(
+        &self,
+        now: i64,
+        window_days: i64,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::analytics::FlowDailyBucket>>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::DailyFlowBuckets {
+                now,
+                window_days,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R18: persist one COMPLETE flow pass atomically.
+    /// Returns the number of state rows written.
+    pub async fn persist_flow_pass(
+        &self,
+        states: Vec<crate::analytics::ChannelFlowStateRow>,
+        kalman: Vec<(String, serde_json::Value)>,
+        updated_at: i64,
+    ) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::PersistFlowPass {
+                states,
+                kalman,
+                updated_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R16: the one-shot startup snapshot's required
+    /// "who already has recent history" read.
+    pub async fn peers_with_recent_connection_history(
+        &self,
+        since: i64,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::PeersWithRecentConnectionHistory { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     /// Task 67: record this process's boot identity once at startup.
     pub async fn record_boot_session(
         &self,
@@ -2144,7 +2223,7 @@ pub fn require_wal_mode(mode: &str, path: &Path) -> Result<()> {
 /// operator pointing `observer-db-path` at a path that doesn't exist yet
 /// is the expected first-run case, not a misconfiguration.
 pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
-    let conn = open_observer_db(path)?;
+    let mut conn = open_observer_db(path)?;
 
     let (tx, mut rx) = mpsc::channel::<Command>(64);
     tokio::task::spawn_blocking(move || {
@@ -2556,6 +2635,32 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 }
                 Command::FinancialSnapshots { limit, reply } => {
                     let _ = reply.send(crate::analytics::financial_snapshots(&conn, limit));
+                }
+                Command::DailyFlowBuckets {
+                    now,
+                    window_days,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::daily_flow_buckets(
+                        &conn,
+                        now,
+                        window_days,
+                    ));
+                }
+                Command::PersistFlowPass {
+                    states,
+                    kalman,
+                    updated_at,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::persist_flow_pass(
+                        &mut conn, &states, &kalman, updated_at,
+                    ));
+                }
+                Command::PeersWithRecentConnectionHistory { since, reply } => {
+                    let _ = reply.send(notifications::peers_with_recent_connection_history(
+                        &conn, since,
+                    ));
                 }
                 Command::RecordBootSession { identity, reply } => {
                     let _ = reply.send(crate::loop_health::record_boot_session(&conn, &identity));
