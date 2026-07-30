@@ -24,6 +24,28 @@ fn healthy_budget() -> ScriptedBudget {
     }))
 }
 
+/// F71-R12(a): `OpenSideEvidence` has no `Default`, so even a test cannot
+/// fabricate one. This runs the REAL producer over empty discovery
+/// evidence, which is a genuine measured empty.
+fn produced_empty_open_side() -> revops::capital_producers::OpenSideEvidence {
+    revops::capital_producers::build_open_side(revops::capital_producers::OpenSideSources {
+        discovery: Default::default(),
+        winner_channels: Vec::new(),
+        enrichment: Default::default(),
+        listnodes: Ok(serde_json::json!({"nodes": []})),
+        closed_channel_daily_net_est: Default::default(),
+        observed_node_daily_ppm: None,
+        chain_costs: revops::open_ev_evidence::ChainCosts {
+            open_cost_sats: 5_000,
+            close_cost_sats: 3_000,
+            used_fallback: true,
+        },
+        planned_channel_size_sats: 1_000_000,
+        min_annual_roi_pct: 1.0,
+    })
+    .expect("producer runs over empty evidence")
+}
+
 fn deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
     EvidenceDeps {
         planner_enabled: true,
@@ -52,12 +74,7 @@ fn deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         defib_gates: Default::default(),
         close_gates: Default::default(),
         open_guards: Default::default(),
-        discovery: Default::default(),
-        candidate_enrichment: Default::default(),
-        open_candidate_evidence: Default::default(),
-        dual_fund_peers: Default::default(),
-        redeployment_winner_evs: Vec::new(),
-        recycle_candidates: Vec::new(),
+        open_side: produced_empty_open_side(),
         // Default to the FAIL-CLOSED protection state, matching what a
         // caller that never read policies would honestly have.
         recycle_protected_peers: None,
@@ -165,19 +182,12 @@ fn healthy_assembly_feeds_the_frozen_kernel() {
 /// rather than running, finding nothing, and reporting success.
 #[test]
 fn task_67c_fields_reach_the_kernel() {
+    use revops::capital_producers::{build_open_side, OpenSideSources};
+    use revops::open_ev_evidence::ChainCosts;
     use revops_capital::planner::candidate_score::CandidateEnrichmentEvidence;
-    use revops_capital::planner::cycle::{OpenCandidateEvidence, RecycleCandidateOwned};
-    use revops_capital::planner::ev::OpenEvInputs;
+    use revops_capital::planner::cycle::{DiscoveryEvidence, NeighborEdge};
+    use revops_capital::planner::discovery::PatronCandidate;
 
-    let ev_template = OpenEvInputs {
-        channel_size_sats: 2_000_000,
-        closed_channel_daily_net_est_sats: None,
-        observed_node_daily_ppm: Some(15.0),
-        open_cost_sats: 1_400,
-        close_cost_sats: 400,
-        inbound_median_fee_ppm: Some(120.0),
-        min_annual_roi_pct: 1.0,
-    };
     let enrichment = CandidateEnrichmentEvidence {
         reputation: None,
         closed_channel_profit: None,
@@ -189,24 +199,47 @@ fn task_67c_fields_reach_the_kernel() {
         demand_flow_role: None,
     };
 
+    // F71-R5/R11/R13: the open side arrives ONLY from the producer, and
+    // candidates are DERIVED by the frozen discover_peers -- 02cc emerges
+    // as a neighbour of patron 02patron rather than being declared here.
+    let open_side = build_open_side(OpenSideSources {
+        discovery: DiscoveryEvidence {
+            all_channels: vec![PatronCandidate {
+                peer_id: "02patron".to_string(),
+                marginal_roi_percent: 250.0,
+            }],
+            neighbor_patron_source_channels: BTreeMap::from([(
+                "02patron".to_string(),
+                vec![NeighborEdge {
+                    destination: "02cc".to_string(),
+                    amount_msat: 5_000_000_000,
+                    fee_per_millionth: 100,
+                }],
+            )]),
+            our_node_id: "02us".to_string(),
+            max_candidate_pool: revops::discovery_evidence::DEFAULT_MAX_CANDIDATE_POOL,
+            ..Default::default()
+        },
+        winner_channels: Vec::new(),
+        enrichment: BTreeMap::from([("02cc".to_string(), enrichment)]),
+        listnodes: Ok(json!({"nodes": [
+            {"nodeid": "02cc", "option_will_fund": {"lease_fee_base_msat": 0}}
+        ]})),
+        closed_channel_daily_net_est: std::collections::HashMap::new(),
+        observed_node_daily_ppm: Some(45.0),
+        chain_costs: ChainCosts {
+            open_cost_sats: 1_400,
+            close_cost_sats: 400,
+            used_fallback: false,
+        },
+        planned_channel_size_sats: 2_000_000,
+        min_annual_roi_pct: 1.0,
+    })
+    .expect("producer runs");
+
     let budget = healthy_budget();
     let mut d = deps(&budget);
-    d.candidate_enrichment = BTreeMap::from([("02cc".to_string(), enrichment.clone())]);
-    d.open_candidate_evidence = BTreeMap::from([(
-        "02cc".to_string(),
-        OpenCandidateEvidence {
-            peer_dest_channel_capacities_sats: vec![3_000_000],
-            open_ev_template: ev_template,
-            enrichment,
-        },
-    )]);
-    d.dual_fund_peers = ["02cc".to_string()].into_iter().collect();
-    d.redeployment_winner_evs = vec![("02aa".to_string(), ev_template)];
-    d.recycle_candidates = vec![RecycleCandidateOwned {
-        peer_id: "02cc".to_string(),
-        score: 0.9,
-        open_ev_template: ev_template,
-    }];
+    d.open_side = open_side;
     d.recycle_protected_peers = Some(["02protected".to_string()].into_iter().collect());
     d.recycle_route_pair_scids = ["900000x1x0".to_string()].into_iter().collect();
 
@@ -218,8 +251,9 @@ fn task_67c_fields_reach_the_kernel() {
     assert!(e.dual_fund_peers.contains("02cc"));
     // F71-R10: a TEMPLATE, not a precomputed scalar -- the loser's
     // capacity is substituted at pricing time.
-    assert_eq!(e.redeployment_winner_evs.len(), 1);
-    assert_eq!(e.redeployment_winner_evs[0].0, "02aa");
+    // Winners derive from identify_winners over winner_channels; none are
+    // supplied here, so the produced set is a measured empty.
+    assert!(e.redeployment_winner_evs.is_empty());
     assert_eq!(e.recycle_candidates.len(), 1);
     assert_eq!(e.recycle_route_pair_scids.len(), 1);
     assert!(

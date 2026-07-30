@@ -20,11 +20,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use revops_capital::planner::candidate_score::CandidateEnrichmentEvidence;
-use revops_capital::planner::cycle::{
-    CycleEvidence, DiscoveryEvidence, OpenCandidateEvidence, RecycleCandidateOwned,
-    StoredPlannerAction,
-};
+use revops_capital::planner::cycle::{CycleEvidence, StoredPlannerAction};
+
+use crate::capital_producers::OpenSideEvidence;
 use revops_capital::planner::portfolio_gate::ChannelBalance;
 use serde_json::Value;
 
@@ -97,14 +95,13 @@ pub struct EvidenceDeps<'a> {
     /// (`discovery_evidence`, `enrichment_evidence`, `open_ev_evidence`,
     /// `recycle_evidence`) and passed in, keeping this function pure and
     /// every failure path drivable from tests.
-    pub discovery: DiscoveryEvidence,
-    pub candidate_enrichment: BTreeMap<String, CandidateEnrichmentEvidence>,
-    pub open_candidate_evidence: BTreeMap<String, OpenCandidateEvidence>,
-    pub dual_fund_peers: BTreeSet<String>,
-    /// F71-R10: per-winner open-EV TEMPLATES, not precomputed scalars --
-    /// the loser's capacity is substituted when that loser is priced.
-    pub redeployment_winner_evs: Vec<(String, revops_capital::planner::ev::OpenEvInputs)>,
-    pub recycle_candidates: Vec<RecycleCandidateOwned>,
+    /// F71-R5/R13: all six open-side fields arrive as ONE produced,
+    /// private bundle. They used to be independently-settable parameters,
+    /// which let production pass empties and clear the gap list while the
+    /// planner stayed inert (R5), and let a caller produce from snapshot A
+    /// then assemble with snapshot B (R13). `OpenSideEvidence` has private
+    /// fields, no `Default`, and only `build_open_side` constructs it.
+    pub open_side: OpenSideEvidence,
     /// Three-way, from [`crate::recycle_evidence::recycle_protected_peers`]:
     /// `None` = source failed, everything protected; `Some(empty)` = nothing
     /// protected. The frozen kernel branches on exactly this distinction.
@@ -184,6 +181,8 @@ pub fn assemble_cycle_evidence(
         .backoff_actions
         .map_err(EvidenceRefusal::BackoffUnavailable)?;
 
+    let open_side = deps.open_side.into_parts();
+
     let (fee_gate_ok, fee_gate_reason) = match deps.fee_gate {
         Ok(()) => (true, None),
         Err(reason) => (false, Some(reason)),
@@ -201,32 +200,32 @@ pub fn assemble_cycle_evidence(
         fee_gate_reason,
         winner_channels: deps.winner_channels,
         loser_channels: deps.loser_channels,
-        redeployment_winner_evs: deps.redeployment_winner_evs,
+        redeployment_winner_evs: open_side.redeployment_winner_evs,
         defibrillation_limit: deps.defibrillation_limit,
         defib_gates: deps.defib_gates,
         close_execution_enabled: deps.close_execution_enabled,
         close_limit: deps.close_limit,
         close_gates: deps.close_gates,
         peer_channels,
-        discovery: deps.discovery,
-        candidate_enrichment: deps.candidate_enrichment,
+        discovery: open_side.discovery,
+        candidate_enrichment: open_side.candidate_enrichment,
         now: deps.now,
         backoff_actions,
         exposure_channels,
         max_channel_sats: deps.max_channel_sats,
         min_channel_sats: deps.min_channel_sats,
-        open_candidate_evidence: deps.open_candidate_evidence,
+        open_candidate_evidence: open_side.open_candidate_evidence,
         available_sats: budget.available_sats,
         max_opens_per_cycle: deps.max_opens_per_cycle,
         exploration_budget_sats: deps.exploration_budget_sats,
         estimated_open_cost_sats: deps.estimated_open_cost_sats,
-        dual_fund_peers: deps.dual_fund_peers,
+        dual_fund_peers: open_side.dual_fund_peers,
         open_guards: deps.open_guards,
         recycle_block_height: deps.recycle_block_height,
         recycle_protected_peers: deps.recycle_protected_peers,
         recycle_route_pair_scids: deps.recycle_route_pair_scids,
         recycle_close_protection: deps.recycle_close_protection,
-        recycle_candidates: deps.recycle_candidates,
+        recycle_candidates: open_side.recycle_candidates,
         recycle_close_cost_sats: deps.recycle_close_cost_sats,
     };
 

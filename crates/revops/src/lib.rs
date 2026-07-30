@@ -14,6 +14,7 @@ pub mod capital_evidence;
 pub mod capital_gates;
 pub mod capital_inputs;
 pub mod capital_owner;
+pub mod capital_producers;
 pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;

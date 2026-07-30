@@ -130,6 +130,28 @@ async fn uninitialized_arms_are_python_verbatim() {
     assert_eq!(response, expected);
 }
 
+/// F71-R12(a): `OpenSideEvidence` has no `Default`, so even a test cannot
+/// fabricate one. This runs the REAL producer over empty discovery
+/// evidence, which is a genuine measured empty.
+fn produced_empty_open_side() -> revops::capital_producers::OpenSideEvidence {
+    revops::capital_producers::build_open_side(revops::capital_producers::OpenSideSources {
+        discovery: Default::default(),
+        winner_channels: Vec::new(),
+        enrichment: Default::default(),
+        listnodes: Ok(serde_json::json!({"nodes": []})),
+        closed_channel_daily_net_est: Default::default(),
+        observed_node_daily_ppm: None,
+        chain_costs: revops::open_ev_evidence::ChainCosts {
+            open_cost_sats: 5_000,
+            close_cost_sats: 3_000,
+            used_fallback: true,
+        },
+        planned_channel_size_sats: 1_000_000,
+        min_annual_roi_pct: 1.0,
+    })
+    .expect("producer runs over empty evidence")
+}
+
 fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
     EvidenceDeps {
         planner_enabled: true,
@@ -153,12 +175,7 @@ fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         defib_gates: Default::default(),
         close_gates: Default::default(),
         open_guards: Default::default(),
-        discovery: Default::default(),
-        candidate_enrichment: Default::default(),
-        open_candidate_evidence: Default::default(),
-        dual_fund_peers: Default::default(),
-        redeployment_winner_evs: Vec::new(),
-        recycle_candidates: Vec::new(),
+        open_side: produced_empty_open_side(),
         recycle_protected_peers: None,
         recycle_route_pair_scids: Default::default(),
         recycle_close_protection: Default::default(),
