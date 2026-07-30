@@ -455,6 +455,36 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     );
 }
 
+/// August-3 cutover gate: canonical mode is not complete merely because a
+/// hand-maintained count increased. Its Python-equivalent names must be the
+/// exact generated contract set. Rust-only diagnostics stay on distinct
+/// names and therefore fail this gate if they collide with `revenue-*`.
+#[test]
+fn canonical_mode_registers_exactly_the_python_rpc_set() {
+    use std::collections::BTreeSet;
+
+    let expected = revops::rpc_params::load_rpc_contract()
+        .methods
+        .into_iter()
+        .map(|method| method.name)
+        .collect::<BTreeSet<_>>();
+    let actual = manifest_with(true)["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .filter(|name| name.starts_with("revenue-"))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+
+    let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+    let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "canonical RPC set differs from Python; missing={missing:?}, unexpected={unexpected:?}"
+    );
+}
+
 /// Shadow mode (both plugins loaded) must keep the opt-in-empty default --
 /// this is a companion pin to the canonical-mode assertion above so a
 /// future change can't accidentally flip both defaults at once.
