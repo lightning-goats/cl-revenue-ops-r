@@ -1,5 +1,5 @@
 use revops::rpc_params::{
-    decode_and_call, decode_params, load_rpc_contract, ParamBinding, ParamCoercion,
+    decode_and_call, decode_params, load_rpc_contract, method_spec, ParamBinding, ParamCoercion,
     ParamDecodeError, ParamSpec, RpcMethodSpec,
 };
 use serde_json::{json, Map, Value};
@@ -40,6 +40,21 @@ fn checked_in_contract_has_exactly_69_unique_methods() {
         contract.python_source_commit,
         "e579de8df523f174283fc2aa21f395c8ef006ac6"
     );
+}
+
+#[test]
+fn method_lookup_returns_the_exact_generated_contract() {
+    let contract = load_rpc_contract();
+    let spec = method_spec(&contract, "revenue-wake-all");
+    assert_eq!(spec.name, "revenue-wake-all");
+    assert_eq!(spec.python_binding, ParamBinding::PositionalOrNamed);
+}
+
+#[test]
+#[should_panic(expected = "missing embedded RPC contract for revenue-no-such-method")]
+fn method_lookup_refuses_an_unregistered_name() {
+    let contract = load_rpc_contract();
+    let _ = method_spec(&contract, "revenue-no-such-method");
 }
 
 #[test]
