@@ -12,6 +12,7 @@ pub mod capital_boundaries;
 pub mod capital_candidates;
 pub mod capital_evidence;
 pub mod capital_gates;
+pub mod capital_inputs;
 pub mod capital_owner;
 pub mod config_resolve;
 pub mod config_types;
