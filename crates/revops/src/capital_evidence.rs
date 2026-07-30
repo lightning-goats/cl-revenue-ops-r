@@ -79,10 +79,11 @@ pub struct EvidenceDeps<'a> {
     pub recycle_block_height: i64,
     pub recycle_close_cost_sats: i64,
     pub now: i64,
-    /// Task 67b: winners/losers from the frozen kernels, now that the
-    /// profitability and flow assemblers exist. Passing them CLOSES the
-    /// two largest of Task 62's eleven analytics gaps.
-    pub winner_channels: Vec<revops_capital::planner::winners::WinnerCandidateEvidence>,
+    /// F71-R15: `winner_channels` is NOT here. It travels inside
+    /// [`OpenSideEvidence`], because the producer derives winners,
+    /// strategy-1 discovery candidates and redeployment templates from it.
+    /// A separate field let a caller build the bundle from snapshot A and
+    /// plan with snapshot B, so those three decisions could disagree.
     pub loser_channels: Vec<revops_capital::planner::losers::LoserChannelEvidence>,
     /// Task 67b: per-peer gate evidence. The kernel is FAIL-CLOSED on
     /// these -- supplying them is what lets defibrillate and close
@@ -198,7 +199,7 @@ pub fn assemble_cycle_evidence(
         planner_enabled: deps.planner_enabled,
         fee_gate_ok,
         fee_gate_reason,
-        winner_channels: deps.winner_channels,
+        winner_channels: open_side.winner_channels,
         loser_channels: deps.loser_channels,
         redeployment_winner_evs: open_side.redeployment_winner_evs,
         defibrillation_limit: deps.defibrillation_limit,

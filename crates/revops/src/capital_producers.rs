@@ -93,6 +93,12 @@ pub struct OpenSideEvidence {
     /// while the gap list stayed empty.
     discovery: DiscoveryEvidence,
     candidate_enrichment: BTreeMap<String, CandidateEnrichmentEvidence>,
+    /// F71-R15: the SAME winner snapshot that derived winners, strategy-1
+    /// discovery candidates and redeployment templates. It used to be a
+    /// separate `EvidenceDeps` field, so a caller could build the bundle
+    /// from snapshot A and plan with snapshot B -- making discovery,
+    /// redeployment and winner decisions disagree with each other.
+    winner_channels: Vec<WinnerCandidateEvidence>,
     open_candidate_evidence: BTreeMap<String, OpenCandidateEvidence>,
     dual_fund_peers: BTreeSet<String>,
     redeployment_winner_evs: Vec<(String, OpenEvInputs)>,
@@ -106,6 +112,10 @@ impl OpenSideEvidence {
 
     pub fn candidate_enrichment(&self) -> &BTreeMap<String, CandidateEnrichmentEvidence> {
         &self.candidate_enrichment
+    }
+
+    pub fn winner_channels(&self) -> &[WinnerCandidateEvidence] {
+        &self.winner_channels
     }
 
     pub fn open_candidate_evidence(&self) -> &BTreeMap<String, OpenCandidateEvidence> {
@@ -130,6 +140,7 @@ impl OpenSideEvidence {
         OpenSideParts {
             discovery: self.discovery,
             candidate_enrichment: self.candidate_enrichment,
+            winner_channels: self.winner_channels,
             open_candidate_evidence: self.open_candidate_evidence,
             dual_fund_peers: self.dual_fund_peers,
             redeployment_winner_evs: self.redeployment_winner_evs,
@@ -142,6 +153,7 @@ impl OpenSideEvidence {
 pub struct OpenSideParts {
     pub discovery: DiscoveryEvidence,
     pub candidate_enrichment: BTreeMap<String, CandidateEnrichmentEvidence>,
+    pub winner_channels: Vec<WinnerCandidateEvidence>,
     pub open_candidate_evidence: BTreeMap<String, OpenCandidateEvidence>,
     pub dual_fund_peers: BTreeSet<String>,
     pub redeployment_winner_evs: Vec<(String, OpenEvInputs)>,
@@ -279,6 +291,7 @@ pub fn build_open_side(sources: OpenSideSources) -> Result<OpenSideEvidence, Pro
         // The same instances that fed discover_peers above.
         discovery: sources.discovery,
         candidate_enrichment: sources.enrichment,
+        winner_channels: sources.winner_channels,
         open_candidate_evidence,
         dual_fund_peers,
         redeployment_winner_evs,

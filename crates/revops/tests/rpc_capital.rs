@@ -170,7 +170,6 @@ fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         recycle_block_height: 900_000,
         recycle_close_cost_sats: 1_000,
         now: NOW,
-        winner_channels: Vec::new(),
         loser_channels: Vec::new(),
         defib_gates: Default::default(),
         close_gates: Default::default(),

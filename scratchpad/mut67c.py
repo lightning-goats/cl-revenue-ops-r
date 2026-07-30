@@ -79,6 +79,11 @@ MUTATIONS = [
      "        discovery: sources.discovery,",
      "        discovery: Default::default(),",
      "capital_producers"),
+    ("C20", "F71-R15: bundle carries a DIFFERENT winner snapshot than it derived from",
+     "crates/revops/src/capital_producers.rs",
+     "        winner_channels: sources.winner_channels,",
+     "        winner_channels: Vec::new(),",
+     "capital_producers"),
     ("C3", "cold-start uptime becomes 0.0 instead of 100.0",
      "crates/revops/src/enrichment_evidence.rs",
      "    if prior.is_none() && in_window.is_empty() {\n        return 100.0;\n    }",
@@ -124,8 +129,12 @@ def run(cmd):
     return subprocess.run(cmd, cwd=ROOT, shell=True,
                           capture_output=True, text=True)
 
-def revert():
-    run("git checkout -- crates/")
+def revert(snapshots):
+    """RC71-1: restore EXACTLY what we touched, by content. `git checkout --`
+    cannot restore an untracked file and destroys uncommitted tracked edits,
+    so it is never used here."""
+    for path, original in snapshots.items():
+        pathlib.Path(path).write_text(original)
 
 # HARNESS GUARD. `git checkout -- crates/` cannot revert an UNTRACKED file,
 # so a mutation applied to a new module stays applied; and it DESTROYS
@@ -142,6 +151,7 @@ results = []
 for mid, desc, relpath, old, new, testname in MUTATIONS:
     p = ROOT / relpath
     src = p.read_text()
+    snapshots = {str(p): src}
     if mid == "C1":
         mutated = c1_patch(src)
     else:
@@ -149,7 +159,7 @@ for mid, desc, relpath, old, new, testname in MUTATIONS:
 
     if mutated is None or mutated == src:
         results.append((mid, "INVALID(anchor-not-found)", desc))
-        revert()
+        revert(snapshots)
         continue
 
     p.write_text(mutated)
@@ -157,7 +167,7 @@ for mid, desc, relpath, old, new, testname in MUTATIONS:
     build = run(f"cargo test -p {pkg(testname)} --test {testname} --no-run")
     if build.returncode != 0:
         results.append((mid, "INVALID(does-not-compile)", desc))
-        revert()
+        revert(snapshots)
         continue
 
     # NOT chained with && -- this command is EXPECTED to fail (lessons:728).

@@ -361,3 +361,44 @@ fn the_bundle_carries_the_instances_that_fed_discovery() {
         e.candidate_enrichment().keys().collect::<Vec<_>>()
     );
 }
+
+/// F71-R15: the winner snapshot must travel INSIDE the bundle. The producer
+/// derives winners, strategy-1 discovery candidates and redeployment
+/// templates from it, so a separately-injected `EvidenceDeps.winner_channels`
+/// would let those three decisions be made against a DIFFERENT snapshot than
+/// the one the kernel plans with -- and they would silently disagree.
+#[test]
+fn the_bundle_carries_the_winner_snapshot_it_derived_from() {
+    use revops_capital::planner::winners::{WinnerCandidateEvidence, WinnerFlowEvidence};
+
+    let mut s = sources();
+    s.enrichment
+        .insert("02win".to_string(), enrichment(vec![1_000_000]));
+    s.winner_channels = vec![WinnerCandidateEvidence {
+        scid: "700000:1:0".to_string(),
+        peer_id: "02win".to_string(),
+        capacity_sats: 1_000_000,
+        marginal_roi_percent: 250.0,
+        flow: Some(WinnerFlowEvidence {
+            daily_volume: 1_000_000.0,
+            flow_ratio: 0.95,
+            kalman_velocity: 0.2,
+            is_congested: false,
+        }),
+        rebalance_success: None,
+        sourced_fee_contribution_sats: 0,
+        channel_role: None,
+        dts_posterior_mean: None,
+    }];
+
+    let e = build_open_side(s).expect("produces");
+    assert_eq!(
+        e.winner_channels().len(),
+        1,
+        "the exact winner snapshot must survive into the bundle"
+    );
+    assert_eq!(e.winner_channels()[0].peer_id, "02win");
+    // And it is the same snapshot the redeployment templates came from.
+    assert_eq!(e.redeployment_winner_evs().len(), 1);
+    assert_eq!(e.redeployment_winner_evs()[0].0, "02win");
+}
