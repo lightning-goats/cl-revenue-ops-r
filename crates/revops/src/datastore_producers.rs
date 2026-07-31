@@ -1,0 +1,216 @@
+//! R68-6: datastore producers with authoritative-store ownership and
+//! readback.
+//!
+//! Python writes all three of Task 68's datastore producers through
+//! `DataService.datastore_push` (`modules/data_service.py:445`), whose
+//! own docstring reads *"Fire-and-forget: logs failures, never raises.
+//! Returns True on success, False on failure."* That single `bool`
+//! collapses five distinct outcomes -- payload not a dict, reserved
+//! `error` key, over the size cap, the RPC raised, the RPC returned --
+//! and `True` means only that `rpc.datastore(...)` did not throw.
+//!
+//! Nothing reads the key back. "The RPC returned" therefore stands in
+//! for "the datastore holds this value", and the two are not the same
+//! claim: an acknowledged write that stored nothing looks identical to a
+//! successful one, forever, while every downstream consumer reads a
+//! stale value or none at all.
+//!
+//! The loss compounds at the call sites: `["revenue", "status"]`
+//! (`cl-revenue-ops.py:3717`) and `["revenue", "fee-bounds"]` (`:3722`)
+//! discard the returned bool entirely, inside a block that ends
+//! `except Exception: pass  # Datastore push is best-effort`.
+//!
+//! This module replaces that with an owner check, a write, a readback,
+//! and a typed outcome. The ENVELOPE rules (timestamp injection, the
+//! reserved `error` key, the size cap) are the frozen
+//! [`revops_analytics::telemetry::datastore_envelope`] kernel and are
+//! consumed here, never re-derived.
+
+use revops_analytics::telemetry::{datastore_envelope, PyDict};
+
+use crate::lifecycle::Owner;
+
+/// py `_DATASTORE_MAX_BYTES = 60000` (`modules/data_service.py:443`), a
+/// safety margin under CLN's 65KB datastore limit.
+pub const DATASTORE_MAX_BYTES: usize = 60_000;
+
+/// The three datastore producers Task 68 names.
+///
+/// A fixed roster rather than "whatever key a caller passes": an
+/// arbitrary key would be a Rust-only datastore path with no Python
+/// counterpart, and a producer that quietly stopped publishing would
+/// leave no evidence that it ever should have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Producer {
+    /// `["revenue", "status"]` -- `cl-revenue-ops.py:3717`.
+    Status,
+    /// `["revenue", "fee-bounds"]` -- `cl-revenue-ops.py:3722`.
+    FeeBounds,
+    /// `["revenue", "segment-observations"]` --
+    /// `modules/rebalance_engine_v2.py:3179`.
+    Rebalance,
+}
+
+impl Producer {
+    pub const ALL: [Producer; 3] = [Producer::Status, Producer::FeeBounds, Producer::Rebalance];
+
+    pub fn key(self) -> [&'static str; 2] {
+        match self {
+            Self::Status => ["revenue", "status"],
+            Self::FeeBounds => ["revenue", "fee-bounds"],
+            Self::Rebalance => ["revenue", "segment-observations"],
+        }
+    }
+
+    /// The single owner allowed to write this key.
+    ///
+    /// Derived from which Python code path pushes it: status and
+    /// fee-bounds are pushed from the fee-adjustment path, and
+    /// segment-observations from the rebalance engine.
+    pub fn owner(self) -> Owner {
+        match self {
+            Self::Status | Self::FeeBounds => Owner::FeeScheduler,
+            Self::Rebalance => Owner::Rebalance,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::FeeBounds => "fee_bounds",
+            Self::Rebalance => "segment_observations",
+        }
+    }
+}
+
+/// The CLN datastore, as this module needs it.
+///
+/// A trait so the producers are fake-proven: the real transport is
+/// `rpc.datastore(mode="create-or-replace")` plus `listdatastore`, which
+/// the generated inventory still marks `rust_transport: "missing"`.
+///
+/// `read` distinguishes "the key is absent" (`Ok(None)`) from "the
+/// datastore could not be asked" (`Err`). Collapsing those is how a
+/// failed verification becomes a successful publish.
+pub trait DatastoreTransport {
+    fn write(&self, key: &[&str], encoded: &str) -> Result<(), String>;
+    fn read(&self, key: &[&str]) -> Result<Option<String>, String>;
+}
+
+/// A write that was stored AND verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    pub producer: Producer,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishRefusal {
+    /// Someone other than the key's authoritative owner tried to write
+    /// it. Refused BEFORE the write -- a refusal that still wrote has
+    /// already corrupted the key it was meant to protect.
+    NotOwner {
+        producer: Producer,
+        attempted_by: Owner,
+    },
+    /// The frozen envelope kernel rejected the payload.
+    Envelope {
+        producer: Producer,
+        detail: String,
+    },
+    WriteFailed {
+        producer: Producer,
+        detail: String,
+    },
+    /// The write was acknowledged and the readback could not be
+    /// performed. NOT proof of success: the write may well have landed,
+    /// but this publish cannot say so, and "we could not check" must
+    /// never be reported as "verified" (the rule R68-1 applied to an
+    /// unstattable production path).
+    ReadbackUnreadable {
+        producer: Producer,
+        detail: String,
+    },
+    /// Acknowledged, and the key holds nothing. The failure Python
+    /// reports as success.
+    ReadbackMissing {
+        producer: Producer,
+    },
+    /// The key exists and holds bytes this publish did not write -- a
+    /// half-applied write, or another writer racing the key. Presence is
+    /// not correctness.
+    ReadbackMismatch {
+        producer: Producer,
+    },
+}
+
+impl PublishRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotOwner { .. } => "datastore_not_owner",
+            Self::Envelope { .. } => "datastore_envelope_rejected",
+            Self::WriteFailed { .. } => "datastore_write_failed",
+            Self::ReadbackUnreadable { .. } => "datastore_readback_unreadable",
+            Self::ReadbackMissing { .. } => "datastore_readback_missing",
+            Self::ReadbackMismatch { .. } => "datastore_readback_mismatch",
+        }
+    }
+
+    /// Which producer stopped publishing. A code alone tells an operator
+    /// what went wrong but not where to look.
+    pub fn producer(&self) -> Producer {
+        match self {
+            Self::NotOwner { producer, .. }
+            | Self::Envelope { producer, .. }
+            | Self::WriteFailed { producer, .. }
+            | Self::ReadbackUnreadable { producer, .. }
+            | Self::ReadbackMissing { producer }
+            | Self::ReadbackMismatch { producer } => *producer,
+        }
+    }
+}
+
+/// Publish one producer's payload, and verify it landed.
+///
+/// The order is the contract: ownership is checked before the envelope
+/// is built, the envelope before anything is written, and the readback
+/// after the write is acknowledged. Only a write that was stored AND
+/// read back byte-for-byte is a [`Published`].
+pub fn publish<T: DatastoreTransport + ?Sized>(
+    transport: &T,
+    producer: Producer,
+    writer: Owner,
+    payload: PyDict,
+    now: i64,
+) -> Result<Published, PublishRefusal> {
+    if writer != producer.owner() {
+        return Err(PublishRefusal::NotOwner {
+            producer,
+            attempted_by: writer,
+        });
+    }
+
+    let encoded = datastore_envelope(payload, now, DATASTORE_MAX_BYTES).map_err(|error| {
+        PublishRefusal::Envelope {
+            producer,
+            detail: error.to_string(),
+        }
+    })?;
+
+    let key = producer.key();
+    transport
+        .write(&key, &encoded)
+        .map_err(|detail| PublishRefusal::WriteFailed { producer, detail })?;
+
+    // The acknowledgement is not the evidence. Read the key BACK -- the
+    // same key that was written -- and compare.
+    match transport.read(&key) {
+        Err(detail) => Err(PublishRefusal::ReadbackUnreadable { producer, detail }),
+        Ok(None) => Err(PublishRefusal::ReadbackMissing { producer }),
+        Ok(Some(found)) if found != encoded => Err(PublishRefusal::ReadbackMismatch { producer }),
+        Ok(Some(_)) => Ok(Published {
+            producer,
+            bytes: encoded.len(),
+        }),
+    }
+}

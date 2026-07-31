@@ -22,6 +22,7 @@ pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;
 pub mod dashboard_evidence;
+pub mod datastore_producers;
 pub mod discovery_evidence;
 pub mod econ_evidence;
 pub mod econ_producer;
