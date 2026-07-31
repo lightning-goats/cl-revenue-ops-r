@@ -450,20 +450,22 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        67,
+        68,
         "methods: {methods:?}"
     );
 
     // Task 66 slice 1: the unified total-cost budget read; slice 2: the
     // generic-ledger reserve and stale-release mutators; slice 3: the
     // closed-channel archival backfill; slice 4: the econ-ledger
-    // reconciliation sweep.
+    // reconciliation sweep; slice 5: the read-only shadow-cycle
+    // diagnostic.
     for name in [
         "revenue-total-cost-budget",
         "revenue-spend-reserve",
         "revenue-spend-release-stale",
         "revenue-cleanup-closed",
         "revenue-econ-reconcile",
+        "revenue-econ-cycle",
     ] {
         assert!(methods.contains(&name), "missing {name}: {methods:?}");
     }
@@ -2192,6 +2194,72 @@ fn revenue_r_econ_reconcile_touches_only_the_rust_dryrun_ledger() {
     assert!(
         !journal_dir.join("econ_ledger.db").exists(),
         "the production ledger name must never be created"
+    );
+}
+
+/// `revenue-r-econ-cycle` through the spawned binary: disabled by default
+/// (Python's exact hint); with the shadow flag enabled through the REAL
+/// config-override path it answers Python's `engine is None` arm — the
+/// rebalance engine is unassembled until Task 69, and the handler must say
+/// so rather than fabricate a cycle. A stray argument is rejected by the
+/// zero-param contract.
+#[test]
+fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let disabled = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-cycle",
+    );
+    assert_eq!(
+        disabled,
+        serde_json::json!({
+            "enabled": false,
+            "hint": "revenue-config set econ_shadow_enabled true",
+        })
+    );
+
+    let stray = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-cycle",
+        serde_json::json!({"apply": true}),
+    );
+    assert!(
+        stray["error"].as_str().is_some(),
+        "zero-param contract must reject extras: {stray:?}"
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path2 = copy_fixture_db(home2.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path2).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('econ_shadow_enabled', 'true', 1, ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("enable econ shadow");
+    }
+    let enabled = call_after_init(
+        false,
+        Some(prod_db_path2.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-econ-cycle",
+    );
+    assert_eq!(
+        enabled,
+        serde_json::json!({
+            "enabled": true,
+            "error": "rebalance engine unavailable",
+        }),
+        "the pre-Task-69 runtime has no candidate source and must say so"
     );
 }
 

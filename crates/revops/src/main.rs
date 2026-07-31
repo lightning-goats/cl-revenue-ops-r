@@ -64,6 +64,10 @@ struct State {
     /// GOVERNOR'S `econ_ledger_dryrun.db`, which `revenue-econ-reconcile`
     /// reconciles. `None` = journaling disabled.
     journal_dir: Option<PathBuf>,
+    /// Port of Python's `_econ_cycle_seq` module global (cl-revenue-ops.py:
+    /// 6147): the shadow-cycle sequence counter, consumed only after the
+    /// enabled + engine gates pass (see `rpc_econ_cycle`).
+    econ_cycle_seq: std::sync::atomic::AtomicI64,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -745,13 +749,60 @@ fn register_econ_reconcile(
                         ledger_path: state
                             .journal_dir
                             .as_ref()
-                            .map(|dir| dir.join("econ_ledger_dryrun.db")),
+                            .map(|dir| dir.join(revops::fee_governor::LEDGER_DRYRUN_FILENAME)),
                         apply,
                         stale_after_seconds,
                         now: now_unix(),
                     },
                 )
                 .await)
+            }
+        },
+    )
+}
+
+fn register_econ_cycle(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "READ-ONLY Workstream H shadow cycle: pure intent generation and batch arbitration; \
+         ledgers to the Rust-owned dry-run ledger only",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                // Zero-param contract: decoding still rejects stray
+                // arguments, matching pyln's TypeError on extras.
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                let state = p.state();
+                Ok(revops::rpc_econ_cycle::econ_cycle_response(
+                    revops::rpc_econ_cycle::EconCycleSources {
+                        enabled: revops::config_resolve::econ_shadow_enabled(state.db.as_ref())
+                            .await,
+                        // The rebalance engine is unassembled until Task
+                        // 69's authority-gated construction (see
+                        // `RebalanceOwnerDeps::engine`), so this is
+                        // Python's `engine is None` arm — honest, not a
+                        // stub: there is no candidate source yet.
+                        candidates: None,
+                        // The RUST-owned dry-run ledger (GovernorWiring's
+                        // file) — never Python's production econ_ledger.db.
+                        ledger_path: state
+                            .journal_dir
+                            .as_ref()
+                            .map(|dir| dir.join(revops::fee_governor::LEDGER_DRYRUN_FILENAME)),
+                        now: now_unix(),
+                    },
+                    &state.econ_cycle_seq,
+                ))
             }
         },
     )
@@ -1435,6 +1486,12 @@ async fn main() -> Result<()> {
     let econ_reconcile_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-econ-reconcile",
+    );
+    // Task 66 slice 5: the read-only shadow-cycle diagnostic.
+    let econ_cycle_name = rpc_name("econ-cycle");
+    let econ_cycle_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-econ-cycle",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -3297,6 +3354,7 @@ async fn main() -> Result<()> {
     );
     let builder = register_cleanup_closed(builder, &cleanup_closed_name, cleanup_closed_spec);
     let builder = register_econ_reconcile(builder, &econ_reconcile_name, econ_reconcile_spec);
+    let builder = register_econ_cycle(builder, &econ_cycle_name, econ_cycle_spec);
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
@@ -4028,6 +4086,7 @@ async fn main() -> Result<()> {
         fee_pass: fee_rpc_pass,
         core_mutations,
         journal_dir: journal_dir.clone(),
+        econ_cycle_seq: std::sync::atomic::AtomicI64::new(0),
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,

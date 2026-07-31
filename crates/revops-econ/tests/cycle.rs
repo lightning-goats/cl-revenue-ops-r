@@ -1,7 +1,7 @@
 //! Deterministic cycle core tests, transcribed from
 //! `tests/test_econ_cycle.py`'s `TestDeterminism` / `TestBatchArbitration`
-//! classes (`TestShadowRunner` is out of scope — `run_shadow_cycle`'s live
-//! collector is deferred to Phase 2b wiring per the Task 8 brief).
+//! classes (`TestShadowRunner`'s subject, `run_shadow_cycle`, lives at the
+//! assembly layer — see `revops::rpc_econ_cycle` and its tests).
 
 use revops_econ::context::CycleContext;
 use revops_econ::cycle::{plan_cycle, RebalancePair};

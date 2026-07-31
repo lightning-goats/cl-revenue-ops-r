@@ -62,6 +62,7 @@ pub mod rpc_capacity_report;
 pub mod rpc_capex_status;
 pub mod rpc_cleanup_closed;
 pub mod rpc_dashboard;
+pub mod rpc_econ_cycle;
 pub mod rpc_econ_reconcile;
 pub mod rpc_econ_snapshot;
 pub mod rpc_fee_authority_status;

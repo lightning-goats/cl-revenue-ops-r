@@ -25,7 +25,12 @@ use revops_fees::execution::GovernedDeps;
 
 /// Filename of the dry-run-owned ledger, resolved under the plugin's
 /// journal directory — never the production ledger's name or location.
-const LEDGER_DRYRUN_FILENAME: &str = "econ_ledger_dryrun.db";
+/// `pub` because every Rust-side consumer of this ledger (`main.rs`'s
+/// `revenue-econ-reconcile` / `revenue-econ-cycle` registrations) must
+/// derive the SAME file from this one constant: the safety boundary is
+/// that exactly one econ-ledger filename exists in this port, and it is
+/// not Python's.
+pub const LEDGER_DRYRUN_FILENAME: &str = "econ_ledger_dryrun.db";
 
 /// Owns the Rust-side governor objects for the plugin lifetime.
 pub struct GovernorWiring {

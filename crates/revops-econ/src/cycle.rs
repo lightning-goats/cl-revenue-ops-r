@@ -16,9 +16,10 @@
 //! ordering. Pinned by `tests/cycle.rs`, transcribed from
 //! `tests/test_econ_cycle.py`.
 //!
-//! `run_shadow_cycle`'s live collector (reading `rebalance_engine`,
-//! ledgering proposed intents, wiring into `EconShadow`) is Phase 2b
-//! wiring, deferred per the Task 8 brief — not ported here.
+//! `run_shadow_cycle` (the collector: candidate intake, `intent_proposed`
+//! ledgering, wire publishing) is ported at the assembly layer —
+//! `revops::rpc_econ_cycle` (Task 66 slice 5) — so this crate stays free
+//! of I/O; only the deterministic core lives here.
 //!
 //! ## The float-in-explanation hazard
 //!
