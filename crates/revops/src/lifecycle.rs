@@ -522,6 +522,292 @@ where
 }
 
 // =====================================================================
+// R68-4: owner drain and join acknowledgements
+// =====================================================================
+
+/// The serialized owners that hold their own task or thread, derived from
+/// `main.rs`' `State`.
+///
+/// The roster is fixed rather than "whatever handles happened to be
+/// `Some`". Four of these are `Option` in `State` -- a passive-observer
+/// boot legitimately runs none of the action owners -- and a shutdown
+/// that iterated only over the handles it held would report clean over an
+/// owner it never asked about. Absence has to be DECLARED
+/// ([`DrainAck::NotSpawned`]), never inferred from silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Owner {
+    /// `State.db` -- the read-only production-DB actor.
+    ProductionDb,
+    /// `State.observer_db` -- the read-write observer store owner.
+    ObserverStore,
+    /// `State.lnplus` -- Task 61's LN+ observer pass.
+    LnPlus,
+    /// `State.scheduler` -- the fee-cycle owner thread.
+    FeeScheduler,
+    Rebalance,
+    Capital,
+    Boltz,
+}
+
+/// Which half of R68-1's shutdown order an owner belongs to.
+///
+/// Action owners drain BEFORE observer owners because an action still in
+/// flight can produce observations the observer must still record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerClass {
+    Action,
+    Observer,
+}
+
+impl Owner {
+    pub const ALL: [Owner; 7] = [
+        Owner::ProductionDb,
+        Owner::ObserverStore,
+        Owner::LnPlus,
+        Owner::FeeScheduler,
+        Owner::Rebalance,
+        Owner::Capital,
+        Owner::Boltz,
+    ];
+
+    pub fn class(self) -> OwnerClass {
+        match self {
+            Self::ProductionDb | Self::ObserverStore | Self::LnPlus => OwnerClass::Observer,
+            Self::FeeScheduler | Self::Rebalance | Self::Capital | Self::Boltz => {
+                OwnerClass::Action
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProductionDb => "production_db",
+            Self::ObserverStore => "observer_store",
+            Self::LnPlus => "lnplus",
+            Self::FeeScheduler => "fee_scheduler",
+            Self::Rebalance => "rebalance",
+            Self::Capital => "capital",
+            Self::Boltz => "boltz",
+        }
+    }
+}
+
+/// What ONE owner reported when asked to stop.
+///
+/// The four states a bare `Ok(())` cannot tell apart. Sending a stop
+/// message into a channel returns `Ok` whether or not anyone was
+/// listening, so the acknowledgement has to come back FROM the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrainAck {
+    /// Not running in this process. Legitimate, and declared.
+    NotSpawned,
+    /// The owner itself confirmed it stopped. `pending_at_stop` is what
+    /// was still queued at that moment -- "I stopped" is not "I
+    /// finished".
+    Drained { pending_at_stop: u64 },
+    /// The stop could not be delivered: the owner was already gone, so
+    /// whatever it had queued was never processed. NOT a drain.
+    Unreachable { detail: String },
+    /// Delivered, and no acknowledgement came back.
+    NoAck { waited: Duration },
+}
+
+/// What ONE owner's task did after acknowledging the stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinAck {
+    NotSpawned,
+    Joined,
+    Timeout {
+        waited: Duration,
+    },
+    /// R68-1's rule, kept per-owner: a panicking owner is a LOST owner,
+    /// not a clean one. Folding a panic into "the task is no longer
+    /// running, so it ended" is how a crash reads as a graceful exit.
+    Panicked {
+        detail: String,
+    },
+}
+
+/// Both halves of every owner's shutdown report.
+///
+/// One structure rather than two so the cross-check
+/// ([`shutdown_acks_are_consistent`]) cannot be handed mismatched
+/// ledgers.
+#[derive(Debug, Default)]
+pub struct DrainLedger {
+    drain: Mutex<[Option<DrainAck>; 7]>,
+    join: Mutex<[Option<JoinAck>; 7]>,
+}
+
+fn owner_slot(owner: Owner) -> usize {
+    match owner {
+        Owner::ProductionDb => 0,
+        Owner::ObserverStore => 1,
+        Owner::LnPlus => 2,
+        Owner::FeeScheduler => 3,
+        Owner::Rebalance => 4,
+        Owner::Capital => 5,
+        Owner::Boltz => 6,
+    }
+}
+
+impl DrainLedger {
+    pub fn record(&self, owner: Owner, ack: DrainAck) {
+        self.drain.lock().expect("drain ledger poisoned")[owner_slot(owner)] = Some(ack);
+    }
+
+    pub fn record_join(&self, owner: Owner, ack: JoinAck) {
+        self.join.lock().expect("drain ledger poisoned")[owner_slot(owner)] = Some(ack);
+    }
+
+    pub fn drain_ack(&self, owner: Owner) -> Option<DrainAck> {
+        self.drain.lock().expect("drain ledger poisoned")[owner_slot(owner)].clone()
+    }
+
+    pub fn join_ack(&self, owner: Owner) -> Option<JoinAck> {
+        self.join.lock().expect("drain ledger poisoned")[owner_slot(owner)].clone()
+    }
+
+    /// Un-report one owner, so a test can prove that a MISSING entry
+    /// refuses rather than being read as absence.
+    pub fn clear_for_tests(&self, owner: Owner) {
+        self.drain.lock().expect("drain ledger poisoned")[owner_slot(owner)] = None;
+    }
+
+    pub fn clear_join_for_tests(&self, owner: Owner) {
+        self.join.lock().expect("drain ledger poisoned")[owner_slot(owner)] = None;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrainRefusal {
+    /// Nobody reported on this owner at all.
+    Unreported {
+        owner: Owner,
+    },
+    Unreachable {
+        owner: Owner,
+        detail: String,
+    },
+    NoAck {
+        owner: Owner,
+        waited: Duration,
+    },
+    /// Acknowledged the stop with work still queued.
+    LeftWork {
+        owner: Owner,
+        pending: u64,
+    },
+}
+
+impl DrainRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unreported { .. } => "drain_owner_unreported",
+            Self::Unreachable { .. } => "drain_owner_unreachable",
+            Self::NoAck { .. } => "drain_owner_no_ack",
+            Self::LeftWork { .. } => "drain_owner_left_work",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinRefusal {
+    Unreported {
+        owner: Owner,
+    },
+    Timeout {
+        owner: Owner,
+        waited: Duration,
+    },
+    Panicked {
+        owner: Owner,
+        detail: String,
+    },
+    /// The cross-check neither ledger can make alone.
+    JoinedWithoutDraining {
+        owner: Owner,
+    },
+}
+
+impl JoinRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unreported { .. } => "join_owner_unreported",
+            Self::Timeout { .. } => "join_owner_timeout",
+            Self::Panicked { .. } => "join_owner_panicked",
+            Self::JoinedWithoutDraining { .. } => "join_without_drain",
+        }
+    }
+}
+
+/// Readiness over the drain half.
+///
+/// Every owner on the roster, not just the ones a handle existed for --
+/// and every owner, not just the first, so the verdict never depends on
+/// iteration order.
+pub fn drain_is_clean(ledger: &DrainLedger) -> Result<(), DrainRefusal> {
+    for owner in Owner::ALL {
+        match ledger.drain_ack(owner) {
+            None => return Err(DrainRefusal::Unreported { owner }),
+            Some(DrainAck::NotSpawned) => {}
+            Some(DrainAck::Drained { pending_at_stop: 0 }) => {}
+            Some(DrainAck::Drained { pending_at_stop }) => {
+                return Err(DrainRefusal::LeftWork {
+                    owner,
+                    pending: pending_at_stop,
+                })
+            }
+            Some(DrainAck::Unreachable { detail }) => {
+                return Err(DrainRefusal::Unreachable { owner, detail })
+            }
+            Some(DrainAck::NoAck { waited }) => return Err(DrainRefusal::NoAck { owner, waited }),
+        }
+    }
+    Ok(())
+}
+
+/// Readiness over the join half.
+pub fn join_is_clean(ledger: &DrainLedger) -> Result<(), JoinRefusal> {
+    for owner in Owner::ALL {
+        match ledger.join_ack(owner) {
+            None => return Err(JoinRefusal::Unreported { owner }),
+            Some(JoinAck::NotSpawned) | Some(JoinAck::Joined) => {}
+            Some(JoinAck::Timeout { waited }) => {
+                return Err(JoinRefusal::Timeout { owner, waited })
+            }
+            Some(JoinAck::Panicked { detail }) => {
+                return Err(JoinRefusal::Panicked { owner, detail })
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The cross-check neither half can make alone.
+///
+/// An owner reported JOINED that was never reported DRAINED ended while
+/// work was still queued -- and both ledgers look clean in isolation.
+/// Conversely an owner that acknowledged a drain and is then declared
+/// absent at join time is a bookkeeping lie: it plainly existed a moment
+/// earlier.
+pub fn shutdown_acks_are_consistent(ledger: &DrainLedger) -> Result<(), JoinRefusal> {
+    for owner in Owner::ALL {
+        let drained = matches!(ledger.drain_ack(owner), Some(DrainAck::Drained { .. }));
+        match ledger.join_ack(owner) {
+            Some(JoinAck::Joined) if !drained => {
+                return Err(JoinRefusal::JoinedWithoutDraining { owner })
+            }
+            Some(JoinAck::NotSpawned) if drained => {
+                return Err(JoinRefusal::JoinedWithoutDraining { owner })
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// =====================================================================
 // R68-2: notification intake
 // =====================================================================
 
