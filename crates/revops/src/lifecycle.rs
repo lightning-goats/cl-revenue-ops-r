@@ -309,3 +309,154 @@ where
     outcome.completed = outcome.failures.is_empty() && !outcome.timed_out;
     outcome
 }
+
+// =====================================================================
+// R68-2: notification intake
+// =====================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// The four `@plugin.subscribe` bindings, from cl-revenue-ops.py.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Subscription {
+    ForwardEvent,
+    Connect,
+    Disconnect,
+    ChannelStateChanged,
+}
+
+impl Subscription {
+    /// Exactly the Python set. A fifth entry would be a Rust-only intake
+    /// path; a missing one is an unbound notification.
+    pub const ALL: [Subscription; 4] = [
+        Subscription::ForwardEvent,
+        Subscription::Connect,
+        Subscription::Disconnect,
+        Subscription::ChannelStateChanged,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ForwardEvent => "forward_event",
+            Self::Connect => "connect",
+            Self::Disconnect => "disconnect",
+            Self::ChannelStateChanged => "channel_state_changed",
+        }
+    }
+}
+
+/// What one notification actually did.
+///
+/// `Skipped` and `Dropped` are deliberately different: Python returns
+/// early for a non-settled forward (a decision), and separately swallows
+/// write failures into a log line (a loss). Collapsing them is what makes
+/// a lossy node look healthy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntakeOutcome {
+    Recorded,
+    Skipped(&'static str),
+    Dropped(String),
+}
+
+/// Process-lifetime intake counters, one set per subscription.
+///
+/// Interior-mutable and `Sync` because the subscription handlers are
+/// independent async tasks with only a shared reference.
+#[derive(Debug, Default)]
+pub struct IntakeLedger {
+    recorded: [AtomicU64; 4],
+    skipped: [AtomicU64; 4],
+    dropped: [AtomicU64; 4],
+    last_reason: Mutex<Option<(Subscription, String)>>,
+}
+
+fn slot(subscription: Subscription) -> usize {
+    match subscription {
+        Subscription::ForwardEvent => 0,
+        Subscription::Connect => 1,
+        Subscription::Disconnect => 2,
+        Subscription::ChannelStateChanged => 3,
+    }
+}
+
+impl IntakeLedger {
+    pub fn record(&self, subscription: Subscription, outcome: IntakeOutcome) {
+        let i = slot(subscription);
+        match outcome {
+            IntakeOutcome::Recorded => {
+                self.recorded[i].fetch_add(1, Ordering::Relaxed);
+            }
+            IntakeOutcome::Skipped(_) => {
+                self.skipped[i].fetch_add(1, Ordering::Relaxed);
+            }
+            IntakeOutcome::Dropped(reason) => {
+                self.dropped[i].fetch_add(1, Ordering::Relaxed);
+                *self.last_reason.lock().expect("intake ledger poisoned") =
+                    Some((subscription, reason));
+            }
+        }
+    }
+
+    pub fn recorded(&self, subscription: Subscription) -> u64 {
+        self.recorded[slot(subscription)].load(Ordering::Relaxed)
+    }
+    pub fn skipped(&self, subscription: Subscription) -> u64 {
+        self.skipped[slot(subscription)].load(Ordering::Relaxed)
+    }
+    pub fn dropped(&self, subscription: Subscription) -> u64 {
+        self.dropped[slot(subscription)].load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntakeRefusal {
+    Dropped {
+        subscription: Subscription,
+        count: u64,
+        last_reason: String,
+    },
+}
+
+impl IntakeRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Dropped { .. } => "intake_notification_dropped",
+        }
+    }
+}
+
+/// Readiness over notification intake.
+///
+/// A dropped notification is data this node SAW and did not keep. The
+/// subscription handlers swallow the failure into a log line -- correctly,
+/// since propagating would take down CLN event processing -- so the count
+/// is the only durable trace, and Task 68's rule is that no
+/// `.ok()`-to-null conversion may satisfy preflight.
+///
+/// The DATA cannot show the loss: the forward cursor is `MAX(timestamp)`
+/// over persisted rows, so a later success advances it straight past the
+/// hole. Only this ledger remembers.
+pub fn intake_is_clean(ledger: &IntakeLedger) -> Result<(), IntakeRefusal> {
+    // Every subscription, not just the first: a verdict that depended on
+    // iteration order would pass or fail by accident.
+    for subscription in Subscription::ALL {
+        let count = ledger.dropped(subscription);
+        if count > 0 {
+            let last_reason = ledger
+                .last_reason
+                .lock()
+                .expect("intake ledger poisoned")
+                .as_ref()
+                .filter(|(which, _)| *which == subscription)
+                .map(|(_, reason)| reason.clone())
+                .unwrap_or_else(|| "reason not retained".to_string());
+            return Err(IntakeRefusal::Dropped {
+                subscription,
+                count,
+                last_reason,
+            });
+        }
+    }
+    Ok(())
+}
