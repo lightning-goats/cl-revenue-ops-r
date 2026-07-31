@@ -64,6 +64,14 @@ enum Command {
         diag_days: i64,
         reply: oneshot::Sender<Result<crate::profitability_history::ProfitabilitySnapshot>>,
     },
+    /// C71-31: py `get_budget_status(since)` -- three SELECTs under ONE
+    /// transaction. Python's own audit fix C-1 requires the transaction:
+    /// a rebalance settling between the reads moves sats from reserved to
+    /// spent and would be counted in both halves.
+    BudgetStatus {
+        since: i64,
+        reply: oneshot::Sender<Result<crate::budget_status::BudgetStatus>>,
+    },
     /// Type-erased job for [`DbHandle::query_row`]. Rust enums can't carry
     /// a generic variant, so the job closure captures its own (typed)
     /// oneshot reply sender and does the query + reply-send internally;
@@ -174,6 +182,17 @@ impl DbHandle {
                 diag_days,
                 reply,
             })
+            .await
+            .context("actor gone")?;
+        rx.await.context("actor dropped reply")?
+    }
+
+    /// C71-31: the windowed budget position as one observation. See
+    /// [`Command::BudgetStatus`].
+    pub async fn budget_status(&self, since: i64) -> Result<crate::budget_status::BudgetStatus> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::BudgetStatus { since, reply })
             .await
             .context("actor gone")?;
         rx.await.context("actor dropped reply")?
@@ -327,6 +346,9 @@ pub async fn spawn_read_only(path: &Path) -> Result<DbHandle> {
                         window_days,
                         diag_days,
                     ));
+                }
+                Command::BudgetStatus { since, reply } => {
+                    let _ = reply.send(crate::budget_status::read_budget_status(&conn, since));
                 }
                 Command::Exec(job) => job(&conn),
             }

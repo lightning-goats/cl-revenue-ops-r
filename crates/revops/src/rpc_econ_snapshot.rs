@@ -207,6 +207,29 @@ pub enum SnapshotAssembly<'a> {
     },
 }
 
+/// C71-32: the two intent counters are `null` in shadow mode, and these
+/// are the STABLE lines that say why.
+///
+/// Python counts intents into the PRODUCTION `econ_ledger.db` beside
+/// `revenue_ops.db`. This port's `GovernorWiring` writes its own
+/// `econ_ledger_dryrun.db` and deliberately never opens Python's file --
+/// Python stays authoritative for the whole shadow window. So the two
+/// numbers are different populations, and publishing the dry-run count
+/// under Python's production field name would be a fabrication that LOOKS
+/// real; zero would be worse still, since it asserts "no intents".
+///
+/// These are shadow-mode answers, NOT production parity. Adopting the
+/// production ledger and a same-lifetime session counter is a Task 69
+/// cutover blocker.
+pub const INTENTS_RECORDED_UNAVAILABLE: &str =
+    "intents_recorded_total unavailable: Python's session counter counts intents \
+     recorded into the production econ_ledger.db; this port writes only its own \
+     econ_ledger_dryrun.db, so no same-population session counter exists yet";
+pub const INTENTS_LEDGER_UNAVAILABLE: &str =
+    "intents_ledger_total unavailable: the durable count lives in Python's \
+     production econ_ledger.db, which this port deliberately never opens while \
+     Python remains authoritative";
+
 /// Port of `revenue_econ_snapshot`. `assembly: None` is only valid when
 /// `enabled=false` (the `econ_shadow_enabled` config gate,
 /// cl-revenue-ops.py:6067-6069) -- an `enabled=true` call with no
@@ -251,6 +274,18 @@ pub fn build_econ_snapshot(
                 now,
                 receivable_ratio_target,
             );
+            // C71-32: a null counter is NEVER emitted undeclared. Pairing
+            // the two here rather than at the call site makes it
+            // structural -- a caller cannot receive an unexplained null,
+            // and supplying real counters later removes the line
+            // automatically without touching this builder.
+            let mut approximations = approximations;
+            if intents_recorded_total.is_none() {
+                approximations.push(INTENTS_RECORDED_UNAVAILABLE.to_string());
+            }
+            if intents_ledger_total.is_none() {
+                approximations.push(INTENTS_LEDGER_UNAVAILABLE.to_string());
+            }
             json!({
                 "enabled": true,
                 "snapshot": wire,
@@ -456,5 +491,125 @@ mod tests {
         assert!(approximations
             .iter()
             .any(|a| a.contains("missing short_channel_id")));
+    }
+
+    // -----------------------------------------------------------------
+    // C71-32: the intent counters in shadow mode.
+    //
+    // Python counts intents into the PRODUCTION `econ_ledger.db`; this
+    // port writes only `econ_ledger_dryrun.db` and never opens Python's
+    // file while Python stays authoritative. The two numbers are
+    // different populations, so the dry-run count must not be published
+    // under Python's field name -- and zero would be worse, because it
+    // asserts "no intents recorded" rather than "we cannot know".
+    // -----------------------------------------------------------------
+
+    fn ready_snapshot(recorded: Option<i64>, ledger: Option<i64>) -> Value {
+        let channels = vec![raw_channel(
+            "111x1x0",
+            &format!("02{}", "a".repeat(64)),
+            1_000_000,
+            400_000,
+        )];
+        let profitability = HashMap::new();
+        let budget = BudgetPreviewInputs::default();
+        build_econ_snapshot(
+            true,
+            Some(SnapshotAssembly::Ready {
+                channels: &channels,
+                profitability: &profitability,
+                budget: &budget,
+                now: 1_800_000_000,
+                receivable_ratio_target: 0.0,
+            }),
+            recorded,
+            ledger,
+        )
+    }
+
+    #[test]
+    fn shadow_mode_reports_null_intent_counters_and_says_why() {
+        let v = ready_snapshot(None, None);
+        assert_eq!(v["intents_recorded_total"], Value::Null);
+        assert_eq!(v["intents_ledger_total"], Value::Null);
+
+        let approximations: Vec<&str> = v["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(
+            approximations.contains(&INTENTS_RECORDED_UNAVAILABLE),
+            "a null counter must never be emitted undeclared: {approximations:?}"
+        );
+        assert!(
+            approximations.contains(&INTENTS_LEDGER_UNAVAILABLE),
+            "{approximations:?}"
+        );
+    }
+
+    #[test]
+    fn a_null_counter_is_never_reported_as_zero() {
+        // Zero is a Python-legal value meaning "no intents recorded this
+        // session". Substituting it for "unknown" is the fabrication this
+        // whole treatment exists to avoid.
+        let v = ready_snapshot(None, None);
+        assert_ne!(v["intents_recorded_total"], json!(0));
+        assert_ne!(v["intents_ledger_total"], json!(0));
+    }
+
+    /// The path Task 69 will use once the production ledger is adopted:
+    /// real counters flow through UNCHANGED, and the shadow-mode
+    /// approximation lines disappear on their own. If this ever fails,
+    /// supplying production counters would require editing the response
+    /// builder, which is exactly the coupling this test prevents.
+    #[test]
+    fn real_counters_pass_through_as_integers_without_the_shadow_notes() {
+        let v = ready_snapshot(Some(3), Some(7));
+        assert_eq!(v["intents_recorded_total"], json!(3));
+        assert_eq!(v["intents_ledger_total"], json!(7));
+
+        let approximations: Vec<&str> = v["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(!approximations.contains(&INTENTS_RECORDED_UNAVAILABLE));
+        assert!(!approximations.contains(&INTENTS_LEDGER_UNAVAILABLE));
+    }
+
+    /// A real zero is NOT the unknown case: it passes through as 0 with no
+    /// note, because "the session recorded none" is a fact.
+    #[test]
+    fn a_genuine_zero_counter_is_reported_as_zero() {
+        let v = ready_snapshot(Some(0), Some(0));
+        assert_eq!(v["intents_recorded_total"], json!(0));
+        assert_eq!(v["intents_ledger_total"], json!(0));
+        let approximations: Vec<&str> = v["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(!approximations.contains(&INTENTS_RECORDED_UNAVAILABLE));
+    }
+
+    /// Each counter is declared independently -- a half-available pair
+    /// must not hide the missing half behind the present one.
+    #[test]
+    fn only_the_missing_counter_is_declared() {
+        let v = ready_snapshot(Some(5), None);
+        assert_eq!(v["intents_recorded_total"], json!(5));
+        assert_eq!(v["intents_ledger_total"], Value::Null);
+        let approximations: Vec<&str> = v["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(!approximations.contains(&INTENTS_RECORDED_UNAVAILABLE));
+        assert!(approximations.contains(&INTENTS_LEDGER_UNAVAILABLE));
     }
 }
