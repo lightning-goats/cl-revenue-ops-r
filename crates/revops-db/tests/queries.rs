@@ -17,9 +17,9 @@
 
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
-    active_spend_reservations, all_channel_states, all_config_overrides, all_policies,
-    channel_closure_cost_total, channel_cost_row, channel_pnl, closed_channels_summary,
-    closure_costs_windows, config_override, cost_evidence_coverage,
+    active_spend_reservations, all_channel_state_rows, all_channel_states, all_config_overrides,
+    all_policies, channel_closure_cost_total, channel_cost_row, channel_pnl,
+    closed_channels_summary, closure_costs_windows, config_override, cost_evidence_coverage,
     hot_channel_protection_override_peers, last_policy_change_timestamp, lifetime_stats,
     opening_costs_since, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
     policy_changes_since, policy_for_peer, rebalance_spend_component, rebalance_success_rates,
@@ -1898,5 +1898,42 @@ async fn rebalance_success_rates_group_and_normalize_to_channel() {
     assert!(
         !rates.contains_key("6x6x0"),
         "pending-only channel has total 0 and must be absent: {rates:?}"
+    );
+}
+
+/// py `get_all_channel_states` (database.py:1803-1807): SELECT * with
+/// dict(row) — full 17-column dicts, ordered `state, flow_ratio DESC`,
+/// NULLs passing through as JSON null.
+#[tokio::test]
+async fn all_channel_state_rows_orders_and_passes_nulls_through() {
+    let (_dir, path) = seeded_db(NOW);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, updated_at) VALUES
+            ('1x1x0', '02aa', 'depleted', 0.9, 10, 20, 1000, 5),
+            ('2x2x0', '02aa', 'balanced', 0.2, 10, 20, 1000, 5),
+            ('3x3x0', '02bb', 'balanced', 0.8, 10, 20, 1000, 5);",
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let rows = all_channel_state_rows(&handle).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    // ORDER BY state ASC then flow_ratio DESC: balanced 0.8, balanced
+    // 0.2, depleted 0.9.
+    assert_eq!(rows[0]["channel_id"], "3x3x0");
+    assert_eq!(rows[1]["channel_id"], "2x2x0");
+    assert_eq!(rows[2]["channel_id"], "1x1x0");
+    assert_eq!(
+        rows[1]["temporal_profile_json"],
+        serde_json::Value::Null,
+        "NULL (the schema default for this column) -> json null"
+    );
+    assert_eq!(rows[0]["flow_ratio"], 0.8);
+    assert_eq!(rows[0]["peer_id"], "02bb");
+    assert_eq!(
+        rows[0].as_object().unwrap().len(),
+        17,
+        "full dict(row) column set"
     );
 }

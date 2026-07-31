@@ -278,6 +278,146 @@ pub fn build_profitability_summary_with_skips(
 /// builder from the wiring layer today would silently claim "this channel
 /// doesn't exist" for every channel, known or not. This shape instead
 /// carries an unmistakable `not_yet_ported` marker.
+/// Port of `ChannelProfitability.to_dict()` (profitability_analyzer.py:
+/// 424-464) -- the raw analyzer dict `revenue-report peer` embeds per
+/// channel (NOT the `revenue-profitability` RPC's channel shape above,
+/// which is a different Python surface). Rounds follow py `round()`
+/// (banker's) via `py_round`.
+pub fn channel_profitability_to_dict(r: &ChannelProfitability) -> Value {
+    json!({
+        "channel_id": r.channel_id,
+        "peer_id": r.peer_id,
+        "capacity_sats": r.capacity_sats,
+        "open_cost_sats": r.costs.open_cost_sats,
+        "rebalance_cost_sats": r.costs.rebalance_cost_sats,
+        "total_cost_sats": r.costs.total_cost_sats(),
+        "fees_earned_sats": r.revenue.fees_earned_sats(),
+        "volume_routed_sats": r.revenue.volume_routed_sats(),
+        "forward_count": r.revenue.forward_count,
+        "net_profit_sats": r.net_profit_sats,
+        "roi_percent": revops_econ::pyfloat::py_round(r.roi_percent, 2),
+        "marginal_roi_percent": revops_econ::pyfloat::py_round(r.marginal_roi_percent(), 2),
+        "is_operationally_profitable": r.is_operationally_profitable(),
+        "classification": r.classification.as_value(),
+        "cost_per_sat_routed": revops_econ::pyfloat::py_round(r.cost_per_sat_routed, 6),
+        "fee_per_sat_routed": revops_econ::pyfloat::py_round(r.fee_per_sat_routed, 6),
+        "days_open": r.days_open,
+        "last_routed": r.last_routed,
+        "contribution_30d_msat": r.contribution_30d_msat,
+        "fees_earned_30d_msat": r.fees_earned_30d_msat,
+        "sourced_fee_30d_msat": r.sourced_fee_30d_msat,
+        "forward_count_30d": r.forward_count_30d,
+        "sourced_forward_count_30d": r.sourced_forward_count_30d,
+        "window_30d_available": r.window_30d_available,
+        "role_30d": r.role_30d().as_value(),
+        "marginal_roi_reliable": r.marginal_roi_reliable(),
+        "channel_role": r.channel_role().as_value(),
+        "inbound_flow": {
+            "payment_count": r.revenue.sourced_forward_count,
+            "volume_sats": r.revenue.sourced_volume_sats(),
+            "contribution_to_other_channels_sats": r.revenue.sourced_fee_contribution_sats(),
+        },
+        "outbound_flow": {
+            "payment_count": r.revenue.forward_count,
+            "volume_sats": r.revenue.volume_routed_sats(),
+            "revenue_earned_sats": r.revenue.fees_earned_sats(),
+        },
+    })
+}
+
+/// Port of `get_profitability_by_peer` (profitability_analyzer.py:
+/// 914-977): the peer's channels sorted by channel_id, aggregate sums
+/// (sats fields summed PER CHANNEL first, matching py's property sums),
+/// ceil-if-positive revenue conversions, round-2 ROI over positive cost,
+/// classification/role histograms, and the full per-channel `to_dict`
+/// list. `None` when the peer has no analyzed channels (py 931-932) --
+/// the caller renders that as JSON null.
+pub fn profitability_by_peer(
+    profitability: &std::collections::HashMap<String, ChannelProfitability>,
+    peer_id: &str,
+) -> Option<Value> {
+    let mut peer_channels: Vec<&ChannelProfitability> = profitability
+        .values()
+        .filter(|p| p.peer_id == peer_id)
+        .collect();
+    peer_channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+    if peer_channels.is_empty() {
+        return None;
+    }
+
+    let total_cost_sats: i64 = peer_channels
+        .iter()
+        .map(|p| p.costs.total_cost_sats())
+        .sum();
+    let total_revenue_msat: i64 = peer_channels
+        .iter()
+        .map(|p| p.revenue.fees_earned_msat)
+        .sum();
+    let total_contribution_msat: i64 = peer_channels
+        .iter()
+        .map(|p| p.revenue.total_contribution_msat())
+        .sum();
+    let total_volume_routed_sats: i64 = peer_channels
+        .iter()
+        .map(|p| p.revenue.volume_routed_sats())
+        .sum();
+    let total_sourced_volume_sats: i64 = peer_channels
+        .iter()
+        .map(|p| p.revenue.sourced_volume_sats())
+        .sum();
+    let total_forward_count: i64 = peer_channels.iter().map(|p| p.revenue.forward_count).sum();
+    let total_sourced_forward_count: i64 = peer_channels
+        .iter()
+        .map(|p| p.revenue.sourced_forward_count)
+        .sum();
+    let ceil_if_positive = |msat: i64| -> i64 {
+        if msat > 0 {
+            revops_core::msat::base_to_sats_ceil(msat as u64) as i64
+        } else {
+            0
+        }
+    };
+    let total_revenue_sats = ceil_if_positive(total_revenue_msat);
+    let total_contribution_sats = ceil_if_positive(total_contribution_msat);
+    let net_profit_sats = total_revenue_sats - total_cost_sats;
+    let overall_roi_percent = if total_cost_sats > 0 {
+        revops_econ::pyfloat::py_round((net_profit_sats as f64 / total_cost_sats as f64) * 100.0, 2)
+    } else {
+        0.0
+    };
+
+    let mut classifications: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut roles: BTreeMap<&str, i64> = BTreeMap::new();
+    for p in &peer_channels {
+        *classifications
+            .entry(p.classification.as_value())
+            .or_insert(0) += 1;
+        *roles.entry(p.channel_role().as_value()).or_insert(0) += 1;
+    }
+
+    Some(json!({
+        "peer_id": peer_id,
+        "channel_count": peer_channels.len(),
+        "aggregate": {
+            "total_cost_sats": total_cost_sats,
+            "total_revenue_sats": total_revenue_sats,
+            "total_contribution_sats": total_contribution_sats,
+            "net_profit_sats": net_profit_sats,
+            "overall_roi_percent": overall_roi_percent,
+            "total_volume_routed_sats": total_volume_routed_sats,
+            "total_sourced_volume_sats": total_sourced_volume_sats,
+            "total_forward_count": total_forward_count,
+            "total_sourced_forward_count": total_sourced_forward_count,
+            "classifications": classifications,
+            "role_distribution": roles,
+        },
+        "channels": peer_channels
+            .iter()
+            .map(|p| channel_profitability_to_dict(p))
+            .collect::<Vec<Value>>(),
+    }))
+}
+
 pub fn build_profitability_channel_not_wired(channel_id: &str) -> Value {
     json!({
         "channel_id": channel_id,

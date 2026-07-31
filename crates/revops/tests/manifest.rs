@@ -2266,6 +2266,94 @@ fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
     );
 }
 
+/// `revenue-r-report` through the spawned binary (Task 66 slice 8c: all
+/// four types real). Guard parity: py gates database/policy_manager FIRST
+/// for EVERY type (cl-revenue-ops.py:5596-5597) — a no-DB summary is
+/// "Plugin not initialized", never the retired not_yet_ported marker.
+/// With a DB: summary/policies count REAL seeded peer_policies rows; the
+/// peer arm's usage guard and the verbatim unknown-type error hold.
+#[test]
+fn revenue_r_report_serves_all_four_types_with_python_guard_order() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let no_db = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "summary"}),
+    );
+    assert_eq!(
+        no_db,
+        serde_json::json!({"error": "Plugin not initialized"})
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, tags, updated_at) VALUES \
+             ('02aa', 'dynamic', 'enabled', '[\"vip\"]', ?1), \
+             ('02bb', 'static', 'disabled', '[\"vip\",\"hot\"]', ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("seed policies");
+    }
+    let summary = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "summary"}),
+    );
+    assert_eq!(summary["type"], "summary", "{summary:?}");
+    assert_eq!(summary["policies"]["total"], 2);
+    assert_eq!(summary["policies"]["by_strategy"]["dynamic"], 1);
+    assert_eq!(summary["policies"]["by_strategy"]["static"], 1);
+    assert_eq!(summary["policies"]["by_rebalance_mode"]["enabled"], 1);
+
+    let policies = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "policies"}),
+    );
+    assert_eq!(policies["type"], "policies");
+    assert_eq!(policies["by_tag"]["vip"], 2);
+    assert_eq!(policies["by_tag"]["hot"], 1);
+
+    let usage = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "peer"}),
+    );
+    assert_eq!(
+        usage,
+        serde_json::json!({"error": "Usage: revenue-report peer <peer_id>"})
+    );
+
+    let unknown = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "bogus"}),
+    );
+    assert_eq!(
+        unknown["error"],
+        "Unknown report type: bogus. Use 'summary', 'peer', 'policies', or 'costs'"
+    );
+}
+
 /// `revenue-r-config get` through the spawned binary must report the REAL
 /// config version — Python's `MAX(version)` over `config_overrides`
 /// (database.py:7374-7378) — with the retired `version` gap entry gone.

@@ -2227,23 +2227,139 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &report_name,
-            "financial/policy reports (Phase 1b: 'costs' is DB-backed; \
-             'summary'/'policies'/'peer' are gap-marked, see _phase1b_gaps)",
+            "financial/policy reports: summary and policies from real peer_policies rows, \
+             peer from policy + by-peer profitability + channel_states, costs from \
+             channel_closure_costs (Task 66 slice 8c: all four types real)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                let s = p.state();
-                let report_type = v
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-report",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let report_type = decoded
                     .get("report_type")
                     .and_then(|t| t.as_str())
-                    .unwrap_or("summary");
-                if report_type != "costs" {
-                    return Ok(build_report(report_type, None, 0));
-                }
+                    .unwrap_or("summary")
+                    .to_string();
+                let s = p.state();
+                // py 5596-5597: database/policy_manager gate FIRST, for
+                // EVERY report type (the old wiring let non-costs types
+                // bypass it into the retired not_yet_ported arm).
                 let Some(handle) = &s.db else {
                     return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 let now = now_unix();
-                let costs = queries::closure_costs_windows(handle, now).await?;
-                Ok(build_report(report_type, Some(&costs), now))
+                let failed =
+                    |e: String| Ok(revops::rpc_report::report_generation_failed(&e));
+                match report_type.as_str() {
+                    "summary" => match queries::all_policies(handle, now).await {
+                        Ok(policies) => {
+                            Ok(revops::rpc_report::build_report_summary(&policies, now))
+                        }
+                        Err(e) => failed(e.to_string()),
+                    },
+                    "policies" => match queries::all_policies(handle, now).await {
+                        Ok(policies) => {
+                            Ok(revops::rpc_report::build_report_policies(&policies))
+                        }
+                        Err(e) => failed(e.to_string()),
+                    },
+                    "peer" => {
+                        // py 5625-5626: `if not peer_id` — absent, null,
+                        // and "" all take the usage arm.
+                        let peer_id = decoded
+                            .get("peer_id")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if peer_id.is_empty() {
+                            return Ok(serde_json::json!({
+                                "error": "Usage: revenue-report peer <peer_id>"
+                            }));
+                        }
+                        let policy = match queries::policy_for_peer(handle, &peer_id, now).await
+                        {
+                            Ok(policy) => revops::rpc_policy::peer_policy_to_json(&policy, now),
+                            Err(e) => return failed(e.to_string()),
+                        };
+                        // py 5631-5633: `prof_data = None` unless the
+                        // analyzer exists; an analyzer EXCEPTION rides the
+                        // outer except. Observer missing = analyzer
+                        // missing; a failed gather = the exception.
+                        let profitability = match s.observer_db.as_ref() {
+                            None => serde_json::Value::Null,
+                            Some(observer) => {
+                                let channels =
+                                    match revops::profitability_assembler::fetch_channel_snapshot(
+                                        &s.socket_path,
+                                    )
+                                    .await
+                                    {
+                                        Ok(channels) => channels,
+                                        Err(e) => return failed(e),
+                                    };
+                                match revops::profitability_assembler::gather_profitability(
+                                    revops::profitability_assembler::ProfitabilitySources {
+                                        production_db: handle,
+                                        observer,
+                                        channels: &channels,
+                                        now,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(fleet) => revops::rpc_profitability::profitability_by_peer(
+                                        &fleet.profitability,
+                                        &peer_id,
+                                    )
+                                    .unwrap_or(serde_json::Value::Null),
+                                    Err(refusal) => {
+                                        return failed(refusal.detail().to_string())
+                                    }
+                                }
+                            }
+                        };
+                        // py 5636-5641: all rows, filtered to this peer,
+                        // sorted by channel_id (the schema has no
+                        // short_channel_id column; py's fallback chain
+                        // ends at "").
+                        let mut flow_states =
+                            match queries::all_channel_state_rows(handle).await {
+                                Ok(rows) => rows
+                                    .into_iter()
+                                    .filter(|row| {
+                                        row.get("peer_id").and_then(|p| p.as_str())
+                                            == Some(peer_id.as_str())
+                                    })
+                                    .collect::<Vec<_>>(),
+                                Err(e) => return failed(e.to_string()),
+                            };
+                        flow_states.sort_by_key(|row| {
+                            row.get("channel_id")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string()
+                        });
+                        Ok(revops::rpc_report::build_report_peer(
+                            &peer_id,
+                            policy,
+                            profitability,
+                            flow_states,
+                        ))
+                    }
+                    "costs" => match queries::closure_costs_windows(handle, now).await {
+                        Ok(costs) => Ok(build_report("costs", Some(&costs), now)),
+                        Err(e) => failed(e.to_string()),
+                    },
+                    other => Ok(revops::rpc_report::unknown_report_type(other)),
+                }
             },
         )
         .rpcmethod(

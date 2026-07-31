@@ -1,15 +1,21 @@
-//! Pure response builder for `revenue-r-report`.
+//! Pure response builders for `revenue-report` (Task 66 slice 8c: ALL
+//! four report types are real now).
 //!
-//! Per the plan's per-RPC gap table: `report_type="costs"` is fully
-//! DB-backed (`database.get_closure_costs_since()` x3 windows +
-//! `.get_total_closure_costs()`, plain SQL). `"summary"`/`"policies"`/
-//! `"peer"` all route through `policy_manager` (`get_all_policies`/
-//! `get_policy`) and/or `profitability_analyzer.get_profitability_by_peer`,
-//! which are Phase 3 scope (governed econ/policy layer) -- Phase 1b returns
-//! an explicit not-yet-ported shape for these, never a fabricated policy
-//! count. Any other `report_type` preserves Python's exact "Unknown report
-//! type" error string verbatim (cl-revenue-ops.py:5526).
+//! Port of `revenue_report` (cl-revenue-ops.py:5578-5716): `costs` was
+//! DB-backed since Phase 1b; `summary` and `policies` count the same
+//! already-ported [`PeerPolicy`] rows `revenue-policy list` serves;
+//! `peer` combines the peer's policy dict, the by-peer profitability
+//! aggregate (`rpc_profitability::profitability_by_peer`), and the
+//! peer's `channel_states` rows (singleton `flow_state` rule, py
+//! 5640-5644). The former `not_yet_ported` arms are gone. Any other
+//! `report_type` preserves Python's exact "Unknown report type" error
+//! string verbatim (cl-revenue-ops.py:5712); every post-guard fetch
+//! failure is Python's outer `except` arm ([`report_generation_failed`],
+//! py 5715-5716).
 
+use std::collections::BTreeMap;
+
+use revops_analytics::policy::PeerPolicy;
 use revops_db::queries::ClosureCostWindows;
 use serde_json::{json, Value};
 
@@ -48,15 +54,93 @@ pub fn build_report(
                 "generated_at": generated_at,
             })
         }
-        "summary" | "policies" | "peer" => json!({
-            "error": "not_yet_ported",
-            "report_type": report_type,
-            "reason": "requires policy_manager (Phase 3)",
-        }),
-        other => json!({
-            "error": format!(
-                "Unknown report type: {other}. Use 'summary', 'peer', 'policies', or 'costs'"
-            ),
-        }),
+        other => unknown_report_type(other),
     }
+}
+
+/// py 5712: the exact unknown-type error string.
+pub fn unknown_report_type(report_type: &str) -> Value {
+    json!({
+        "error": format!(
+            "Unknown report type: {report_type}. Use 'summary', 'peer', 'policies', or 'costs'"
+        ),
+    })
+}
+
+/// py 5715-5716: the outer `except Exception` arm every post-guard fetch
+/// failure lands on.
+pub fn report_generation_failed(error: &str) -> Value {
+    json!({"status": "error", "error": format!("Report generation failed: {error}")})
+}
+
+fn count_into<'a>(counts: &mut BTreeMap<&'a str, i64>, key: &'a str) {
+    *counts.entry(key).or_insert(0) += 1;
+}
+
+/// py 5601-5620: strategy/rebalance-mode histograms over
+/// `get_all_policies`.
+pub fn build_report_summary(policies: &[PeerPolicy], generated_at: i64) -> Value {
+    let mut by_strategy: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut by_mode: BTreeMap<&str, i64> = BTreeMap::new();
+    for policy in policies {
+        count_into(&mut by_strategy, policy.strategy.as_value());
+        count_into(&mut by_mode, policy.rebalance_mode.as_value());
+    }
+    json!({
+        "type": "summary",
+        "policies": {
+            "total": policies.len(),
+            "by_strategy": by_strategy,
+            "by_rebalance_mode": by_mode,
+        },
+        "generated_at": generated_at,
+    })
+}
+
+/// py 5648-5678: the flat variant plus the by_tag histogram (every tag
+/// on every policy counts). No `generated_at` in Python's shape.
+pub fn build_report_policies(policies: &[PeerPolicy]) -> Value {
+    let mut by_strategy: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut by_mode: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut by_tag: BTreeMap<&str, i64> = BTreeMap::new();
+    for policy in policies {
+        count_into(&mut by_strategy, policy.strategy.as_value());
+        count_into(&mut by_mode, policy.rebalance_mode.as_value());
+        for tag in &policy.tags {
+            count_into(&mut by_tag, tag);
+        }
+    }
+    json!({
+        "type": "policies",
+        "total": policies.len(),
+        "by_strategy": by_strategy,
+        "by_rebalance_mode": by_mode,
+        "by_tag": by_tag,
+    })
+}
+
+/// py 5624-5646: `policy` is the peer's `to_dict()`
+/// ([`crate::rpc_policy::peer_policy_to_json`]), `profitability` the
+/// by-peer aggregate or null (py `prof_data = None` when no analyzer /
+/// no channels), and `flow_state` the SINGLETON row only when the peer
+/// has exactly one `channel_states` row (py 5643).
+pub fn build_report_peer(
+    peer_id: &str,
+    policy: Value,
+    profitability: Value,
+    flow_states: Vec<Value>,
+) -> Value {
+    let flow_state = if flow_states.len() == 1 {
+        flow_states[0].clone()
+    } else {
+        Value::Null
+    };
+    json!({
+        "type": "peer",
+        "peer_id": peer_id,
+        "policy": policy,
+        "profitability": profitability,
+        "flow_state": flow_state,
+        "flow_states": flow_states,
+    })
 }

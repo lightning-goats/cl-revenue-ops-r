@@ -20,9 +20,14 @@
 
 use revops::rpc_dashboard::{build_dashboard, parse_window_days};
 use revops::rpc_history::build_history;
-use revops::rpc_report::build_report;
+use revops::rpc_policy::peer_policy_to_json;
+use revops::rpc_report::{
+    build_report, build_report_peer, build_report_policies, build_report_summary,
+};
+use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_db::queries::{ClosedChannelsSummary, ClosureCostWindows, LifetimeStats, PnlSummary};
 use serde_json::json;
+use serde_json::Value;
 
 fn stats(
     total_revenue_msat: i64,
@@ -126,14 +131,100 @@ fn build_report_costs_without_db_errors() {
     assert_eq!(v["error"], "Database not initialized");
 }
 
+fn policy(peer: &str, strategy: FeeStrategy, mode: RebalanceMode, tags: &[&str]) -> PeerPolicy {
+    let mut p = PeerPolicy::default_for(peer);
+    p.strategy = strategy;
+    p.rebalance_mode = mode;
+    p.tags = tags.iter().map(|t| t.to_string()).collect();
+    p
+}
+
+/// py 5601-5620: summary counts strategies and rebalance modes over
+/// get_all_policies, plus generated_at.
 #[test]
-fn build_report_gap_marks_summary_policies_peer() {
-    for t in ["summary", "policies", "peer"] {
-        let v = build_report(t, None, 0);
-        assert_eq!(v["error"], "not_yet_ported");
-        assert_eq!(v["report_type"], t);
-        assert_eq!(v["reason"], "requires policy_manager (Phase 3)");
-    }
+fn build_report_summary_counts_policies() {
+    let policies = vec![
+        policy("02aa", FeeStrategy::Dynamic, RebalanceMode::Enabled, &[]),
+        policy(
+            "02bb",
+            FeeStrategy::Dynamic,
+            RebalanceMode::Disabled,
+            &["vip"],
+        ),
+        policy("02cc", FeeStrategy::Static, RebalanceMode::Enabled, &[]),
+    ];
+    let v = build_report_summary(&policies, 1_800_000_000);
+    assert_eq!(v["type"], "summary");
+    assert_eq!(v["policies"]["total"], 3);
+    assert_eq!(v["policies"]["by_strategy"]["dynamic"], 2);
+    assert_eq!(v["policies"]["by_strategy"]["static"], 1);
+    assert_eq!(v["policies"]["by_rebalance_mode"]["enabled"], 2);
+    assert_eq!(v["policies"]["by_rebalance_mode"]["disabled"], 1);
+    assert_eq!(v["generated_at"], 1_800_000_000);
+}
+
+/// py 5648-5678: policies adds the by_tag histogram (a peer can carry
+/// several tags; each counts) and has NO generated_at.
+#[test]
+fn build_report_policies_counts_tags_too() {
+    let policies = vec![
+        policy(
+            "02aa",
+            FeeStrategy::Dynamic,
+            RebalanceMode::Enabled,
+            &["vip", "hot"],
+        ),
+        policy(
+            "02bb",
+            FeeStrategy::Passive,
+            RebalanceMode::Disabled,
+            &["vip"],
+        ),
+    ];
+    let v = build_report_policies(&policies);
+    assert_eq!(v["type"], "policies");
+    assert_eq!(v["total"], 2);
+    assert_eq!(v["by_strategy"]["dynamic"], 1);
+    assert_eq!(v["by_strategy"]["passive"], 1);
+    assert_eq!(v["by_rebalance_mode"]["enabled"], 1);
+    assert_eq!(v["by_tag"]["vip"], 2);
+    assert_eq!(v["by_tag"]["hot"], 1);
+    assert!(
+        v.get("generated_at").is_none(),
+        "py policies arm emits none"
+    );
+}
+
+/// py 5624-5646: the peer report carries the policy dict, the by-peer
+/// profitability aggregate (or null), and the peer's flow-state rows —
+/// `flow_state` is the SINGLETON row only when exactly one exists.
+#[test]
+fn build_report_peer_singleton_flow_state_rule() {
+    let pol = policy("02aa", FeeStrategy::Dynamic, RebalanceMode::Enabled, &[]);
+    let pol_json = peer_policy_to_json(&pol, 1_800_000_000);
+    let row1 = serde_json::json!({"channel_id": "100x1x0", "peer_id": "02aa", "state": "balanced"});
+    let row2 = serde_json::json!({"channel_id": "200x1x0", "peer_id": "02aa", "state": "depleted"});
+
+    let one = build_report_peer("02aa", pol_json.clone(), Value::Null, vec![row1.clone()]);
+    assert_eq!(one["type"], "peer");
+    assert_eq!(one["peer_id"], "02aa");
+    assert_eq!(one["policy"], pol_json);
+    assert_eq!(one["profitability"], Value::Null);
+    assert_eq!(one["flow_state"], row1);
+    assert_eq!(one["flow_states"], serde_json::json!([row1]));
+
+    let two = build_report_peer(
+        "02aa",
+        pol_json.clone(),
+        Value::Null,
+        vec![row1.clone(), row2.clone()],
+    );
+    assert_eq!(two["flow_state"], Value::Null, "two rows -> null singleton");
+    assert_eq!(two["flow_states"], serde_json::json!([row1, row2]));
+
+    let none = build_report_peer("02aa", pol_json, Value::Null, vec![]);
+    assert_eq!(none["flow_state"], Value::Null);
+    assert_eq!(none["flow_states"], serde_json::json!([]));
 }
 
 #[test]
@@ -511,4 +602,179 @@ fn fee_cycle_denial_matches_python_execution_gate_shape() {
 
     let enabled = FeeAuthorityStatusSnapshot::from_startup_mode(true, 1_700_000_000);
     assert_eq!(enabled.fee_cycle_denial_response(), None);
+}
+
+// ---------------------------------------------------------------------------
+// Task 66 slice 8c: the by-peer profitability aggregate + to_dict port
+// ---------------------------------------------------------------------------
+
+use revops::rpc_profitability::{channel_profitability_to_dict, profitability_by_peer};
+use revops_analytics::profitability::{
+    ChannelCosts, ChannelProfitability, ChannelRevenue, ProfitabilityClass,
+};
+use std::collections::HashMap;
+
+#[allow(clippy::too_many_arguments)]
+fn peer_prof(
+    scid: &str,
+    peer: &str,
+    open_cost: i64,
+    rebalance_cost: i64,
+    fees_msat: i64,
+    volume_msat: i64,
+    forwards: i64,
+    sourced_volume_msat: i64,
+    sourced_fee_msat: i64,
+    sourced_forwards: i64,
+) -> ChannelProfitability {
+    ChannelProfitability {
+        channel_id: scid.to_string(),
+        peer_id: peer.to_string(),
+        capacity_sats: 2_000_000,
+        costs: ChannelCosts {
+            channel_id: scid.to_string(),
+            peer_id: peer.to_string(),
+            open_cost_sats: open_cost,
+            rebalance_cost_sats: rebalance_cost,
+            effective_rebalance_cost_sats: rebalance_cost,
+        },
+        revenue: ChannelRevenue {
+            channel_id: scid.to_string(),
+            fees_earned_msat: fees_msat,
+            volume_routed_msat: volume_msat,
+            forward_count: forwards,
+            sourced_volume_msat,
+            sourced_fee_contribution_msat: sourced_fee_msat,
+            sourced_forward_count: sourced_forwards,
+        },
+        net_profit_sats: 0,
+        roi_percent: 12.345,
+        classification: ProfitabilityClass::Profitable,
+        cost_per_sat_routed: 0.5,
+        fee_per_sat_routed: 0.25,
+        days_open: 90,
+        last_routed: Some(1_799_000_000),
+        marginal_profit_30d_sats: 150,
+        rebalance_cost_30d_sats: 300,
+        opener: "local".to_string(),
+        contribution_30d_msat: 2_500_000,
+        fees_earned_30d_msat: 2_000_000,
+        sourced_fee_30d_msat: 0,
+        forward_count_30d: 9,
+        sourced_forward_count_30d: 1,
+        window_30d_available: true,
+    }
+}
+
+/// Hand-derived against get_profitability_by_peer (py 914-977): two
+/// channels for the peer, one foreign channel excluded; sums, ceils,
+/// round-2 ROI, histograms, sorted channels list.
+#[test]
+fn profitability_by_peer_aggregates_hand_derived() {
+    let mut map = HashMap::new();
+    // A: 700 cost; 2_500_500 msat direct (contribution 2_500_500 --
+    // the sub-sat tail makes the py ceil OBSERVABLE); 10 fwd / 5 sourced.
+    map.insert(
+        "100x1x0".to_string(),
+        peer_prof(
+            "100x1x0",
+            "02aa",
+            500,
+            200,
+            2_500_500,
+            100_000_000,
+            10,
+            50_000_000,
+            1_000_000,
+            5,
+        ),
+    );
+    // B: 300 cost; 0 direct but 4M sourced (contribution 4M); 0/12 -> inbound gateway.
+    map.insert(
+        "200x1x0".to_string(),
+        peer_prof(
+            "200x1x0", "02aa", 300, 0, 0, 0, 0, 20_000_000, 4_000_000, 12,
+        ),
+    );
+    map.insert(
+        "999x1x0".to_string(),
+        peer_prof("999x1x0", "02zz", 9_999, 0, 0, 0, 0, 0, 0, 0),
+    );
+
+    let v = profitability_by_peer(&map, "02aa").expect("peer has channels");
+    assert_eq!(v["peer_id"], "02aa");
+    assert_eq!(v["channel_count"], 2);
+    let a = &v["aggregate"];
+    assert_eq!(a["total_cost_sats"], 1000, "700 + 300");
+    assert_eq!(a["total_revenue_sats"], 2501, "CEIL(2_500_500 msat)");
+    assert_eq!(a["total_contribution_sats"], 6501, "CEIL(2_500_500 + 4M)");
+    assert_eq!(a["net_profit_sats"], 1501, "2501 - 1000");
+    assert_eq!(a["overall_roi_percent"], 150.1);
+    assert_eq!(a["total_volume_routed_sats"], 100_000);
+    assert_eq!(a["total_sourced_volume_sats"], 70_000);
+    assert_eq!(a["total_forward_count"], 10);
+    assert_eq!(a["total_sourced_forward_count"], 17);
+    assert_eq!(a["classifications"]["profitable"], 2);
+    assert_eq!(
+        a["role_distribution"]["balanced"], 1,
+        "10 of 15 outbound = 66.7%"
+    );
+    assert_eq!(
+        a["role_distribution"]["inbound_gateway"], 1,
+        "12 of 12 sourced"
+    );
+    let channels = v["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 2);
+    assert_eq!(channels[0]["channel_id"], "100x1x0", "sorted by channel_id");
+    assert_eq!(channels[1]["channel_id"], "200x1x0");
+
+    assert!(
+        profitability_by_peer(&map, "02absent").is_none(),
+        "py returns None for a peer with no analyzed channels"
+    );
+}
+
+/// Field-exact spot checks of the to_dict port (py 424-464), including
+/// the py round() semantics and both flow sub-objects.
+#[test]
+fn channel_profitability_to_dict_matches_python_fields() {
+    let mut p = peer_prof(
+        "100x1x0",
+        "02aa",
+        500,
+        200,
+        2_500_000,
+        100_000_000,
+        10,
+        50_000_000,
+        1_000_000,
+        5,
+    );
+    // 100/300 -> 33.333...% so py round(x, 2) is OBSERVABLE (50.0 rounds
+    // to itself and would let a dropped round survive mutation).
+    p.marginal_profit_30d_sats = 100;
+    let d = channel_profitability_to_dict(&p);
+    assert_eq!(d["channel_id"], "100x1x0");
+    assert_eq!(d["total_cost_sats"], 700);
+    assert_eq!(d["fees_earned_sats"], 2500);
+    assert_eq!(d["volume_routed_sats"], 100_000);
+    assert_eq!(d["roi_percent"], 12.35, "py round(12.345, 2) banker's");
+    assert_eq!(d["marginal_roi_percent"], 33.33, "py round(33.333.., 2)");
+    assert_eq!(d["is_operationally_profitable"], true);
+    assert_eq!(d["classification"], "profitable");
+    assert_eq!(d["cost_per_sat_routed"], 0.5);
+    assert_eq!(d["days_open"], 90);
+    assert_eq!(d["last_routed"], 1_799_000_000i64);
+    assert_eq!(d["contribution_30d_msat"], 2_500_000);
+    assert_eq!(d["window_30d_available"], true);
+    assert_eq!(d["marginal_roi_reliable"], true, "300 sats of 30d spend");
+    assert_eq!(d["channel_role"], "balanced");
+    assert_eq!(d["inbound_flow"]["payment_count"], 5);
+    assert_eq!(d["inbound_flow"]["volume_sats"], 50_000);
+    assert_eq!(
+        d["inbound_flow"]["contribution_to_other_channels_sats"],
+        1000
+    );
+    assert_eq!(d["outbound_flow"]["payment_count"], 10);
+    assert_eq!(d["outbound_flow"]["revenue_earned_sats"], 2500);
 }

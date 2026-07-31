@@ -1069,6 +1069,46 @@ pub async fn rebalance_spend_component(
     })
 }
 
+/// py `Database.get_all_channel_states` (database.py:1803-1807) as FULL
+/// row dicts — `SELECT *` with `dict(row)`, ordered `state, flow_ratio
+/// DESC`. The column list is written out (the schema's 17 columns) so a
+/// schema change surfaces as a loud query error, not silently reshaped
+/// rows; NULLs pass through as JSON null exactly like `dict(row)`.
+/// (`all_channel_states` above stays: it is the two-column identity
+/// subset `revenue-cleanup-closed` uses.)
+pub async fn all_channel_state_rows(handle: &DbHandle) -> Result<Vec<serde_json::Value>> {
+    handle
+        .query_rows(
+            "SELECT channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, \
+             updated_at, confidence, velocity, flow_multiplier, ema_decay, forward_count, \
+             kalman_flow_ratio, kalman_velocity, kalman_uncertainty, temporal_profile_json \
+             FROM channel_states ORDER BY state, flow_ratio DESC",
+            vec![],
+            |row| {
+                Ok(serde_json::json!({
+                    "channel_id": row.get::<_, Option<String>>(0)?,
+                    "peer_id": row.get::<_, Option<String>>(1)?,
+                    "state": row.get::<_, Option<String>>(2)?,
+                    "flow_ratio": row.get::<_, Option<f64>>(3)?,
+                    "sats_in": row.get::<_, Option<i64>>(4)?,
+                    "sats_out": row.get::<_, Option<i64>>(5)?,
+                    "capacity": row.get::<_, Option<i64>>(6)?,
+                    "updated_at": row.get::<_, Option<i64>>(7)?,
+                    "confidence": row.get::<_, Option<f64>>(8)?,
+                    "velocity": row.get::<_, Option<f64>>(9)?,
+                    "flow_multiplier": row.get::<_, Option<f64>>(10)?,
+                    "ema_decay": row.get::<_, Option<f64>>(11)?,
+                    "forward_count": row.get::<_, Option<i64>>(12)?,
+                    "kalman_flow_ratio": row.get::<_, Option<f64>>(13)?,
+                    "kalman_velocity": row.get::<_, Option<f64>>(14)?,
+                    "kalman_uncertainty": row.get::<_, Option<f64>>(15)?,
+                    "temporal_profile_json": row.get::<_, Option<String>>(16)?,
+                }))
+            },
+        )
+        .await
+}
+
 /// py `Database.get_config_version` (database.py:7374-7378): the live
 /// config version is `MAX(version)` over `config_overrides`, 0 when the
 /// table is empty (py `row['max_v'] or 0` — MAX over no rows is NULL).
