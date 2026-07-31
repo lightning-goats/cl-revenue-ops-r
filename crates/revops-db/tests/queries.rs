@@ -22,7 +22,8 @@ use revops_db::queries::{
     closure_costs_windows, config_override, cost_evidence_coverage,
     hot_channel_protection_override_peers, last_policy_change_timestamp, lifetime_stats,
     opening_costs_since, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
-    policy_changes_since, policy_for_peer, rebalance_spend_component, spend_ledger_aggregates,
+    policy_changes_since, policy_for_peer, rebalance_spend_component, recent_fee_change_timestamps,
+    spend_ledger_aggregates, spend_reservation_states,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -536,6 +537,68 @@ async fn channel_pnl_windows_revenue_rollups_and_ceils_rebalance_cost() {
     assert_eq!(pnl.forward_count, 6);
     // cost_msat 1500 -> ceil -> 2 sats; out-of-window row excluded.
     assert_eq!(pnl.rebalance_cost_sats, 2);
+}
+
+/// Actor-side port of `Database.get_spend_reservation_states`' no-filter
+/// form (database.py / BudgetDb parity: every row, ordered by id, capped
+/// at 10000) — the reconciliation truth map `revenue-econ-reconcile`
+/// diffs the econ ledger against.
+#[tokio::test]
+async fn spend_reservation_states_maps_every_row_with_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO spend_reservations (reservation_id, category, reserved_sats, reserved_at, status) VALUES \
+         ('r-a', 'rebalance', 40, ?1, 'active'), \
+         ('r-b', 'channel_open', 70, ?1, 'released'), \
+         ('r-c', 'misc', 0, ?1, 'spent')",
+        rusqlite::params![NOW - 100],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let states = spend_reservation_states(&handle).await.unwrap();
+    assert_eq!(states.len(), 3);
+    assert_eq!(states["r-a"].status, "active");
+    assert_eq!(states["r-a"].reserved_sats, 40);
+    assert_eq!(states["r-b"].status, "released");
+    assert_eq!(states["r-c"].reserved_sats, 0);
+}
+
+/// The consumed subset of `Database.get_recent_fee_changes`
+/// (database.py:2406-2425): `fee_intent_completeness` reads ONLY the
+/// timestamp column, newest first, with the SEC-10 limit clamp [1,10000].
+#[tokio::test]
+async fn recent_fee_change_timestamps_orders_desc_and_clamps_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO fee_changes (channel_id, peer_id, old_fee_ppm, new_fee_ppm, timestamp) VALUES \
+         ('1x1x0', ?1, 100, 110, ?2), \
+         ('1x1x0', ?1, 110, 120, ?3), \
+         ('1x1x0', ?1, 120, 130, ?4)",
+        rusqlite::params!["a".repeat(66), NOW - 300, NOW - 100, NOW - 200],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    assert_eq!(
+        recent_fee_change_timestamps(&handle, 500).await.unwrap(),
+        vec![NOW - 100, NOW - 200, NOW - 300]
+    );
+    assert_eq!(
+        recent_fee_change_timestamps(&handle, 2).await.unwrap(),
+        vec![NOW - 100, NOW - 200]
+    );
+    // SEC-10: a non-positive limit clamps to 1, never an SQL error.
+    assert_eq!(
+        recent_fee_change_timestamps(&handle, 0).await.unwrap(),
+        vec![NOW - 100]
+    );
 }
 
 /// Python's `COALESCE(SUM(...), 0)`: an empty table answers 0, not an error.

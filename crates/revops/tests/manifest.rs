@@ -450,18 +450,20 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        66,
+        67,
         "methods: {methods:?}"
     );
 
     // Task 66 slice 1: the unified total-cost budget read; slice 2: the
     // generic-ledger reserve and stale-release mutators; slice 3: the
-    // closed-channel archival backfill.
+    // closed-channel archival backfill; slice 4: the econ-ledger
+    // reconciliation sweep.
     for name in [
         "revenue-total-cost-budget",
         "revenue-spend-reserve",
         "revenue-spend-release-stale",
         "revenue-cleanup-closed",
+        "revenue-econ-reconcile",
     ] {
         assert!(methods.contains(&name), "missing {name}: {methods:?}");
     }
@@ -2105,6 +2107,91 @@ fn revenue_r_cleanup_closed_guard_arms_and_order() {
         with_db,
         serde_json::json!({"error": "Plugin not initialized"}),
         "owner unassembled until Task 69"
+    );
+}
+
+/// `revenue-r-econ-reconcile` through the spawned binary: the shadow flag
+/// defaults OFF, so the real config path answers Python's exact disabled
+/// hint; and a bad stale_after_seconds surfaces the int() error in-band.
+#[test]
+fn revenue_r_econ_reconcile_disabled_by_default_with_real_config_path() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-reconcile",
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "enabled": false,
+            "hint": "revenue-config set econ_shadow_enabled true",
+        })
+    );
+
+    let bad = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-reconcile",
+        serde_json::json!({"stale_after_seconds": "junk"}),
+    );
+    assert!(
+        bad["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("invalid literal for int()")),
+        "{bad:?}"
+    );
+}
+
+/// With the shadow flag enabled through the REAL config-override path and
+/// a journal dir configured, the handler must open the RUST-owned
+/// `econ_ledger_dryrun.db` — and must NEVER create a file named
+/// `econ_ledger.db`, which is Python's production ledger until cutover.
+#[test]
+fn revenue_r_econ_reconcile_touches_only_the_rust_dryrun_ledger() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('econ_shadow_enabled', 'true', 1, ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("enable econ shadow");
+    }
+    let journal_dir = home.path().join("journal");
+    std::fs::create_dir_all(&journal_dir).expect("mkdir journal");
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[(
+            "revops-r-journal-dir",
+            serde_json::json!(journal_dir.to_str().unwrap()),
+        )],
+        "revenue-r-econ-reconcile",
+    );
+    assert_eq!(result["enabled"], true, "{result:?}");
+    assert_eq!(result["checked"], 0);
+    assert_eq!(result["divergences"], serde_json::json!([]));
+    assert_eq!(
+        result["fee_intent_completeness"]["status"],
+        "no_intent_data"
+    );
+    assert!(
+        journal_dir.join("econ_ledger_dryrun.db").exists(),
+        "the handler must open the Rust-owned dry-run ledger"
+    );
+    assert!(
+        !journal_dir.join("econ_ledger.db").exists(),
+        "the production ledger name must never be created"
     );
 }
 

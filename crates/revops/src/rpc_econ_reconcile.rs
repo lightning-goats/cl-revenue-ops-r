@@ -6,13 +6,130 @@
 //! `revops_econ::reconcile` -- this module only shapes an already-computed
 //! [`ReconciliationReport`] (plus the separately-computed
 //! `fee_intent_completeness` blob and optional `apply` count) into the
-//! exact Python response dict. `econ_shadow`/`ledger`/`database`
-//! availability and the `apply=true` execution itself are the caller's
-//! job (py 6108-6117, 6143-6145): this crate does no I/O and commits no
-//! ledger events.
+//! exact Python response dict, plus (Task 66 slice 4)
+//! [`econ_reconcile_response`], the full assembly `main.rs` registers:
+//! availability arms, the DB truth-map read, the reconcile sweep, the
+//! best-effort completeness cross-check, and the `apply=true` corrections
+//! — appended ONLY to the Rust-owned dry-run ledger (see
+//! [`EconReconcileSources::ledger_path`]).
 
-use revops_econ::reconcile::ReconciliationReport;
+use revops_db::actor::DbHandle;
+use revops_econ::ledger::EconLedger;
+use revops_econ::reconcile::{DbReservationState, ReconciliationReport};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use crate::rpc_params::{is_truthy_py, python_int};
+
+/// py `apply: bool = False` under pyln's permissive binding: generic
+/// truthiness, like every other handler-defined bool in this port.
+pub fn parse_apply(raw: Option<&Value>) -> bool {
+    raw.map(is_truthy_py).unwrap_or(false)
+}
+
+/// py `stale_after_seconds: int = 3600`, floored at 60 inside the handler
+/// (`max(60, int(stale_after_seconds))`, cl-revenue-ops.py:6114).
+pub fn parse_stale_after_seconds(raw: Option<&Value>) -> Result<i64, Value> {
+    let default = Value::Number(3600.into());
+    let parsed = python_int(raw.unwrap_or(&default)).map_err(|error| json!({"error": error}))?;
+    Ok(parsed.max(60))
+}
+
+/// Everything the assembled response needs. `ledger_path` is the
+/// RUST-OWNED dry-run ledger (`<journal_dir>/econ_ledger_dryrun.db`, the
+/// same file `GovernorWiring` writes) — NEVER Python's production
+/// `econ_ledger.db`, which stays Python-owned until cutover. `apply=true`
+/// therefore appends reconciliation events only to this port's own
+/// evidence trail, exactly as the governed fee path already does.
+pub struct EconReconcileSources<'a> {
+    /// `config_resolve::econ_shadow_enabled` outcome — a FAILED read is
+    /// not "disabled"; it takes Python's outer error arm.
+    pub enabled: Result<bool, String>,
+    pub db: Option<&'a DbHandle>,
+    pub ledger_path: Option<PathBuf>,
+    pub apply: bool,
+    /// Already [`parse_stale_after_seconds`]-floored.
+    pub stale_after_seconds: i64,
+    pub now: i64,
+}
+
+/// Port of `revenue_econ_reconcile`'s arm structure
+/// (cl-revenue-ops.py:6095-6148): disabled hint, ledger/database
+/// unavailability, the dry-run report, the best-effort completeness
+/// cross-check (its OWN inner catch), and the optional apply count. Every
+/// remaining failure is Python's outer `{enabled: true, error}` arm.
+pub async fn econ_reconcile_response(s: EconReconcileSources<'_>) -> Value {
+    match s.enabled {
+        Ok(true) => {}
+        Ok(false) => return build_econ_reconcile_disabled(),
+        Err(error) => return build_econ_reconcile_error(&error),
+    }
+    let (Some(handle), Some(ledger_path)) = (s.db, s.ledger_path.as_ref()) else {
+        return build_econ_reconcile_unavailable();
+    };
+    // py `ledger_for_reconciliation()` returns None on an open failure ->
+    // the same unavailable arm.
+    let Ok(ledger) = EconLedger::open(ledger_path) else {
+        return build_econ_reconcile_unavailable();
+    };
+
+    let db_states: BTreeMap<String, DbReservationState> =
+        match revops_db::queries::spend_reservation_states(handle).await {
+            Ok(states) => states
+                .into_iter()
+                .map(|(key, state)| {
+                    (
+                        key,
+                        DbReservationState {
+                            status: state.status,
+                            reserved_sats: state.reserved_sats,
+                        },
+                    )
+                })
+                .collect(),
+            Err(error) => return build_econ_reconcile_error(&error.to_string()),
+        };
+
+    let report = match revops_econ::reconcile::reconcile(
+        &ledger,
+        &db_states,
+        s.now,
+        s.stale_after_seconds,
+    ) {
+        Ok(report) => report,
+        Err(error) => return build_econ_reconcile_error(&error.to_string()),
+    };
+
+    // py wraps BOTH the fee-changes read and the completeness math in one
+    // inner try/except -> the {"status": "error"} blob, never a whole-RPC
+    // failure (cl-revenue-ops.py:6134-6142).
+    let completeness = match revops_db::queries::recent_fee_change_timestamps(handle, 500).await {
+        Ok(timestamps) => {
+            let rows: Vec<Value> = timestamps
+                .into_iter()
+                .map(|timestamp| json!({"timestamp": timestamp}))
+                .collect();
+            match revops_econ::reconcile::fee_intent_completeness(&ledger, &rows, s.now, 86400, 120)
+            {
+                Ok(value) => value,
+                Err(error) => json!({"status": "error", "error": error.to_string()}),
+            }
+        }
+        Err(error) => json!({"status": "error", "error": error.to_string()}),
+    };
+
+    let applied = if s.apply {
+        match revops_econ::reconcile::apply(&ledger, &report, s.now) {
+            Ok(count) => Some(count),
+            Err(error) => return build_econ_reconcile_error(&error.to_string()),
+        }
+    } else {
+        None
+    };
+
+    build_econ_reconcile(&report, completeness, applied)
+}
 
 /// Port of the `econ_shadow is None or not econ_shadow.enabled()` branch
 /// (cl-revenue-ops.py:6108-6110).
@@ -91,6 +208,33 @@ pub fn build_econ_reconcile(
 mod tests {
     use super::*;
     use revops_econ::reconcile::Divergence;
+
+    #[test]
+    fn parse_apply_is_python_truthiness_defaulting_false() {
+        assert!(!parse_apply(None));
+        assert!(!parse_apply(Some(&json!(false))));
+        assert!(!parse_apply(Some(&json!(0))));
+        assert!(parse_apply(Some(&json!(true))));
+        // Python truthiness: a non-empty string is true — including "false".
+        assert!(parse_apply(Some(&json!("false"))));
+    }
+
+    #[test]
+    fn parse_stale_after_floors_at_sixty_and_defaults_3600() {
+        assert_eq!(parse_stale_after_seconds(None).unwrap(), 3600);
+        assert_eq!(parse_stale_after_seconds(Some(&json!(7200))).unwrap(), 7200);
+        assert_eq!(
+            parse_stale_after_seconds(Some(&json!(5))).unwrap(),
+            60,
+            "py max(60, ...)"
+        );
+        assert_eq!(parse_stale_after_seconds(Some(&json!("90"))).unwrap(), 90);
+        assert!(
+            parse_stale_after_seconds(Some(&json!("junk"))).unwrap_err()["error"]
+                .as_str()
+                .is_some()
+        );
+    }
 
     #[test]
     fn disabled_and_unavailable_branches_match_python_shapes() {

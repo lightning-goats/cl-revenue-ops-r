@@ -1069,6 +1069,45 @@ pub async fn rebalance_spend_component(
     })
 }
 
+/// Actor-side port of `Database.get_spend_reservation_states`' no-filter
+/// form (the only form `revenue-econ-reconcile` uses): every reservation's
+/// (status, reserved_sats) keyed by id, ordered, capped at 10000 —
+/// identical to `BudgetDb::get_spend_reservation_states(None)`.
+pub async fn spend_reservation_states(
+    handle: &DbHandle,
+) -> Result<BTreeMap<String, crate::budget::ReservationState>> {
+    let rows = handle
+        .query_rows(
+            "SELECT reservation_id, status, reserved_sats FROM spend_reservations \
+             ORDER BY reservation_id LIMIT 10000",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    crate::budget::ReservationState {
+                        status: row.get(1)?,
+                        reserved_sats: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    },
+                ))
+            },
+        )
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// The consumed subset of `Database.get_recent_fee_changes`
+/// (database.py:2406-2425): `fee_intent_completeness` reads only each
+/// row's timestamp. SEC-10 limit clamp [1,10000] mirrored; newest first.
+pub async fn recent_fee_change_timestamps(handle: &DbHandle, limit: i64) -> Result<Vec<i64>> {
+    handle
+        .query_rows(
+            "SELECT timestamp FROM fee_changes ORDER BY timestamp DESC LIMIT ?1",
+            vec![SqlValue::Integer(limit.clamp(1, 10000))],
+            |row| row.get(0),
+        )
+        .await
+}
+
 /// The identity subset of one `channel_states` row that
 /// `revenue-cleanup-closed` consumes (Python's `get_all_channel_states`
 /// returns whole rows; only these two fields are read there).

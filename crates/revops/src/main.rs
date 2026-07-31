@@ -59,6 +59,11 @@ struct State {
     /// Empty until Task69 consumes the whole-plugin live capability and
     /// assembles the sealed core-state mutator owner.
     core_mutations: std::sync::OnceLock<revops::rpc_state_mutators::CoreStateMutationOwner>,
+    /// The resolved dry-run journal directory (`resolve_journal_dir`),
+    /// where every Rust-owned evidence file lives — including the
+    /// GOVERNOR'S `econ_ledger_dryrun.db`, which `revenue-econ-reconcile`
+    /// reconciles. `None` = journaling disabled.
+    journal_dir: Option<PathBuf>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -692,6 +697,57 @@ fn register_total_cost_budget(
                         growth_experiment_fraction,
                         growth_max_extra_sats,
                         growth_hard_ceiling_sats,
+                        now: now_unix(),
+                    },
+                )
+                .await)
+            }
+        },
+    )
+}
+
+fn register_econ_reconcile(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "reconcile the Rust-owned econ ledger against spend_reservations truth (dry-run \
+         by default; apply=true appends corrections to the RUST dry-run ledger only)",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let apply = revops::rpc_econ_reconcile::parse_apply(decoded.get("apply"));
+                let stale_after_seconds =
+                    match revops::rpc_econ_reconcile::parse_stale_after_seconds(
+                        decoded.get("stale_after_seconds"),
+                    ) {
+                        Ok(seconds) => seconds,
+                        Err(error) => return Ok(error),
+                    };
+                let state = p.state();
+                Ok(revops::rpc_econ_reconcile::econ_reconcile_response(
+                    revops::rpc_econ_reconcile::EconReconcileSources {
+                        enabled: revops::config_resolve::econ_shadow_enabled(state.db.as_ref())
+                            .await,
+                        db: state.db.as_ref(),
+                        // The RUST-owned dry-run ledger (GovernorWiring's
+                        // file) — never Python's production econ_ledger.db.
+                        ledger_path: state
+                            .journal_dir
+                            .as_ref()
+                            .map(|dir| dir.join("econ_ledger_dryrun.db")),
+                        apply,
+                        stale_after_seconds,
                         now: now_unix(),
                     },
                 )
@@ -1373,6 +1429,12 @@ async fn main() -> Result<()> {
     let cleanup_closed_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-cleanup-closed",
+    );
+    // Task 66 slice 4: the econ-ledger reconciliation sweep.
+    let econ_reconcile_name = rpc_name("econ-reconcile");
+    let econ_reconcile_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-econ-reconcile",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -3234,6 +3296,7 @@ async fn main() -> Result<()> {
         revops::rpc_state_mutators::CoreStateMutationAction::SpendReleaseStale,
     );
     let builder = register_cleanup_closed(builder, &cleanup_closed_name, cleanup_closed_spec);
+    let builder = register_econ_reconcile(builder, &econ_reconcile_name, econ_reconcile_spec);
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
@@ -3964,6 +4027,7 @@ async fn main() -> Result<()> {
         scheduler,
         fee_pass: fee_rpc_pass,
         core_mutations,
+        journal_dir: journal_dir.clone(),
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,
