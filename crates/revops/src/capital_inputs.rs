@@ -31,7 +31,12 @@ pub struct CapitalReadSources {
     pub planner_actions: Result<HashMap<String, Vec<PlannerActionRecord>>, String>,
     pub rebalance_modes: Result<HashMap<String, String>, String>,
     pub close_protected_peers: Result<Vec<String>, String>,
-    pub openers: HashMap<String, String>,
+    /// C71-25: per-channel profitability evidence that was actually looked
+    /// up (routing time, diagnostics, fee posterior, opener). Replaces the
+    /// bare `openers` map, whose absent entries used to become a fabricated
+    /// `"local"` alongside three other invented classifier inputs. A
+    /// channel missing here is skipped with a reason, never defaulted.
+    pub evidence: HashMap<String, crate::profitability_evidence::ChannelEvidence>,
     pub daily_volume_sats: HashMap<String, f64>,
     pub rebalance_success: HashMap<String, RebalanceSuccessStats>,
     pub now: i64,
@@ -101,7 +106,7 @@ pub fn gather_capital_inputs(
         &revenue_all_time,
         &revenue_30d,
         &costs,
-        &sources.openers,
+        &sources.evidence,
         sources.now,
     );
     let candidates = build_candidate_evidence(CandidateSources {

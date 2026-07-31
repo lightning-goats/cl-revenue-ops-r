@@ -75,7 +75,22 @@ fn healthy() -> CapitalReadSources {
         planner_actions: Ok(HashMap::new()),
         rebalance_modes: Ok(HashMap::new()),
         close_protected_peers: Ok(Vec::new()),
-        openers: HashMap::new(),
+        // C71-25: this fixture used to pass an EMPTY openers map, and the
+        // assembler quietly turned that into `opener: "local"` for every
+        // channel alongside three other invented classifier inputs. The
+        // evidence now has to be supplied, so the fixture states it.
+        evidence: HashMap::from([(
+            "700x1x0".to_string(),
+            revops::profitability_evidence::ChannelEvidence {
+                last_routed: Some(NOW - 86_400),
+                diag: revops_analytics::profitability::DiagStats {
+                    attempt_count: 0,
+                    last_success_time: 0,
+                },
+                posterior_variance: None,
+                opener: "local".to_string(),
+            },
+        )]),
         daily_volume_sats: HashMap::from([("700x1x0".to_string(), 4_000_000.0)]),
         rebalance_success: HashMap::new(),
         now: NOW,
@@ -173,6 +188,23 @@ fn unevaluable_channels_are_reported_with_reasons() {
                 opened_at: 0, // missing
                 rebalance_cost_sats: 0,
                 rebalance_cost_30d_sats: 0,
+            },
+        );
+    }
+    // Both extra channels DO have evidence -- this test is about the
+    // flow-state and opened_at reasons, and a missing-evidence skip would
+    // mask them with a reason of its own.
+    for scid in ["800x1x0", "900x1x0"] {
+        s.evidence.insert(
+            scid.to_string(),
+            revops::profitability_evidence::ChannelEvidence {
+                last_routed: Some(NOW - 86_400),
+                diag: revops_analytics::profitability::DiagStats {
+                    attempt_count: 0,
+                    last_success_time: 0,
+                },
+                posterior_variance: None,
+                opener: "local".to_string(),
             },
         );
     }

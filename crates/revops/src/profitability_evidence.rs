@@ -64,10 +64,32 @@ pub struct ChannelEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfitabilityEvidenceRefusal {
-    LastRoutedUnavailable { scid: String, detail: String },
-    DiagnosticsUnavailable { scid: String, detail: String },
-    FeeStateUnavailable { scid: String, detail: String },
-    OpenerUnavailable { scid: String, detail: String },
+    LastRoutedUnavailable {
+        scid: String,
+        detail: String,
+    },
+    DiagnosticsUnavailable {
+        scid: String,
+        detail: String,
+    },
+    FeeStateUnavailable {
+        scid: String,
+        detail: String,
+    },
+    OpenerUnavailable {
+        scid: String,
+        detail: String,
+    },
+    /// The production-database snapshot could not be read at all. Fleet
+    /// level on purpose: no channel's revenue, costs or history is
+    /// available, so there is no per-channel verdict to skip.
+    SnapshotUnavailable {
+        detail: String,
+    },
+    /// The observer store's fee state could not be read at all.
+    FeeStoreUnavailable {
+        detail: String,
+    },
 }
 
 impl ProfitabilityEvidenceRefusal {
@@ -77,17 +99,23 @@ impl ProfitabilityEvidenceRefusal {
             Self::DiagnosticsUnavailable { .. } => "profitability_diagnostics_unavailable",
             Self::FeeStateUnavailable { .. } => "profitability_fee_state_unavailable",
             Self::OpenerUnavailable { .. } => "profitability_opener_unavailable",
+            Self::SnapshotUnavailable { .. } => "profitability_snapshot_unavailable",
+            Self::FeeStoreUnavailable { .. } => "profitability_fee_store_unavailable",
         }
     }
 
-    /// Which channel this refusal is about. A fleet pass skips per
-    /// channel, so a refusal that does not name one cannot be acted on.
-    pub fn scid(&self) -> &str {
+    /// Which channel this refusal is about, when it is about one. A fleet
+    /// pass skips per channel, so a per-channel refusal that does not name
+    /// its channel cannot be acted on. The two store-level variants
+    /// deliberately name none: attributing a whole-store failure to one
+    /// channel would suggest the rest of the fleet was evaluated.
+    pub fn scid(&self) -> Option<&str> {
         match self {
             Self::LastRoutedUnavailable { scid, .. }
             | Self::DiagnosticsUnavailable { scid, .. }
             | Self::FeeStateUnavailable { scid, .. }
-            | Self::OpenerUnavailable { scid, .. } => scid,
+            | Self::OpenerUnavailable { scid, .. } => Some(scid),
+            Self::SnapshotUnavailable { .. } | Self::FeeStoreUnavailable { .. } => None,
         }
     }
 
@@ -96,8 +124,102 @@ impl ProfitabilityEvidenceRefusal {
             Self::LastRoutedUnavailable { detail, .. }
             | Self::DiagnosticsUnavailable { detail, .. }
             | Self::FeeStateUnavailable { detail, .. }
-            | Self::OpenerUnavailable { detail, .. } => detail,
+            | Self::OpenerUnavailable { detail, .. }
+            | Self::SnapshotUnavailable { detail }
+            | Self::FeeStoreUnavailable { detail } => detail,
         }
+    }
+}
+
+/// Read one channel's fee posterior out of the observer store's
+/// `v2_state_json` envelope, as py `_classify_channel` does
+/// (profitability_analyzer.py:2715-2723).
+///
+/// `Ok(None)` is Python's `10000` default: at or above the `2500` widening
+/// threshold, so it widens nothing. `Err` is the case Python cannot
+/// express -- its whole posterior block sits under `except Exception:
+/// pass`, so an unreadable envelope and a channel with no posterior both
+/// arrive at the classifier as "no widening". Those are different facts:
+/// one is a real answer about a new channel, the other is corrupt
+/// controller state that the widening decision would otherwise rest on.
+///
+/// The `or` chain is Python's and is load-bearing in both directions: an
+/// EMPTY nested `thompson_state` is falsy and falls through to the flat
+/// pre-mirror row, while a NON-empty one wins outright and a missing
+/// `posterior_variance` inside it takes the default rather than reaching
+/// back to the flat row's (possibly stale) value.
+/// Python's truthiness, which both `or`s in the chain above depend on.
+/// `bool({})`, `bool([])`, `bool("")`, `bool(0)`, `bool(0.0)`,
+/// `bool(False)` and `bool(None)` are all false, and each one makes the
+/// chain fall through to the next term.
+fn is_python_falsy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Bool(b) => !b,
+        serde_json::Value::Number(n) => n.as_f64() == Some(0.0),
+        serde_json::Value::String(s) => s.is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+    }
+}
+
+pub fn posterior_variance_from_v2_json(v2_state_json: &str) -> Result<Option<f64>, String> {
+    // py: `fee_state.get('v2_state_json', '{}') or '{}'` -- an empty or
+    // NULL column is an empty envelope, not a failure.
+    let raw = if v2_state_json.is_empty() {
+        "{}"
+    } else {
+        v2_state_json
+    };
+    let envelope: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("v2_state_json is not valid JSON: {error}"))?;
+    let envelope = envelope
+        .as_object()
+        .ok_or_else(|| "v2_state_json is not a JSON object".to_string())?;
+
+    // py `(v2_data.get('fee_state') or {})`. A FALSY `fee_state` -- null,
+    // false, 0, "", [], {} -- becomes an empty dict and the chain
+    // continues to the flat row; that is not an error case in Python and
+    // refusing there would deny a posterior Python honours. A TRUTHY
+    // non-object raises AttributeError instead, which Python's blanket
+    // handler turns into "no widening" -- and falling through to the flat
+    // row there would be strictly worse than either behaviour, widening a
+    // band from a stale pre-mirror posterior on the strength of corrupt
+    // state.
+    let fee_state = match envelope.get("fee_state") {
+        Some(value) if !is_python_falsy(value) => Some(
+            value
+                .as_object()
+                .ok_or_else(|| "fee_state is not a JSON object".to_string())?,
+        ),
+        _ => None,
+    };
+
+    // The second `or`, with the same falsy set.
+    let nested = fee_state
+        .and_then(|fee_state| fee_state.get("thompson_state"))
+        .filter(|state| !is_python_falsy(state));
+
+    let thompson = match nested.or_else(|| envelope.get("thompson_state")) {
+        Some(state) => state,
+        // py's `.get('thompson_state', {})` default: an ABSENT key yields
+        // an empty dict, whose `posterior_variance` is the 10000 default.
+        None => return Ok(None),
+    };
+    // Reached only when a value is present. `{}` is a dict and reads as
+    // the default; null/0/""/[] are not, and `.get` on them raises.
+    let thompson = thompson
+        .as_object()
+        .ok_or_else(|| "thompson_state is not a JSON object".to_string())?;
+
+    match thompson.get("posterior_variance") {
+        // Absent, or a JSON null: py's `isinstance` guard turns both into
+        // "no widening", which is a real answer for a pre-posterior row.
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| format!("posterior_variance is not a number: {value}")),
     }
 }
 

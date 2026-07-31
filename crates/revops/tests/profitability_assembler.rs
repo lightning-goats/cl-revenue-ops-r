@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use revops::profitability_assembler::{
     assemble_channel_profitability, ChannelInput, ProfitabilityRefusal,
 };
-use revops_analytics::profitability::ProfitabilityClass;
+use revops::profitability_evidence::ChannelEvidence;
+use revops_analytics::profitability::{DiagStats, ProfitabilityClass};
 use revops_db::queries::{PerChannelCosts, PerChannelRevenue};
 
 const NOW: i64 = 1_800_000_000;
@@ -153,13 +154,12 @@ fn fleet_assembly_reports_skips_with_reasons() {
     // A channel with costs but a missing open timestamp.
     cst.insert("800x1x0".to_string(), costs(1_000, 0, 0, 1_000_000, 0));
 
-    let out = revops::profitability_assembler::assemble_fleet(
-        &rev,
-        &HashMap::new(),
-        &cst,
-        &HashMap::new(),
-        NOW,
-    );
+    let mut ev = HashMap::new();
+    ev.insert("700x1x0".to_string(), evidence("local", None));
+    ev.insert("800x1x0".to_string(), evidence("local", None));
+
+    let out =
+        revops::profitability_assembler::assemble_fleet(&rev, &HashMap::new(), &cst, &ev, NOW);
     assert_eq!(out.profitability.len(), 1);
     assert!(out.profitability.contains_key("700x1x0"));
     assert_eq!(out.skipped.len(), 1);
@@ -168,5 +168,86 @@ fn fleet_assembly_reports_skips_with_reasons() {
         out.skipped[0].1.contains("opened_at"),
         "the skip reason must name the missing column: {:?}",
         out.skipped
+    );
+}
+
+fn evidence(opener: &str, last_routed: Option<i64>) -> ChannelEvidence {
+    ChannelEvidence {
+        last_routed,
+        diag: DiagStats {
+            attempt_count: 0,
+            last_success_time: 0,
+        },
+        posterior_variance: None,
+        opener: opener.to_string(),
+    }
+}
+
+/// C71-25. The fleet assembler used to invent `opener: "local"`,
+/// `last_routed: None` and zeroed diagnostics for every channel. Three of
+/// those coincide with Python's no-row defaults, so no test ever saw them;
+/// the fourth asserts this node paid for the open.
+///
+/// A channel with no evidence must now be SKIPPED with a reason, because
+/// "we did not look" and "we looked and found nothing" are different facts
+/// and only the second one is Python's.
+#[test]
+fn a_channel_without_evidence_is_skipped_rather_than_assembled_from_defaults() {
+    let mut cst = HashMap::new();
+    cst.insert(
+        "700x1x0".to_string(),
+        costs(2_000, 0, 0, 5_000_000, NOW - 10 * DAY),
+    );
+
+    let out = revops::profitability_assembler::assemble_fleet(
+        &HashMap::new(),
+        &HashMap::new(),
+        &cst,
+        &HashMap::new(),
+        NOW,
+    );
+    assert!(
+        out.profitability.is_empty(),
+        "a channel with no evidence must not be classified from defaults"
+    );
+    assert_eq!(out.skipped.len(), 1);
+    assert_eq!(out.skipped[0].0, "700x1x0");
+    assert!(
+        out.skipped[0].1.contains("evidence"),
+        "the skip reason must say the evidence is missing: {:?}",
+        out.skipped
+    );
+}
+
+/// The damage the fabricated `last_routed: None` actually did: the
+/// classifier substitutes `days_open` for `days_inactive` when there is no
+/// routing time (py profitability_analyzer.py:2661-2663), so a mature
+/// channel that routed yesterday was judged idle for its entire life.
+#[test]
+fn fleet_assembly_uses_the_evidence_last_routed_rather_than_reporting_never_routed() {
+    let mut cst = HashMap::new();
+    cst.insert(
+        "700x1x0".to_string(),
+        costs(2_000, 0, 0, 5_000_000, NOW - 400 * DAY),
+    );
+    let mut ev = HashMap::new();
+    ev.insert("700x1x0".to_string(), evidence("remote", Some(NOW - DAY)));
+
+    let out = revops::profitability_assembler::assemble_fleet(
+        &HashMap::new(),
+        &HashMap::new(),
+        &cst,
+        &ev,
+        NOW,
+    );
+    let p = out.profitability.get("700x1x0").expect("assembles");
+    assert_eq!(
+        p.last_routed,
+        Some(NOW - DAY),
+        "the assembled channel must carry the evidence's routing time"
+    );
+    assert_eq!(
+        p.opener, "remote",
+        "the opener must come from the live snapshot, not a fabricated \"local\""
     );
 }

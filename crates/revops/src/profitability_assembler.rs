@@ -173,33 +173,197 @@ pub struct FleetProfitability {
     pub skipped: Vec<(String, String)>,
 }
 
-/// Assemble every channel that has costs. `openers` and `last_routed` come
-/// from the live snapshot; absent entries fall back to Python's own
-/// defaults (`"local"`, no routing time).
+/// py's trailing window for marginal ROI and its
+/// `get_diagnostic_rebalance_stats(scid, days=14)` default
+/// (database.py:2787). Constants rather than options because Python does
+/// not expose either as one.
+pub const PROFITABILITY_WINDOW_DAYS: i64 = 30;
+pub const DIAGNOSTIC_WINDOW_DAYS: i64 = 14;
+
+/// The stores one fleet profitability pass reads, and the already-fetched
+/// channel snapshot it is told about.
+///
+/// `channels` is passed IN rather than fetched here: the opener must come
+/// from the same bounded snapshot the caller already took, not from a
+/// second query that could disagree with it.
+pub struct ProfitabilitySources<'a> {
+    pub production_db: &'a revops_db::actor::DbHandle,
+    pub observer: &'a revops_db::owner::ObserverHandle,
+    pub channels: &'a [serde_json::Value],
+    pub now: i64,
+}
+
+/// py `_scid_aliases`, applied to every key so the three sources agree.
+fn normalize_scid(scid: &str) -> String {
+    scid.replace(':', "x")
+}
+
+/// The opener of each channel in an already-fetched `listpeerchannels`
+/// snapshot. Channels without a `short_channel_id` (still opening) or
+/// without an `opener` are simply absent -- absence is what makes the
+/// channel skip, and inventing `"local"` here is the thing C71-25 removes.
+pub fn openers_from_channels(channels: &[serde_json::Value]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for channel in channels {
+        let Some(scid) = channel.get("short_channel_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(opener) = channel.get("opener").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        out.insert(normalize_scid(scid), opener.to_string());
+    }
+    out
+}
+
+/// One fleet profitability pass: ONE production-database await, ONE
+/// observer-store await, and the caller's already-fetched channel
+/// snapshot.
+///
+/// It never calls `per_channel_revenue`, `per_channel_costs` or
+/// `channel_history`. Those are separate actor turns against a database
+/// Python writes concurrently under WAL, and composing them would produce
+/// a fleet state that existed at no instant (C71-21).
+///
+/// Store-level failures refuse for the whole fleet. Per-channel evidence
+/// problems -- a corrupt fee posterior, a channel absent from the snapshot
+/// -- skip that channel WITH a reason, so one bad row cannot blank the
+/// whole surface and cannot pass unnoticed either.
+pub async fn gather_profitability(
+    sources: ProfitabilitySources<'_>,
+) -> Result<FleetProfitability, crate::profitability_evidence::ProfitabilityEvidenceRefusal> {
+    use crate::profitability_evidence::{
+        channel_evidence, posterior_variance_from_v2_json, ConsultedSources,
+        ProfitabilityEvidenceRefusal,
+    };
+
+    let snapshot = sources
+        .production_db
+        .profitability_snapshot(
+            sources.now,
+            PROFITABILITY_WINDOW_DAYS,
+            DIAGNOSTIC_WINDOW_DAYS,
+        )
+        .await
+        .map_err(|error| ProfitabilityEvidenceRefusal::SnapshotUnavailable {
+            detail: format!("{error:#}"),
+        })?;
+
+    let fee_state = sources
+        .observer
+        .load_latest_fee_state()
+        .await
+        .map_err(|error| ProfitabilityEvidenceRefusal::FeeStoreUnavailable {
+            detail: format!("{error:#}"),
+        })?;
+    let posteriors: HashMap<String, Result<Option<f64>, String>> = fee_state
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                normalize_scid(&row.channel_id),
+                posterior_variance_from_v2_json(&row.v2_state_json),
+            )
+        })
+        .collect();
+
+    let openers = openers_from_channels(sources.channels);
+
+    let mut evidence = HashMap::new();
+    let mut refused: Vec<(String, String)> = Vec::new();
+    let mut scids: Vec<&String> = snapshot.costs.keys().collect();
+    scids.sort();
+    for scid in scids {
+        let history = snapshot.history.get(scid);
+        let consulted = ConsultedSources {
+            // The fleet snapshot RAN; a channel absent from it genuinely
+            // has no rows, which is Python's own no-row answer.
+            last_routed: Ok(history.and_then(|h| h.last_routed)),
+            diag: Ok(history.map(|h| h.diag)),
+            posterior_variance: posteriors.get(scid).cloned().unwrap_or(Ok(None)),
+            opener: Ok(openers.get(scid).cloned()),
+        };
+        match channel_evidence(scid, consulted) {
+            Ok(ev) => {
+                evidence.insert(scid.clone(), ev);
+            }
+            Err(refusal) => {
+                refused.push((
+                    scid.clone(),
+                    format!("{}: {}", refusal.code(), refusal.detail()),
+                ));
+            }
+        }
+    }
+
+    let mut fleet = assemble_fleet(
+        &snapshot.revenue_all_time,
+        &snapshot.revenue_30d,
+        &snapshot.costs,
+        &evidence,
+        sources.now,
+    );
+    // A refused channel is ALSO absent from `evidence`, so the assembler
+    // has already skipped it with its generic "no evidence was gathered"
+    // reason. Dropping that here is not cosmetic: the generic reason says
+    // nothing was looked up, when in fact the lookup ran and one source
+    // came back unreadable. Leaving both in would let the vaguer reason
+    // mask the actionable one -- the C71-15 precedence trap.
+    let refused_scids: std::collections::HashSet<&str> =
+        refused.iter().map(|(scid, _)| scid.as_str()).collect();
+    fleet
+        .skipped
+        .retain(|(scid, _)| !refused_scids.contains(scid.as_str()));
+    fleet.skipped.extend(refused);
+    fleet.skipped.sort();
+    Ok(fleet)
+}
+
+/// Assemble every channel that has costs, from evidence that was actually
+/// looked up.
+///
+/// C71-25: this function used to invent `opener: "local"`,
+/// `last_routed: None`, zeroed diagnostics and no fee posterior for every
+/// channel. Three of those coincide with Python's no-row defaults, which
+/// is why no test ever caught them -- but Python reached them by RUNNING
+/// the query, and this reached them by not asking. The fourth,
+/// `opener: "local"`, is not even Python's default in spirit: it asserts
+/// this node paid the opening fee, and that figure is reported to the
+/// operator, not merely fed to the classifier.
+///
+/// A channel with no evidence entry is therefore SKIPPED with a reason.
+/// Skipping is visible; a fabricated default is not.
 pub fn assemble_fleet(
     revenue_all_time: &HashMap<String, PerChannelRevenue>,
     revenue_30d: &HashMap<String, PerChannelRevenue>,
     costs: &HashMap<String, PerChannelCosts>,
-    openers: &HashMap<String, String>,
+    evidence: &HashMap<String, crate::profitability_evidence::ChannelEvidence>,
     now: i64,
 ) -> FleetProfitability {
     let mut out = FleetProfitability::default();
     let mut scids: Vec<&String> = costs.keys().collect();
     scids.sort();
     for scid in scids {
+        let Some(ev) = evidence.get(scid) else {
+            out.skipped.push((
+                scid.clone(),
+                "no profitability evidence was gathered for this channel; \
+                 classifying it from defaults would report an unconsulted \
+                 channel as never-routed and locally funded"
+                    .to_string(),
+            ));
+            continue;
+        };
         let input = ChannelInput {
             scid: scid.clone(),
             revenue_all_time: revenue_all_time.get(scid).cloned().unwrap_or_default(),
             revenue_30d: revenue_30d.get(scid).cloned().unwrap_or_default(),
             costs: costs.get(scid).cloned().unwrap_or_default(),
-            opener: openers
-                .get(scid)
-                .cloned()
-                .unwrap_or_else(|| "local".to_string()),
-            last_routed: None,
-            diag_attempt_count: 0,
-            diag_last_success_time: 0,
-            posterior_variance: None,
+            opener: ev.opener.clone(),
+            last_routed: ev.last_routed,
+            diag_attempt_count: ev.diag.attempt_count,
+            diag_last_success_time: ev.diag.last_success_time,
+            posterior_variance: ev.posterior_variance,
         };
         match assemble_channel_profitability(input, now) {
             Ok(p) => {

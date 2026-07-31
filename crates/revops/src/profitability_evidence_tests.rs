@@ -169,8 +169,18 @@ fn every_refusal_names_the_channel_it_is_about() {
     };
     let refusal = channel_evidence(SCID, sources).expect_err("refuses");
     assert!(
-        refusal.scid() == SCID,
+        refusal.scid() == Some(SCID),
         "refusal must carry its channel, got {refusal:?}"
+    );
+    // The store-level variants name no channel on purpose: pinning a
+    // whole-store failure on one channel would imply the rest of the fleet
+    // was evaluated.
+    assert_eq!(
+        ProfitabilityEvidenceRefusal::SnapshotUnavailable {
+            detail: "io".to_string()
+        }
+        .scid(),
+        None
     );
     assert!(
         !refusal.code().is_empty() && refusal.code() != "not_yet_ported",
@@ -241,4 +251,233 @@ fn a_sourced_posterior_variance_actually_widens_the_thresholds() {
         "a proven fee posterior must widen the band; dropping it makes the port \
          harsher than Python on exactly the channels Python protects"
     );
+}
+
+// ---------------------------------------------------------------------
+// C71-25: the fee posterior, parsed from the observer store's envelope.
+//
+// py `_classify_channel` (profitability_analyzer.py:2705-2729) reads
+// `v2_state_json`, prefers `fee_state.thompson_state` and falls back to a
+// flat `thompson_state`, then takes `posterior_variance` defaulting to
+// 10000 -- a value at/above the 2500 widening threshold, so the default
+// widens nothing. `None` here IS that default.
+//
+// Everything in that block is wrapped in `except Exception: pass`, so
+// Python cannot tell "no stored posterior" from "the stored posterior is
+// unreadable". This port keeps them distinct: absent is Python's answer,
+// unreadable is a refusal.
+// ---------------------------------------------------------------------
+
+use crate::profitability_evidence::posterior_variance_from_v2_json as parse_posterior;
+
+#[test]
+fn a_nested_thompson_posterior_is_the_preferred_source() {
+    assert_eq!(
+        parse_posterior(r#"{"fee_state":{"thompson_state":{"posterior_variance":1200}}}"#),
+        Ok(Some(1200.0))
+    );
+}
+
+#[test]
+fn a_flat_thompson_posterior_is_the_fallback_for_pre_mirror_rows() {
+    // py's `or` chain falls back to a top-level `thompson_state` for rows
+    // written before the mirror removal. Dropping the fallback silently
+    // un-widens every legacy channel's band.
+    assert_eq!(
+        parse_posterior(r#"{"thompson_state":{"posterior_variance":1200}}"#),
+        Ok(Some(1200.0))
+    );
+}
+
+#[test]
+fn an_empty_nested_thompson_state_falls_through_to_the_flat_one() {
+    // `(x or {}).get('thompson_state') or v2.get('thompson_state', {})`:
+    // an EMPTY nested dict is falsy, so Python falls back. Treating the
+    // nested key's mere presence as authoritative diverges here.
+    assert_eq!(
+        parse_posterior(
+            r#"{"fee_state":{"thompson_state":{}},"thompson_state":{"posterior_variance":1200}}"#
+        ),
+        Ok(Some(1200.0))
+    );
+}
+
+#[test]
+fn a_non_empty_nested_thompson_state_wins_even_when_it_lacks_the_posterior() {
+    // The other side of the same `or`: once the nested dict is truthy it
+    // IS `ts`, and a missing `posterior_variance` takes the 10000 default
+    // rather than reaching for the flat row's value. Falling through here
+    // would resurrect a stale legacy posterior and widen a band Python
+    // leaves narrow.
+    assert_eq!(
+        parse_posterior(
+            r#"{"fee_state":{"thompson_state":{"alpha":3}},"thompson_state":{"posterior_variance":1200}}"#
+        ),
+        Ok(None)
+    );
+}
+
+#[test]
+fn a_row_with_no_thompson_state_at_all_is_pythons_own_default() {
+    assert_eq!(parse_posterior(r#"{"fee_state":{}}"#), Ok(None));
+    assert_eq!(parse_posterior("{}"), Ok(None));
+}
+
+#[test]
+fn an_empty_envelope_string_is_pythons_own_default() {
+    // py: `fee_state.get('v2_state_json', '{}') or '{}'` -- an empty or
+    // NULL column reads as `{}`, not as an error.
+    assert_eq!(parse_posterior(""), Ok(None));
+}
+
+#[test]
+fn a_json_null_posterior_is_absent_not_malformed() {
+    // py takes the value, then guards `isinstance(variance, (int, float))`.
+    // A JSON null fails that guard and widens nothing -- a real answer, and
+    // a common one for rows written before the posterior existed. Refusing
+    // here would make those channels unevaluable.
+    assert_eq!(
+        parse_posterior(r#"{"thompson_state":{"posterior_variance":null}}"#),
+        Ok(None)
+    );
+}
+
+#[test]
+fn a_non_numeric_posterior_is_a_refusal_not_a_silent_no_widening() {
+    // Disclosed divergence. Python's isinstance guard turns a corrupt
+    // value into "no widening", indistinguishable from a channel that
+    // simply has no posterior. A string where a variance belongs means the
+    // fee controller wrote something wrong, and the widening decision would
+    // then rest on state nobody can read.
+    let refusal = parse_posterior(r#"{"thompson_state":{"posterior_variance":"1200"}}"#)
+        .expect_err("a non-numeric posterior must not read as absent");
+    assert!(
+        refusal.contains("posterior_variance"),
+        "the refusal must name the field: {refusal}"
+    );
+}
+
+#[test]
+fn an_unparseable_envelope_is_a_refusal_not_an_absent_posterior() {
+    // py's `except Exception: pass` swallows the JSONDecodeError and
+    // classifies with an unwidened band. That is could-not-consult being
+    // reported as consulted-and-empty.
+    let refusal =
+        parse_posterior("{not json").expect_err("an unparseable envelope must not read as absent");
+    assert!(
+        !refusal.is_empty(),
+        "the refusal must carry the parse detail"
+    );
+}
+
+#[test]
+fn a_bare_number_envelope_is_a_refusal() {
+    // `json.loads("5")` succeeds and returns an int; py's `.get` then
+    // raises AttributeError, caught by the same blanket handler. The
+    // envelope is not an object, so nothing was consulted.
+    assert!(parse_posterior("5").is_err());
+}
+
+#[test]
+fn an_integer_posterior_is_read_as_a_variance() {
+    // The store writes whatever serde produced; an exact integer must not
+    // read as malformed.
+    assert_eq!(
+        parse_posterior(r#"{"thompson_state":{"posterior_variance":2500}}"#),
+        Ok(Some(2500.0))
+    );
+}
+
+#[test]
+fn a_thompson_state_that_is_not_an_object_is_a_refusal() {
+    // py's `.get` on a non-dict raises AttributeError into the blanket
+    // handler, so this too arrives as an unwidened band indistinguishable
+    // from a new channel. Structural corruption is the same class of fact
+    // as a corrupt value.
+    assert!(parse_posterior(r#"{"thompson_state":7}"#).is_err());
+    assert!(parse_posterior(r#"{"fee_state":{"thompson_state":7}}"#).is_err());
+}
+
+// ---------------------------------------------------------------------
+// C71-27: the `or` chain's falsy set, derived by EXECUTING Python.
+//
+//   ts = ((v2.get('fee_state') or {}).get('thompson_state')
+//         or v2.get('thompson_state', {}))
+//   variance = ts.get('posterior_variance', 10000)
+//
+// Two `or`s, each with Python's full falsy set (None/False/0/""/[]/{}),
+// and two places that raise into the blanket handler. Verified case by
+// case against the interpreter:
+//
+//   fee_state null/false/0/[]        -> falls through to flat  (`or {}`)
+//   fee_state 7 (truthy non-dict)    -> AttributeError
+//   nested null/false/0/""/[]/{}     -> falls through to flat
+//   nested 7 (truthy non-dict)       -> AttributeError
+//   flat present but null            -> AttributeError
+//   flat absent, or an empty dict    -> the 10000 default
+//
+// A falsy `fee_state` is NOT a raise: `None or {}` yields `{}`, so Python
+// really does reach the flat row. Refusing there would deny a posterior
+// Python honours.
+// ---------------------------------------------------------------------
+
+const FLAT_1200: &str = r#""thompson_state":{"posterior_variance":1200}"#;
+
+#[test]
+fn every_python_falsy_nested_thompson_state_falls_through_to_the_flat_row() {
+    for falsy in ["null", "false", "0", "0.0", r#""""#, "[]", "{}"] {
+        let envelope = format!(r#"{{"fee_state":{{"thompson_state":{falsy}}},{FLAT_1200}}}"#);
+        assert_eq!(
+            parse_posterior(&envelope),
+            Ok(Some(1200.0)),
+            "nested thompson_state `{falsy}` is Python-falsy and must fall \
+             through to the flat pre-mirror row"
+        );
+    }
+}
+
+#[test]
+fn every_python_falsy_fee_state_falls_through_to_the_flat_row() {
+    // `(x or {})` -- a falsy fee_state becomes an empty dict and the chain
+    // continues. This is NOT one of Python's raising cases.
+    for falsy in ["null", "false", "0", r#""""#, "[]", "{}"] {
+        let envelope = format!(r#"{{"fee_state":{falsy},{FLAT_1200}}}"#);
+        assert_eq!(
+            parse_posterior(&envelope),
+            Ok(Some(1200.0)),
+            "fee_state `{falsy}` is Python-falsy; `or {{}}` means Python still \
+             reads the flat row, so refusing here would deny a posterior \
+             Python honours"
+        );
+    }
+}
+
+#[test]
+fn a_truthy_non_object_fee_state_refuses_rather_than_resurrecting_the_flat_row() {
+    // Python raises AttributeError here and the blanket handler turns it
+    // into "no widening". Falling through to the flat row instead would be
+    // strictly worse than either: it would widen a band from a stale
+    // pre-mirror posterior on the strength of corrupt state.
+    for truthy in ["7", r#""x""#, "[1]", "true"] {
+        let envelope = format!(r#"{{"fee_state":{truthy},{FLAT_1200}}}"#);
+        assert!(
+            parse_posterior(&envelope).is_err(),
+            "a truthy non-object fee_state (`{truthy}`) must refuse, not fall \
+             through to the flat row"
+        );
+    }
+}
+
+#[test]
+fn a_flat_thompson_state_present_but_null_refuses() {
+    // `v2.get('thompson_state', {})` returns None when the key is present
+    // with a null value -- the default only applies to an ABSENT key -- and
+    // `None.get(...)` raises.
+    assert!(parse_posterior(r#"{"thompson_state":null}"#).is_err());
+}
+
+#[test]
+fn an_absent_or_empty_flat_thompson_state_is_the_ten_thousand_default() {
+    assert_eq!(parse_posterior("{}"), Ok(None));
+    assert_eq!(parse_posterior(r#"{"thompson_state":{}}"#), Ok(None));
 }
