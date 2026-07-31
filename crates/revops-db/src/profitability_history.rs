@@ -232,6 +232,11 @@ fn read_revenue(
     Ok(out)
 }
 
+/// py `base_to_sats_ceil`: a partial sat of cost is a whole sat spent.
+fn ceil_sats(msat: i64) -> i64 {
+    msat.div_euclid(1000) + i64::from(msat.rem_euclid(1000) != 0)
+}
+
 fn read_costs(
     tx: &rusqlite::Transaction<'_>,
     window_since: i64,
@@ -277,15 +282,40 @@ fn read_costs(
     }
 
     {
-        let mut stmt = tx
-            .prepare(
-                "SELECT channel_id, COALESCE(peer_id,''), COALESCE(SUM(cost_sats),0),
-                        COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN cost_sats ELSE 0 END),0)
-                   FROM rebalance_costs
-                  WHERE channel_id IS NOT NULL
-                  GROUP BY channel_id",
-            )
-            .context("prepare snapshot rebalance costs")?;
+        // py `SUM(COALESCE(cost_msat, cost_sats * 1000))`, with the same
+        // fallback for a schema predating the msat column
+        // (database.py:3122-3132). The msat form is not cosmetic: the
+        // bleeder verdict is `net < 0` over
+        // `contribution_msat - rebalance_cost_msat`, so rounding to sats
+        // first moves the boundary.
+        const MSAT_NATIVE: &str = "SELECT channel_id, COALESCE(peer_id,''),
+                    COALESCE(SUM(COALESCE(cost_msat, cost_sats * 1000)),0),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1
+                                 THEN COALESCE(cost_msat, cost_sats * 1000) ELSE 0 END),0)
+               FROM rebalance_costs
+              WHERE channel_id IS NOT NULL
+              GROUP BY channel_id";
+        const SATS_ONLY: &str = "SELECT channel_id, COALESCE(peer_id,''),
+                    COALESCE(SUM(cost_sats * 1000),0),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN cost_sats * 1000 ELSE 0 END),0)
+               FROM rebalance_costs
+              WHERE channel_id IS NOT NULL
+              GROUP BY channel_id";
+
+        // An ABSENT column is a schema fact, not a store failure; every
+        // other prepare error still refuses.
+        let mut stmt = match tx.prepare(MSAT_NATIVE) {
+            Ok(stmt) => stmt,
+            Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+                if message.contains("no such column") =>
+            {
+                tx.prepare(SATS_ONLY)
+                    .context("prepare snapshot rebalance costs (pre-msat schema)")?
+            }
+            Err(error) => {
+                return Err(anyhow::Error::from(error)).context("prepare snapshot rebalance costs")
+            }
+        };
         let rows = stmt
             .query_map([window_since], |row| {
                 Ok((
@@ -297,15 +327,19 @@ fn read_costs(
             })
             .context("run snapshot rebalance costs")?;
         for row in rows {
-            let (scid, peer_id, total, windowed) =
+            let (scid, peer_id, total_msat, windowed_msat) =
                 row.context("decode snapshot rebalance costs")?;
             let e = out.entry(normalize_scid(&scid)).or_default();
             if e.peer_id.is_empty() {
                 e.peer_id = peer_id;
             }
             // `+=` here: rebalance costs ARE disjoint spend events.
-            e.rebalance_cost_sats += total;
-            e.rebalance_cost_30d_sats += windowed;
+            e.rebalance_cost_msat += total_msat;
+            e.rebalance_cost_30d_msat += windowed_msat;
+            // py `base_to_sats_ceil(cost_msat)` (database.py:3137): a
+            // partial sat of cost is a whole sat spent.
+            e.rebalance_cost_sats = ceil_sats(e.rebalance_cost_msat);
+            e.rebalance_cost_30d_sats = ceil_sats(e.rebalance_cost_30d_msat);
         }
     }
 

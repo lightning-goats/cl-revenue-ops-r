@@ -221,6 +221,30 @@ pub fn openers_from_channels(channels: &[serde_json::Value]) -> HashMap<String, 
 /// Same timeout every other read-only CLN call in this port uses.
 const RPC_TIMEOUT_SECONDS: u64 = 30;
 
+/// One bounded, read-only CLN call. Fresh connection per call, same
+/// timeout every other read path in this port uses. Errors are stringly
+/// typed because they become typed refusals at the RPC boundary, naming
+/// the source that could not be reached.
+pub async fn fetch_read_rpc(
+    socket_path: &std::path::Path,
+    method: &'static str,
+) -> Result<serde_json::Value, String> {
+    let call = async {
+        let mut rpc = cln_rpc::ClnRpc::new(socket_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "connect lightning-rpc socket {}: {e}",
+                socket_path.display()
+            )
+        })?;
+        rpc.call_raw::<serde_json::Value, serde_json::Value>(method, &json!({}))
+            .await
+            .map_err(|e| anyhow::anyhow!("{method} RPC error: {e}"))
+    };
+    revops_rpc::call_with_timeout(method, RPC_TIMEOUT_SECONDS, call)
+        .await
+        .map_err(|error| format!("{error}"))
+}
+
 /// One fresh, bounded `listpeerchannels`.
 ///
 /// Separate from [`gather_profitability`] on purpose: the caller takes the
@@ -235,20 +259,7 @@ const RPC_TIMEOUT_SECONDS: u64 = 30;
 pub async fn fetch_channel_snapshot(
     socket_path: &std::path::Path,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let call = async {
-        let mut rpc = cln_rpc::ClnRpc::new(socket_path).await.map_err(|e| {
-            anyhow::anyhow!(
-                "connect lightning-rpc socket {}: {e}",
-                socket_path.display()
-            )
-        })?;
-        rpc.call_raw::<serde_json::Value, serde_json::Value>("listpeerchannels", &json!({}))
-            .await
-            .map_err(|e| anyhow::anyhow!("listpeerchannels RPC error: {e}"))
-    };
-    let reply = revops_rpc::call_with_timeout("listpeerchannels", RPC_TIMEOUT_SECONDS, call)
-        .await
-        .map_err(|error| format!("{error}"))?;
+    let reply = fetch_read_rpc(socket_path, "listpeerchannels").await?;
     reply
         .get("channels")
         .and_then(serde_json::Value::as_array)

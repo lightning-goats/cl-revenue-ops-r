@@ -159,9 +159,21 @@ fn pnl() -> PnlSummary {
     }
 }
 
+fn evidence() -> revops::rpc_dashboard::DashboardEvidence {
+    revops::rpc_dashboard::DashboardEvidence {
+        tlv_sats: 7_000,
+        annualized_roc_pct: 12.17,
+        warnings: vec![
+            "Channel 700x1x0 is bleeding: Spent 3000 sats rebalancing, earned 1000 sats."
+                .to_string(),
+        ],
+        bleeder_count: 1,
+    }
+}
+
 #[test]
 fn build_dashboard_populates_db_backed_fields() {
-    let v = build_dashboard(&pnl());
+    let v = build_dashboard(&pnl(), &evidence());
 
     assert_eq!(v["period"]["window_days"], 30);
     assert_eq!(v["period"]["gross_revenue_sats"], 8);
@@ -174,30 +186,41 @@ fn build_dashboard_populates_db_backed_fields() {
     assert_eq!(v["financial_health"]["operating_margin_pct"], -6150.0);
 }
 
+/// C71-28: the four fields this test used to pin as GAPS are now served.
+///
+/// The replacement matters most for `warnings`. `tlv_sats: null` and
+/// `bleeder_count: null` are visibly absent, but `warnings: []` is a
+/// well-formed Python answer meaning "no channel is bleeding" -- so a node
+/// losing money on every channel reported exactly what a healthy one
+/// reports. That is the only one of the four a caller could act on while
+/// being wrong.
 #[test]
-fn build_dashboard_gap_marks_tlv_roc_warnings_bleeders() {
-    let v = build_dashboard(&pnl());
+fn build_dashboard_serves_tlv_roc_warnings_and_bleeders() {
+    let v = build_dashboard(&pnl(), &evidence());
 
-    assert!(v["financial_health"]["tlv_sats"].is_null());
-    assert!(v["financial_health"]["annualized_roc_pct"].is_null());
-    assert!(v["bleeder_count"].is_null());
-    assert_eq!(v["warnings"], json!([]));
-
-    let gaps: Vec<&str> = v["_phase1b_gaps"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|g| g.as_str().unwrap())
-        .collect();
+    assert_eq!(v["financial_health"]["tlv_sats"], json!(7_000));
+    assert_eq!(v["financial_health"]["annualized_roc_pct"], json!(12.17));
+    assert_eq!(v["bleeder_count"], json!(1));
     assert_eq!(
-        gaps,
-        vec![
-            "financial_health.tlv_sats",
-            "financial_health.annualized_roc_pct",
-            "warnings",
-            "bleeder_count",
-        ]
+        v["warnings"],
+        json!(["Channel 700x1x0 is bleeding: Spent 3000 sats rebalancing, earned 1000 sats."])
     );
+    assert!(
+        v.get("_phase1b_gaps").is_none(),
+        "no Phase-1b gaps remain on this surface: {v:?}"
+    );
+}
+
+/// An empty warnings list must still be reachable -- a healthy node really
+/// does have nothing to report, and that is not the same fact as the old
+/// placeholder.
+#[test]
+fn a_healthy_node_reports_no_warnings_and_still_carries_no_gap_marker() {
+    let v = build_dashboard(&pnl(), &revops::rpc_dashboard::DashboardEvidence::default());
+    assert_eq!(v["warnings"], json!([]));
+    assert_eq!(v["bleeder_count"], json!(0));
+    assert_eq!(v["financial_health"]["tlv_sats"], json!(0));
+    assert!(v.get("_phase1b_gaps").is_none());
 }
 
 #[test]

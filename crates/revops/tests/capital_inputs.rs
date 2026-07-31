@@ -45,6 +45,8 @@ fn healthy() -> CapitalReadSources {
             opened_at: NOW - 100 * DAY,
             rebalance_cost_sats: 500,
             rebalance_cost_30d_sats: 100,
+            rebalance_cost_msat: 0,
+            rebalance_cost_30d_msat: 0,
         },
     );
     let mut flow = HashMap::new();
@@ -177,6 +179,8 @@ fn unevaluable_channels_are_reported_with_reasons() {
                 opened_at: NOW - 10 * DAY,
                 rebalance_cost_sats: 0,
                 rebalance_cost_30d_sats: 0,
+                rebalance_cost_msat: 0,
+                rebalance_cost_30d_msat: 0,
             },
         );
         costs.insert(
@@ -188,6 +192,8 @@ fn unevaluable_channels_are_reported_with_reasons() {
                 opened_at: 0, // missing
                 rebalance_cost_sats: 0,
                 rebalance_cost_30d_sats: 0,
+                rebalance_cost_msat: 0,
+                rebalance_cost_30d_msat: 0,
             },
         );
     }

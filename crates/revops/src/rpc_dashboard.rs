@@ -18,13 +18,13 @@ use serde_json::{json, Value};
 /// Port of `revenue_dashboard`'s DB-backed half (cl-revenue-ops.py:5726-
 /// 5825), minus the `tlv_sats`/`annualized_roc_pct`/`warnings`/
 /// `bleeder_count` fields (see module doc comment).
-pub fn build_dashboard(pnl: &PnlSummary) -> Value {
+pub fn build_dashboard(pnl: &PnlSummary, evidence: &DashboardEvidence) -> Value {
     json!({
         "financial_health": {
-            "tlv_sats": Value::Null,
+            "tlv_sats": evidence.tlv_sats,
             "net_profit_sats": pnl.net_profit_sats,
             "operating_margin_pct": pnl.operating_margin_pct,
-            "annualized_roc_pct": Value::Null,
+            "annualized_roc_pct": evidence.annualized_roc_pct,
         },
         "period": {
             "window_days": pnl.window_days,
@@ -35,15 +35,28 @@ pub fn build_dashboard(pnl: &PnlSummary) -> Value {
             "volume_sats": pnl.volume_sats,
             "forward_count": pnl.forward_count,
         },
-        "warnings": Value::Array(vec![]),
-        "bleeder_count": Value::Null,
-        "_phase1b_gaps": [
-            "financial_health.tlv_sats",
-            "financial_health.annualized_roc_pct",
-            "warnings",
-            "bleeder_count",
-        ],
+        "warnings": evidence.warnings,
+        "bleeder_count": evidence.bleeder_count,
     })
+}
+
+/// The four fields the dashboard used to gap-mark, once they have been
+/// looked up. C71-28: there is no `_phase1b_gaps` key any more, because
+/// there are no Phase-1b gaps left on this surface.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DashboardEvidence {
+    pub tlv_sats: i64,
+    /// Already `py_round(_, 2)`ed by `dashboard_evidence::annualized_roc_pct`.
+    pub annualized_roc_pct: f64,
+    pub warnings: Vec<String>,
+    pub bleeder_count: usize,
+}
+
+/// A store or node this call could not consult. Never a zeroed dashboard:
+/// `tlv_sats: 0` is a node worth nothing and `warnings: []` is a node with
+/// nothing wrong, and both are answers Python emits for real.
+pub fn build_dashboard_unavailable(code: &str, detail: &str) -> Value {
+    json!({"error": code, "detail": detail})
 }
 
 /// Port of `revenue_dashboard`'s `window_days` parsing/clamp

@@ -33,6 +33,8 @@ fn costs(open: i64, rebal: i64, rebal_30d: i64, capacity: i64, opened_at: i64) -
         opened_at,
         rebalance_cost_sats: rebal,
         rebalance_cost_30d_sats: rebal_30d,
+        rebalance_cost_msat: 0,
+        rebalance_cost_30d_msat: 0,
     }
 }
 

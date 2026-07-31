@@ -794,3 +794,121 @@ fn the_two_history_reads_are_issued_as_one_command() {
         "the coupled read must take one transaction so both SELECTs see one snapshot"
     );
 }
+
+// ---------------------------------------------------------------------
+// C71-28: msat-native rebalance cost.
+//
+// py sums `COALESCE(cost_msat, cost_sats * 1000)` and falls back to
+// `cost_sats * 1000` when the column does not exist at all
+// (database.py:3122-3132). The bleeder verdict is `net < 0` over
+// `contribution_msat - rebalance_cost_msat`, so a sats-only sum shifts the
+// boundary and can flip a channel's bleeder status.
+// ---------------------------------------------------------------------
+
+const SCHEMA_WITH_COST_MSAT: &str = "
+CREATE TABLE forwards (
+    id INTEGER PRIMARY KEY, in_channel TEXT, out_channel TEXT,
+    in_msat INTEGER, out_msat INTEGER, fee_msat INTEGER, timestamp INTEGER
+);
+CREATE TABLE daily_forwarding_stats (
+    channel_id TEXT, date INTEGER, forward_count INTEGER
+);
+CREATE TABLE daily_forwarding_stats_inbound (
+    channel_id TEXT, date INTEGER, forward_count INTEGER
+);
+CREATE TABLE rebalance_history (
+    id INTEGER PRIMARY KEY, from_channel TEXT, to_channel TEXT,
+    rebalance_type TEXT, status TEXT, timestamp INTEGER
+);
+CREATE TABLE channel_costs (
+    channel_id TEXT PRIMARY KEY, peer_id TEXT, open_cost_sats INTEGER,
+    capacity_sats INTEGER, opened_at INTEGER
+);
+CREATE TABLE rebalance_costs (
+    id INTEGER PRIMARY KEY, channel_id TEXT, peer_id TEXT,
+    cost_sats INTEGER, cost_msat INTEGER, timestamp INTEGER
+);
+";
+
+async fn db_with_schema(schema: &str, seed: &str) -> revops_db::actor::DbHandle {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(schema).unwrap();
+        conn.execute_batch(seed).unwrap();
+    }
+    let handle = spawn_read_only(&path).await.unwrap();
+    std::mem::forget(dir);
+    handle
+}
+
+#[tokio::test]
+async fn the_msat_rebalance_cost_column_wins_over_the_rounded_sats_one() {
+    // 1500 msat is 1.5 sats. Whatever the sats column says, the msat
+    // column is the precise fact and py prefers it.
+    let recent = NOW - DAY;
+    let handle = db_with_schema(
+        SCHEMA_WITH_COST_MSAT,
+        &format!(
+            "INSERT INTO rebalance_costs (channel_id,peer_id,cost_sats,cost_msat,timestamp)
+             VALUES ('700x1x0','02aa', 2, 1500, {recent});"
+        ),
+    )
+    .await;
+
+    let snapshot =
+        revops_db::profitability_history::profitability_snapshot(&handle, NOW, 30, DIAG_DAYS)
+            .await
+            .expect("snapshot reads");
+    let costs = snapshot.costs.get("700x1x0").expect("costs row");
+    assert_eq!(
+        costs.rebalance_cost_msat, 1500,
+        "the msat column is the precise fact"
+    );
+    assert_eq!(costs.rebalance_cost_30d_msat, 1500);
+}
+
+#[tokio::test]
+async fn a_null_msat_cost_falls_back_to_the_sats_column() {
+    let recent = NOW - DAY;
+    let handle = db_with_schema(
+        SCHEMA_WITH_COST_MSAT,
+        &format!(
+            "INSERT INTO rebalance_costs (channel_id,peer_id,cost_sats,cost_msat,timestamp)
+             VALUES ('700x1x0','02aa', 7, NULL, {recent});"
+        ),
+    )
+    .await;
+
+    let snapshot =
+        revops_db::profitability_history::profitability_snapshot(&handle, NOW, 30, DIAG_DAYS)
+            .await
+            .expect("snapshot reads");
+    assert_eq!(
+        snapshot.costs.get("700x1x0").unwrap().rebalance_cost_msat,
+        7_000,
+        "py's COALESCE(cost_msat, cost_sats * 1000)"
+    );
+}
+
+#[tokio::test]
+async fn a_schema_with_no_msat_column_at_all_still_reads_the_sats_one() {
+    // py wraps the COALESCE query in `except sqlite3.OperationalError` and
+    // retries with the sats-only form. An older production schema must not
+    // make the whole snapshot refuse.
+    let recent = NOW - DAY;
+    let handle = db(&format!(
+        "INSERT INTO rebalance_costs (channel_id,peer_id,cost_sats,timestamp)
+         VALUES ('700x1x0','02aa', 7, {recent});"
+    ))
+    .await;
+
+    let snapshot =
+        revops_db::profitability_history::profitability_snapshot(&handle, NOW, 30, DIAG_DAYS)
+            .await
+            .expect("an older schema is not a store failure");
+    let costs = snapshot.costs.get("700x1x0").expect("costs row");
+    assert_eq!(costs.rebalance_cost_msat, 7_000);
+    assert_eq!(costs.rebalance_cost_sats, 7);
+}

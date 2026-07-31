@@ -1166,6 +1166,13 @@ pub struct PerChannelCosts {
     pub opened_at: i64,
     pub rebalance_cost_sats: i64,
     pub rebalance_cost_30d_sats: i64,
+    /// C71-28: msat-native rebalance cost, py's
+    /// `SUM(COALESCE(cost_msat, cost_sats * 1000))` (database.py:3122).
+    /// The bleeder verdict is `net < 0` over
+    /// `contribution_msat - rebalance_cost_msat`, so rounding to sats first
+    /// shifts the boundary and can flip a channel's bleeder status.
+    pub rebalance_cost_msat: i64,
+    pub rebalance_cost_30d_msat: i64,
 }
 
 /// Aggregate `forwards` per channel, from `since` (inclusive; 0 = all).
@@ -1284,6 +1291,12 @@ pub async fn per_channel_costs(
         }
         e.rebalance_cost_sats = total;
         e.rebalance_cost_30d_sats = windowed;
+        // This legacy split reader is NOT on the producer path (see
+        // `profitability_history::read_profitability_snapshot`, which is
+        // the msat-native one). It keeps the sats column's precision so
+        // nothing here silently claims more than it read.
+        e.rebalance_cost_msat = total * 1000;
+        e.rebalance_cost_30d_msat = windowed * 1000;
     }
     Ok(out)
 }

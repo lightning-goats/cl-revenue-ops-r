@@ -1448,8 +1448,9 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &dashboard_name,
-            "P&L dashboard (Phase 1b: period.*/net_profit/margin are \
-             DB-backed; tlv/roc/warnings/bleeders are gap-marked)",
+            "P&L dashboard: period/net_profit/margin from the production DB, \
+             TLV from listfunds, annualized ROC from live channel capacity, \
+             and bleeder warnings from the windowed profitability snapshot",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 let s = p.state();
                 let Some(handle) = &s.db else {
@@ -1460,8 +1461,81 @@ async fn main() -> Result<()> {
                     Err(e) => return Ok(e),
                 };
                 let now = now_unix();
+
+                // C71-28. These four fields used to be `null`/`[]` under a
+                // `_phase1b_gaps` marker. `warnings: []` was the dangerous
+                // one: an empty array is a well-formed Python answer meaning
+                // "nothing is bleeding", so a node losing money on every
+                // channel reported exactly what a healthy one reports.
+                let funds = match revops::profitability_assembler::fetch_read_rpc(
+                    &s.socket_path,
+                    "listfunds",
+                )
+                .await
+                {
+                    Ok(funds) => funds,
+                    Err(detail) => {
+                        return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                            "dashboard_funds_unavailable",
+                            &detail,
+                        ))
+                    }
+                };
+                let tlv = match revops::dashboard_evidence::total_liquidating_value(&funds) {
+                    Ok(tlv) => tlv,
+                    Err(detail) => {
+                        return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                            "dashboard_funds_unavailable",
+                            &detail,
+                        ))
+                    }
+                };
+                let channels =
+                    match revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
+                        .await
+                    {
+                        Ok(channels) => channels,
+                        Err(detail) => {
+                            return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                                "dashboard_channels_unavailable",
+                                &detail,
+                            ))
+                        }
+                    };
+                let snapshot = match handle
+                    .profitability_snapshot(
+                        now,
+                        window_days,
+                        revops::profitability_assembler::DIAGNOSTIC_WINDOW_DAYS,
+                    )
+                    .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                            "dashboard_snapshot_unavailable",
+                            &format!("{error:#}"),
+                        ))
+                    }
+                };
+
                 let pnl = queries::pnl_summary(handle, window_days, now).await?;
-                Ok(build_dashboard(&pnl))
+                let bleeders = revops::dashboard_evidence::bleeder_warnings(
+                    &channels,
+                    &snapshot.revenue_30d,
+                    &snapshot.costs,
+                );
+                let evidence = revops::rpc_dashboard::DashboardEvidence {
+                    tlv_sats: tlv.tlv_sats,
+                    annualized_roc_pct: revops::dashboard_evidence::annualized_roc_pct(
+                        pnl.net_profit_sats,
+                        revops::dashboard_evidence::total_capacity_sats(&channels),
+                        window_days,
+                    ),
+                    warnings: bleeders.warnings,
+                    bleeder_count: bleeders.bleeder_count,
+                };
+                Ok(build_dashboard(&pnl, &evidence))
             },
         )
         .rpcmethod(

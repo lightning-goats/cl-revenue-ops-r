@@ -2694,3 +2694,42 @@ fn revenue_r_profitability_refuses_when_the_channel_snapshot_cannot_be_fetched()
         "must not produce a zeroed fleet summary: {result:?}"
     );
 }
+
+/// C71-28: the dashboard's four formerly-gapped fields need a live node.
+///
+/// With the production DB configured but no lightning socket, `listfunds`
+/// cannot be reached -- and the handler must say so rather than emit the
+/// shape it used to. `tlv_sats: 0` is a node worth nothing and
+/// `warnings: []` is a node with nothing wrong; both are answers Python
+/// emits for real, so neither can stand in for "we could not look".
+#[test]
+fn revenue_r_dashboard_refuses_when_the_node_cannot_be_reached() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-dashboard",
+    );
+
+    assert_eq!(
+        result["error"],
+        serde_json::json!("dashboard_funds_unavailable"),
+        "{result:?}"
+    );
+    assert!(
+        result.get("financial_health").is_none(),
+        "must not emit a zeroed net worth: {result:?}"
+    );
+    assert!(
+        result.get("warnings").is_none(),
+        "an empty warnings list would read as a healthy node: {result:?}"
+    );
+    assert!(
+        result.get("_phase1b_gaps").is_none(),
+        "the gap marker is retired; a refusal is not a gap: {result:?}"
+    );
+}
