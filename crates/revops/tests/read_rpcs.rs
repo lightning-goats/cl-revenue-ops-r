@@ -224,9 +224,42 @@ fn a_healthy_node_reports_no_warnings_and_still_carries_no_gap_marker() {
 }
 
 #[test]
-fn parse_window_days_defaults_to_30_when_absent() {
+fn parse_window_days_defaults_to_30_only_when_the_parameter_is_omitted() {
+    // C71-30. Python binds the signature default of 30 only when the
+    // parameter is NEVER PASSED. This test used to assert that an explicit
+    // `null` also produced 30 -- see the test below for why that is wrong.
     assert_eq!(parse_window_days(None), Ok(30));
-    assert_eq!(parse_window_days(Some(&serde_json::Value::Null)), Ok(30));
+}
+
+/// An EXPLICIT null is not an omitted parameter.
+///
+/// Python's default binds at call time; an explicit `None` reaches
+/// `int(None)`, which raises `TypeError` and returns the error dict.
+/// Mapping it to 30 silently gave a caller a 30-day window when it had
+/// asked for something the server could not understand -- a wrong answer
+/// with no error, which is worse than either correct outcome.
+#[test]
+fn parse_window_days_rejects_an_explicit_null() {
+    let err = parse_window_days(Some(&serde_json::Value::Null)).unwrap_err();
+    assert_eq!(err["error"], "window_days must be an integer");
+}
+
+/// `bool` is an `int` subclass in Python, so `int(True) == 1` and
+/// `int(False) == 0` -- and `max(1, ...)` then makes BOTH of them 1.
+///
+/// This port previously rejected booleans, on the stated grounds that no
+/// real caller passes one. That is a divergence either way; matching
+/// Python is the objective, and the asymmetry (false also yielding 1, via
+/// the clamp rather than the cast) is exactly the kind of detail a
+/// reimplementation gets wrong.
+#[test]
+fn parse_window_days_treats_booleans_as_pythons_int_subclass() {
+    assert_eq!(parse_window_days(Some(&json!(true))), Ok(1));
+    assert_eq!(
+        parse_window_days(Some(&json!(false))),
+        Ok(1),
+        "int(False) is 0, and the min-clamp lifts it to 1"
+    );
 }
 
 #[test]
@@ -255,11 +288,16 @@ fn parse_window_days_rejects_non_integer() {
     let err = parse_window_days(Some(&json!("abc"))).unwrap_err();
     assert_eq!(err["error"], "window_days must be an integer");
 
-    let err2 = parse_window_days(Some(&json!(true))).unwrap_err();
-    assert_eq!(err2["error"], "window_days must be an integer");
-
     let err3 = parse_window_days(Some(&json!([1, 2]))).unwrap_err();
     assert_eq!(err3["error"], "window_days must be an integer");
+
+    let err4 = parse_window_days(Some(&json!({"a": 1}))).unwrap_err();
+    assert_eq!(err4["error"], "window_days must be an integer");
+
+    // Python's `int()` accepts surrounding whitespace but not a decimal
+    // string: `int(" 45 ")` is 45, `int("45.9")` raises.
+    assert_eq!(parse_window_days(Some(&json!(" 45 "))), Ok(45));
+    assert!(parse_window_days(Some(&json!("45.9"))).is_err());
 }
 
 /// **Guard-order test (Phase 1b Task 5 review finding 2):**
