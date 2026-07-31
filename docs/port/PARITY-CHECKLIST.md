@@ -343,6 +343,35 @@ transport-proven locally; watcher compiled/reachable/partial; soak and live
 promotion remain pending; no deployment, authority transition, or live external
 call was performed.**
 
+#### Task 66 — Python canonical RPC set closure, 2026-07-31, `c4ba670`
+
+The registration gap is CLOSED: `manifest.rs::canonical_mode_registers_
+exactly_the_python_rpc_set` is green — the Rust plugin registers exactly
+Python's 69 canonical `revenue-*` methods (0 missing, 0 unexpected), every
+one through the Task 64 parameter contract (`fixtures/port/rpc_params.json`).
+The seven post-compaction slices (`680e0a9`, `0fe82d5`, `28916cf`, `1dd9481`,
+`6ac4b22`, `85802ca`, `c4ba670`) added total-cost-budget, spend-reserve/
+release-stale, cleanup-closed, econ-reconcile, econ-cycle, capex-status, and
+set-fee; each landed RED-first with a per-slice mutation harness (all kills
+by TEST failure). Honest state, per `fixtures/port/plugin_inventory.json`
+(generator v4, which now parses helper-fn registrations and the
+mode-conditional wake-all binding): **69/69 reachable; 15 full / 54 partial;
+review passed only for the 12 previously-reviewed names — every Task-66
+contract is review-PENDING** (the tier-1 Python review of the 17-commit
+queue). `full` and `reviewed` are now SEPARATE axes in the generator
+(`FULL_EFFECTIVE_RPCS` vs `REVIEWED_FULL_RPCS`) so a complete contract can
+never imply a review that has not happened. Write-shaped surfaces (the nine
+core-state mutators, cleanup-closed, set-fee, fee-cycle, rebalance/planner/
+Boltz actions) classify `partial` deliberately: their contracts are complete
+INCLUDING Python's exact uninitialized/denial arms, but the result-bearing
+execution capability stays sealed until Task 69's authority-gated assembly.
+Standing safety facts, each e2e-pinned: set-fee is double-sealed (authority
+lease denies in every non-live mode AND the manual setter is unassembled);
+the econ RPCs touch ONLY the Rust-owned `econ_ledger_dryrun.db` (one shared
+filename constant; a swap to Python's production name dies by mutation);
+capex-status performs NO datastore push (declared delta per the authority
+record above); Python's production stores receive no writes.
+
 **Round-2 correction (P1): the table below is the CURRENT response contract
 for each of the ten Batch A RPCs** (i.e. it already reflects the Task 50
 correction round's F1-F5/F10/F11 fixes below and this round's mixed-type-tags
@@ -787,6 +816,12 @@ Ranked by size, from this audit:
    Round-2 correction, P1: this was 60 of 69 before Task 49 registered its
    ten Python-equivalent builders (9 → 19 registered, so 69 − 19 = 50
    remaining, not 60).
+   **Task 66 correction (2026-07-31, `c4ba670`): 0 of 69 remaining — the
+   registration surface is CLOSED (see the Task 66 subsection in §2).
+   Registration ≠ done: 54 of 69 are `partial` (complete contracts with
+   sealed execution, or declared response deltas) and every Task-66
+   contract awaits independent review, but "which Python methods have no
+   Rust registration at all" is no longer a live category.**
 3. **Wiring the ported-but-uncalled kernels** — rebalance (8,167 LOC ported, no
    loop, no RPC, no sendpay call site) and the non-fee governed-execution call
    sites. Same shape as A1–A3, at much larger scale and touching real payments.
