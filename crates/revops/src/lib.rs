@@ -39,6 +39,7 @@ pub mod flow_config;
 pub mod flow_evidence;
 pub mod flow_owner;
 pub mod hydration;
+pub mod lifecycle;
 pub mod lnplus_adapters;
 pub mod lnplus_runtime;
 pub mod loop_health;
