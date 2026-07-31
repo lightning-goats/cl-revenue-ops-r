@@ -58,7 +58,7 @@ struct State {
     fee_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>>,
     /// Empty until Task69 consumes the whole-plugin live capability and
     /// assembles the sealed core-state mutator owner.
-    policy_mutators: std::sync::OnceLock<revops::rpc_state_mutators::PolicyMutationOwner>,
+    core_mutations: std::sync::OnceLock<revops::rpc_state_mutators::CoreStateMutationOwner>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -618,15 +618,15 @@ fn register_fee_cycle(
     )
 }
 
-fn register_policy_mutator(
+fn register_core_mutator(
     builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
     name: &str,
     spec: revops::rpc_params::RpcMethodSpec,
-    action: revops::rpc_state_mutators::PolicyMutationAction,
+    action: revops::rpc_state_mutators::CoreStateMutationAction,
 ) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
     builder.rpcmethod(
         name,
-        "apply a completed peer-policy mutation through the sealed live state writer",
+        "apply a completed core-state mutation through the sealed live state writer",
         move |p: Plugin<SharedState>, raw: serde_json::Value| {
             let spec = spec.clone();
             async move {
@@ -638,7 +638,7 @@ fn register_policy_mutator(
                     Ok(params) => params,
                     Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
                 };
-                let Some(owner) = p.state().policy_mutators.get() else {
+                let Some(owner) = p.state().core_mutations.get() else {
                     return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 Ok(owner.handle(action, &params).await)
@@ -1195,6 +1195,16 @@ async fn main() -> Result<()> {
     let unban_name = rpc_name("unban");
     let unban_spec =
         revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-unban");
+    let spend_release_name = rpc_name("spend-release");
+    let spend_release_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-release",
+    );
+    let spend_settle_name = rpc_name("spend-settle");
+    let spend_settle_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-settle",
+    );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
     let rebalance_debug_name = rpc_name("rebalance-debug");
@@ -2992,29 +3002,41 @@ async fn main() -> Result<()> {
         fee_authority_status_spec,
     );
     let builder = register_fee_cycle(builder, &fee_cycle_name, fee_cycle_spec);
-    let builder = register_policy_mutator(
+    let builder = register_core_mutator(
         builder,
         &ignore_name,
         ignore_spec,
-        revops::rpc_state_mutators::PolicyMutationAction::Ignore,
+        revops::rpc_state_mutators::CoreStateMutationAction::Ignore,
     );
-    let builder = register_policy_mutator(
+    let builder = register_core_mutator(
         builder,
         &unignore_name,
         unignore_spec,
-        revops::rpc_state_mutators::PolicyMutationAction::Unignore,
+        revops::rpc_state_mutators::CoreStateMutationAction::Unignore,
     );
-    let builder = register_policy_mutator(
+    let builder = register_core_mutator(
         builder,
         &ban_name,
         ban_spec,
-        revops::rpc_state_mutators::PolicyMutationAction::Ban,
+        revops::rpc_state_mutators::CoreStateMutationAction::Ban,
     );
-    let builder = register_policy_mutator(
+    let builder = register_core_mutator(
         builder,
         &unban_name,
         unban_spec,
-        revops::rpc_state_mutators::PolicyMutationAction::Unban,
+        revops::rpc_state_mutators::CoreStateMutationAction::Unban,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_release_name,
+        spend_release_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendRelease,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_settle_name,
+        spend_settle_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendSettle,
     );
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
@@ -3351,7 +3373,7 @@ async fn main() -> Result<()> {
 
     let resolved_mode_label = mode_label(&mode);
     let scheduler = std::sync::OnceLock::new();
-    let policy_mutators = std::sync::OnceLock::new();
+    let core_mutations = std::sync::OnceLock::new();
     let authority_plan = mode.into_authority_plan(|live_mode| {
         let store = observer_db
             .clone()
@@ -3745,7 +3767,7 @@ async fn main() -> Result<()> {
         active_profile,
         scheduler,
         fee_pass: fee_rpc_pass,
-        policy_mutators,
+        core_mutations,
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,

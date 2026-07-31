@@ -150,6 +150,26 @@ impl CoreMutators {
     pub(crate) async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
         self.writer.delete_peer_policy(peer_id).await
     }
+
+    pub(crate) async fn release_spend_reservation(
+        &self,
+        reservation_id: String,
+    ) -> StateWriteAck<bool> {
+        self.writer.release_spend_reservation(reservation_id).await
+    }
+
+    pub(crate) async fn settle_spend_reservation(
+        &self,
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+    ) -> StateWriteAck<bool> {
+        self.writer
+            .settle_spend_reservation(reservation_id, actual_spent_sats, source, record_event, now)
+            .await
+    }
 }
 
 impl ProductionStateWriter {
@@ -216,6 +236,35 @@ impl ProductionStateWriter {
     pub async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
         resolve(
             self.handle.try_delete_peer_policy(peer_id),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn release_spend_reservation(&self, reservation_id: String) -> StateWriteAck<bool> {
+        resolve(
+            self.handle.try_release_spend_reservation(reservation_id),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn settle_spend_reservation(
+        &self,
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+    ) -> StateWriteAck<bool> {
+        resolve(
+            self.handle.try_settle_spend_reservation(
+                reservation_id,
+                actual_spent_sats,
+                source,
+                record_event,
+                now,
+            ),
             self.receipt_budget,
         )
         .await

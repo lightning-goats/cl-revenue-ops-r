@@ -630,14 +630,16 @@ pub fn build_profile_preview(
 const MAX_POLICY_CHANGES_PER_MINUTE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyMutationAction {
+pub enum CoreStateMutationAction {
     Ignore,
     Unignore,
     Ban,
     Unban,
+    SpendRelease,
+    SpendSettle,
 }
 
-pub struct PolicyMutationOwner {
+pub struct CoreStateMutationOwner {
     core: CoreMutators,
     reader: DbHandle,
     fee_ingress: SchedulerIngress,
@@ -645,7 +647,7 @@ pub struct PolicyMutationOwner {
     rate_limit: Mutex<HashMap<String, Vec<i64>>>,
 }
 
-impl PolicyMutationOwner {
+impl CoreStateMutationOwner {
     pub fn assemble(
         core: CoreMutators,
         reader: DbHandle,
@@ -661,12 +663,18 @@ impl PolicyMutationOwner {
         }
     }
 
-    pub async fn handle(&self, action: PolicyMutationAction, params: &Map<String, Value>) -> Value {
+    pub async fn handle(
+        &self,
+        action: CoreStateMutationAction,
+        params: &Map<String, Value>,
+    ) -> Value {
         match action {
-            PolicyMutationAction::Ignore => self.ignore(params).await,
-            PolicyMutationAction::Unignore => self.unignore(params).await,
-            PolicyMutationAction::Ban => self.ban(params).await,
-            PolicyMutationAction::Unban => self.unban(params).await,
+            CoreStateMutationAction::Ignore => self.ignore(params).await,
+            CoreStateMutationAction::Unignore => self.unignore(params).await,
+            CoreStateMutationAction::Ban => self.ban(params).await,
+            CoreStateMutationAction::Unban => self.unban(params).await,
+            CoreStateMutationAction::SpendRelease => self.spend_release(params).await,
+            CoreStateMutationAction::SpendSettle => self.spend_settle(params).await,
         }
     }
 
@@ -837,11 +845,43 @@ impl PolicyMutationOwner {
         let success = unban_success(&peer_id, &tags);
         self.complete_upsert(&peer_id, now, write, success).await
     }
+
+    pub async fn spend_release(&self, params: &Map<String, Value>) -> Value {
+        let reservation_id = parse_spend_release_params(params);
+        let ack = self
+            .core
+            .release_spend_reservation(reservation_id.clone())
+            .await;
+        completed_spend_response(ack, |released| {
+            spend_release_response(&reservation_id, released)
+        })
+    }
+
+    pub async fn spend_settle(&self, params: &Map<String, Value>) -> Value {
+        let parsed = match parse_spend_settle_params(params) {
+            Ok(parsed) => parsed,
+            Err(error) => return error,
+        };
+        let reservation_id = parsed.reservation_id.clone();
+        let ack = self
+            .core
+            .settle_spend_reservation(
+                parsed.reservation_id,
+                parsed.actual_spent_sats,
+                parsed.source,
+                parsed.record_event,
+                (self.clock)(),
+            )
+            .await;
+        completed_spend_response(ack, |settled| {
+            spend_settle_response(&reservation_id, settled)
+        })
+    }
 }
 
 #[cfg(test)]
-mod policy_owner_tests {
-    use super::PolicyMutationOwner;
+mod core_mutation_owner_tests {
+    use super::CoreStateMutationOwner;
     use crate::fee_scheduler::{CycleMsg, SchedulerIngress};
     use crate::state_writer::{CoreMutators, CoreStateLiveCapability, ProductionStateWriter};
     use revops_db::state_writer::spawn_state_writer;
@@ -856,7 +896,7 @@ mod policy_owner_tests {
     async fn fixture() -> (
         tempfile::TempDir,
         PathBuf,
-        PolicyMutationOwner,
+        CoreStateMutationOwner,
         tokio::sync::mpsc::Receiver<CycleMsg>,
     ) {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
@@ -877,7 +917,7 @@ mod policy_owner_tests {
         let live = CoreStateLiveCapability::for_tests();
         let core = CoreMutators::assemble(writer, live);
         let (ingress, receiver) = SchedulerIngress::bounded_channel(16);
-        let owner = PolicyMutationOwner::assemble(core, reader, ingress, Arc::new(|| NOW));
+        let owner = CoreStateMutationOwner::assemble(core, reader, ingress, Arc::new(|| NOW));
         (dir, path, owner, receiver)
     }
 
@@ -1069,5 +1109,107 @@ mod policy_owner_tests {
             receiver.try_recv(),
             Ok(CycleMsg::PolicyChanged { peer_id }) if peer_id == PEER
         ));
+    }
+
+    fn seed_spend_reservation(path: &std::path::Path, reservation_id: &str, amount_sats: i64) {
+        let conn = Connection::open(path).expect("open fixture to seed reservation");
+        conn.execute(
+            "INSERT INTO spend_reservations
+             (reservation_id, category, reserved_sats, reserved_at, status)
+             VALUES (?1, 'misc', ?2, ?3, 'active')",
+            rusqlite::params![reservation_id, amount_sats, NOW - 1],
+        )
+        .expect("seed spend reservation");
+    }
+
+    #[tokio::test]
+    async fn spend_release_returns_only_after_commit_and_repeated_release_is_not_found() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        seed_spend_reservation(&path, "release-me", 25);
+
+        let first = owner
+            .spend_release(&params(&[("reservation_id", json!("release-me"))]))
+            .await;
+        assert_eq!(
+            first,
+            json!({"status": "success", "reservation_id": "release-me"})
+        );
+        let status: String = Connection::open(&path)
+            .expect("open committed reservation")
+            .query_row(
+                "SELECT status FROM spend_reservations WHERE reservation_id = ?1",
+                ["release-me"],
+                |row| row.get(0),
+            )
+            .expect("read committed release");
+        assert_eq!(status, "released");
+
+        let second = owner
+            .spend_release(&params(&[("reservation_id", json!("release-me"))]))
+            .await;
+        assert_eq!(
+            second,
+            json!({"status": "not_found", "reservation_id": "release-me"})
+        );
+    }
+
+    #[tokio::test]
+    async fn spend_settle_commits_status_and_event_atomically_then_is_terminal() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        seed_spend_reservation(&path, "settle-me", 40);
+
+        let first = owner
+            .spend_settle(&params(&[
+                ("reservation_id", json!("settle-me")),
+                ("actual_spent_sats", json!(33)),
+                ("source", json!("rpc-test")),
+                ("record_event", json!(true)),
+            ]))
+            .await;
+        assert_eq!(
+            first,
+            json!({"status": "success", "reservation_id": "settle-me"})
+        );
+
+        let conn = Connection::open(&path).expect("read committed settlement");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM spend_reservations WHERE reservation_id = ?1",
+                ["settle-me"],
+                |row| row.get(0),
+            )
+            .expect("read settled reservation");
+        assert_eq!(status, "spent");
+        let event: (i64, String) = conn
+            .query_row(
+                "SELECT amount_sats, source FROM spend_events WHERE event_id = ?1",
+                ["resv:settle-me"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read atomic settlement event");
+        assert_eq!(event, (33, "rpc-test".to_string()));
+        drop(conn);
+
+        let second = owner
+            .spend_settle(&params(&[
+                ("reservation_id", json!("settle-me")),
+                ("actual_spent_sats", json!(33)),
+                ("source", json!("rpc-test")),
+                ("record_event", json!(true)),
+            ]))
+            .await;
+        assert_eq!(
+            second,
+            json!({"status": "not_found", "reservation_id": "settle-me"})
+        );
+        let event_count: i64 = Connection::open(path)
+            .expect("open event count")
+            .query_row(
+                "SELECT COUNT(*) FROM spend_events WHERE event_id = ?1",
+                ["resv:settle-me"],
+                |row| row.get(0),
+            )
+            .expect("count settlement events");
+        assert_eq!(event_count, 1);
     }
 }

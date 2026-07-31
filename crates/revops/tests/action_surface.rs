@@ -516,7 +516,7 @@ fn core_state_mutators_require_the_sealed_live_capability() {
 
     assert!(state_writer.contains("pub struct CoreStateLiveCapability"));
     assert!(state_writer.contains("pub struct CoreMutators"));
-    assert!(rpc_mutators.contains("pub struct PolicyMutationOwner"));
+    assert!(rpc_mutators.contains("pub struct CoreStateMutationOwner"));
     for observer_surface in [runtime.as_str(), main.as_str()] {
         assert!(!observer_surface.contains("CoreMutators"));
         assert!(!observer_surface.contains("ProductionStateWriter"));

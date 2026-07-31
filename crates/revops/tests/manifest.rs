@@ -330,6 +330,8 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         "revenue-unignore",
         "revenue-ban",
         "revenue-unban",
+        "revenue-spend-release",
+        "revenue-spend-settle",
     ] {
         assert!(
             methods.contains(&policy_mutator),
@@ -429,7 +431,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
     }
-    // Exactly 59 rpc methods total (no leftover revenue-r-* names bleeding
+    // Exactly 61 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
@@ -446,7 +448,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        59,
+        61,
         "methods: {methods:?}"
     );
 
@@ -600,7 +602,7 @@ fn fee_authority_status_is_reachable_in_both_naming_modes() {
 }
 
 #[test]
-fn peer_policy_mutators_are_reachable_in_both_naming_modes() {
+fn core_state_mutators_are_reachable_in_both_naming_modes() {
     let canonical_manifest = manifest_with(true);
     let canonical = canonical_manifest["rpcmethods"]
         .as_array()
@@ -615,14 +617,21 @@ fn peer_policy_mutators_are_reachable_in_both_naming_modes() {
         .iter()
         .filter_map(|method| method["name"].as_str())
         .collect::<Vec<_>>();
-    for suffix in ["ignore", "unignore", "ban", "unban"] {
+    for suffix in [
+        "ignore",
+        "unignore",
+        "ban",
+        "unban",
+        "spend-release",
+        "spend-settle",
+    ] {
         assert!(canonical.contains(&format!("revenue-{suffix}").as_str()));
         assert!(shadow.contains(&format!("revenue-r-{suffix}").as_str()));
     }
 }
 
 #[test]
-fn peer_policy_mutators_refuse_when_live_capability_is_unassembled() {
+fn core_state_mutators_refuse_when_live_capability_is_unassembled() {
     for (method, params) in [
         (
             "revenue-ignore",
@@ -639,6 +648,14 @@ fn peer_policy_mutators_refuse_when_live_capability_is_unassembled() {
         (
             "revenue-unban",
             serde_json::json!({"peer_id": fake_peer_id("02", 'd')}),
+        ),
+        (
+            "revenue-spend-release",
+            serde_json::json!({"reservation_id": "r"}),
+        ),
+        (
+            "revenue-spend-settle",
+            serde_json::json!({"reservation_id": "r"}),
         ),
     ] {
         assert_eq!(
