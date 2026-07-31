@@ -153,6 +153,30 @@ impl CoreMutators {
         self.writer.delete_peer_policy(peer_id).await
     }
 
+    pub(crate) async fn apply_policy_batch(
+        &self,
+        writes: Vec<PeerPolicyWrite>,
+        now: i64,
+    ) -> StateWriteAck<usize> {
+        self.writer.apply_policy_batch(writes, now).await
+    }
+
+    pub(crate) async fn set_hot_channel_override(
+        &self,
+        peer_id: String,
+        note: Option<String>,
+        min_depletion_trigger_pct: Option<f64>,
+        now: i64,
+    ) -> StateWriteAck<()> {
+        self.writer
+            .set_hot_channel_override(peer_id, note, min_depletion_trigger_pct, now)
+            .await
+    }
+
+    pub(crate) async fn remove_hot_channel_override(&self, peer_id: String) -> StateWriteAck<bool> {
+        self.writer.remove_hot_channel_override(peer_id).await
+    }
+
     pub(crate) async fn clear_all_budget_reservations(&self) -> StateWriteAck<ClearStats> {
         self.writer.clear_all_budget_reservations().await
     }

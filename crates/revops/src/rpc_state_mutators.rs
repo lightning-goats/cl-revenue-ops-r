@@ -641,6 +641,230 @@ pub fn build_profile_preview(
 
 const MAX_POLICY_CHANGES_PER_MINUTE: usize = 10;
 
+/// py `_parse_optional_float` (cl-revenue-ops.py, revenue_policy set arm):
+/// None -> None; strings strip+lower with ''/'null'/'none' -> None, else
+/// float(); anything unparseable is the handler's ValueError arm.
+fn parse_optional_float(raw: Option<&Value>, field: &str) -> Result<Option<f64>, Value> {
+    let err = || json!({"status": "error", "error": format!("Invalid {field}: expected float")});
+    match raw {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let s = s.trim().to_lowercase();
+            if s.is_empty() || s == "null" || s == "none" {
+                return Ok(None);
+            }
+            s.parse::<f64>().map(Some).map_err(|_| err())
+        }
+        Some(Value::Number(n)) => Ok(n.as_f64()),
+        Some(Value::Bool(b)) => Ok(Some(if *b { 1.0 } else { 0.0 })),
+        Some(_) => Err(err()),
+    }
+}
+
+/// py `_parse_optional_int`, same shape (int() semantics via python_int).
+fn parse_optional_int(raw: Option<&Value>, field: &str) -> Result<Option<i64>, Value> {
+    let err = || json!({"status": "error", "error": format!("Invalid {field}: expected integer")});
+    match raw {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let t = s.trim().to_lowercase();
+            if t.is_empty() || t == "null" || t == "none" {
+                return Ok(None);
+            }
+            crate::rpc_params::python_int(&Value::String(t))
+                .map(Some)
+                .map_err(|_| err())
+        }
+        Some(other) => crate::rpc_params::python_int(other)
+            .map(Some)
+            .map_err(|_| err()),
+    }
+}
+
+/// Which py surface's error strings apply: `revenue-policy set` uses the
+/// bare set_policy texts; `batch` entries append py's
+/// `for peer {peer12}...` suffix (and two texts differ outright).
+enum PolicyErrStyle {
+    Single,
+    Batch,
+}
+
+/// The set_policy / set_policies_batch validation + merge core
+/// (policy_manager.py:557-720, 1152-1265): existing-policy partial
+/// update with py's exact validation chain and error strings. Inputs
+/// are the RAW param Values (strategy/rebalance/fee_ppm) plus
+/// already-parsed multipliers/expiry; `tags` replaces when `Some`.
+#[allow(clippy::too_many_arguments)]
+fn merge_policy(
+    existing: &PeerPolicy,
+    strategy_raw: Option<&Value>,
+    rebalance_raw: Option<&Value>,
+    fee_ppm_raw: Option<&Value>,
+    tags: Option<Vec<String>>,
+    mult_min_in: Option<f64>,
+    mult_max_in: Option<f64>,
+    expires_in_hours: Option<i64>,
+    now: i64,
+    style: PolicyErrStyle,
+) -> Result<(PeerPolicyWrite, PeerPolicy), Value> {
+    use revops_analytics::policy::{FeeStrategy, RebalanceMode};
+    let peer12 = &existing.peer_id[..existing.peer_id.len().min(12)];
+    let verr = |msg: String| json!({"status": "error", "error": msg});
+    let suffix = match style {
+        PolicyErrStyle::Single => String::new(),
+        PolicyErrStyle::Batch => format!(" for peer {peer12}..."),
+    };
+
+    let mut strategy = existing.strategy;
+    if let Some(raw) = strategy_raw.filter(|v| !v.is_null()) {
+        let text = python_str(raw).to_lowercase();
+        strategy = match text.as_str() {
+            "dynamic" => FeeStrategy::Dynamic,
+            "static" => FeeStrategy::Static,
+            "passive" => FeeStrategy::Passive,
+            _ => {
+                return Err(verr(match style {
+                    PolicyErrStyle::Single => format!(
+                        "Invalid strategy '{text}'. Valid: ['dynamic', 'static', 'passive']"
+                    ),
+                    PolicyErrStyle::Batch => format!("Invalid strategy '{text}'{suffix}"),
+                }))
+            }
+        };
+    }
+
+    let mut rebalance_mode = existing.rebalance_mode;
+    if let Some(raw) = rebalance_raw.filter(|v| !v.is_null()) {
+        let text = python_str(raw).to_lowercase();
+        rebalance_mode = match text.as_str() {
+            "enabled" => RebalanceMode::Enabled,
+            "disabled" => RebalanceMode::Disabled,
+            "source_only" => RebalanceMode::SourceOnly,
+            "sink_only" => RebalanceMode::SinkOnly,
+            _ => {
+                return Err(verr(match style {
+                    PolicyErrStyle::Single => format!(
+                        "Invalid rebalance_mode '{text}'. Valid: ['enabled', 'disabled', \
+                         'source_only', 'sink_only']"
+                    ),
+                    PolicyErrStyle::Batch => format!("Invalid rebalance_mode '{text}'{suffix}"),
+                }))
+            }
+        };
+    }
+
+    // py: fee_ppm_target if provided else existing; isinstance(int)
+    // (bool IS an int in py) and the 0..=100000 rails.
+    let fee_ppm_target = match fee_ppm_raw.filter(|v| !v.is_null()) {
+        None => existing.fee_ppm_target,
+        Some(Value::Number(n)) if n.is_i64() || n.is_u64() => n.as_i64(),
+        Some(Value::Bool(b)) => Some(if *b { 1 } else { 0 }),
+        Some(other) => {
+            return Err(verr(match style {
+                PolicyErrStyle::Single => format!(
+                    "fee_ppm_target must be a non-negative integer, got {}",
+                    python_str(other)
+                ),
+                PolicyErrStyle::Batch => {
+                    format!("fee_ppm_target must be a non-negative integer{suffix}")
+                }
+            }))
+        }
+    };
+    if let Some(fee) = fee_ppm_target {
+        if fee < 0 {
+            return Err(verr(match style {
+                PolicyErrStyle::Single => {
+                    format!("fee_ppm_target must be a non-negative integer, got {fee}")
+                }
+                PolicyErrStyle::Batch => {
+                    format!("fee_ppm_target must be a non-negative integer{suffix}")
+                }
+            }));
+        }
+        if fee > 100_000 {
+            return Err(verr(match style {
+                PolicyErrStyle::Single => "fee_ppm_target cannot exceed 100000 PPM".to_string(),
+                PolicyErrStyle::Batch => format!("fee_ppm_target cannot exceed 100000 PPM{suffix}"),
+            }));
+        }
+    }
+    if strategy == FeeStrategy::Static && fee_ppm_target.is_none() {
+        return Err(verr(format!(
+            "strategy=static requires fee_ppm_target{suffix}"
+        )));
+    }
+
+    let tags = tags.unwrap_or_else(|| existing.tags.clone());
+
+    let mult_min = mult_min_in.or(existing.fee_multiplier_min);
+    let mult_max = mult_max_in.or(existing.fee_multiplier_max);
+    // py GLOBAL_MIN/MAX_FEE_MULTIPLIER = 0.1 / 5.0 (policy_manager.py:38-39).
+    for (value, name) in [
+        (mult_min, "fee_multiplier_min"),
+        (mult_max, "fee_multiplier_max"),
+    ] {
+        if let Some(v) = value {
+            if v < 0.1 {
+                return Err(verr(format!("{name} must be >= 0.1{suffix}")));
+            }
+            if v > 5.0 {
+                return Err(verr(format!("{name} must be <= 5.0{suffix}")));
+            }
+        }
+    }
+    if let (Some(lo), Some(hi)) = (mult_min, mult_max) {
+        if lo > hi {
+            // py renders the offending values as FLOATS ("3.0"), so
+            // both go through py_repr.
+            return Err(verr(format!(
+                "fee_multiplier_min ({}) cannot exceed fee_multiplier_max ({}){suffix}",
+                revops_econ::pyfloat::py_repr(lo),
+                revops_econ::pyfloat::py_repr(hi),
+            )));
+        }
+    }
+
+    let mut expires_at = existing.expires_at;
+    if let Some(hours) = expires_in_hours {
+        if hours <= 0 {
+            expires_at = None;
+        } else if hours > 720 {
+            return Err(verr(match style {
+                PolicyErrStyle::Single => {
+                    "expires_in_hours cannot exceed 720 (30 days)".to_string()
+                }
+                PolicyErrStyle::Batch => format!("expires_in_hours exceeds 720{suffix}"),
+            }));
+        } else {
+            expires_at = Some(now + hours * 3600);
+        }
+    }
+
+    let policy = PeerPolicy {
+        peer_id: existing.peer_id.clone(),
+        strategy,
+        rebalance_mode,
+        fee_ppm_target,
+        tags: tags.clone(),
+        updated_at: now,
+        fee_multiplier_min: mult_min,
+        fee_multiplier_max: mult_max,
+        expires_at,
+    };
+    let write = PeerPolicyWrite {
+        peer_id: existing.peer_id.clone(),
+        strategy: strategy.as_value().to_string(),
+        rebalance_mode: rebalance_mode.as_value().to_string(),
+        fee_ppm_target,
+        tags: Some(Value::Array(tags.into_iter().map(Value::String).collect()).to_string()),
+        fee_multiplier_min: mult_min,
+        fee_multiplier_max: mult_max,
+        expires_at,
+    };
+    Ok((write, policy))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreStateMutationAction {
     Ignore,
@@ -652,6 +876,14 @@ pub enum CoreStateMutationAction {
     SpendReleaseStale,
     SpendReserve,
     SpendSettle,
+    PolicySet,
+    PolicyDelete,
+    PolicyTag,
+    PolicyUntag,
+    PolicyBatch,
+    HotChannelAdd,
+    HotChannelRemove,
+    HotChannelClear,
 }
 
 /// Async provider of the unified total-cost budget snapshot — the same
@@ -707,6 +939,14 @@ impl CoreStateMutationOwner {
             CoreStateMutationAction::SpendReleaseStale => self.spend_release_stale(params).await,
             CoreStateMutationAction::SpendReserve => self.spend_reserve(params).await,
             CoreStateMutationAction::SpendSettle => self.spend_settle(params).await,
+            CoreStateMutationAction::PolicySet => self.policy_set(params).await,
+            CoreStateMutationAction::PolicyDelete => self.policy_delete(params).await,
+            CoreStateMutationAction::PolicyTag => self.policy_tag(params, true).await,
+            CoreStateMutationAction::PolicyUntag => self.policy_tag(params, false).await,
+            CoreStateMutationAction::PolicyBatch => self.policy_batch(params).await,
+            CoreStateMutationAction::HotChannelAdd => self.hot_channel_add(params).await,
+            CoreStateMutationAction::HotChannelRemove => self.hot_channel_remove(params).await,
+            CoreStateMutationAction::HotChannelClear => self.hot_channel_clear().await,
         }
     }
 
@@ -1160,6 +1400,450 @@ impl CoreStateMutationOwner {
         completed_spend_response(ack, |settled| {
             spend_settle_response(&reservation_id, settled)
         })
+    }
+
+    /// py revenue_policy usage/format guards (falsy peer -> per-action
+    /// usage; then the 66-hex gate).
+    fn policy_peer(params: &Map<String, Value>, usage: &str) -> Result<String, Value> {
+        let peer = params
+            .get("peer_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if peer.is_empty() {
+            return Err(json!({"error": usage}));
+        }
+        if !is_valid_peer_id(peer) {
+            return Err(invalid_peer_id_error());
+        }
+        Ok(peer.to_string())
+    }
+
+    /// py's RuntimeError-through-generic-except wrapping for the set arm
+    /// (the rate limiter raises; revenue_policy's `except Exception`
+    /// prefixes "Unexpected error: ").
+    fn policy_rate_limit_error(peer_id: &str) -> Value {
+        json!({
+            "status": "error",
+            "error": format!(
+                "Unexpected error: Rate limited: max {} changes/minute for {}...",
+                MAX_POLICY_CHANGES_PER_MINUTE,
+                &peer_id[..12]
+            ),
+        })
+    }
+
+    /// py revenue_policy `set` (cl-revenue-ops.py:5395-5470 +
+    /// policy_manager.set_policy).
+    pub async fn policy_set(&self, params: &Map<String, Value>) -> Value {
+        let peer_id = match Self::policy_peer(
+            params,
+            "Usage: revenue-policy set <peer_id> [strategy=X] [rebalance=X] [fee_ppm=N]",
+        ) {
+            Ok(peer) => peer,
+            Err(error) => return error,
+        };
+        let mult_min =
+            match parse_optional_float(params.get("fee_multiplier_min"), "fee_multiplier_min") {
+                Ok(v) => v,
+                Err(error) => return error,
+            };
+        let mult_max =
+            match parse_optional_float(params.get("fee_multiplier_max"), "fee_multiplier_max") {
+                Ok(v) => v,
+                Err(error) => return error,
+            };
+        let expires = match parse_optional_int(params.get("expires_in_hours"), "expires_in_hours") {
+            Ok(v) => v,
+            Err(error) => return error,
+        };
+        let now = (self.clock)();
+        let existing = match self.existing_policy(&peer_id, now).await {
+            Ok(existing) => existing,
+            Err(error) => return error,
+        };
+        let (write, policy) = match merge_policy(
+            &existing,
+            params.get("strategy"),
+            params.get("rebalance"),
+            params.get("fee_ppm"),
+            None,
+            mult_min,
+            mult_max,
+            expires,
+            now,
+            PolicyErrStyle::Single,
+        ) {
+            Ok(merged) => merged,
+            Err(error) => return error,
+        };
+        // B2: rate limit AFTER validation, before the write.
+        if !self.rate_limit_allows(&peer_id, now) {
+            return Self::policy_rate_limit_error(&peer_id);
+        }
+        let success = json!({
+            "status": "success",
+            "policy": crate::rpc_policy::peer_policy_to_json(&policy, now),
+            "message": format!("Policy updated for peer {}...", &peer_id[..12]),
+        });
+        self.complete_upsert(&peer_id, now, write, success).await
+    }
+
+    /// py revenue_policy `delete` (cl-revenue-ops.py:5495-5507).
+    pub async fn policy_delete(&self, params: &Map<String, Value>) -> Value {
+        let peer_id = match Self::policy_peer(params, "Usage: revenue-policy delete <peer_id>") {
+            Ok(peer) => peer,
+            Err(error) => return error,
+        };
+        let ack = self.core.delete_peer_policy(peer_id.clone()).await;
+        let deleted = matches!(&ack, StateWriteAck::Applied(PolicyDelete::Deleted));
+        let response = completed_write_response(ack, |outcome| match outcome {
+            PolicyDelete::Deleted => json!({
+                "status": "success",
+                "peer_id": peer_id,
+                "message": "Policy deleted, peer reverted to defaults (dynamic strategy, \
+                            rebalancing enabled)",
+            }),
+            PolicyDelete::AlreadyAbsent => json!({
+                "status": "noop",
+                "message": "No policy existed for this peer",
+            }),
+        });
+        if deleted {
+            // py delete_policy fires _notify_change with the default
+            // policy -- the fee owner re-reads on wake either way.
+            self.wake_after_commit(&peer_id).await;
+        }
+        response
+    }
+
+    /// py revenue_policy `tag`/`untag` (cl-revenue-ops.py:5509-5533 +
+    /// policy_manager.add_tag/remove_tag 770-815): a no-op membership
+    /// change returns the EXISTING tags without a write (and without a
+    /// rate-limit hit); otherwise the full set_policy path with the new
+    /// tag list.
+    pub async fn policy_tag(&self, params: &Map<String, Value>, add: bool) -> Value {
+        let action = if add { "tag" } else { "untag" };
+        let usage = format!("Usage: revenue-policy {action} <peer_id> <tag>");
+        let tag = params
+            .get("tag")
+            .filter(|v| crate::rpc_params::is_truthy_py(v))
+            .map(python_str);
+        let peer = params
+            .get("peer_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // py: `if not peer_id or not tag` -- ONE usage arm for both.
+        let (peer_id, tag) = match (peer.is_empty(), tag) {
+            (false, Some(tag)) => (peer.to_string(), tag),
+            _ => return json!({"error": usage}),
+        };
+        if !is_valid_peer_id(&peer_id) {
+            return invalid_peer_id_error();
+        }
+        let now = (self.clock)();
+        let existing = match self.existing_policy(&peer_id, now).await {
+            Ok(existing) => existing,
+            Err(error) => return error,
+        };
+        let mut new_tags = existing.tags.clone();
+        let changed = if add {
+            if new_tags.contains(&tag) {
+                false
+            } else {
+                new_tags.push(tag);
+                true
+            }
+        } else {
+            let before = new_tags.len();
+            new_tags.retain(|t| *t != tag);
+            new_tags.len() != before
+        };
+        if !changed {
+            return json!({
+                "status": "success",
+                "peer_id": peer_id,
+                "tags": existing.tags,
+            });
+        }
+        let (write, policy) = match merge_policy(
+            &existing,
+            None,
+            None,
+            None,
+            Some(new_tags),
+            None,
+            None,
+            None,
+            now,
+            PolicyErrStyle::Single,
+        ) {
+            Ok(merged) => merged,
+            Err(error) => return error,
+        };
+        if !self.rate_limit_allows(&peer_id, now) {
+            return Self::policy_rate_limit_error(&peer_id);
+        }
+        let success = json!({
+            "status": "success",
+            "peer_id": peer_id,
+            "tags": policy.tags,
+        });
+        self.complete_upsert(&peer_id, now, write, success).await
+    }
+
+    /// py revenue_policy `batch` (cl-revenue-ops.py:5536-5564 +
+    /// set_policies_batch 1152-1290): parse/cap at the handler, validate
+    /// EVERY entry before any write (M5 fail-fast), one batch txn, rate
+    /// limiting bypassed.
+    pub async fn policy_batch(&self, params: &Map<String, Value>) -> Value {
+        let updates_raw = params
+            .get("updates")
+            .cloned()
+            .unwrap_or_else(|| json!("[]"));
+        let updates = match &updates_raw {
+            Value::String(text) => match serde_json::from_str::<Value>(text) {
+                Ok(parsed) => parsed,
+                Err(e) => return json!({"error": format!("Invalid JSON in updates: {e}")}),
+            },
+            other => other.clone(),
+        };
+        let Some(entries) = updates.as_array() else {
+            return json!({"error": "updates must be a JSON array"});
+        };
+        if entries.len() > 100 {
+            return json!({
+                "error": format!("Batch too large: {} entries, max 100", entries.len())
+            });
+        }
+        if entries.is_empty() {
+            return json!({
+                "status": "success",
+                "updated": 0,
+                "policies": [],
+                "message": "Batch updated 0 policies",
+            });
+        }
+        let now = (self.clock)();
+        let mut writes = Vec::with_capacity(entries.len());
+        let mut policies = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let peer_id = entry
+                .get("peer_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !is_valid_peer_id(peer_id) {
+                return json!({
+                    "status": "error",
+                    "error": "Invalid peer_id format: expected 66-character hex pubkey",
+                });
+            }
+            let existing = match self.existing_policy(peer_id, now).await {
+                Ok(existing) => existing,
+                Err(error) => return error,
+            };
+            let tags = match entry.get("tags") {
+                None | Some(Value::Null) => None,
+                Some(Value::Array(items)) => Some(items.iter().map(python_str).collect::<Vec<_>>()),
+                Some(_) => {
+                    return json!({
+                        "status": "error",
+                        "error": format!(
+                            "tags must be a list of strings for peer {}...",
+                            &peer_id[..12]
+                        ),
+                    })
+                }
+            };
+            let mult_min =
+                match parse_optional_float(entry.get("fee_multiplier_min"), "fee_multiplier_min") {
+                    Ok(v) => v,
+                    Err(error) => return error,
+                };
+            let mult_max =
+                match parse_optional_float(entry.get("fee_multiplier_max"), "fee_multiplier_max") {
+                    Ok(v) => v,
+                    Err(error) => return error,
+                };
+            let expires =
+                match parse_optional_int(entry.get("expires_in_hours"), "expires_in_hours") {
+                    Ok(v) => v,
+                    Err(error) => return error,
+                };
+            match merge_policy(
+                &existing,
+                entry.get("strategy"),
+                entry.get("rebalance_mode"),
+                entry.get("fee_ppm_target"),
+                tags,
+                mult_min,
+                mult_max,
+                expires,
+                now,
+                PolicyErrStyle::Batch,
+            ) {
+                Ok((write, policy)) => {
+                    writes.push(write);
+                    policies.push(policy);
+                }
+                Err(error) => return error,
+            }
+        }
+        let peer_ids: Vec<String> = policies.iter().map(|p| p.peer_id.clone()).collect();
+        let ack = self.core.apply_policy_batch(writes, now).await;
+        let applied = matches!(&ack, StateWriteAck::Applied(_));
+        let response = completed_write_response(ack, |_| {
+            json!({
+                "status": "success",
+                "updated": policies.len(),
+                "policies": policies
+                    .iter()
+                    .map(|p| crate::rpc_policy::peer_policy_to_json(p, now))
+                    .collect::<Vec<_>>(),
+                "message": format!("Batch updated {} policies", policies.len()),
+            })
+        });
+        if applied {
+            for peer_id in &peer_ids {
+                self.wake_after_commit(peer_id).await;
+            }
+        }
+        response
+    }
+
+    /// py revenue_hot_channel_protection_peers `add`
+    /// (cl-revenue-ops.py handler + database.py:7289-7302).
+    pub async fn hot_channel_add(&self, params: &Map<String, Value>) -> Value {
+        let peer_id = match Self::policy_peer(
+            params,
+            "Usage: revenue-hot-channel-protection-peers add <peer_id> [note] \
+             [min_depletion_trigger_pct]",
+        ) {
+            Ok(peer) => peer,
+            Err(error) => return error,
+        };
+        let pct = match params.get("min_depletion_trigger_pct") {
+            None | Some(Value::Null) => None,
+            Some(raw) => match raw
+                .as_f64()
+                .or_else(|| raw.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+            {
+                Some(v) => Some(v),
+                None => return json!({"error": "min_depletion_trigger_pct must be a number"}),
+            },
+        };
+        if let Some(v) = pct {
+            if !(v > 0.0 && v <= 100.0) {
+                return json!({
+                    "error": "min_depletion_trigger_pct must be between 0 (exclusive) and 100"
+                });
+            }
+        }
+        let note = params
+            .get("note")
+            .filter(|v| !v.is_null())
+            .map(python_str)
+            .unwrap_or_default();
+        let now = (self.clock)();
+        let ack = self
+            .core
+            .set_hot_channel_override(peer_id.clone(), Some(note), pct, now)
+            .await;
+        let rows = match &ack {
+            StateWriteAck::Applied(()) => self.hot_channel_rows().await,
+            _ => Ok(Vec::new()),
+        };
+        completed_write_response(ack, |_| match rows {
+            Ok(rows) => json!({
+                "status": "success",
+                "action": "add",
+                "peer_id": peer_id,
+                "count": rows.len(),
+                "peers": rows,
+            }),
+            Err(ref error) => json!({"error": error}),
+        })
+    }
+
+    /// py `remove` arm: NO peer format gate (py only checks falsy), the
+    /// removed flag, and the refreshed list.
+    pub async fn hot_channel_remove(&self, params: &Map<String, Value>) -> Value {
+        let peer_id = params
+            .get("peer_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if peer_id.is_empty() {
+            return json!({
+                "error": "Usage: revenue-hot-channel-protection-peers remove <peer_id>"
+            });
+        }
+        let ack = self.core.remove_hot_channel_override(peer_id.clone()).await;
+        let rows = match &ack {
+            StateWriteAck::Applied(_) => self.hot_channel_rows().await,
+            _ => Ok(Vec::new()),
+        };
+        completed_write_response(ack, |removed| match rows {
+            Ok(rows) => json!({
+                "status": "success",
+                "action": "remove",
+                "peer_id": peer_id,
+                "removed": removed,
+                "count": rows.len(),
+                "peers": rows,
+            }),
+            Err(ref error) => json!({"error": error}),
+        })
+    }
+
+    /// py `clear` arm: list-then-remove-each; the response is always the
+    /// emptied shape with the removed count.
+    pub async fn hot_channel_clear(&self) -> Value {
+        let rows = match self.hot_channel_rows().await {
+            Ok(rows) => rows,
+            Err(error) => return json!({"error": error}),
+        };
+        let mut removed = 0usize;
+        for row in &rows {
+            let peer = row
+                .get("peer_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if peer.is_empty() {
+                continue;
+            }
+            match self.core.remove_hot_channel_override(peer).await {
+                StateWriteAck::Applied(true) => removed += 1,
+                StateWriteAck::Applied(false) => {}
+                other => return completed_write_response(other, |_| Value::Null),
+            }
+        }
+        json!({
+            "status": "success",
+            "action": "clear",
+            "removed": removed,
+            "count": 0,
+            "peers": [],
+        })
+    }
+
+    /// py list_hot_channel_protection_override_peers row dicts.
+    async fn hot_channel_rows(&self) -> Result<Vec<Value>, String> {
+        revops_db::queries::hot_channel_protection_override_peers(&self.reader)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        json!({
+                            "peer_id": row.peer_id,
+                            "added_at": row.added_at,
+                            "note": row.note,
+                            "min_depletion_trigger_pct": row.min_depletion_trigger_pct,
+                        })
+                    })
+                    .collect()
+            })
+            .map_err(|error| format!("{error:#}"))
     }
 }
 
@@ -2082,5 +2766,384 @@ mod core_mutation_owner_tests {
             .await;
         assert_eq!(stale["status"], "success");
         assert_eq!(stale["released_count"], 0);
+    }
+
+    const PEER2: &str = "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// py set_policy's validation chain, exact error strings, then a real
+    /// write: read back through the SAME reader the runtime uses, and the
+    /// fee owner woken exactly once.
+    #[tokio::test]
+    async fn policy_set_validates_with_python_strings_then_writes_and_wakes() {
+        let (_d, _path, owner, mut wake) = fixture().await;
+
+        let bad = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("strategy", json!("turbo")),
+            ]))
+            .await;
+        assert_eq!(
+            bad["error"],
+            "Invalid strategy 'turbo'. Valid: ['dynamic', 'static', 'passive']"
+        );
+
+        let no_fee = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("strategy", json!("static")),
+            ]))
+            .await;
+        assert_eq!(no_fee["error"], "strategy=static requires fee_ppm_target");
+
+        let big = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("fee_ppm", json!(200_000)),
+            ]))
+            .await;
+        assert_eq!(big["error"], "fee_ppm_target cannot exceed 100000 PPM");
+
+        let crossed = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("fee_multiplier_min", json!(3.0)),
+                ("fee_multiplier_max", json!(2.0)),
+            ]))
+            .await;
+        assert_eq!(
+            crossed["error"], "fee_multiplier_min (3.0) cannot exceed fee_multiplier_max (2.0)",
+            "py renders the floats: {crossed:?}"
+        );
+
+        let expiry = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("expires_in_hours", json!(721)),
+            ]))
+            .await;
+        assert_eq!(
+            expiry["error"],
+            "expires_in_hours cannot exceed 720 (30 days)"
+        );
+
+        assert!(wake.try_recv().is_err(), "no wake before a committed write");
+
+        let ok = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("strategy", json!("static")),
+                ("fee_ppm", json!(500)),
+            ]))
+            .await;
+        assert_eq!(ok["status"], "success", "{ok:?}");
+        assert_eq!(
+            ok["message"],
+            format!("Policy updated for peer {}...", &PEER[..12])
+        );
+        assert_eq!(ok["policy"]["strategy"], "static");
+        assert_eq!(ok["policy"]["fee_ppm_target"], 500);
+        assert!(
+            matches!(wake.try_recv(), Ok(CycleMsg::PolicyChanged { peer_id }) if peer_id == PEER),
+            "committed set wakes the fee owner"
+        );
+
+        let reader = revops_db::actor::spawn_read_only(&_path).await.unwrap();
+        let read_back = revops_db::queries::policy_for_peer(&reader, PEER, NOW)
+            .await
+            .unwrap();
+        assert_eq!(read_back.strategy.as_value(), "static");
+        assert_eq!(read_back.fee_ppm_target, Some(500));
+    }
+
+    /// B2 + py's generic-except wrap: the 11th change inside the minute
+    /// answers "Unexpected error: Rate limited: ...".
+    #[tokio::test]
+    async fn policy_set_rate_limits_the_eleventh_change() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        for i in 0..10 {
+            let ok = owner
+                .policy_set(&params(&[
+                    ("peer_id", json!(PEER)),
+                    ("fee_ppm", json!(100 + i)),
+                ]))
+                .await;
+            assert_eq!(ok["status"], "success", "change {i}: {ok:?}");
+        }
+        let refused = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("fee_ppm", json!(999)),
+            ]))
+            .await;
+        assert_eq!(
+            refused["error"],
+            format!(
+                "Unexpected error: Rate limited: max 10 changes/minute for {}...",
+                &PEER[..12]
+            )
+        );
+    }
+
+    /// py delete arms: noop when absent, success message when a row died,
+    /// and the peer reads back as the default policy afterwards.
+    #[tokio::test]
+    async fn policy_delete_noop_and_success_arms() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        let noop = owner
+            .policy_delete(&params(&[("peer_id", json!(PEER))]))
+            .await;
+        assert_eq!(noop["status"], "noop");
+        assert_eq!(noop["message"], "No policy existed for this peer");
+
+        owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("fee_ppm", json!(100)),
+            ]))
+            .await;
+        let deleted = owner
+            .policy_delete(&params(&[("peer_id", json!(PEER))]))
+            .await;
+        assert_eq!(deleted["status"], "success");
+        assert_eq!(
+            deleted["message"],
+            "Policy deleted, peer reverted to defaults (dynamic strategy, rebalancing enabled)"
+        );
+        let reader = revops_db::actor::spawn_read_only(&_path).await.unwrap();
+        let read_back = revops_db::queries::policy_for_peer(&reader, PEER, NOW)
+            .await
+            .unwrap();
+        assert_eq!(read_back.strategy.as_value(), "dynamic");
+    }
+
+    /// py add_tag/remove_tag: membership no-ops return the existing tags
+    /// WITHOUT a write (proven by the rate limiter staying unconsumed),
+    /// real changes go through the full set path.
+    #[tokio::test]
+    async fn policy_tag_untag_membership_semantics() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        let usage = owner
+            .policy_tag(&params(&[("peer_id", json!(PEER))]), true)
+            .await;
+        assert_eq!(usage["error"], "Usage: revenue-policy tag <peer_id> <tag>");
+
+        let tagged = owner
+            .policy_tag(
+                &params(&[("peer_id", json!(PEER)), ("tag", json!("vip"))]),
+                true,
+            )
+            .await;
+        assert_eq!(tagged["status"], "success");
+        assert_eq!(tagged["tags"], json!(["vip"]));
+
+        // 10 duplicate adds: all no-ops, none consumes the rate limit...
+        for _ in 0..10 {
+            let dup = owner
+                .policy_tag(
+                    &params(&[("peer_id", json!(PEER)), ("tag", json!("vip"))]),
+                    true,
+                )
+                .await;
+            assert_eq!(dup["status"], "success");
+            assert_eq!(dup["tags"], json!(["vip"]));
+        }
+        // ...so a REAL change still succeeds (only 2 of 10 slots used).
+        let untagged = owner
+            .policy_tag(
+                &params(&[("peer_id", json!(PEER)), ("tag", json!("vip"))]),
+                false,
+            )
+            .await;
+        assert_eq!(untagged["status"], "success");
+        assert_eq!(untagged["tags"], json!([]));
+
+        let missing = owner
+            .policy_tag(
+                &params(&[("peer_id", json!(PEER)), ("tag", json!("ghost"))]),
+                false,
+            )
+            .await;
+        assert_eq!(
+            missing["status"], "success",
+            "removing an absent tag is py's no-op arm"
+        );
+    }
+
+    /// py set_policies_batch: M5 fail-fast validation (an invalid later
+    /// entry writes NOTHING), then one transaction for the whole batch.
+    #[tokio::test]
+    async fn policy_batch_is_fail_fast_and_atomic() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        let bad = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([
+                    {"peer_id": PEER, "fee_ppm_target": 123},
+                    {"peer_id": PEER2, "strategy": "turbo"},
+                ]),
+            )]))
+            .await;
+        assert_eq!(
+            bad["error"],
+            format!("Invalid strategy 'turbo' for peer {}...", &PEER2[..12])
+        );
+        let reader = revops_db::actor::spawn_read_only(&_path).await.unwrap();
+        let untouched = revops_db::queries::policy_for_peer(&reader, PEER, NOW)
+            .await
+            .unwrap();
+        assert_eq!(untouched.fee_ppm_target, None, "fail-fast: nothing written");
+
+        let ok = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([
+                    {"peer_id": PEER, "fee_ppm_target": 123},
+                    {"peer_id": PEER2, "strategy": "passive"},
+                ]),
+            )]))
+            .await;
+        assert_eq!(ok["status"], "success", "{ok:?}");
+        assert_eq!(ok["updated"], 2);
+        assert_eq!(ok["message"], "Batch updated 2 policies");
+        let a = revops_db::queries::policy_for_peer(&reader, PEER, NOW)
+            .await
+            .unwrap();
+        assert_eq!(a.fee_ppm_target, Some(123));
+        let b = revops_db::queries::policy_for_peer(&reader, PEER2, NOW)
+            .await
+            .unwrap();
+        assert_eq!(b.strategy.as_value(), "passive");
+
+        let oversized: Vec<Value> = (0..101).map(|_| json!({"peer_id": PEER})).collect();
+        let too_big = owner
+            .policy_batch(&params(&[("updates", json!(oversized))]))
+            .await;
+        assert_eq!(too_big["error"], "Batch too large: 101 entries, max 100");
+
+        let junk = owner
+            .policy_batch(&params(&[("updates", json!("not-json"))]))
+            .await;
+        assert!(
+            junk["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Invalid JSON in updates:"),
+            "{junk:?}"
+        );
+    }
+
+    /// py hot-channel add/remove/clear round trip with py's exact
+    /// validation strings and refreshed-list responses.
+    #[tokio::test]
+    async fn hot_channel_add_remove_clear_round_trip() {
+        let (_d, _path, owner, _wake) = fixture().await;
+
+        let bad_pct = owner
+            .hot_channel_add(&params(&[
+                ("peer_id", json!(PEER)),
+                ("min_depletion_trigger_pct", json!(0)),
+            ]))
+            .await;
+        assert_eq!(
+            bad_pct["error"],
+            "min_depletion_trigger_pct must be between 0 (exclusive) and 100"
+        );
+        let nan = owner
+            .hot_channel_add(&params(&[
+                ("peer_id", json!(PEER)),
+                ("min_depletion_trigger_pct", json!("abc")),
+            ]))
+            .await;
+        assert_eq!(nan["error"], "min_depletion_trigger_pct must be a number");
+
+        let added = owner
+            .hot_channel_add(&params(&[
+                ("peer_id", json!(PEER)),
+                ("note", json!("ops")),
+                ("min_depletion_trigger_pct", json!(42.5)),
+            ]))
+            .await;
+        assert_eq!(added["status"], "success", "{added:?}");
+        assert_eq!(added["action"], "add");
+        assert_eq!(added["count"], 1);
+        assert_eq!(added["peers"][0]["peer_id"], PEER);
+        assert_eq!(added["peers"][0]["note"], "ops");
+        assert_eq!(added["peers"][0]["min_depletion_trigger_pct"], 42.5);
+
+        let removed = owner
+            .hot_channel_remove(&params(&[("peer_id", json!(PEER))]))
+            .await;
+        assert_eq!(removed["removed"], true);
+        assert_eq!(removed["count"], 0);
+
+        owner
+            .hot_channel_add(&params(&[("peer_id", json!(PEER))]))
+            .await;
+        owner
+            .hot_channel_add(&params(&[("peer_id", json!(PEER2))]))
+            .await;
+        let cleared = owner.hot_channel_clear().await;
+        assert_eq!(cleared["removed"], 2);
+        assert_eq!(cleared["count"], 0);
+        assert_eq!(cleared["peers"], json!([]));
+    }
+
+    /// Dispatch reachability (item-214, same pin as slice 2): each new
+    /// action routed through `handle()` must reach ITS method --
+    /// shape-distinctive probes per arm.
+    #[tokio::test]
+    async fn handle_dispatches_the_new_policy_and_hot_channel_actions() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        use super::CoreStateMutationAction as A;
+
+        let set = owner
+            .handle(
+                A::PolicySet,
+                &params(&[("peer_id", json!(PEER)), ("strategy", json!("x"))]),
+            )
+            .await;
+        assert_eq!(
+            set["error"],
+            "Invalid strategy 'x'. Valid: ['dynamic', 'static', 'passive']"
+        );
+
+        let delete = owner
+            .handle(A::PolicyDelete, &params(&[("peer_id", json!(PEER))]))
+            .await;
+        assert_eq!(delete["status"], "noop");
+
+        let tag = owner
+            .handle(A::PolicyTag, &params(&[("peer_id", json!(PEER))]))
+            .await;
+        assert_eq!(tag["error"], "Usage: revenue-policy tag <peer_id> <tag>");
+        let untag = owner
+            .handle(A::PolicyUntag, &params(&[("peer_id", json!(PEER))]))
+            .await;
+        assert_eq!(
+            untag["error"],
+            "Usage: revenue-policy untag <peer_id> <tag>"
+        );
+
+        let batch = owner
+            .handle(A::PolicyBatch, &params(&[("updates", json!("["))]))
+            .await;
+        assert!(batch["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Invalid JSON in updates:"));
+
+        let add = owner.handle(A::HotChannelAdd, &params(&[])).await;
+        assert!(add["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Usage: revenue-hot-channel"));
+        let remove = owner.handle(A::HotChannelRemove, &params(&[])).await;
+        assert_eq!(
+            remove["error"],
+            "Usage: revenue-hot-channel-protection-peers remove <peer_id>"
+        );
+        let clear = owner.handle(A::HotChannelClear, &params(&[])).await;
+        assert_eq!(clear["action"], "clear");
     }
 }

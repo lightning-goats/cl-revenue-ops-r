@@ -1545,14 +1545,17 @@ fn revenue_r_policy_list_reflects_real_peer_policies_rows() {
 }
 
 /// `revenue-r-policy` mutation actions must be refused BEFORE any DB
-/// access (task rule 3) -- no db-path override is supplied here, so a
-/// handler that checked `s.db` first would answer "Plugin not
-/// initialized" instead of the tactical-action refusal. Asserting the
-/// refusal text specifically pins the ordering, not just "some error".
+/// access -- SUPERSEDED ordering (Task 66 slice 8f): py checks
+/// `policy_manager is None` BEFORE the deprecation gate
+/// (cl-revenue-ops.py:5385-5397), so with no DB a tactical call answers
+/// "Plugin not initialized"; WITH a DB and no internal/admin override it
+/// answers py's own deprecation refusal verbatim; with the override it
+/// reaches the sealed owner -- unassembled until Task 69, the same
+/// "Plugin not initialized" string.
 #[test]
-fn revenue_r_policy_set_action_is_refused_before_any_db_access() {
+fn revenue_r_policy_write_arms_follow_pythons_guard_order() {
     let home = tempfile::tempdir().expect("tempdir");
-    let result = call_after_init_with_params(
+    let no_db = call_after_init_with_params(
         false,
         None,
         home.path(),
@@ -1561,15 +1564,42 @@ fn revenue_r_policy_set_action_is_refused_before_any_db_access() {
         serde_json::json!({"action": "set", "peer_id": "irrelevant"}),
     );
     assert_eq!(
-        result["error"]["code"], "state_writer_authority_absent",
-        "must be the stable authority refusal, not a DB-access error: {result:?}"
+        no_db,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "py's policy_manager gate fires first: {no_db:?}"
     );
-    assert!(
-        result["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("write authority"),
-        "{result:?}"
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    let refused = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "set", "peer_id": "irrelevant"}),
+    );
+    assert_eq!(
+        refused,
+        serde_json::json!({
+            "error": "revenue-policy set is deprecated for normal operator use. \
+                      Use revenue-policy list/get/find/changes for diagnostics."
+        }),
+        "{refused:?}"
+    );
+
+    let staged = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "set", "peer_id": "irrelevant", "internal": true}),
+    );
+    assert_eq!(
+        staged,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "override reaches the owner, unassembled until Task 69: {staged:?}"
     );
 }
 
@@ -1897,10 +1927,11 @@ fn revenue_r_hot_channel_protection_peers_list_reflects_a_real_row() {
     );
     assert_eq!(result["peers"][0]["min_depletion_trigger_pct"], 0.42);
 
-    // `action != "list"` must be refused, never treated as an implicit
-    // list -- add/remove/clear are DB writes and stay out of this
-    // read-only port's scope.
-    let refused = call_after_init_with_params(
+    // Task 66 slice 8f: the write actions route through the sealed
+    // mutation owner -- unassembled until Task 69, answering py's
+    // "Plugin not initialized" exactly like the other staged mutators
+    // (never an implicit list, never a fabricated success).
+    let staged = call_after_init_with_params(
         false,
         Some(prod_db_path.to_str().unwrap()),
         home.path(),
@@ -1908,12 +1939,10 @@ fn revenue_r_hot_channel_protection_peers_list_reflects_a_real_row() {
         "revenue-r-hot-channel-protection-peers",
         serde_json::json!({"action": "add"}),
     );
-    let err = refused["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected a refusal error, got: {refused:?}"));
-    assert!(
-        err.contains("not available in this read-only port"),
-        "{err}"
+    assert_eq!(
+        staged,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "{staged:?}"
     );
 }
 
@@ -1990,9 +2019,9 @@ fn revenue_r_hot_channel_protection_peers_action_normalization_matches_python() 
         "{leading_space_err}"
     );
 
-    // H6: the write-action refusal and the unknown-action refusal must be
-    // DIFFERENT messages.
-    let write_refused = call_after_init_with_params(
+    // H6 (updated for Task 66 slice 8f): a real write action's staged
+    // answer must still read differently from an unknown-action refusal.
+    let write_staged = call_after_init_with_params(
         false,
         Some(prod_db_path.to_str().unwrap()),
         home.path(),
@@ -2000,11 +2029,11 @@ fn revenue_r_hot_channel_protection_peers_action_normalization_matches_python() 
         "revenue-r-hot-channel-protection-peers",
         serde_json::json!({"action": "remove"}),
     );
-    let write_refused_err = write_refused["error"].as_str().unwrap();
-    assert!(write_refused_err.contains("not available in this read-only port"));
+    let write_staged_err = write_staged["error"].as_str().unwrap();
+    assert_eq!(write_staged_err, "Plugin not initialized");
     assert_ne!(
-        write_refused_err, leading_space_err,
-        "a real write action's refusal must read differently from an unknown-action refusal"
+        write_staged_err, leading_space_err,
+        "a real write action's staged arm must read differently from an unknown-action refusal"
     );
 }
 

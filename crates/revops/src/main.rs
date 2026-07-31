@@ -3474,8 +3474,9 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &policy_name,
-            "peer policy diagnostics (READ-ONLY in this port: list/get/find/changes; \
-             set/delete/tag/untag/batch are refused -- see revops::rpc_policy)",
+            "peer policy management: list/get/find/changes reads; set/delete/tag/untag/\
+             batch behind py's internal/admin override through the sealed mutation \
+             owner (Task 66 slice 8f; execution staged until Task 69)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
@@ -3488,6 +3489,41 @@ async fn main() -> Result<()> {
                 // `str(x or "")` -> `""` -> unknown-action error) -- the
                 // OLD wiring collapsed both to `None` -> "list".
                 let action = revops::rpc_policy::normalize_action(v.get("action"));
+                // Task 66 slice 8f: py's arm order for the write actions
+                // (cl-revenue-ops.py:5385-5397): policy_manager gate,
+                // then the no-override deprecation refusal, then the
+                // write. Pre-Task-69 the write capability is the
+                // UNASSEMBLED mutation owner -> "Plugin not initialized",
+                // the same string py answers when the manager is absent.
+                if revops::rpc_policy::is_tactical_action(&action) {
+                    if s.db.is_none() {
+                        return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    }
+                    let params = v.as_object().cloned().unwrap_or_default();
+                    if let Some(denial) =
+                        revops::rpc_state_mutators::deprecated_policy_write_gate(
+                            &format!("revenue-policy {action}"),
+                            &params,
+                        )
+                    {
+                        return Ok(denial);
+                    }
+                    let Some(owner) = s.core_mutations.get() else {
+                        return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    };
+                    let mutation = match action.as_str() {
+                        "set" => revops::rpc_state_mutators::CoreStateMutationAction::PolicySet,
+                        "delete" => {
+                            revops::rpc_state_mutators::CoreStateMutationAction::PolicyDelete
+                        }
+                        "tag" => revops::rpc_state_mutators::CoreStateMutationAction::PolicyTag,
+                        "untag" => {
+                            revops::rpc_state_mutators::CoreStateMutationAction::PolicyUntag
+                        }
+                        _ => revops::rpc_state_mutators::CoreStateMutationAction::PolicyBatch,
+                    };
+                    return Ok(owner.handle(mutation, &params).await);
+                }
                 if let Some(err) = revops::rpc_policy::policy_action_gate(&action) {
                     return Ok(err);
                 }
@@ -3597,11 +3633,18 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &hot_channel_protection_peers_name,
-            "list persistent hot-channel-protection peer overrides (READ-ONLY in \
-             this port: add/remove/clear are DB writes and are refused)",
+            "persistent hot-channel-protection peer overrides: list reads; add/remove/\
+             clear through the sealed mutation owner (Task 66 slice 8f; execution \
+             staged until Task 69)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
+                }
+                // py's guard order: `database is None` fires FIRST, for
+                // every action (cl-revenue-ops.py handler top).
+                let s = p.state();
+                if s.db.is_none() {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 }
                 // Task 50 correction round, F8: `str(action or
                 // "list").lower()`, NO `.strip()` -- the OLD wiring
@@ -3613,20 +3656,29 @@ async fn main() -> Result<()> {
                     revops::rpc_hot_channel_protection_peers::normalize_action(v.get("action"));
                 if revops::rpc_hot_channel_protection_peers::WRITE_ACTIONS.contains(&action.as_str())
                 {
-                    // H6: a REAL write action (a genuine scope boundary),
-                    // distinct from the unknown-action message below.
-                    return Ok(
-                        revops::rpc_hot_channel_protection_peers::write_action_refused_error(
-                            &action,
-                        ),
-                    );
+                    // Task 66 slice 8f: real writes, through the sealed
+                    // owner -- unassembled until Task 69, answering py's
+                    // "Plugin not initialized" exactly like the other
+                    // staged mutators.
+                    let Some(owner) = s.core_mutations.get() else {
+                        return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    };
+                    let params = v.as_object().cloned().unwrap_or_default();
+                    let mutation = match action.as_str() {
+                        "add" => revops::rpc_state_mutators::CoreStateMutationAction::HotChannelAdd,
+                        "remove" => {
+                            revops::rpc_state_mutators::CoreStateMutationAction::HotChannelRemove
+                        }
+                        _ => revops::rpc_state_mutators::CoreStateMutationAction::HotChannelClear,
+                    };
+                    return Ok(owner.handle(mutation, &params).await);
                 }
                 if action != "list" {
                     return Ok(
                         revops::rpc_hot_channel_protection_peers::unknown_action_error(&action),
                     );
                 }
-                let Some(handle) = &p.state().db else {
+                let Some(handle) = &s.db else {
                     return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 match queries::hot_channel_protection_override_peers(handle).await {

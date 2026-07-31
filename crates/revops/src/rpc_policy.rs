@@ -4,10 +4,11 @@
 //! (policy_manager.py:54). This batch is read-only reporting only: the
 //! tactical actions (`set`/`delete`/`tag`/`untag`/`batch`,
 //! `TACTICAL_POLICY_ACTIONS`, policy_manager.py:55) are DB writes and
-//! stay out of scope -- [`policy_action_gate`] always returns Python's
-//! stable authority refusal for them (never applying
-//! Python's `internal`/`admin` override, since this port implements no
-//! write path for those actions to unlock).
+//! route through py's `internal`/`admin` override and the sealed
+//! mutation owner (Task 66 slice 8f; `rpc_state_mutators`'s policy
+//! methods) -- without the override they answer py's own deprecation
+//! refusal, and pre-Task-69 the override path answers the unassembled
+//! owner's "Plugin not initialized".
 //!
 //! Every builder consumes already-fetched [`PeerPolicy`] values (ported in
 //! `revops_analytics::policy`, itself a port of `modules/policy_manager
@@ -77,25 +78,23 @@ pub fn normalize_action(raw: Option<&Value>) -> String {
 /// tactical or unrecognized action (the caller should return it as-is,
 /// no query needed); `None` means "one of the 4 read actions -- proceed
 /// to fetch and call the matching `build_policy_*` below".
+/// Whether `action` is one of py `TACTICAL_POLICY_ACTIONS`
+/// (policy_manager.py:55) -- the write actions `main.rs` routes through
+/// py's internal/admin override + the sealed mutation owner (Task 66
+/// slice 8f).
+pub fn is_tactical_action(action: &str) -> bool {
+    TACTICAL_ACTIONS.contains(&action)
+}
+
 pub fn policy_action_gate(action: &str) -> Option<Value> {
-    if TACTICAL_ACTIONS.contains(&action) {
-        // Task 65 slice 4: the STABLE authority refusal. Python supports
-        // these write actions (set/tag/untag are the documented
-        // replacement for revenue-ignore); this plugin refuses them
-        // because it holds no production write authority before the
-        // Task 69 cutover -- never a fake success, never a misleading
-        // deprecation claim.
-        return Some(json!({
-            "error": {
-                "code": "state_writer_authority_absent",
-                "message": format!(
-                    "revenue-policy {action} is a production-state write; this plugin \
-                     holds no write authority before cutover. Use the Python plugin's \
-                     revenue-policy for writes; list/get/find/changes serve reads here."
-                ),
-            }
-        }));
-    }
+    // Task 66 slice 8f: the tactical actions no longer reach this gate --
+    // `main.rs` dispatches them FIRST (deprecation refusal without py's
+    // internal/admin override; the sealed owner with it). Task 65 slice
+    // 4's Rust-vocabulary authority refusal retired with that dispatch.
+    debug_assert!(
+        !TACTICAL_ACTIONS.contains(&action),
+        "tactical actions are dispatched before this gate"
+    );
     if READ_ONLY_ACTIONS.contains(&action) {
         return None;
     }
@@ -245,18 +244,15 @@ mod tests {
     }
 
     #[test]
-    fn action_gate_blocks_writes_with_the_stable_authority_refusal() {
-        // Task 65 slice 4: Python SUPPORTS set/tag/untag (they are the
-        // recommended replacement for revenue-ignore) -- the old
-        // "deprecated" text was a mislabel. The honest refusal is that
-        // this plugin holds no production write authority before the
-        // Task 69 cutover.
-        for action in ["batch", "delete", "set", "tag", "untag"] {
-            let v = policy_action_gate(action).unwrap();
-            assert_eq!(v["error"]["code"], "state_writer_authority_absent");
-            let message = v["error"]["message"].as_str().unwrap();
-            assert!(message.contains(action), "{message}");
-            assert!(message.contains("write authority"), "{message}");
+    fn tactical_actions_are_classified_for_the_owner_dispatch() {
+        // Task 66 slice 8f: tacticals never reach policy_action_gate --
+        // main.rs routes them through the deprecation gate + sealed
+        // owner. The classifier is what keeps that dispatch exhaustive.
+        for action in ["set", "delete", "tag", "untag", "batch"] {
+            assert!(is_tactical_action(action), "{action}");
+        }
+        for action in ["list", "get", "find", "changes", "bogus", ""] {
+            assert!(!is_tactical_action(action), "{action}");
         }
     }
 
