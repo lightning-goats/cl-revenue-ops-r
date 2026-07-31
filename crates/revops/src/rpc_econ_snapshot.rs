@@ -204,7 +204,43 @@ pub enum SnapshotAssembly<'a> {
         budget: &'a BudgetPreviewInputs,
         now: i64,
         receivable_ratio_target: f64,
+        /// C71-34: notes about evidence the CALLER could not gather,
+        /// merged into Python's own `approximations` list. An input
+        /// rather than something derived here, because only the caller
+        /// knows which source failed.
+        evidence_notes: &'a [String],
     },
+}
+
+/// C71-34: a profitability read that FAILED, declared.
+///
+/// Python's `_assemble_econ_snapshot` swallows this into `profitability =
+/// {}` with no note (cl-revenue-ops.py:6030-6033), so a snapshot assembled
+/// with NO per-channel evidence is indistinguishable from one where every
+/// channel legitimately had none. This port keeps Python's response SHAPE
+/// -- the degradation is declared through Python's own `approximations`
+/// mechanism -- while making the difference visible. Disclosed divergence,
+/// in the safe direction: nothing is fabricated either way.
+pub const PROFITABILITY_UNAVAILABLE: &str =
+    "profitability evidence unavailable: per-channel economics are absent from \
+     this snapshot, which is NOT the same as every channel having none";
+
+/// C71-36: one channel whose REQUIRED evidence was refused.
+///
+/// `gather_profitability` returns `Ok` for the fleet while listing
+/// per-channel refusals (a corrupt fee posterior, a missing opener, no
+/// `opened_at`) in `FleetProfitability::skipped`. Those channels have no
+/// entry in the profitability map, so the snapshot shows them with ZERO
+/// economics -- indistinguishable from a channel that genuinely earned and
+/// spent nothing. Each one is declared instead.
+pub const CHANNEL_EVIDENCE_SKIPPED: &str = "channel evidence skipped";
+
+/// A source this call could not consult at all. Deliberately NOT
+/// [`build_econ_snapshot`]'s `enabled=false` shape: an unreadable config
+/// surface is not a disabled shadow, and an unreadable budget is not a
+/// zero budget.
+pub fn build_econ_snapshot_unavailable(code: &str, detail: &str) -> Value {
+    json!({"error": code, "detail": detail})
 }
 
 /// C71-32: the two intent counters are `null` in shadow mode, and these
@@ -266,6 +302,7 @@ pub fn build_econ_snapshot(
             budget,
             now,
             receivable_ratio_target,
+            evidence_notes,
         } => {
             let (wire, approximations) = assemble_snapshot_preview(
                 channels,
@@ -280,6 +317,7 @@ pub fn build_econ_snapshot(
             // and supplying real counters later removes the line
             // automatically without touching this builder.
             let mut approximations = approximations;
+            approximations.extend(evidence_notes.iter().cloned());
             if intents_recorded_total.is_none() {
                 approximations.push(INTENTS_RECORDED_UNAVAILABLE.to_string());
             }
@@ -521,6 +559,7 @@ mod tests {
                 budget: &budget,
                 now: 1_800_000_000,
                 receivable_ratio_target: 0.0,
+                evidence_notes: &[],
             }),
             recorded,
             ledger,
@@ -611,5 +650,70 @@ mod tests {
             .collect();
         assert!(!approximations.contains(&INTENTS_RECORDED_UNAVAILABLE));
         assert!(approximations.contains(&INTENTS_LEDGER_UNAVAILABLE));
+    }
+
+    /// C71-34: a caller that could not gather profitability declares it,
+    /// and the note reaches Python's own `approximations` list.
+    ///
+    /// Python swallows this failure into `profitability = {}` with no
+    /// note, so a snapshot with NO evidence looks exactly like one where
+    /// every channel legitimately had none.
+    #[test]
+    fn a_declared_evidence_failure_reaches_the_approximations_list() {
+        let channels = vec![raw_channel(
+            "111x1x0",
+            &format!("02{}", "a".repeat(64)),
+            1_000_000,
+            400_000,
+        )];
+        let profitability = HashMap::new();
+        let budget = BudgetPreviewInputs::default();
+        let notes = vec![format!("{PROFITABILITY_UNAVAILABLE}: store unavailable")];
+        let v = build_econ_snapshot(
+            true,
+            Some(SnapshotAssembly::Ready {
+                channels: &channels,
+                profitability: &profitability,
+                budget: &budget,
+                now: 1_800_000_000,
+                receivable_ratio_target: 0.0,
+                evidence_notes: &notes,
+            }),
+            None,
+            None,
+        );
+        let approximations: Vec<&str> = v["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(
+            approximations
+                .iter()
+                .any(|a| a.starts_with(PROFITABILITY_UNAVAILABLE)),
+            "an absent-evidence snapshot must say so: {approximations:?}"
+        );
+        // And the snapshot is still produced -- Python degrades here, it
+        // does not refuse, and the shape must stay Python's.
+        assert_eq!(v["enabled"], true);
+        assert!(v["snapshot"].is_object());
+    }
+
+    /// The control: no declared failure means no note. Without this,
+    /// pushing the line unconditionally would pass the test above while
+    /// telling every healthy caller its evidence was missing.
+    #[test]
+    fn a_healthy_pass_carries_no_evidence_failure_note() {
+        let v = ready_snapshot(None, None);
+        let approximations: Vec<&str> = v["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(!approximations
+            .iter()
+            .any(|a| a.starts_with(PROFITABILITY_UNAVAILABLE)));
     }
 }

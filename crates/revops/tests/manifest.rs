@@ -2459,19 +2459,28 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
     assert_eq!(auto_cycle["boltz_enabled"], serde_json::json!(false));
     assert!(auto_cycle.get("error").is_none(), "{auto_cycle:?}");
 
-    // F1: no EconShadow config surface exists in Rust -- must NOT claim
-    // `enabled: false` (a hardcoded lie on any node where Python's real
-    // config has econ_shadow_enabled=true). Must be an in-band error that
-    // cannot be read as either a true or false `enabled` answer.
+    // F1, updated by C71-30/C71-34: the `econ_shadow_enabled` surface IS
+    // wired now -- it is a PUBLIC_RUNTIME_KEYS override with no registered
+    // CLN option, so it resolves from `config_overrides`. With no
+    // production database configured here it cannot be READ, and the
+    // original F1 invariant still holds and still matters: the response
+    // must not claim any enabled state, because `enabled: false` is a
+    // hardcoded lie on any node whose operator turned the shadow on. Only
+    // the error code changes -- from "not ported" to "could not read".
     let econ_snapshot = call_after_init(false, None, home.path(), &[], "revenue-r-econ-snapshot");
     assert!(
         econ_snapshot.get("enabled").is_none(),
         "must not claim any enabled state (true or false) when the config \
-         surface isn't wired: {econ_snapshot:?}"
+         surface cannot be read: {econ_snapshot:?}"
     );
     assert_eq!(
         econ_snapshot["error"],
-        serde_json::json!("econ shadow not_yet_ported")
+        serde_json::json!("econ_shadow_config_unavailable")
+    );
+    assert_ne!(
+        econ_snapshot["error"],
+        serde_json::json!("econ shadow not_yet_ported"),
+        "the surface is wired; an unported marker would hide a real outage"
     );
 }
 
@@ -2731,5 +2740,96 @@ fn revenue_r_dashboard_refuses_when_the_node_cannot_be_reached() {
     assert!(
         result.get("_phase1b_gaps").is_none(),
         "the gap marker is retired; a refusal is not a gap: {result:?}"
+    );
+}
+
+/// C71-34: `revenue-r-econ-snapshot` is served, not marked unported.
+///
+/// With no stores configured, the gate itself is unreadable -- and an
+/// unreadable config surface is NOT a disabled shadow. Reporting
+/// `enabled: false` here would be a false statement about node state on any
+/// node whose operator turned the shadow on, which is exactly what the old
+/// `not_yet_ported` marker existed to prevent.
+#[test]
+fn revenue_r_econ_snapshot_refuses_when_the_config_surface_is_unreadable() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init(false, None, home.path(), &[], "revenue-r-econ-snapshot");
+
+    assert_eq!(
+        result["error"],
+        serde_json::json!("econ_shadow_config_unavailable"),
+        "{result:?}"
+    );
+    assert!(
+        result.get("enabled").is_none(),
+        "neither a true nor a false enabled claim may be made: {result:?}"
+    );
+    assert_ne!(
+        result["error"],
+        serde_json::json!("econ shadow not_yet_ported"),
+        "the surface is wired now; an unported marker would hide a real outage"
+    );
+}
+
+/// The shadow is genuinely OFF (no override row, Python's dataclass
+/// default), so Python's exact two-key disabled shape is returned -- not a
+/// refusal, and not an assembled snapshot.
+#[test]
+fn revenue_r_econ_snapshot_reports_pythons_disabled_shape_when_genuinely_off() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-snapshot",
+    );
+
+    assert_eq!(result["enabled"], serde_json::json!(false), "{result:?}");
+    assert_eq!(
+        result["hint"],
+        serde_json::json!("revenue-config set econ_shadow_enabled true")
+    );
+    assert!(
+        result.get("snapshot").is_none(),
+        "the disabled shape is exactly two keys: {result:?}"
+    );
+}
+
+/// Enabled, but there is no lightning socket in this harness, so the ONE
+/// channel fetch fails. Python reports that as a channel-read failure with
+/// a null snapshot rather than fabricating one, and so must this.
+#[test]
+fn revenue_r_econ_snapshot_reports_a_channel_read_failure_without_fabricating() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('econ_shadow_enabled', 'true', 1, 1800000000)",
+            [],
+        )
+        .expect("enable the shadow");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-snapshot",
+    );
+
+    assert_eq!(result["enabled"], serde_json::json!(true), "{result:?}");
+    assert_eq!(result["snapshot"], serde_json::Value::Null);
+    let approximations = result["approximations"].as_array().expect("declared");
+    assert!(
+        approximations
+            .iter()
+            .any(|a| a.as_str().unwrap_or("").starts_with("channel read failed")),
+        "the failure must be named: {approximations:?}"
     );
 }

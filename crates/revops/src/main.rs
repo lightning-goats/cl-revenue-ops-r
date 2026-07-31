@@ -2626,24 +2626,43 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &econ_snapshot_name,
-            "READ-ONLY preview of the canonical EconomicSnapshot, assembled from \
-             live channels + already-computed profitability + budget (requires \
-             econ_shadow_enabled) -- Phase: the econ_shadow_enabled config surface \
-             is not wired into this port yet, so every call returns an explicit \
-             not_yet_ported marker rather than a possibly-false enabled/disabled answer",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+            "READ-ONLY preview of the canonical EconomicSnapshot, assembled from one \
+             fresh bounded listpeerchannels snapshot, the profitability evidence \
+             gathered against that same snapshot, and a one-transaction budget \
+             position (requires econ_shadow_enabled)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
                 }
-                // Task 50 correction round, F1: there is no `EconShadow`
-                // equivalent (or `econ_shadow_enabled` config read) in this
-                // Rust port at all -- the OLD wiring hardcoded
-                // `let enabled = false`, which is a FALSE statement about
-                // node state on any node where Python's real config has
-                // econ_shadow_enabled=true, with no gap marker. Do NOT
-                // fabricate a config read that does not exist; return an
-                // explicitly-marked not-wired shape instead.
-                Ok(revops::rpc_econ_snapshot::build_econ_snapshot_not_wired())
+                // C71-35: the assembly itself lives in
+                // `revops::econ_producer` so integration tests can drive
+                // every gate against real stores and a fake CLN socket. A
+                // handler written inline here could only be checked by
+                // reading its source, which proves a call is WRITTEN, not
+                // that it BEHAVES.
+                let s = p.state();
+                let config_error = |error: anyhow::Error| format!("{error:#}");
+                Ok(revops::econ_producer::econ_snapshot_response(
+                    revops::econ_producer::EconSources {
+                        production_db: s.db.as_ref(),
+                        observer: s.observer_db.as_ref(),
+                        socket_path: &s.socket_path,
+                        receivable_ratio_target: resolved_config_json(
+                            &p,
+                            "receivable-ratio-target",
+                        )
+                        .await
+                        .map(|value| value.and_then(|v| v.as_f64()).unwrap_or(0.0))
+                        .map_err(config_error),
+                        daily_budget_sats: resolved_config_json(&p, "daily-budget-sats")
+                            .await
+                            .map(|value| value.and_then(|v| v.as_i64()).unwrap_or(0))
+                            .map_err(config_error),
+                        enabled: revops::config_resolve::econ_shadow_enabled(s.db.as_ref()).await,
+                        now: now_unix(),
+                    },
+                )
+                .await)
             },
         )
         .rpcmethod(

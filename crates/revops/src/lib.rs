@@ -24,6 +24,7 @@ pub mod cutover_arm;
 pub mod dashboard_evidence;
 pub mod discovery_evidence;
 pub mod econ_evidence;
+pub mod econ_producer;
 pub mod enrichment_evidence;
 pub mod fee_config;
 pub mod fee_evidence;

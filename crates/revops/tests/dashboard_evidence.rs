@@ -373,3 +373,53 @@ fn the_dashboard_never_answers_a_failed_source_with_a_placeholder() {
         "the gap marker is retired on this surface"
     );
 }
+
+// ---------------------------------------------------------------------
+// C71-35: main.rs must DELEGATE the econ assembly, not inline it.
+//
+// The behavioural matrix for every gate lives in `tests/econ_producer.rs`
+// and runs against real stores and a fake CLN socket. The only thing left
+// to check from source is that `main.rs` still routes there -- a handler
+// that drifted back to inline logic would silently lose all of that
+// coverage, because `main.rs` is a binary no test can import.
+// ---------------------------------------------------------------------
+
+#[test]
+fn the_econ_rpc_delegates_to_the_testable_producer() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("main.rs is readable");
+    let after = source
+        .split_once("&econ_snapshot_name,")
+        .expect("the econ-snapshot RPC must be registered")
+        .1;
+    let handler = after
+        .split_once(".rpcmethod(")
+        .map(|(handler, _)| handler.to_string())
+        .unwrap_or_else(|| after.to_string());
+    let code: String = handler
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(
+        code.contains("econ_producer::econ_snapshot_response"),
+        "the handler must call the producer that the behavioural tests drive"
+    );
+    assert!(
+        !code.contains("build_econ_snapshot_not_wired"),
+        "the surface is wired; the unported marker would hide a real answer"
+    );
+    // No inline assembly: the gates belong to the producer, where they are
+    // executable.
+    for inlined in [
+        "SnapshotAssembly::Ready",
+        "gather_profitability",
+        "budget_status",
+    ] {
+        assert!(
+            !code.contains(inlined),
+            "`{inlined}` belongs in the producer, not in the untestable binary"
+        );
+    }
+}
