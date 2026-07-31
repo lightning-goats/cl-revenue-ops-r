@@ -895,8 +895,9 @@ fn wake_all_msg_clears_sleep_state() {
         .cycle_states
         .insert("c1".to_string(), sleeping);
 
-    let woken = owner.wake_all(NOW);
-    assert_eq!(woken, 1);
+    let completed = owner.handle_wake_all_completion(NOW);
+    assert_eq!(completed.channels_woken, 1);
+    assert_eq!(completed.completed_at, NOW);
     let c1 = &owner.state().cycle_states["c1"];
     assert!(!c1.is_sleeping);
     assert_eq!(c1.sleep_until, 0);
@@ -1261,6 +1262,48 @@ async fn bounded_owner_ingress_backpressures_wake_until_drain() {
     tokio::task::spawn_blocking(move || owner.join().unwrap())
         .await
         .unwrap();
+}
+
+/// Task 66: the canonical `revenue-wake-all` response must describe a
+/// completed owner mutation, never mere queue admission. Holding the owner
+/// thread proves the public bridge does not resolve before the command runs.
+#[tokio::test]
+async fn wake_all_completion_waits_for_the_owner_result() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+
+    let completion = handle.wake_all();
+    tokio::pin!(completion);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut completion)
+            .await
+            .is_err(),
+        "queue admission must not be reported as a completed wake"
+    );
+
+    let body = held.lock().unwrap().take().unwrap();
+    let owner = std::thread::spawn(body);
+    let completed = completion.await.expect("owner completed wake-all");
+    assert_eq!(completed.channels_woken, 0);
+    assert!(completed.completed_at > 0);
+
+    handle.tx.send(CycleMsg::Shutdown).await.ok();
+    tokio::task::spawn_blocking(move || owner.join().unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn wake_all_completion_reports_owner_loss_instead_of_success() {
+    let fx = fixture();
+    let (handle, held) = held_owner(&fx);
+    drop(held.lock().unwrap().take());
+
+    let error = handle
+        .wake_all()
+        .await
+        .expect_err("closed owner cannot complete a wake");
+    assert_eq!(error, "fee-cycle owner thread not running");
 }
 
 #[tokio::test]
