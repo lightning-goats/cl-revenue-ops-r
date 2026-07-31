@@ -4,6 +4,7 @@ use revops_analytics::policy::{is_valid_peer_id, PeerPolicy};
 use revops_db::{
     actor::DbHandle,
     budget::{ClearStats, ReserveRequest},
+    queries::ChannelStateIdentity,
     state_writer::{PeerPolicyWrite, PolicyDelete, SpendReleaseBatch},
 };
 use serde_json::{json, Map, Value};
@@ -960,6 +961,156 @@ impl CoreStateMutationOwner {
         }
     }
 
+    /// Port of `revenue_cleanup_closed`'s success path
+    /// (cl-revenue-ops.py:6394-6490) over already-fetched CLN blobs. Reads
+    /// come off `self.reader`; each channel's archive+purge is ONE sealed
+    /// write. Per-channel failures collect into `errors` and the sweep
+    /// continues, exactly like Python's per-channel try/except.
+    pub async fn cleanup_closed(
+        &self,
+        evidence: crate::rpc_cleanup_closed::CleanupClosedEvidence,
+    ) -> Value {
+        use crate::rpc_cleanup_closed as pure;
+        let tracked = match revops_db::queries::all_channel_states(&self.reader).await {
+            Ok(tracked) => tracked,
+            // py outer except: the base result with the error recorded.
+            Err(error) => return pure::cleanup_result(0, 0, &[], &[error.to_string()]),
+        };
+        if tracked.is_empty() {
+            return pure::no_tracked_channels();
+        }
+        let open = match &evidence.peer_channels {
+            Ok(blob) => pure::open_scids(blob),
+            Err(error) => {
+                return pure::cleanup_result(
+                    0,
+                    0,
+                    &[],
+                    &[format!("Failed to get open channels: {error}")],
+                )
+            }
+        };
+        let closed: Vec<&ChannelStateIdentity> = tracked
+            .iter()
+            .filter(|state| !open.contains(&state.channel_id))
+            .collect();
+        if closed.is_empty() {
+            return pure::no_closed_channels();
+        }
+        let closed_info = evidence
+            .closed_list
+            .as_ref()
+            .map(pure::closed_info_by_scid)
+            .unwrap_or_default();
+
+        let mut archived = 0i64;
+        let mut channels = Vec::new();
+        let mut errors = Vec::new();
+        for state in closed {
+            match self
+                .archive_one_closed(state, &closed_info, evidence.block_height, evidence.now)
+                .await
+            {
+                Ok(()) => {
+                    archived += 1;
+                    channels.push(state.channel_id.clone());
+                }
+                Err(error) => {
+                    errors.push(format!("Error processing {}: {error}", state.channel_id))
+                }
+            }
+        }
+        // py increments archived and cleaned together per success.
+        pure::cleanup_result(archived, archived, &channels, &errors)
+    }
+
+    /// One channel's evidence gathering + archive write, port of
+    /// `_archive_closed_channel` (cl-revenue-ops.py:7561-7679).
+    async fn archive_one_closed(
+        &self,
+        state: &ChannelStateIdentity,
+        closed_info: &BTreeMap<String, Map<String, Value>>,
+        block_height: i64,
+        now: i64,
+    ) -> Result<(), String> {
+        use crate::rpc_cleanup_closed as pure;
+        let channel_id = state.channel_id.as_str();
+        let empty = Map::new();
+        let ch_info = closed_info.get(channel_id).unwrap_or(&empty);
+        let close_type = pure::close_type_from_info(ch_info);
+
+        let cost = revops_db::queries::channel_cost_row(&self.reader, channel_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let open_cost_sats = cost.as_ref().map(|row| row.open_cost_sats).unwrap_or(0);
+        let opened_at = pure::repair_opened_at(
+            channel_id,
+            cost.as_ref().map(|row| row.opened_at),
+            block_height,
+            now,
+        );
+        let closure_cost_sats =
+            revops_db::queries::channel_closure_cost_total(&self.reader, channel_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0);
+        // py: window_days=3650 ("10 years = all time").
+        let pnl = revops_db::queries::channel_pnl(&self.reader, channel_id, 3650, now)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let mut closer = pure::determine_closer(&close_type).to_string();
+        let capacity_sats =
+            revops_core::msat::parse_msat(ch_info.get("total_msat").unwrap_or(&Value::Null)) / 1000;
+        // py peer precedence: tracked state, then listclosedchannels, then
+        // the writer's 'unknown' fallback.
+        let peer_id = if !state.peer_id.is_empty() {
+            state.peer_id.clone()
+        } else {
+            ch_info
+                .get("peer_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string()
+        };
+        if closer == "unknown" {
+            if let Some(info_closer) = ch_info.get("closer").and_then(Value::as_str) {
+                if !info_closer.is_empty() {
+                    closer = info_closer.to_string();
+                }
+            }
+        }
+
+        let archive = revops_db::state_writer::ClosedChannelArchive {
+            channel_id: channel_id.to_string(),
+            peer_id,
+            capacity_sats,
+            opened_at,
+            closed_at: now,
+            close_type,
+            open_cost_sats,
+            closure_cost_sats,
+            // py: `pnl.get('revenue_msat', 0) // 1000`.
+            total_revenue_sats: pnl.revenue_msat.div_euclid(1000),
+            total_rebalance_cost_sats: pnl.rebalance_cost_sats,
+            forward_count: pnl.forward_count,
+            funding_txid: None,
+            closing_txid: ch_info
+                .get("closing_txid")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            closer,
+        };
+        match self.core.archive_closed_channel(archive).await {
+            StateWriteAck::Applied(()) => Ok(()),
+            StateWriteAck::AlreadyTerminal => Err("state already terminal".to_string()),
+            StateWriteAck::Denied(detail)
+            | StateWriteAck::NotAdmitted(detail)
+            | StateWriteAck::AdmittedOutcomeUnknown(detail)
+            | StateWriteAck::StorageFailure(detail) => Err(detail),
+        }
+    }
+
     /// Port of `revenue_spend_release_stale` (cl-revenue-ops.py:7884-7908):
     /// the safe recovery sweep for orphaned reservations — the same
     /// operation `_compute_total_cost_budget_status` runs best-effort at
@@ -1662,6 +1813,242 @@ mod core_mutation_owner_tests {
         assert_eq!(response["status"], "success");
         assert_eq!(response["released_count"], 2);
         assert_eq!(response["released_sats"], 110);
+    }
+
+    fn cleanup_evidence(
+        peer_channels: Result<Value, String>,
+        closed_list: Option<Value>,
+    ) -> crate::rpc_cleanup_closed::CleanupClosedEvidence {
+        crate::rpc_cleanup_closed::CleanupClosedEvidence {
+            peer_channels,
+            closed_list,
+            block_height: 0,
+            now: NOW,
+        }
+    }
+
+    /// Task 66 slice 3, `revenue-cleanup-closed` (py cl-revenue-ops.py:
+    /// 6359-6490 + `_archive_closed_channel` :7561-7679): the tracked-but-
+    /// no-longer-open channel is archived with its full hand-derived P&L
+    /// and purged from tracking; the still-open channel is untouched.
+    #[tokio::test]
+    async fn cleanup_closed_archives_hand_derived_pnl_and_purges_tracking() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed cleanup fixture");
+        conn.execute_batch(&format!(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, updated_at) VALUES
+               ('111x1x0', '{peer_a}', 'source', 0.2, 10, 90, 1000000, {now}),
+               ('222x2x0', '{peer_b}', 'sink', 0.9, 90, 10, 1000000, {now});
+             INSERT INTO channel_costs (channel_id, peer_id, open_cost_sats, capacity_sats, opened_at) VALUES
+               ('111x1x0', '{peer_a}', 500, 1000000, {opened});
+             INSERT INTO channel_closure_costs
+               (channel_id, peer_id, close_type, closure_fee_sats, htlc_sweep_fee_sats, penalty_fee_sats, total_closure_cost_sats, closed_at, resolution_complete)
+               VALUES ('111x1x0', '{peer_a}', 'mutual', 300, 0, 0, 300, {now}, 1);
+             INSERT INTO forwards (in_channel, out_channel, in_msat, out_msat, fee_msat, timestamp, resolved_time) VALUES
+               ('9x9x0', '111x1x0', 1000000, 997500, 2500, {recent}, {recent}),
+               ('9x9x0', '111x1x0', 1000000, 999000, 1000, {old_forward}, {old_forward});
+             INSERT INTO rebalance_costs (channel_id, peer_id, cost_sats, cost_msat, amount_sats, timestamp) VALUES
+               ('111x1x0', '{peer_a}', 200, 200000, 50000, {recent});",
+            peer_a = "a".repeat(66),
+            peer_b = "b".repeat(66),
+            now = NOW,
+            opened = NOW - 10 * 86400,
+            recent = NOW - 3600,
+            old_forward = NOW - 100 * 86400,
+        ))
+        .expect("seed rows");
+        drop(conn);
+
+        let response = owner
+            .cleanup_closed(cleanup_evidence(
+                Ok(json!({"channels": [{"short_channel_id": "222x2x0"}]})),
+                Some(json!({"closedchannels": [{
+                    "short_channel_id": "111x1x0",
+                    "close_cause": "user initiated MUTUAL close",
+                    "closer": "local",
+                    "total_msat": 5_000_000_000i64,
+                    "closing_txid": "ctxid-1",
+                }]})),
+            ))
+            .await;
+        assert_eq!(
+            response,
+            json!({
+                "archived": 1,
+                "cleaned": 1,
+                "channels": ["111x1x0"],
+                "errors": [],
+            })
+        );
+
+        let conn = Connection::open(&path).expect("verify archive");
+        let row: (String, i64, i64, i64, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT peer_id, capacity_sats, net_pnl_sats, total_revenue_sats, close_type, closer, closing_txid \
+                 FROM closed_channels WHERE channel_id = '111x1x0'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .expect("archived row");
+        // revenue = 2500 (recent) + 1000 (100 days old -- INSIDE the
+        // all-time 3650d window, outside any 30d default) = 3500 msat
+        // // 1000 = 3; net = 3 - (500 + 300 + 200) = -997; capacity from
+        // listclosedchannels total_msat / 1000; the tracked peer wins over
+        // the blob; cause "MUTUAL" beats closer "local".
+        assert_eq!(
+            row,
+            (
+                "a".repeat(66),
+                5_000_000,
+                -997,
+                3,
+                "mutual".to_string(),
+                "mutual".to_string(),
+                Some("ctxid-1".to_string())
+            )
+        );
+        let remaining: Vec<String> = conn
+            .prepare("SELECT channel_id FROM channel_states")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec!["222x2x0".to_string()],
+            "only the closed channel purges"
+        );
+    }
+
+    /// The three guard arms: nothing tracked, a failed listpeerchannels
+    /// read (short-circuits — a partial open-set would misclassify every
+    /// open channel as closed), and everything still open.
+    #[tokio::test]
+    async fn cleanup_closed_guard_arms_match_python() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        assert_eq!(
+            owner
+                .cleanup_closed(cleanup_evidence(Ok(json!({"channels": []})), None))
+                .await,
+            json!({
+                "message": "No tracked channels found",
+                "archived": 0, "cleaned": 0, "channels": [], "errors": [],
+            })
+        );
+
+        let conn = Connection::open(&path).expect("seed one tracked");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, updated_at) \
+             VALUES ('111x1x0', ?1, 'source', 0.2, 10, 90, 1000000, ?2)",
+            rusqlite::params!["a".repeat(66), NOW],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let failed = owner
+            .cleanup_closed(cleanup_evidence(Err("socket gone".to_string()), None))
+            .await;
+        assert_eq!(
+            failed,
+            json!({
+                "archived": 0, "cleaned": 0, "channels": [],
+                "errors": ["Failed to get open channels: socket gone"],
+            })
+        );
+
+        let all_open = owner
+            .cleanup_closed(cleanup_evidence(
+                Ok(json!({"channels": [{"short_channel_id": "111:1:0"}]})),
+                None,
+            ))
+            .await;
+        assert_eq!(
+            all_open,
+            json!({
+                "message": "No closed channels found to clean up",
+                "archived": 0, "cleaned": 0, "channels": [], "errors": [],
+            }),
+            "the legacy-colon spelling still counts as open"
+        );
+    }
+
+    /// The closer-override arm (py 7639-7641): when the close TYPE stays
+    /// unknown but listclosedchannels carries a truthy closer, that closer
+    /// is recorded — here "mutual", which maps through no close_type arm.
+    #[tokio::test]
+    async fn cleanup_closed_takes_blob_closer_when_type_is_unknown() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, updated_at) \
+             VALUES ('444x4x0', ?1, 'source', 0.2, 10, 90, 1000000, ?2)",
+            rusqlite::params!["d".repeat(66), NOW],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let response = owner
+            .cleanup_closed(cleanup_evidence(
+                Ok(json!({"channels": []})),
+                Some(json!({"closedchannels": [{
+                    "short_channel_id": "444x4x0",
+                    "closer": "mutual",
+                }]})),
+            ))
+            .await;
+        assert_eq!(response["archived"], 1, "{response:?}");
+
+        let conn = Connection::open(&path).expect("verify");
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT close_type, closer FROM closed_channels WHERE channel_id = '444x4x0'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(row, ("unknown".to_string(), "mutual".to_string()));
+    }
+
+    /// Absent from listclosedchannels entirely: the archive still lands,
+    /// fully unknown close metadata, zero capacity — never fabricated.
+    #[tokio::test]
+    async fn cleanup_closed_without_closure_info_archives_honest_unknowns() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed");
+        conn.execute(
+            "INSERT INTO channel_states (channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, updated_at) \
+             VALUES ('333x3x0', ?1, 'source', 0.2, 10, 90, 1000000, ?2)",
+            rusqlite::params!["c".repeat(66), NOW],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let response = owner
+            .cleanup_closed(cleanup_evidence(Ok(json!({"channels": []})), None))
+            .await;
+        assert_eq!(response["archived"], 1, "{response:?}");
+
+        let conn = Connection::open(&path).expect("verify");
+        let row: (i64, String, String, i64) = conn
+            .query_row(
+                "SELECT capacity_sats, close_type, closer, total_revenue_sats \
+                 FROM closed_channels WHERE channel_id = '333x3x0'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(row, (0, "unknown".to_string(), "unknown".to_string(), 0));
     }
 
     /// The `handle()` dispatch edge for the two new actions — the other

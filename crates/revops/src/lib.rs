@@ -60,6 +60,7 @@ pub mod rpc_boltz_ops;
 pub mod rpc_boltz_status;
 pub mod rpc_capacity_report;
 pub mod rpc_capex_status;
+pub mod rpc_cleanup_closed;
 pub mod rpc_dashboard;
 pub mod rpc_econ_reconcile;
 pub mod rpc_econ_snapshot;

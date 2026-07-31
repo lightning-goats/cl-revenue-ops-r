@@ -928,7 +928,7 @@ fn record_spend_event_on(conn: &Connection, ev: &SpendEvent) -> Result<bool> {
 
 /// Python `Database._sanitize_amount`: clamp |amount| to `MAX_AMOUNT_SATS`,
 /// preserving sign. (The float/NaN branches have no i64 analog.)
-fn sanitize_amount(amount_sats: i64) -> i64 {
+pub(crate) fn sanitize_amount(amount_sats: i64) -> i64 {
     if amount_sats.unsigned_abs() > MAX_AMOUNT_SATS as u64 {
         if amount_sats >= 0 {
             MAX_AMOUNT_SATS

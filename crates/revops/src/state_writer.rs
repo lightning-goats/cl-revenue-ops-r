@@ -31,8 +31,8 @@ use std::time::Duration;
 use revops_db::budget::{ClearStats, ReserveRequest};
 use revops_db::owner::{StoreAdmissionRefused, StoreReceipt, StoreReceiptWait};
 use revops_db::state_writer::{
-    BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete, SpendReleaseBatch,
-    StateWriterHandle,
+    BatchAck, BudgetTransition, ClosedChannelArchive, ConfigDelete, PeerPolicyWrite, PolicyDelete,
+    SpendReleaseBatch, StateWriterHandle,
 };
 
 /// Receipt budget default: the Task 59 floor (one legitimate SQLite lock
@@ -172,6 +172,13 @@ impl CoreMutators {
         self.writer.reserve_spend(request, now).await
     }
 
+    pub(crate) async fn archive_closed_channel(
+        &self,
+        archive: ClosedChannelArchive,
+    ) -> StateWriteAck<()> {
+        self.writer.archive_closed_channel(archive).await
+    }
+
     pub(crate) async fn release_stale_spend_reservations(
         &self,
         category: Option<String>,
@@ -290,6 +297,14 @@ impl ProductionStateWriter {
     ) -> StateWriteAck<(bool, i64)> {
         resolve(
             self.handle.try_reserve_spend(request, now),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn archive_closed_channel(&self, archive: ClosedChannelArchive) -> StateWriteAck<()> {
+        resolve(
+            self.handle.try_archive_closed_channel(archive),
             self.receipt_budget,
         )
         .await

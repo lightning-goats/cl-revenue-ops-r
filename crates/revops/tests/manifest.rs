@@ -450,16 +450,18 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        65,
+        66,
         "methods: {methods:?}"
     );
 
     // Task 66 slice 1: the unified total-cost budget read; slice 2: the
-    // generic-ledger reserve and stale-release mutators.
+    // generic-ledger reserve and stale-release mutators; slice 3: the
+    // closed-channel archival backfill.
     for name in [
         "revenue-total-cost-budget",
         "revenue-spend-reserve",
         "revenue-spend-release-stale",
+        "revenue-cleanup-closed",
     ] {
         assert!(methods.contains(&name), "missing {name}: {methods:?}");
     }
@@ -2073,6 +2075,36 @@ fn revenue_r_total_cost_budget_without_db_is_plugin_not_initialized() {
     assert_eq!(
         result,
         serde_json::json!({"error": "Plugin not initialized"})
+    );
+}
+
+/// `revenue-cleanup-closed`'s guard ORDER (cl-revenue-ops.py:6383-6386):
+/// no DB answers "Database not initialized"; with a DB but no assembled
+/// mutation owner (pre-Task-69), the safe_plugin-analog arm answers
+/// "Plugin not initialized" — two DIFFERENT strings, both distinct from
+/// the total-cost-budget guard above.
+#[test]
+fn revenue_r_cleanup_closed_guard_arms_and_order() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let no_db = call_after_init(false, None, home.path(), &[], "revenue-r-cleanup-closed");
+    assert_eq!(
+        no_db,
+        serde_json::json!({"error": "Database not initialized"})
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    let with_db = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-cleanup-closed",
+    );
+    assert_eq!(
+        with_db,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "owner unassembled until Task 69"
     );
 }
 

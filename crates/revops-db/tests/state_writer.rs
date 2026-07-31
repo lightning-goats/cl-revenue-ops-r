@@ -5,8 +5,8 @@
 
 use revops_db::budget::ReserveRequest;
 use revops_db::state_writer::{
-    spawn_state_writer, BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete,
-    StateWriterOpenError,
+    spawn_state_writer, BatchAck, BudgetTransition, ClosedChannelArchive, ConfigDelete,
+    PeerPolicyWrite, PolicyDelete, StateWriterOpenError,
 };
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -78,6 +78,24 @@ fn python_schema(path: &PathBuf) {
             source_channel_id TEXT, dest_channel_id TEXT, at INTEGER
         );
         CREATE TABLE fee_strategy_state (channel_id TEXT PRIMARY KEY, v2_state_json TEXT);
+        CREATE TABLE closed_channels (
+            channel_id TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL,
+            capacity_sats INTEGER NOT NULL,
+            opened_at INTEGER,
+            closed_at INTEGER NOT NULL,
+            close_type TEXT NOT NULL,
+            open_cost_sats INTEGER NOT NULL DEFAULT 0,
+            closure_cost_sats INTEGER NOT NULL DEFAULT 0,
+            total_revenue_sats INTEGER NOT NULL DEFAULT 0,
+            total_rebalance_cost_sats INTEGER NOT NULL DEFAULT 0,
+            forward_count INTEGER NOT NULL DEFAULT 0,
+            net_pnl_sats INTEGER NOT NULL DEFAULT 0,
+            days_open INTEGER NOT NULL DEFAULT 0,
+            funding_txid TEXT,
+            closing_txid TEXT,
+            closer TEXT DEFAULT 'unknown'
+        );
         "#,
     )
     .unwrap();
@@ -588,6 +606,167 @@ async fn closed_channel_purge_hits_the_python_tables_atomically() {
         BatchAck::DeniedOverBound { len } => assert_eq!(len, 101),
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Closed-channel archive: py record_closed_channel_history +
+// remove_closed_channel_data, one atomic unit per channel
+// ---------------------------------------------------------------------------
+
+fn archive(channel_id: &str) -> ClosedChannelArchive {
+    ClosedChannelArchive {
+        channel_id: channel_id.to_string(),
+        peer_id: "peerA".to_string(),
+        capacity_sats: 1_000_000,
+        opened_at: Some(1_800_000_000 - 10 * 86400),
+        closed_at: 1_800_000_000,
+        close_type: "mutual".to_string(),
+        open_cost_sats: 500,
+        closure_cost_sats: 300,
+        total_revenue_sats: 900,
+        total_rebalance_cost_sats: 50,
+        forward_count: 20,
+        funding_txid: None,
+        closing_txid: Some("txid-close".to_string()),
+        closer: "mutual".to_string(),
+    }
+}
+
+/// `closed_channels` is a write target as of the archive op, so its
+/// absence must refuse at OPEN (fail-closed), not at first archive.
+#[tokio::test]
+async fn open_refuses_a_schema_missing_closed_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("revenue_ops.db");
+    python_schema(&path);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE closed_channels;")
+        .unwrap();
+    let err = spawn_state_writer(&path).await.expect_err("missing table");
+    match &err {
+        StateWriterOpenError::SchemaMismatch { table, .. } => {
+            assert_eq!(table, "closed_channels")
+        }
+        other => panic!("expected SchemaMismatch, got {other:?}"),
+    }
+}
+
+/// The archive records the permanent P&L row (derived net_pnl/days_open,
+/// py database.py:6434-6446) and purges the live tracking rows in ONE
+/// immediate transaction. Python runs record + purge as two separate
+/// calls; fusing them is deliberate hardening — an archive that lands
+/// without its purge would double-count the channel as both open and
+/// closed, a partial state Python merely tolerates.
+#[tokio::test]
+async fn archive_closed_channel_records_pnl_row_and_purges_tracking() {
+    let (_d, path) = fixture();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO channel_states VALUES ('700x1x0', 'peerA');
+         INSERT INTO kalman_state VALUES ('700x1x0', '{}');",
+    )
+    .unwrap();
+    drop(conn);
+    let writer = spawn_state_writer(&path).await.unwrap();
+
+    writer
+        .archive_closed_channel(archive("700x1x0"))
+        .await
+        .unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let row: (String, i64, i64, i64, String, String) = conn
+        .query_row(
+            "SELECT peer_id, capacity_sats, net_pnl_sats, days_open, close_type, closer \
+             FROM closed_channels WHERE channel_id = '700x1x0'",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    // net_pnl = 900 - (500 + 300 + 50) = 50; days_open = 10.
+    assert_eq!(
+        row,
+        (
+            "peerA".to_string(),
+            1_000_000,
+            50,
+            10,
+            "mutual".to_string(),
+            "mutual".to_string()
+        )
+    );
+    let tracked: i64 = conn
+        .query_row("SELECT COUNT(*) FROM channel_states", [], |r| r.get(0))
+        .unwrap();
+    let kalman: i64 = conn
+        .query_row("SELECT COUNT(*) FROM kalman_state", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!((tracked, kalman), (0, 0), "purge rides the same commit");
+}
+
+/// Python's input validation (database.py:6416-6433): amounts clamp to
+/// |10 BTC|, forward_count floors at 0, close_type/closer outside their
+/// valid sets become 'unknown', a missing/future opened_at yields
+/// days_open 0 (M15 clock-skew clamp), and re-archiving REPLACES the row
+/// (INSERT OR REPLACE).
+#[tokio::test]
+async fn archive_closed_channel_sanitizes_like_python_and_replaces() {
+    let (_d, path) = fixture();
+    let writer = spawn_state_writer(&path).await.unwrap();
+
+    let mut wild = archive("900x1x0");
+    wild.capacity_sats = 20_000_000_000;
+    wild.forward_count = -5;
+    wild.close_type = "weird".to_string();
+    wild.closer = "banana".to_string();
+    wild.opened_at = Some(1_800_000_000 + 999); // closed_at < opened_at
+    writer.archive_closed_channel(wild).await.unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let row: (i64, i64, String, String, i64) = conn
+        .query_row(
+            "SELECT capacity_sats, forward_count, close_type, closer, days_open \
+             FROM closed_channels WHERE channel_id = '900x1x0'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            10_000_000_000,
+            0,
+            "unknown".to_string(),
+            "unknown".to_string(),
+            0
+        )
+    );
+    drop(conn);
+
+    // Second archive of the same channel replaces, not errors.
+    let mut second = archive("900x1x0");
+    second.total_revenue_sats = 1;
+    writer.archive_closed_channel(second).await.unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let (count, revenue): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(total_revenue_sats) FROM closed_channels \
+             WHERE channel_id = '900x1x0'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((count, revenue), (1, 1));
 }
 
 // ---------------------------------------------------------------------------

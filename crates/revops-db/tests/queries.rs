@@ -17,7 +17,8 @@
 
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
-    active_spend_reservations, all_config_overrides, all_policies, closed_channels_summary,
+    active_spend_reservations, all_channel_states, all_config_overrides, all_policies,
+    channel_closure_cost_total, channel_cost_row, channel_pnl, closed_channels_summary,
     closure_costs_windows, config_override, cost_evidence_coverage,
     hot_channel_protection_override_peers, last_policy_change_timestamp, lifetime_stats,
     opening_costs_since, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
@@ -408,6 +409,133 @@ async fn cost_evidence_coverage_tolerates_a_missing_source_table() {
     let coverage = cost_evidence_coverage(&handle, 24, NOW).await.unwrap();
     assert_eq!(coverage.covered_hours, Some(24.0));
     assert_eq!(coverage.coverage_status, "complete");
+}
+
+/// Port of `Database.get_all_channel_states`' identity subset
+/// (database.py:1803-1807): the tracked (channel_id, peer_id) pairs
+/// `revenue-cleanup-closed` diffs against the live open set, in Python's
+/// `ORDER BY state, flow_ratio DESC`.
+#[tokio::test]
+async fn all_channel_states_lists_tracked_pairs_in_python_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO channel_states \
+         (channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, updated_at) VALUES \
+         ('1x1x0', ?1, 'source', 0.2, 10, 90, 1000000, ?3), \
+         ('2x2x0', ?2, 'sink', 0.9, 90, 10, 1000000, ?3), \
+         ('3x3x0', ?1, 'sink', 0.4, 60, 40, 1000000, ?3)",
+        rusqlite::params!["a".repeat(66), "b".repeat(66), NOW],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let states = all_channel_states(&handle).await.unwrap();
+    let pairs: Vec<(&str, &str)> = states
+        .iter()
+        .map(|row| (row.channel_id.as_str(), &row.peer_id[..1]))
+        .collect();
+    // state ASC ('sink' < 'source'), then flow_ratio DESC within a state.
+    assert_eq!(pairs, vec![("2x2x0", "b"), ("3x3x0", "a"), ("1x1x0", "a")]);
+}
+
+/// Port of `Database.get_channel_cost` (database.py:5749-5776): the lookup
+/// spans SCID alias spellings (`x` and legacy `:`), prefers the row whose
+/// stored id equals the canonical spelling, else falls back to the first
+/// alias hit. The fixture schema carries no funding_txid column, so that
+/// field is honestly absent (Python's `.get` answers None the same way).
+#[tokio::test]
+async fn channel_cost_row_spans_aliases_and_prefers_exact_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO channel_costs (channel_id, peer_id, open_cost_sats, capacity_sats, opened_at) VALUES \
+         ('123:456:0', ?1, 500, 1000000, 1000), \
+         ('9x9x9', ?1, 700, 2000000, 2000), \
+         ('9:9:9', ?1, 800, 3000000, 3000)",
+        rusqlite::params!["a".repeat(66)],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    // Only the legacy-colon spelling exists: alias fallback finds it.
+    let legacy = channel_cost_row(&handle, "123x456x0").await.unwrap();
+    let legacy = legacy.expect("legacy alias row found");
+    assert_eq!(legacy.open_cost_sats, 500);
+    assert_eq!(legacy.opened_at, 1000);
+
+    // Both spellings exist: the exact canonical row wins.
+    let exact = channel_cost_row(&handle, "9x9x9").await.unwrap();
+    assert_eq!(exact.expect("exact row").open_cost_sats, 700);
+
+    // No row at all.
+    assert!(channel_cost_row(&handle, "0x0x0").await.unwrap().is_none());
+}
+
+/// Port of `Database.get_channel_closure_cost`'s consumed subset
+/// (database.py:6302-6318) — plain equality, NO alias spellings (Python's
+/// own SQL is a bare `channel_id = ?`).
+#[tokio::test]
+async fn channel_closure_cost_total_is_exact_match_only() {
+    let (_dir, path) = seeded_db(NOW);
+    let handle = spawn_read_only(&path).await.unwrap();
+    // seeded_db carries one 300-sat closure for '3x3x0'.
+    assert_eq!(
+        channel_closure_cost_total(&handle, "3x3x0").await.unwrap(),
+        Some(300)
+    );
+    assert_eq!(
+        channel_closure_cost_total(&handle, "3:3:0").await.unwrap(),
+        None,
+        "no alias spellings here, matching Python"
+    );
+}
+
+/// Port of `Database.get_channel_pnl` (database.py:3063-3147): windowed
+/// revenue = live `forwards` (by out_channel, across alias spellings) plus
+/// completed-day rollups in `[since_day, today_start)`; rebalance cost from
+/// the unpruned `rebalance_costs` via `COALESCE(cost_msat, cost_sats*1000)`
+/// with ceil msat->sats.
+#[tokio::test]
+async fn channel_pnl_windows_revenue_rollups_and_ceils_rebalance_cost() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let five_days_ago_day = ((NOW - 5 * 86400) / 86400) * 86400;
+    conn.execute_batch(&format!(
+        "INSERT INTO forwards (in_channel, out_channel, in_msat, out_msat, fee_msat, timestamp, resolved_time) VALUES
+           ('9x9x0','1x1x0',1000000,998500,1500,{in_window},{in_window}),
+           ('9x9x0','1:1:0',1000000,999800,200,{in_window},{in_window}),
+           ('9x9x0','1x1x0',1000000,999000,999,{out_of_window},{out_of_window}),
+           ('9x9x0','2x2x0',1000000,999000,777,{in_window},{in_window});
+         INSERT INTO daily_forwarding_stats (channel_id, date, total_in_msat, total_out_msat, total_fee_msat, forward_count) VALUES
+           ('1x1x0', {rollup_day}, 5000000, 4995000, 5000, 4);
+         INSERT INTO rebalance_costs (channel_id, peer_id, cost_sats, cost_msat, amount_sats, timestamp) VALUES
+           ('1x1x0', '{peer}', 2, 1500, 50000, {in_window}),
+           ('1x1x0', '{peer}', 9, 9000, 50000, {out_of_window});",
+        in_window = NOW - 3600,
+        out_of_window = NOW - 40 * 86400,
+        rollup_day = five_days_ago_day,
+        peer = "1".repeat(66),
+    ))
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    let pnl = channel_pnl(&handle, "1x1x0", 30, NOW).await.unwrap();
+    // live 1500 + alias-spelled 200 + rollup 5000; the 40-day-old forward
+    // and the other channel's 777 are excluded.
+    assert_eq!(pnl.revenue_msat, 6700);
+    // 2 live forwards + 4 rolled up.
+    assert_eq!(pnl.forward_count, 6);
+    // cost_msat 1500 -> ceil -> 2 sats; out-of-window row excluded.
+    assert_eq!(pnl.rebalance_cost_sats, 2);
 }
 
 /// Python's `COALESCE(SUM(...), 0)`: an empty table answers 0, not an error.

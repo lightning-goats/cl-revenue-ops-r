@@ -701,6 +701,69 @@ fn register_total_cost_budget(
     )
 }
 
+fn register_cleanup_closed(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "archive tracked channels that are no longer open, then purge their tracking rows",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                // Python's guard order (cl-revenue-ops.py:6383-6386):
+                // database first, then the plugin runtime (here: the sealed
+                // mutation owner, unassembled until Task 69).
+                let state = p.state();
+                if state.db.is_none() {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                }
+                let Some(owner) = state.core_mutations.get() else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                let peer_channels = revops::profitability_assembler::fetch_read_rpc(
+                    &state.socket_path,
+                    "listpeerchannels",
+                )
+                .await;
+                // Both best-effort in Python: a missing listclosedchannels
+                // degrades to unknown close metadata (py 6434-6435), a
+                // failed getinfo to no opened_at repair (py 7597-7600).
+                let closed_list = revops::profitability_assembler::fetch_read_rpc(
+                    &state.socket_path,
+                    "listclosedchannels",
+                )
+                .await
+                .ok();
+                let block_height =
+                    revops::profitability_assembler::fetch_read_rpc(&state.socket_path, "getinfo")
+                        .await
+                        .ok()
+                        .and_then(|info| {
+                            info.get("blockheight").and_then(serde_json::Value::as_i64)
+                        })
+                        .unwrap_or(0);
+                Ok(owner
+                    .cleanup_closed(revops::rpc_cleanup_closed::CleanupClosedEvidence {
+                        peer_channels,
+                        closed_list,
+                        block_height,
+                        now: now_unix(),
+                    })
+                    .await)
+            }
+        },
+    )
+}
+
 fn register_core_mutator(
     builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
     name: &str,
@@ -1304,6 +1367,12 @@ async fn main() -> Result<()> {
     let spend_release_stale_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-spend-release-stale",
+    );
+    // Task 66 slice 3: the closed-channel archival backfill.
+    let cleanup_closed_name = rpc_name("cleanup-closed");
+    let cleanup_closed_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-cleanup-closed",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -3164,6 +3233,7 @@ async fn main() -> Result<()> {
         spend_release_stale_spec,
         revops::rpc_state_mutators::CoreStateMutationAction::SpendReleaseStale,
     );
+    let builder = register_cleanup_closed(builder, &cleanup_closed_name, cleanup_closed_spec);
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
