@@ -439,15 +439,33 @@ pub struct ShutdownOutcome {
 pub type StepFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
 
+/// One owner's drain acknowledgement, in flight.
+pub type DrainFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = DrainAck> + Send + 'a>>;
+
+/// One owner's join acknowledgement, in flight.
+pub type JoinFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = JoinAck> + Send + 'a>>;
+
 /// The steps a real runtime supplies. Kept as a trait so the ordering, the
 /// failure handling and the bound are testable without a live plugin.
+///
+/// R68-5: the owner half reports PER OWNER. `drain_action_owners` and
+/// friends returned one `Result<(), String>` for all seven owners at
+/// once, which is exactly the `.ok()`-to-null conversion Task 68 forbids
+/// -- a single `Ok(())` cannot distinguish an owner that finished from
+/// one that was already gone, never answered, or stopped with work still
+/// queued, nor a legitimately absent owner from one nobody asked.
+///
+/// The roster is walked by [`shutdown`] rather than by the implementer,
+/// so the action-before-observer order is a property of the kernel.
 pub trait LifecycleSteps: Send + Sync {
     fn stop_intake(&self) -> StepFuture<'_>;
     fn persist_cursors(&self) -> StepFuture<'_>;
-    fn drain_action_owners(&self) -> StepFuture<'_>;
-    fn drain_observer_owners(&self) -> StepFuture<'_>;
     fn flush_stores(&self) -> StepFuture<'_>;
-    fn join_owners(&self) -> StepFuture<'_>;
+    /// Ask ONE owner to stop, and report what it actually said.
+    fn drain_owner(&self, owner: Owner) -> DrainFuture<'_>;
+    /// Wait for ONE owner's task to end, and report how it ended.
+    fn join_owner(&self, owner: Owner) -> JoinFuture<'_>;
 }
 
 /// Run the whole shutdown under ONE bound.
@@ -463,12 +481,26 @@ pub trait LifecycleSteps: Send + Sync {
 /// A failing step does NOT skip the remaining ones. Leaving stores
 /// unflushed because an earlier owner failed loses data the failure itself
 /// did not.
-pub async fn shutdown<S>(steps: std::sync::Arc<S>, timeout: Duration) -> ShutdownOutcome
+///
+/// R68-5: `ledger` is supplied by the CALLER and outlives the call. The
+/// bound can cut the roster short, and an owner past the cut was never
+/// asked -- building the ledger inside the spawned task would throw that
+/// evidence away with the task, leaving "wedged before we reached it"
+/// indistinguishable from "reported clean". The verdict in `failures` is
+/// a snapshot taken at decision time: on timeout the detached task may
+/// still be running (py: "process exit proceeds on timeout"), so a later
+/// read of the ledger can differ from the outcome that was returned.
+pub async fn shutdown<S>(
+    steps: std::sync::Arc<S>,
+    ledger: std::sync::Arc<DrainLedger>,
+    timeout: Duration,
+) -> ShutdownOutcome
 where
     S: LifecycleSteps + 'static,
 {
     let mut outcome = ShutdownOutcome::default();
 
+    let owner_ledger = std::sync::Arc::clone(&ledger);
     let handle = tokio::spawn(async move {
         let mut reached = Vec::new();
         let mut failures = Vec::new();
@@ -485,10 +517,29 @@ where
         }
         run!(Phase::IntakeStopped, steps.stop_intake());
         run!(Phase::CursorsPersisted, steps.persist_cursors());
-        run!(Phase::ActionOwnersDrained, steps.drain_action_owners());
-        run!(Phase::ObserverOwnersDrained, steps.drain_observer_owners());
+
+        // Both halves walk the WHOLE roster, not the handles that happen
+        // to exist: an owner nobody asked about must be `Unreported`, and
+        // absence must be declared by the owner half itself.
+        for owner in Owner::ALL {
+            if owner.class() == OwnerClass::Action {
+                owner_ledger.record(owner, steps.drain_owner(owner).await);
+            }
+        }
+        reached.push(Phase::ActionOwnersDrained);
+        for owner in Owner::ALL {
+            if owner.class() == OwnerClass::Observer {
+                owner_ledger.record(owner, steps.drain_owner(owner).await);
+            }
+        }
+        reached.push(Phase::ObserverOwnersDrained);
+
         run!(Phase::StoresFlushed, steps.flush_stores());
-        run!(Phase::Joined, steps.join_owners());
+
+        for owner in Owner::ALL {
+            owner_ledger.record_join(owner, steps.join_owner(owner).await);
+        }
+        reached.push(Phase::Joined);
         (reached, failures)
     });
 
@@ -509,6 +560,26 @@ where
             outcome.reached = reached;
             outcome.failures = failures;
         }
+    }
+
+    // R68-5: the owner acknowledgements are part of the verdict, not a
+    // side report. Every step can succeed while an owner was never
+    // reached, answered nothing, or ended with work still queued -- and
+    // under the old trait each of those returned a clean shutdown.
+    if let Err(refusal) = drain_is_clean(&ledger) {
+        outcome
+            .failures
+            .push(format!("{}: {}", refusal.code(), refusal.owner().as_str()));
+    }
+    if let Err(refusal) = join_is_clean(&ledger) {
+        outcome
+            .failures
+            .push(format!("{}: {}", refusal.code(), refusal.owner().as_str()));
+    }
+    if let Err(refusal) = shutdown_acks_are_consistent(&ledger) {
+        outcome
+            .failures
+            .push(format!("{}: {}", refusal.code(), refusal.owner().as_str()));
     }
 
     // Two conditions, not three. A `reached.last() == Joined` clause was
@@ -709,6 +780,17 @@ impl DrainRefusal {
             Self::LeftWork { .. } => "drain_owner_left_work",
         }
     }
+
+    /// Which owner. A refusal code alone tells an operator what went
+    /// wrong but not where to look.
+    pub fn owner(&self) -> Owner {
+        match self {
+            Self::Unreported { owner }
+            | Self::Unreachable { owner, .. }
+            | Self::NoAck { owner, .. }
+            | Self::LeftWork { owner, .. } => *owner,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,6 +819,15 @@ impl JoinRefusal {
             Self::Timeout { .. } => "join_owner_timeout",
             Self::Panicked { .. } => "join_owner_panicked",
             Self::JoinedWithoutDraining { .. } => "join_without_drain",
+        }
+    }
+
+    pub fn owner(&self) -> Owner {
+        match self {
+            Self::Unreported { owner }
+            | Self::Timeout { owner, .. }
+            | Self::Panicked { owner, .. }
+            | Self::JoinedWithoutDraining { owner } => *owner,
         }
     }
 }

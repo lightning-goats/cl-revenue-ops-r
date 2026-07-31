@@ -1,6 +1,11 @@
 //! R68-1 (RED): the lifecycle kernel -- store identity, the current-boot
 //! startup receipt, and bounded shutdown ordering.
 //!
+//! R68-5 extends the shutdown half: the three coarse owner steps are gone,
+//! and `shutdown` now drives the seven-owner roster itself, recording a
+//! typed acknowledgement per owner. See the "bounded shutdown ordering"
+//! section below.
+//!
 //! Contract re-derived from `fixtures/port/plugin_inventory.json`:
 //!
 //! - `shutdown`: `{name: "rpc-shutdown", bounded: true,
@@ -9,12 +14,14 @@
 //! - the four subscriptions, from `@plugin.subscribe`: `forward_event`,
 //!   `connect`, `disconnect`, `channel_state_changed`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use revops::lifecycle::{
-    assert_distinct_stores, classify_startup_receipt, shutdown, LifecycleSteps, Phase,
+    assert_distinct_stores, classify_startup_receipt, drain_is_clean, shutdown, DrainAck,
+    DrainFuture, DrainLedger, JoinAck, JoinFuture, LifecycleSteps, Owner, OwnerClass, Phase,
     StartupReceipt, StartupRefusal, StepFuture, StoreIdentityRefusal, SHUTDOWN_JOIN_TIMEOUT,
 };
 
@@ -199,14 +206,32 @@ fn no_receipt_at_all_is_refused_rather_than_assumed_complete() {
 // =====================================================================
 // bounded shutdown ordering
 // =====================================================================
+//
+// R68-5: `drain_action_owners` / `drain_observer_owners` / `join_owners`
+// each returned a bare `Result<(), String>`, so ONE `Ok(())` stood for all
+// seven owners at once. That is precisely the `.ok()`-to-null conversion
+// Task 68 forbids: it cannot distinguish an owner that finished from one
+// that was already gone, never answered, or stopped with work still
+// queued -- and it cannot distinguish an owner that legitimately does not
+// run in this process from one nobody remembered to ask.
+//
+// The trait now reports PER OWNER, and `shutdown` drives the roster
+// itself so the action-before-observer order is enforced by the kernel
+// rather than by whoever implements the trait.
 
-/// Records the order steps ran in, and can be told to fail, panic, or hang.
+/// Records what ran, and can be told to fail, panic, or hang -- at a
+/// phase, or at one specific owner's drain.
 #[derive(Default)]
 struct FakeSteps {
     order: Mutex<Vec<Phase>>,
+    drain_order: Mutex<Vec<Owner>>,
+    join_order: Mutex<Vec<Owner>>,
     fail_at: Option<Phase>,
     panic_at: Option<Phase>,
     hang_at: Option<Phase>,
+    hang_draining: Option<Owner>,
+    drain_acks: Mutex<HashMap<Owner, DrainAck>>,
+    join_acks: Mutex<HashMap<Owner, JoinAck>>,
     joins: AtomicUsize,
 }
 
@@ -214,9 +239,29 @@ impl FakeSteps {
     fn recording() -> Arc<Self> {
         Arc::new(Self::default())
     }
+
+    /// Override one owner's drain acknowledgement. Everything unset
+    /// answers cleanly, so each test perturbs exactly one thing.
+    fn drains_as(self, owner: Owner, ack: DrainAck) -> Self {
+        self.drain_acks.lock().unwrap().insert(owner, ack);
+        self
+    }
+
+    fn joins_as(self, owner: Owner, ack: JoinAck) -> Self {
+        self.join_acks.lock().unwrap().insert(owner, ack);
+        self
+    }
+
     fn seen(&self) -> Vec<Phase> {
         self.order.lock().unwrap().clone()
     }
+    fn drained(&self) -> Vec<Owner> {
+        self.drain_order.lock().unwrap().clone()
+    }
+    fn joined(&self) -> Vec<Owner> {
+        self.join_order.lock().unwrap().clone()
+    }
+
     async fn step(&self, phase: Phase) -> Result<(), String> {
         if self.hang_at == Some(phase) {
             // Longer than any test timeout; the bounded wait must win.
@@ -231,6 +276,30 @@ impl FakeSteps {
         }
         Ok(())
     }
+
+    async fn drain(&self, owner: Owner) -> DrainAck {
+        if self.hang_draining == Some(owner) {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+        self.drain_order.lock().unwrap().push(owner);
+        self.drain_acks
+            .lock()
+            .unwrap()
+            .get(&owner)
+            .cloned()
+            .unwrap_or(DrainAck::Drained { pending_at_stop: 0 })
+    }
+
+    async fn join(&self, owner: Owner) -> JoinAck {
+        self.joins.fetch_add(1, Ordering::SeqCst);
+        self.join_order.lock().unwrap().push(owner);
+        self.join_acks
+            .lock()
+            .unwrap()
+            .get(&owner)
+            .cloned()
+            .unwrap_or(JoinAck::Joined)
+    }
 }
 
 impl LifecycleSteps for FakeSteps {
@@ -240,34 +309,38 @@ impl LifecycleSteps for FakeSteps {
     fn persist_cursors(&self) -> StepFuture<'_> {
         Box::pin(self.step(Phase::CursorsPersisted))
     }
-    fn drain_action_owners(&self) -> StepFuture<'_> {
-        Box::pin(self.step(Phase::ActionOwnersDrained))
-    }
-    fn drain_observer_owners(&self) -> StepFuture<'_> {
-        Box::pin(self.step(Phase::ObserverOwnersDrained))
-    }
     fn flush_stores(&self) -> StepFuture<'_> {
         Box::pin(self.step(Phase::StoresFlushed))
     }
-    fn join_owners(&self) -> StepFuture<'_> {
-        self.joins.fetch_add(1, Ordering::SeqCst);
-        Box::pin(self.step(Phase::Joined))
+    fn drain_owner(&self, owner: Owner) -> DrainFuture<'_> {
+        Box::pin(self.drain(owner))
     }
+    fn join_owner(&self, owner: Owner) -> JoinFuture<'_> {
+        Box::pin(self.join(owner))
+    }
+}
+
+fn ledger() -> Arc<DrainLedger> {
+    Arc::new(DrainLedger::default())
 }
 
 /// The ordering is the contract, and it is not arbitrary: cursors must be
 /// persisted only after intake stops (or the cursor races new work), and
 /// ACTION owners must drain before OBSERVER owners (an action still in
 /// flight can produce observations the observer must still record).
+///
+/// Asserted against a LITERAL phase list rather than against whatever
+/// order the kernel iterates, so reordering the kernel cannot move both
+/// sides of the comparison at once.
 #[tokio::test]
 async fn a_clean_shutdown_runs_every_phase_in_order() {
     let steps = FakeSteps::recording();
-    let outcome = shutdown(steps.clone(), SHUTDOWN_JOIN_TIMEOUT).await;
+    let outcome = shutdown(steps.clone(), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
 
     assert!(outcome.completed, "{outcome:?}");
     assert!(!outcome.timed_out);
     assert_eq!(
-        steps.seen(),
+        outcome.reached,
         vec![
             Phase::IntakeStopped,
             Phase::CursorsPersisted,
@@ -277,6 +350,15 @@ async fn a_clean_shutdown_runs_every_phase_in_order() {
             Phase::Joined,
         ]
     );
+    assert_eq!(
+        steps.seen(),
+        vec![
+            Phase::IntakeStopped,
+            Phase::CursorsPersisted,
+            Phase::StoresFlushed
+        ],
+        "the non-owner steps still run, and only those"
+    );
 }
 
 /// Success is reported only AFTER the join. Reporting it earlier is the
@@ -284,12 +366,16 @@ async fn a_clean_shutdown_runs_every_phase_in_order() {
 #[tokio::test]
 async fn success_is_never_reported_before_the_owners_are_joined() {
     let steps = FakeSteps::recording();
-    let outcome = shutdown(steps.clone(), SHUTDOWN_JOIN_TIMEOUT).await;
+    let outcome = shutdown(steps.clone(), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
 
     assert!(outcome.completed);
-    assert_eq!(steps.joins.load(Ordering::SeqCst), 1, "join actually ran");
     assert_eq!(
-        steps.seen().last(),
+        steps.joins.load(Ordering::SeqCst),
+        Owner::ALL.len(),
+        "every owner is actually joined, not just counted"
+    );
+    assert_eq!(
+        outcome.reached.last(),
         Some(&Phase::Joined),
         "join is the LAST phase"
     );
@@ -297,46 +383,52 @@ async fn success_is_never_reported_before_the_owners_are_joined() {
 
 /// A failing phase must surface, and must not be reported as a clean
 /// shutdown -- but later phases still run, because leaving stores
-/// unflushed because an earlier owner failed loses data the failure did
+/// unflushed because an earlier step failed loses data the failure did
 /// not.
 #[tokio::test]
 async fn a_failed_phase_is_surfaced_and_does_not_skip_the_remaining_ones() {
     let steps = Arc::new(FakeSteps {
-        fail_at: Some(Phase::ActionOwnersDrained),
+        fail_at: Some(Phase::CursorsPersisted),
         ..Default::default()
     });
-    let outcome = shutdown(steps.clone(), SHUTDOWN_JOIN_TIMEOUT).await;
+    let outcome = shutdown(steps.clone(), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
 
-    assert!(!outcome.completed, "a failed drain is not a clean shutdown");
+    assert!(
+        !outcome.completed,
+        "a failed cursor persist is not a clean shutdown"
+    );
     assert!(
         outcome
             .failures
             .iter()
-            .any(|f| f.contains("ActionOwnersDrained")),
+            .any(|f| f.contains("CursorsPersisted")),
         "{outcome:?}"
     );
     assert!(
-        steps.seen().contains(&Phase::StoresFlushed) && steps.seen().contains(&Phase::Joined),
-        "stores must still flush and owners must still join: {:?}",
+        steps.seen().contains(&Phase::StoresFlushed),
+        "stores must still flush: {:?}",
         steps.seen()
+    );
+    assert_eq!(
+        steps.joined().len(),
+        Owner::ALL.len(),
+        "owners must still be joined: {:?}",
+        steps.joined()
     );
 }
 
-/// An owner that PANICS is a lost owner, not a clean one.
+/// A step that PANICS loses the owner, not just the step.
 #[tokio::test]
-async fn a_panicking_owner_is_reported_rather_than_swallowed() {
+async fn a_panicking_step_is_reported_rather_than_swallowed() {
     let steps = Arc::new(FakeSteps {
-        panic_at: Some(Phase::ObserverOwnersDrained),
+        panic_at: Some(Phase::StoresFlushed),
         ..Default::default()
     });
-    let outcome = shutdown(steps.clone(), SHUTDOWN_JOIN_TIMEOUT).await;
+    let outcome = shutdown(steps.clone(), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
 
     assert!(!outcome.completed);
     assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|f| f.contains("ObserverOwnersDrained")),
+        outcome.failures.iter().any(|f| f.contains("lost")),
         "the lost owner must be named: {outcome:?}"
     );
 }
@@ -344,12 +436,12 @@ async fn a_panicking_owner_is_reported_rather_than_swallowed() {
 /// py: "daemon drain thread; bounded wait; process exit proceeds on
 /// timeout". A wedged owner must not hold shutdown open forever.
 #[tokio::test(start_paused = true)]
-async fn a_wedged_owner_times_out_rather_than_blocking_forever() {
+async fn a_wedged_step_times_out_rather_than_blocking_forever() {
     let steps = Arc::new(FakeSteps {
-        hang_at: Some(Phase::ActionOwnersDrained),
+        hang_at: Some(Phase::CursorsPersisted),
         ..Default::default()
     });
-    let outcome = shutdown(steps.clone(), Duration::from_secs(10)).await;
+    let outcome = shutdown(steps.clone(), ledger(), Duration::from_secs(10)).await;
 
     assert!(outcome.timed_out, "{outcome:?}");
     assert!(!outcome.completed);
@@ -359,4 +451,263 @@ async fn a_wedged_owner_times_out_rather_than_blocking_forever() {
 #[test]
 fn the_join_timeout_matches_the_generated_shutdown_contract() {
     assert_eq!(SHUTDOWN_JOIN_TIMEOUT, Duration::from_secs_f64(10.0));
+}
+
+// ---------------------------------------------------------------------
+// R68-5: the roster is driven by the kernel
+// ---------------------------------------------------------------------
+
+/// Every owner is ASKED. A shutdown that iterated only the handles it
+/// happened to hold would report clean over an owner it never contacted.
+#[tokio::test]
+async fn every_owner_on_the_roster_is_asked_to_drain_and_to_join() {
+    let steps = FakeSteps::recording();
+    let outcome = shutdown(steps.clone(), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(outcome.completed, "{outcome:?}");
+    for owner in Owner::ALL {
+        assert!(
+            steps.drained().contains(&owner),
+            "{} was never asked to drain: {:?}",
+            owner.as_str(),
+            steps.drained()
+        );
+        assert!(
+            steps.joined().contains(&owner),
+            "{} was never joined: {:?}",
+            owner.as_str(),
+            steps.joined()
+        );
+    }
+}
+
+/// R68-1's phase order, now enforced per OWNER rather than per step: an
+/// action still in flight can produce observations the observer store
+/// must still record, so no observer owner may drain before the last
+/// action owner has.
+#[tokio::test]
+async fn action_owners_drain_before_observer_owners() {
+    let steps = FakeSteps::recording();
+    shutdown(steps.clone(), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    let drained = steps.drained();
+    let last_action = drained
+        .iter()
+        .rposition(|o| o.class() == OwnerClass::Action)
+        .expect("some action owner drained");
+    let first_observer = drained
+        .iter()
+        .position(|o| o.class() == OwnerClass::Observer)
+        .expect("some observer owner drained");
+    assert!(
+        last_action < first_observer,
+        "every action owner must drain before any observer owner: {drained:?}"
+    );
+}
+
+/// The ledger is the operator's evidence, so it must outlive the call --
+/// and be the SAME one the caller passed in, not a private copy the
+/// kernel threw away.
+#[tokio::test]
+async fn the_ledger_the_caller_passed_in_holds_every_owners_report_afterwards() {
+    let steps = FakeSteps::recording();
+    let ledger = ledger();
+    let outcome = shutdown(steps.clone(), ledger.clone(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(outcome.completed, "{outcome:?}");
+    for owner in Owner::ALL {
+        assert_eq!(
+            ledger.drain_ack(owner),
+            Some(DrainAck::Drained { pending_at_stop: 0 }),
+            "{}",
+            owner.as_str()
+        );
+        assert_eq!(
+            ledger.join_ack(owner),
+            Some(JoinAck::Joined),
+            "{}",
+            owner.as_str()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// R68-5: a faulty acknowledgement is not a clean shutdown
+// ---------------------------------------------------------------------
+//
+// Each of these ran to completion with no failing STEP -- under the old
+// `Result<(), String>` trait every one of them reported `completed`.
+
+#[tokio::test]
+async fn an_owner_that_never_acknowledged_the_stop_is_not_a_clean_shutdown() {
+    let steps = Arc::new(FakeSteps::default().drains_as(
+        Owner::FeeScheduler,
+        DrainAck::NoAck {
+            waited: Duration::from_secs(10),
+        },
+    ));
+    let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(!outcome.completed, "{outcome:?}");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("drain_owner_no_ack") && f.contains("fee_scheduler")),
+        "the refusal must name both the fault and the owner: {outcome:?}"
+    );
+}
+
+/// "I stopped" is not "I finished". An owner that acknowledged the stop
+/// with work still queued dropped that work on the floor.
+#[tokio::test]
+async fn an_owner_that_stopped_with_work_still_queued_is_not_a_clean_shutdown() {
+    let steps = Arc::new(
+        FakeSteps::default().drains_as(Owner::Rebalance, DrainAck::Drained { pending_at_stop: 3 }),
+    );
+    let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(!outcome.completed, "{outcome:?}");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("drain_owner_left_work") && f.contains("rebalance")),
+        "{outcome:?}"
+    );
+}
+
+/// Sending a stop into a channel nobody is reading returns `Ok`. The
+/// owner was already gone, so whatever it had queued was never processed
+/// -- that is a LOST owner, not a drained one.
+#[tokio::test]
+async fn an_owner_that_was_already_gone_is_not_a_drained_one() {
+    let steps = Arc::new(FakeSteps::default().drains_as(
+        Owner::ObserverStore,
+        DrainAck::Unreachable {
+            detail: "channel closed".to_string(),
+        },
+    ));
+    let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(!outcome.completed, "{outcome:?}");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("drain_owner_unreachable") && f.contains("observer_store")),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_owner_that_timed_out_joining_is_not_a_clean_shutdown() {
+    let steps = Arc::new(FakeSteps::default().joins_as(
+        Owner::Boltz,
+        JoinAck::Timeout {
+            waited: Duration::from_secs(10),
+        },
+    ));
+    let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(!outcome.completed, "{outcome:?}");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("join_owner_timeout") && f.contains("boltz")),
+        "{outcome:?}"
+    );
+}
+
+/// R68-1's rule, kept per-owner: folding a panic into "the task is no
+/// longer running, so it ended" is how a crash reads as a graceful exit.
+#[tokio::test]
+async fn a_panicking_owner_is_not_a_joined_one() {
+    let steps = Arc::new(FakeSteps::default().joins_as(
+        Owner::LnPlus,
+        JoinAck::Panicked {
+            detail: "index out of bounds".to_string(),
+        },
+    ));
+    let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(!outcome.completed, "{outcome:?}");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("join_owner_panicked") && f.contains("lnplus")),
+        "{outcome:?}"
+    );
+}
+
+/// The cross-check neither ledger can make alone: both halves look clean
+/// in isolation -- the drain half sees a legitimately absent owner, the
+/// join half sees a clean join -- and together they are a contradiction.
+#[tokio::test]
+async fn an_owner_joined_without_draining_fails_the_cross_check() {
+    let steps = Arc::new(
+        FakeSteps::default()
+            .drains_as(Owner::Capital, DrainAck::NotSpawned)
+            .joins_as(Owner::Capital, JoinAck::Joined),
+    );
+    let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(!outcome.completed, "{outcome:?}");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("join_without_drain") && f.contains("capital")),
+        "{outcome:?}"
+    );
+}
+
+/// ...and the gate must not over-refuse. A passive-observer boot runs
+/// NONE of the four action owners; declaring that absence is a clean
+/// shutdown, not a fault. A gate that reddened every observer-only boot
+/// would be turned off within a day.
+#[tokio::test]
+async fn a_passive_observer_boot_shuts_down_cleanly_when_it_declares_its_absent_owners() {
+    let mut steps = FakeSteps::default();
+    for owner in Owner::ALL {
+        if owner.class() == OwnerClass::Action {
+            steps = steps
+                .drains_as(owner, DrainAck::NotSpawned)
+                .joins_as(owner, JoinAck::NotSpawned);
+        }
+    }
+    let outcome = shutdown(Arc::new(steps), ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
+
+    assert!(
+        outcome.completed,
+        "declared absence is not a fault: {outcome:?}"
+    );
+}
+
+/// The bound can cut the roster short, and the owners past the cut were
+/// never asked. Their silence must read as UNREPORTED -- the one state
+/// the old `Ok(())` could never express, and the reason the ledger is
+/// passed in rather than built inside the spawned task.
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_that_timed_out_mid_drain_still_names_the_owners_it_never_heard_from() {
+    let steps = Arc::new(FakeSteps {
+        hang_draining: Some(Owner::Rebalance),
+        ..Default::default()
+    });
+    let ledger = ledger();
+    let outcome = shutdown(steps, ledger.clone(), Duration::from_secs(10)).await;
+
+    assert!(outcome.timed_out, "{outcome:?}");
+    assert!(!outcome.completed);
+    assert_eq!(
+        ledger.drain_ack(Owner::Rebalance),
+        None,
+        "the wedged owner never reported"
+    );
+    assert!(
+        drain_is_clean(&ledger).is_err(),
+        "an unreported owner is not a drained one"
+    );
 }
