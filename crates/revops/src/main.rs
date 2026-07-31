@@ -1195,6 +1195,11 @@ async fn main() -> Result<()> {
     let unban_name = rpc_name("unban");
     let unban_spec =
         revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-unban");
+    let clear_reservations_name = rpc_name("clear-reservations");
+    let clear_reservations_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-clear-reservations",
+    );
     let spend_release_name = rpc_name("spend-release");
     let spend_release_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
@@ -3025,6 +3030,12 @@ async fn main() -> Result<()> {
         &unban_name,
         unban_spec,
         revops::rpc_state_mutators::CoreStateMutationAction::Unban,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &clear_reservations_name,
+        clear_reservations_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::ClearReservations,
     );
     let builder = register_core_mutator(
         builder,

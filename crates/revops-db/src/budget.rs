@@ -527,28 +527,7 @@ impl BudgetDb {
     /// with a concurrent reserve). Touches ONLY `budget_reservations`,
     /// exactly as Python does.
     pub fn clear_all_reservations(&mut self) -> Result<ClearStats> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            let (cleared_count, released_sats): (i64, i64) = self.conn.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(reserved_sats), 0) \
-                 FROM budget_reservations WHERE status = 'active'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            self.conn.execute(
-                "UPDATE budget_reservations SET status = 'released' WHERE status = 'active'",
-                [],
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(ClearStats {
-                cleared_count,
-                released_sats,
-            })
-        })();
-        if result.is_err() {
-            rollback_quietly(&self.conn);
-        }
-        result
+        clear_all_reservations_on(&self.conn)
     }
 
     // -----------------------------------------------------------------
@@ -1073,8 +1052,34 @@ fn is_busy_or_locked(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// Best-effort ROLLBACK for error paths (Python's nested
-/// `try: conn.execute("ROLLBACK") except: pass`).
+/// Shared Python-parity transaction used by both BudgetDb and the
+/// sealed production state-writer actor.
+pub(crate) fn clear_all_reservations_on(conn: &Connection) -> Result<ClearStats> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let (cleared_count, released_sats): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(reserved_sats), 0) \
+             FROM budget_reservations WHERE status = 'active'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        conn.execute(
+            "UPDATE budget_reservations SET status = 'released' WHERE status = 'active'",
+            [],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(ClearStats {
+            cleared_count,
+            released_sats,
+        })
+    })();
+    if result.is_err() {
+        rollback_quietly(conn);
+    }
+    result
+}
+
+/// Best-effort rollback for Python-equivalent transaction error paths.
 fn rollback_quietly(conn: &Connection) {
     let _ = conn.execute_batch("ROLLBACK");
 }

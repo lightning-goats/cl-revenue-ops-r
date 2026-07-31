@@ -330,6 +330,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         "revenue-unignore",
         "revenue-ban",
         "revenue-unban",
+        "revenue-clear-reservations",
         "revenue-spend-release",
         "revenue-spend-settle",
     ] {
@@ -448,7 +449,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        61,
+        62,
         "methods: {methods:?}"
     );
 
@@ -622,6 +623,7 @@ fn core_state_mutators_are_reachable_in_both_naming_modes() {
         "unignore",
         "ban",
         "unban",
+        "clear-reservations",
         "spend-release",
         "spend-settle",
     ] {
@@ -649,6 +651,7 @@ fn core_state_mutators_refuse_when_live_capability_is_unassembled() {
             "revenue-unban",
             serde_json::json!({"peer_id": fake_peer_id("02", 'd')}),
         ),
+        ("revenue-clear-reservations", serde_json::json!({})),
         (
             "revenue-spend-release",
             serde_json::json!({"reservation_id": "r"}),

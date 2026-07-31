@@ -28,6 +28,7 @@
 
 use std::time::Duration;
 
+use revops_db::budget::ClearStats;
 use revops_db::owner::{StoreAdmissionRefused, StoreReceipt, StoreReceiptWait};
 use revops_db::state_writer::{
     BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete, StateWriterHandle,
@@ -151,6 +152,10 @@ impl CoreMutators {
         self.writer.delete_peer_policy(peer_id).await
     }
 
+    pub(crate) async fn clear_all_budget_reservations(&self) -> StateWriteAck<ClearStats> {
+        self.writer.clear_all_budget_reservations().await
+    }
+
     pub(crate) async fn release_spend_reservation(
         &self,
         reservation_id: String,
@@ -236,6 +241,14 @@ impl ProductionStateWriter {
     pub async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
         resolve(
             self.handle.try_delete_peer_policy(peer_id),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn clear_all_budget_reservations(&self) -> StateWriteAck<ClearStats> {
+        resolve(
+            self.handle.try_clear_all_budget_reservations(),
             self.receipt_budget,
         )
         .await

@@ -36,8 +36,8 @@ use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::budget::{
-    mark_spent_in_tx, release_spend_reservation_on, reserve_spend_in_tx, MarkSpentTx,
-    ReserveRequest,
+    clear_all_reservations_on, mark_spent_in_tx, release_spend_reservation_on, reserve_spend_in_tx,
+    ClearStats, MarkSpentTx, ReserveRequest,
 };
 use crate::owner::{StoreAdmissionRefused, StoreReceipt};
 
@@ -179,6 +179,9 @@ enum Command {
         max_age_seconds: i64,
         now: i64,
         reply: oneshot::Sender<Result<i64>>,
+    },
+    ClearAllBudgetReservations {
+        reply: oneshot::Sender<Result<ClearStats>>,
     },
     ReserveSpend {
         request: ReserveRequest,
@@ -354,6 +357,12 @@ impl StateWriterHandle {
         })
     }
 
+    pub fn try_clear_all_budget_reservations(
+        &self,
+    ) -> std::result::Result<StoreReceipt<ClearStats>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ClearAllBudgetReservations { reply })
+    }
+
     pub fn try_reserve_spend(
         &self,
         request: ReserveRequest,
@@ -509,6 +518,10 @@ impl StateWriterHandle {
             now,
             reply
         })
+    }
+
+    pub async fn clear_all_budget_reservations(&self) -> Result<ClearStats> {
+        roundtrip!(self, |reply| Command::ClearAllBudgetReservations { reply })
     }
 
     pub async fn reserve_spend(&self, request: ReserveRequest, now: i64) -> Result<(bool, i64)> {
@@ -741,6 +754,10 @@ pub async fn spawn_state_writer(
                     reply,
                 } => {
                     let _ = reply.send(cleanup_stale_reservations(&conn, max_age_seconds, now));
+                }
+                Command::ClearAllBudgetReservations { reply } => {
+                    let _ =
+                        reply.send(clear_all_reservations_on(&conn).map_err(anyhow::Error::from));
                 }
                 Command::ReserveSpend {
                     request,

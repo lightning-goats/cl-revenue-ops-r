@@ -3,7 +3,7 @@
 use revops_analytics::policy::{is_valid_peer_id, PeerPolicy};
 use revops_db::{
     actor::DbHandle,
-    budget::ReserveRequest,
+    budget::{ClearStats, ReserveRequest},
     state_writer::{PeerPolicyWrite, PolicyDelete, SpendReleaseBatch},
 };
 use serde_json::{json, Map, Value};
@@ -151,6 +151,15 @@ pub fn unban_success(peer_id: &str, tags: &[String]) -> Value {
         "action": "unban",
         "peer_id": peer_id,
         "tags": tags,
+    })
+}
+
+pub fn clear_reservations_response(cleared: &ClearStats, budget_available: i64) -> Value {
+    json!({
+        "status": "success",
+        "cleared_count": cleared.cleared_count,
+        "released_sats": cleared.released_sats,
+        "budget_available": budget_available.max(0),
     })
 }
 
@@ -635,6 +644,7 @@ pub enum CoreStateMutationAction {
     Unignore,
     Ban,
     Unban,
+    ClearReservations,
     SpendRelease,
     SpendSettle,
 }
@@ -644,6 +654,7 @@ pub struct CoreStateMutationOwner {
     reader: DbHandle,
     fee_ingress: SchedulerIngress,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    daily_budget_sats: Arc<dyn Fn() -> i64 + Send + Sync>,
     rate_limit: Mutex<HashMap<String, Vec<i64>>>,
 }
 
@@ -653,12 +664,14 @@ impl CoreStateMutationOwner {
         reader: DbHandle,
         fee_ingress: SchedulerIngress,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        daily_budget_sats: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
         Self {
             core,
             reader,
             fee_ingress,
             clock,
+            daily_budget_sats,
             rate_limit: Mutex::new(HashMap::new()),
         }
     }
@@ -673,6 +686,7 @@ impl CoreStateMutationOwner {
             CoreStateMutationAction::Unignore => self.unignore(params).await,
             CoreStateMutationAction::Ban => self.ban(params).await,
             CoreStateMutationAction::Unban => self.unban(params).await,
+            CoreStateMutationAction::ClearReservations => self.clear_reservations(params).await,
             CoreStateMutationAction::SpendRelease => self.spend_release(params).await,
             CoreStateMutationAction::SpendSettle => self.spend_settle(params).await,
         }
@@ -846,6 +860,32 @@ impl CoreStateMutationOwner {
         self.complete_upsert(&peer_id, now, write, success).await
     }
 
+    pub async fn clear_reservations(&self, _params: &Map<String, Value>) -> Value {
+        let cleared = match self.core.clear_all_budget_reservations().await {
+            StateWriteAck::Applied(cleared) => cleared,
+            other => return completed_spend_response(other, |_| unreachable!("applied handled")),
+        };
+        let now = (self.clock)();
+        let spent = match self
+            .reader
+            .budget_status(now.saturating_sub(24 * 3600))
+            .await
+        {
+            Ok(status) => status.spent_sats,
+            Err(error) => return in_band_error(format!("{error:#}")),
+        };
+        let daily_budget = (self.daily_budget_sats)();
+        let available = match daily_budget.checked_sub(spent) {
+            Some(available) => available,
+            None => {
+                return in_band_error(format!(
+                    "budget_available overflows i64: daily budget {daily_budget} - spent {spent}"
+                ))
+            }
+        };
+        clear_reservations_response(&cleared, available)
+    }
+
     pub async fn spend_release(&self, params: &Map<String, Value>) -> Value {
         let reservation_id = parse_spend_release_params(params);
         let ack = self
@@ -917,7 +957,13 @@ mod core_mutation_owner_tests {
         let live = CoreStateLiveCapability::for_tests();
         let core = CoreMutators::assemble(writer, live);
         let (ingress, receiver) = SchedulerIngress::bounded_channel(16);
-        let owner = CoreStateMutationOwner::assemble(core, reader, ingress, Arc::new(|| NOW));
+        let owner = CoreStateMutationOwner::assemble(
+            core,
+            reader,
+            ingress,
+            Arc::new(|| NOW),
+            Arc::new(|| 100),
+        );
         (dir, path, owner, receiver)
     }
 
@@ -1120,6 +1166,79 @@ mod core_mutation_owner_tests {
             rusqlite::params![reservation_id, amount_sats, NOW - 1],
         )
         .expect("seed spend reservation");
+    }
+
+    #[tokio::test]
+    async fn clear_reservations_commits_legacy_rows_then_reports_spent_only_budget() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed clear-reservations fixture");
+        conn.execute(
+            "INSERT INTO budget_reservations
+             (reservation_id, reserved_sats, reserved_at, job_channel_id, status)
+             VALUES ('legacy-a', 25, ?1, '1x1x0', 'active'),
+                    ('legacy-b', 30, ?1, '2x2x0', 'active'),
+                    ('legacy-done', 99, ?1, '3x3x0', 'released')",
+            [NOW - 1],
+        )
+        .expect("seed legacy reservations");
+        conn.execute(
+            "INSERT INTO spend_reservations
+             (reservation_id, category, reserved_sats, reserved_at, status)
+             VALUES ('generic-active', 'rebalance', 77, ?1, 'active')",
+            [NOW - 1],
+        )
+        .expect("seed generic reservation that Python does not clear");
+        conn.execute(
+            "INSERT INTO rebalance_costs
+             (timestamp, channel_id, peer_id, cost_sats, amount_sats)
+             VALUES (?1, '4x4x0', '02aa', 40, 1000)",
+            [NOW - 1],
+        )
+        .expect("seed daily spend");
+        drop(conn);
+
+        let first = owner.clear_reservations(&Map::new()).await;
+        assert_eq!(
+            first,
+            json!({
+                "status": "success",
+                "cleared_count": 2,
+                "released_sats": 55,
+                "budget_available": 60,
+            })
+        );
+
+        let conn = Connection::open(&path).expect("read committed clear");
+        let active_legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM budget_reservations WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count active legacy rows");
+        let generic_status: String = conn
+            .query_row(
+                "SELECT status FROM spend_reservations WHERE reservation_id = 'generic-active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read generic row");
+        assert_eq!(active_legacy, 0);
+        assert_eq!(
+            generic_status, "active",
+            "Python clears only the legacy table"
+        );
+        drop(conn);
+
+        assert_eq!(
+            owner.clear_reservations(&Map::new()).await,
+            json!({
+                "status": "success",
+                "cleared_count": 0,
+                "released_sats": 0,
+                "budget_available": 60,
+            })
+        );
     }
 
     #[tokio::test]
