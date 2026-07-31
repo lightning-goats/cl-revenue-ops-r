@@ -3,6 +3,7 @@
 //! (cl_revenue_ops/modules/database.py) -- the production file is never
 //! involved anywhere in this workspace.
 
+use revops_db::budget::ReserveRequest;
 use revops_db::state_writer::{
     spawn_state_writer, BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete,
     StateWriterOpenError,
@@ -46,6 +47,29 @@ fn python_schema(path: &PathBuf) {
             job_channel_id TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active'
         );
+        CREATE TABLE spend_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            reserved_sats INTEGER NOT NULL,
+            reserved_at INTEGER NOT NULL,
+            reference_id TEXT,
+            channel_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT
+        );
+        CREATE TABLE spend_events (
+            event_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            amount_sats INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            reference_id TEXT,
+            channel_id TEXT,
+            source TEXT,
+            metadata_json TEXT
+        );
+        CREATE TABLE rebalance_costs (cost_sats INTEGER, timestamp INTEGER);
         CREATE TABLE channel_states (channel_id TEXT PRIMARY KEY, peer_id TEXT);
         CREATE TABLE channel_failures (channel_id TEXT, at INTEGER);
         CREATE TABLE channel_probes (channel_id TEXT, at INTEGER);
@@ -262,6 +286,117 @@ async fn budget_transitions_are_guarded_and_terminal() {
         )
         .unwrap();
     assert_eq!(status, "released");
+}
+
+#[tokio::test]
+async fn generic_spend_commands_share_the_writer_and_preserve_atomic_results() {
+    let (_d, path) = fixture();
+    let writer = spawn_state_writer(&path).await.unwrap();
+
+    let request = |id: &str, amount: i64, category: &str| ReserveRequest {
+        reservation_id: id.to_string(),
+        amount_sats: amount,
+        category: category.to_string(),
+        effective_budget_sats: Some(1_000),
+        since_timestamp: Some(0),
+        ..ReserveRequest::default()
+    };
+    assert_eq!(
+        writer
+            .reserve_spend(request("r1", 400, " Rebalance "), 100)
+            .await
+            .unwrap(),
+        (true, 600)
+    );
+    assert_eq!(
+        writer
+            .reserve_spend(request("r2", 700, "misc"), 101)
+            .await
+            .unwrap(),
+        (false, 600),
+        "the actor transaction must enforce the live cross-category total"
+    );
+    assert!(writer.release_spend_reservation("r1".into()).await.unwrap());
+    assert!(!writer.release_spend_reservation("r1".into()).await.unwrap());
+
+    for (id, amount, category, at) in [
+        ("old-a", 100, "foo", 1),
+        ("old-b", 200, "foo", 2),
+        ("old-c", 300, "bar", 3),
+        ("fresh", 50, "foo", 950),
+    ] {
+        assert!(
+            writer
+                .reserve_spend(request(id, amount, category), at)
+                .await
+                .unwrap()
+                .0
+        );
+    }
+    let released = writer
+        .release_spend_reservations(Some("foo".into()), 100, 1, 1_000)
+        .await
+        .unwrap();
+    assert_eq!(released.released_count, 1);
+    assert_eq!(released.released_sats, 100);
+    assert_eq!(released.reservation_ids, vec!["old-a"]);
+
+    assert!(writer
+        .settle_spend_reservation(
+            "old-b".into(),
+            Some(150),
+            Some("operator".into()),
+            true,
+            2_000,
+        )
+        .await
+        .unwrap());
+    assert!(!writer
+        .settle_spend_reservation("old-b".into(), None, None, false, 2_001)
+        .await
+        .unwrap());
+
+    assert!(
+        writer
+            .reserve_spend(request("bad-event", 40, "foo"), 1_500)
+            .await
+            .unwrap()
+            .0
+    );
+    assert!(!writer
+        .settle_spend_reservation("bad-event".into(), Some(-1), None, true, 2_100)
+        .await
+        .unwrap());
+
+    let conn = Connection::open(&path).unwrap();
+    let bad_status: String = conn
+        .query_row(
+            "SELECT status FROM spend_reservations WHERE reservation_id = 'bad-event'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let bad_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM spend_events WHERE event_id = 'resv:bad-event'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bad_status, "active", "rejected event must roll settle back");
+    assert_eq!(bad_events, 0);
+
+    let row: (String, i64, String) = conn
+        .query_row(
+            "SELECT r.status, e.amount_sats, e.source
+             FROM spend_reservations r JOIN spend_events e
+               ON e.event_id = 'resv:' || r.reservation_id
+             WHERE r.reservation_id = 'old-b'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("spent".into(), 150, "operator".into()));
 }
 
 // ---------------------------------------------------------------------------
