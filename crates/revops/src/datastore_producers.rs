@@ -27,6 +27,7 @@
 //! consumed here, never re-derived.
 
 use revops_analytics::telemetry::{datastore_envelope, PyDict, PyVal};
+use revops_fees::pyjson::OValue;
 
 use crate::lifecycle::Owner;
 
@@ -325,4 +326,221 @@ pub fn publish<T: DatastoreTransport + ?Sized>(
             bytes: encoded.len(),
         }),
     }
+}
+
+// =====================================================================
+// R68-8: stamping the segment-observation snapshot
+// =====================================================================
+
+/// Python's five-key snapshot literal, in order
+/// (`modules/segment_observations.py:154-160`).
+///
+/// The order is a WIRE contract, not documentation: `json.dumps` walks a
+/// dict in insertion order and `rebalance_engine_v2.py:3180-3186` writes
+/// the result verbatim, so a stamp appended at the end produces a
+/// byte-different blob from the one Python publishes.
+pub const SNAPSHOT_KEY_ORDER: [&str; 5] = [
+    "generated_at",
+    "ttl_seconds",
+    "schema_version",
+    "observer_member_id",
+    "segment_observations",
+];
+
+/// The key the frozen kernel deliberately omits and this module supplies.
+const OBSERVER_MEMBER_ID: &str = "observer_member_id";
+/// The kernel's observation array.
+const SEGMENT_OBSERVATIONS: &str = "segment_observations";
+
+/// Every typed way a snapshot is unusable. Task 68's rule -- required
+/// reads return typed outcomes -- applies here: an unreadable snapshot is
+/// refused, never silently treated as an empty one, because "no
+/// observations" and "I could not tell how many observations" lead to the
+/// same silent non-publish while meaning opposite things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRefusal {
+    /// The export was not a JSON object at all.
+    NotAnObject,
+    /// An `observer_member_id` was already present. The frozen kernel
+    /// never emits one, so this is a second stamp -- and stamping twice
+    /// yields a dict with two identical keys, which `json.dumps` emits
+    /// happily and no consumer can interpret.
+    AlreadyStamped,
+    /// No `segment_observations` key: nothing to attribute, and no count
+    /// for the withhold decision to read.
+    MissingObservations,
+    /// `segment_observations` was present but not an array.
+    ObservationsNotAnArray,
+    /// The snapshot carried a JSON null, which the telemetry value model
+    /// has no representation for. Refused rather than dropped or coerced:
+    /// either would publish a payload that differs from the snapshot the
+    /// kernel actually produced.
+    UnsupportedNull,
+}
+
+impl SnapshotRefusal {
+    /// Stable machine-matchable code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotAnObject => "segment_snapshot_not_an_object",
+            Self::AlreadyStamped => "segment_snapshot_already_stamped",
+            Self::MissingObservations => "segment_snapshot_missing_observations",
+            Self::ObservationsNotAnArray => "segment_snapshot_observations_not_an_array",
+            Self::UnsupportedNull => "segment_snapshot_unsupported_null",
+        }
+    }
+}
+
+/// Validate that `snapshot` is an object carrying an array of
+/// observations, returning both its entries and that array.
+///
+/// Returns the array rather than re-finding it in each caller: a second
+/// lookup would need its own "not an array" arm that the first lookup has
+/// already made unreachable, and an arm no input can reach is one no test
+/// can falsify.
+type SnapshotParts<'a> = (&'a [(String, OValue)], &'a [OValue]);
+
+fn snapshot_parts(snapshot: &OValue) -> Result<SnapshotParts<'_>, SnapshotRefusal> {
+    let entries = snapshot.as_obj().ok_or(SnapshotRefusal::NotAnObject)?;
+    let observations = entries
+        .iter()
+        .find(|(key, _)| key == SEGMENT_OBSERVATIONS)
+        .map(|(_, value)| value)
+        .ok_or(SnapshotRefusal::MissingObservations)?
+        .as_arr()
+        .ok_or(SnapshotRefusal::ObservationsNotAnArray)?;
+    Ok((entries, observations))
+}
+
+/// Merge `observer_member_id` into the frozen segstore's export.
+///
+/// Port of the stamp Python performs inline inside `export_snapshot`
+/// (`modules/segment_observations.py:158`,
+/// `str(observer_member_id or "").strip()`) but which the frozen
+/// [`revops_rebalance::segstore::SegmentObservationStore::export_snapshot`]
+/// deliberately omits, leaving it to the engine that knows its own member
+/// id (`segstore.rs:11-23`).
+///
+/// This does exactly one thing. Validation, TTL pruning, sort order and
+/// truncation are the kernel's decisions and pass through untouched --
+/// consumed, never re-derived.
+///
+/// The stamp is INSERTED immediately before `segment_observations`, which
+/// is Python's fourth position, rather than appended; see
+/// [`SNAPSHOT_KEY_ORDER`] for why that is load-bearing. Anchoring on the
+/// observations key rather than on the literal index 3 means a kernel that
+/// grew another leading field would still stamp in the Python-correct
+/// place.
+///
+/// The value is trimmed. The *guard* on whether to publish at all reads
+/// the raw string ([`segment_publish_is_allowed`]), matching Python's
+/// untrimmed truthiness test at `rebalance_engine_v2.py:3170` -- so a
+/// whitespace-only id passes the guard and stamps as `""`, exactly as
+/// Python does.
+pub fn stamp_observer_member_id(
+    snapshot: OValue,
+    observer_member_id: &str,
+) -> Result<OValue, SnapshotRefusal> {
+    Ok(OValue::Obj(stamped_entries(&snapshot, observer_member_id)?))
+}
+
+/// The stamp itself, returning entries rather than a rebuilt [`OValue`] so
+/// [`segment_decision`] can convert them directly instead of re-unwrapping
+/// an object it just built -- a re-unwrap would need a failure arm that no
+/// input could reach.
+fn stamped_entries(
+    snapshot: &OValue,
+    observer_member_id: &str,
+) -> Result<Vec<(String, OValue)>, SnapshotRefusal> {
+    let (entries, _) = snapshot_parts(snapshot)?;
+    if entries.iter().any(|(key, _)| key == OBSERVER_MEMBER_ID) {
+        return Err(SnapshotRefusal::AlreadyStamped);
+    }
+
+    let mut stamped: Vec<(String, OValue)> = Vec::with_capacity(entries.len() + 1);
+    for (key, value) in entries {
+        if key == SEGMENT_OBSERVATIONS {
+            stamped.push((
+                OBSERVER_MEMBER_ID.to_string(),
+                OValue::str(observer_member_id.trim()),
+            ));
+        }
+        stamped.push((key.clone(), value.clone()));
+    }
+    Ok(stamped)
+}
+
+/// How many observations the snapshot carries, for R68-7's
+/// [`segment_publish_is_allowed`].
+///
+/// py `if not snapshot.get("segment_observations"): return False`. A
+/// snapshot that cannot be counted is REFUSED rather than reported as
+/// zero: both outcomes withhold the publish, but only one of them is a
+/// bug worth an operator's attention.
+pub fn snapshot_observation_count(snapshot: &OValue) -> Result<usize, SnapshotRefusal> {
+    let (_, observations) = snapshot_parts(snapshot)?;
+    Ok(observations.len())
+}
+
+/// Cross the two Python-parity value models: `revops_fees::pyjson::OValue`
+/// (what the frozen segstore returns) to
+/// `revops_analytics::telemetry::PyVal` (what the frozen envelope and
+/// [`publish`] speak).
+///
+/// Both preserve insertion order and both distinguish int from float, so
+/// this is a structural mapping with one gap: `PyVal` has no null, and
+/// `OValue::Null` is therefore refused rather than dropped or coerced.
+fn ovalue_to_pyval(value: &OValue) -> Result<PyVal, SnapshotRefusal> {
+    Ok(match value {
+        OValue::Null => return Err(SnapshotRefusal::UnsupportedNull),
+        OValue::Bool(b) => PyVal::Bool(*b),
+        OValue::Int(n) => PyVal::Int(*n),
+        OValue::Float(f) => PyVal::Float(*f),
+        OValue::Str(s) => PyVal::Str(s.clone()),
+        OValue::Arr(items) => PyVal::List(
+            items
+                .iter()
+                .map(ovalue_to_pyval)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        OValue::Obj(entries) => PyVal::Dict(ovalue_entries_to_pydict(entries)?),
+    })
+}
+
+fn ovalue_entries_to_pydict(entries: &[(String, OValue)]) -> Result<PyDict, SnapshotRefusal> {
+    let mut dict = PyDict::new();
+    for (key, value) in entries {
+        dict.push(key.clone(), ovalue_to_pyval(value)?);
+    }
+    Ok(dict)
+}
+
+/// The `["revenue", "segment-observations"]` producer's whole decision:
+/// take the frozen kernel's export, apply Python's two guards, stamp the
+/// observer's identity, and hand back a payload the frozen envelope can
+/// encode.
+///
+/// Port of `_push_segment_observation_snapshot`
+/// (`modules/rebalance_engine_v2.py:3167-3186`), with its ordering kept:
+/// the identity guard reads the RAW member id (Python truthiness) and runs
+/// before the observation-count guard, so an unnamed observer is reported
+/// even when it also has nothing to say.
+///
+/// `Withhold` and `Err` are deliberately different outcomes. Both publish
+/// nothing, but a withhold is this producer working as designed while a
+/// refusal is a malformed snapshot an operator needs to see -- Python
+/// returns `False` for both and loses that distinction.
+pub fn segment_decision(
+    snapshot: OValue,
+    observer_member_id: &str,
+) -> Result<PublishDecision, SnapshotRefusal> {
+    let (_, observations) = snapshot_parts(&snapshot)?;
+    if let Err(withheld) = segment_publish_is_allowed(observer_member_id, observations.len()) {
+        return Ok(PublishDecision::Withhold(withheld));
+    }
+
+    let stamped = stamped_entries(&snapshot, observer_member_id)?;
+    Ok(PublishDecision::Publish(ovalue_entries_to_pydict(
+        &stamped,
+    )?))
 }

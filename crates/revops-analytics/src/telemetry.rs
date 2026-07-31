@@ -48,6 +48,14 @@ pub enum PyVal {
     Float(f64),
     Str(String),
     Dict(PyDict),
+    /// A JSON array. Added by R68-8 for the
+    /// `["revenue", "segment-observations"]` producer, whose payload is
+    /// irreducibly list-bearing (`segment_observations` is an array of
+    /// observation objects, `modules/segment_observations.py:154-160`) and
+    /// so could not be expressed by this model at all.
+    ///
+    /// Purely ADDITIVE: no existing variant, golden, or caller changes.
+    List(Vec<PyVal>),
 }
 
 /// An insertion-ordered dict: Python dict semantics (construction order
@@ -94,7 +102,21 @@ fn write_val(v: &PyVal, out: &mut String) {
         PyVal::Float(f) => out.push_str(&py_repr(*f)),
         PyVal::Str(s) => write_str(s, out),
         PyVal::Dict(d) => write_dict(d, out),
+        PyVal::List(items) => write_list(items, out),
     }
+}
+
+/// `json.dumps` default separators put `", "` between elements, and an
+/// empty list renders as `[]`.
+fn write_list(items: &[PyVal], out: &mut String) {
+    out.push('[');
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_val(item, out);
+    }
+    out.push(']');
 }
 
 fn write_dict(d: &PyDict, out: &mut String) {

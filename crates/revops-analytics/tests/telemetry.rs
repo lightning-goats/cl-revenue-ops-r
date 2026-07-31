@@ -305,3 +305,165 @@ fn envelope_default_datastore_max_bytes_matches_python_constant() {
     let expected = fx["datastore_max_bytes"].as_i64().unwrap() as usize;
     assert_eq!(expected, 60_000, "Python _DATASTORE_MAX_BYTES == 60000");
 }
+
+// =============================================================================
+// PyVal::List (R68-8): the list variant, against CPython-derived goldens
+// =============================================================================
+//
+// Added because the `["revenue", "segment-observations"]` producer's payload
+// is irreducibly list-bearing (`segment_observations` is an array of
+// observation objects, `modules/segment_observations.py:154-160`), and this
+// value model had no list variant -- so that payload could not be expressed
+// here at all, let alone routed through `datastore_envelope`.
+//
+// The variant is ADDITIVE: every golden above is untouched and still asserts
+// the same bytes. Each expected string below was produced by running the
+// equivalent structure through real CPython `json.dumps` with default
+// arguments, not hand-written, so the separators (`", "` between elements)
+// and the empty-list shape are the interpreter's own output.
+
+/// CPython: `json.dumps({"a": []})`.
+#[test]
+fn python_dumps_writes_an_empty_list_as_empty_brackets() {
+    let mut d = PyDict::new();
+    d.push("a", PyVal::List(vec![]));
+    assert_eq!(python_dumps(&PyVal::Dict(d)), r#"{"a": []}"#);
+}
+
+/// CPython: `json.dumps({"a": [1, 2, 3]})` -- note the `", "` separator,
+/// the DEFAULT, not the compact `","` canonical form.
+#[test]
+fn python_dumps_separates_list_elements_with_comma_space() {
+    let mut d = PyDict::new();
+    d.push(
+        "a",
+        PyVal::List(vec![PyVal::Int(1), PyVal::Int(2), PyVal::Int(3)]),
+    );
+    assert_eq!(python_dumps(&PyVal::Dict(d)), r#"{"a": [1, 2, 3]}"#);
+}
+
+/// CPython: `json.dumps({"a": [[1, 2], [], [3]]})`.
+#[test]
+fn python_dumps_nests_lists_inside_lists() {
+    let mut d = PyDict::new();
+    d.push(
+        "a",
+        PyVal::List(vec![
+            PyVal::List(vec![PyVal::Int(1), PyVal::Int(2)]),
+            PyVal::List(vec![]),
+            PyVal::List(vec![PyVal::Int(3)]),
+        ]),
+    );
+    assert_eq!(python_dumps(&PyVal::Dict(d)), r#"{"a": [[1, 2], [], [3]]}"#);
+}
+
+/// CPython: `json.dumps({"a": [{"x": 1}, {"y": 2}]})` -- the shape the
+/// segment-observations payload actually takes.
+#[test]
+fn python_dumps_writes_a_list_of_dicts() {
+    let mut x = PyDict::new();
+    x.push("x", PyVal::Int(1));
+    let mut y = PyDict::new();
+    y.push("y", PyVal::Int(2));
+
+    let mut d = PyDict::new();
+    d.push("a", PyVal::List(vec![PyVal::Dict(x), PyVal::Dict(y)]));
+    assert_eq!(
+        python_dumps(&PyVal::Dict(d)),
+        r#"{"a": [{"x": 1}, {"y": 2}]}"#
+    );
+}
+
+/// CPython: `json.dumps({"outer": {"inner": [{"k": [7]}]}})` -- dict in list
+/// in dict in list, to prove the recursion alternates correctly.
+#[test]
+fn python_dumps_alternates_dicts_and_lists_to_depth() {
+    let mut k = PyDict::new();
+    k.push("k", PyVal::List(vec![PyVal::Int(7)]));
+    let mut inner = PyDict::new();
+    inner.push("inner", PyVal::List(vec![PyVal::Dict(k)]));
+    let mut outer = PyDict::new();
+    outer.push("outer", PyVal::Dict(inner));
+
+    assert_eq!(
+        python_dumps(&PyVal::Dict(outer)),
+        r#"{"outer": {"inner": [{"k": [7]}]}}"#
+    );
+}
+
+/// CPython: `json.dumps({"a": [1, 1.5, "s", True, False]})`.
+#[test]
+fn python_dumps_writes_every_scalar_kind_inside_a_list() {
+    let mut d = PyDict::new();
+    d.push(
+        "a",
+        PyVal::List(vec![
+            PyVal::Int(1),
+            PyVal::Float(1.5),
+            PyVal::Str("s".to_string()),
+            PyVal::Bool(true),
+            PyVal::Bool(false),
+        ]),
+    );
+    assert_eq!(
+        python_dumps(&PyVal::Dict(d)),
+        r#"{"a": [1, 1.5, "s", true, false]}"#
+    );
+}
+
+/// CPython: `json.dumps({"a": ["café", "中"]})` -- `ensure_ascii=True`
+/// applies inside lists exactly as it does inside dicts.
+#[test]
+fn python_dumps_escapes_non_ascii_inside_a_list() {
+    let mut d = PyDict::new();
+    d.push(
+        "a",
+        PyVal::List(vec![
+            PyVal::Str("café".to_string()),
+            PyVal::Str("中".to_string()),
+        ]),
+    );
+    // CPython emits the \u escapes, not the literal characters.
+    assert_eq!(
+        python_dumps(&PyVal::Dict(d)),
+        r#"{"a": ["caf\u00e9", "\u4e2d"]}"#
+    );
+}
+
+/// CPython: `json.dumps({"a": [0.1, 1e22, 1.0]})` -- `repr` float formatting
+/// inside lists, including the `1e+22` exponent form and the `1.0` that must
+/// not collapse to `1`.
+#[test]
+fn python_dumps_uses_repr_float_formatting_inside_a_list() {
+    let mut d = PyDict::new();
+    d.push(
+        "a",
+        PyVal::List(vec![
+            PyVal::Float(0.1),
+            PyVal::Float(1e22),
+            PyVal::Float(1.0),
+        ]),
+    );
+    assert_eq!(python_dumps(&PyVal::Dict(d)), r#"{"a": [0.1, 1e+22, 1.0]}"#);
+}
+
+/// The envelope must accept a list-bearing payload unchanged -- that is the
+/// whole point of the variant. CPython golden for the same dict with
+/// `"timestamp"` appended by the envelope rule.
+#[test]
+fn the_envelope_accepts_a_list_bearing_payload() {
+    let mut observation = PyDict::new();
+    observation.push("observation_id", PyVal::Str("obs-1040-6".to_string()));
+
+    let mut payload = PyDict::new();
+    payload.push("generated_at", PyVal::Int(1050));
+    payload.push(
+        "segment_observations",
+        PyVal::List(vec![PyVal::Dict(observation)]),
+    );
+
+    assert_eq!(
+        datastore_envelope(payload, 1234, 60_000).expect("a list payload is encodable"),
+        r#"{"generated_at": 1050, "segment_observations": [{"observation_id": "obs-1040-6"}], "timestamp": 1234}"#
+    );
+}
