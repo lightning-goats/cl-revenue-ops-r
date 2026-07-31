@@ -65,6 +65,8 @@ struct State {
     /// `revops::config_resolve` for the (a) DB override > (b) this cache >
     /// (c) fixture-default precedence `revenue-r-config` resolves through.
     python_options: revops::config_resolve::PythonOptionCache,
+    // Validated startup risk profile. Frozen because Python applies profile bundles only at restart.
+    active_profile: Result<String, String>,
     /// Task 10: the stable label for the [`ValidatedFeeMode`] this process
     /// resolved at startup (`resolve_startup_mode`) -- one of
     /// `"passive_observer"`, `"autonomous_shadow"`, `"live_authority"`.
@@ -432,6 +434,180 @@ where
 /// of double-registering with conflicting defaults. This does not change the
 /// total registered-option count (`fixture_len + 1`): the skip here is
 /// offset by `main`'s own registration of the same name.
+fn resolved_profile_config_json(
+    p: &Plugin<SharedState>,
+    key: &str,
+    overrides: &std::collections::BTreeMap<String, String>,
+    python_options: &HashMap<String, cln_plugin::options::Value>,
+) -> Result<Option<serde_json::Value>> {
+    let state = p.state();
+    let Some(full_name) = state.config_names.get(key) else {
+        return Ok(None);
+    };
+    let fixture_value = p.option_str(full_name)?;
+    let db_key = revops::config_resolve::db_override_key(key);
+    let field_type = config_types::field_type_for(&db_key);
+    let db_override = if revops::config_resolve::is_immutable_key(key) {
+        None
+    } else {
+        overrides
+            .get(&db_key)
+            .and_then(|raw| revops::config_resolve::validate_override(&db_key, raw))
+            .map(cln_plugin::options::Value::String)
+    };
+    let python_value = revops::config_resolve::python_option_name(key)
+        .and_then(|python_name| python_options.get(&python_name).cloned())
+        .map(|value| match value {
+            cln_plugin::options::Value::String(raw)
+                if field_type == Some(config_types::FieldType::Bool) =>
+            {
+                cln_plugin::options::Value::Boolean(config_types::python_startup_bool(
+                    &db_key, &raw,
+                ))
+            }
+            other => other,
+        });
+    Ok(
+        revops::config_resolve::resolve_option_value(db_override, python_value, fixture_value)
+            .as_ref()
+            .map(|raw| config_types::convert_value(field_type, raw)),
+    )
+}
+
+fn register_profile_preview(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "preview risk-profile bundle changes without mutating configuration",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let state = p.state();
+                let Some(handle) = state.db.as_ref() else {
+                    return Ok(serde_json::json!({"error": "Plugin not fully initialized"}));
+                };
+                let overrides = match queries::all_config_overrides(handle).await {
+                    Ok(overrides) => overrides,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let mut current = serde_json::Map::new();
+                let python_options = state.python_options.snapshot();
+                let bundle_keys = revops::rpc_profile_preview::profile_bundles()
+                    .values()
+                    .flat_map(|bundle| bundle.keys().cloned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for key in bundle_keys {
+                    let suffix = key.replace("_", "-");
+                    match resolved_profile_config_json(&p, &suffix, &overrides, &python_options) {
+                        Ok(Some(value)) => {
+                            current.insert(key, value);
+                        }
+                        Ok(None) => {
+                            return Ok(serde_json::json!({
+                                "error": format!("config value unavailable: {key}")
+                            }));
+                        }
+                        Err(error) => {
+                            return Ok(serde_json::json!({"error": format!("{error:#}")}));
+                        }
+                    }
+                }
+                let active_profile = match &state.active_profile {
+                    Ok(profile) => profile,
+                    Err(error) => return Ok(serde_json::json!({"error": error})),
+                };
+                let explicit_keys = overrides.keys().cloned().collect();
+                revops::rpc_profile_preview::apply_active_profile(
+                    &mut current,
+                    active_profile,
+                    &explicit_keys,
+                );
+                let override_values = overrides
+                    .into_iter()
+                    .map(|(key, value)| (key, serde_json::Value::String(value)))
+                    .collect::<serde_json::Map<_, _>>();
+                Ok(revops::rpc_profile_preview::build_profile_preview(
+                    &current,
+                    active_profile,
+                    &override_values,
+                    decoded.get("profile"),
+                ))
+            }
+        },
+    )
+}
+
+fn register_rust_diagnostics(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    ping_name: &str,
+    rebalance_plan_name: &str,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    if canonical_names() {
+        return builder;
+    }
+    builder
+        .rpcmethod(
+            ping_name,
+            "liveness probe for the Rust port",
+            |_p, _v| async move { Ok(serde_json::json!({"pong": true, "version": VERSION})) },
+        )
+        .rpcmethod(
+            rebalance_plan_name,
+            "read-only rebalance plan: what the ported planner WOULD pair (sends nothing)",
+            |p: Plugin<SharedState>, _v: serde_json::Value| async move {
+                let cfg = p.configuration();
+                let socket = PathBuf::from(&cfg.lightning_dir).join(&cfg.rpc_file);
+                let mut rpc = match cln_rpc::ClnRpc::new(&socket).await {
+                    Ok(rpc) => rpc,
+                    Err(error) => {
+                        return Ok(serde_json::json!({
+                            "error": format!("connect {}: {error}", socket.display())
+                        }));
+                    }
+                };
+                let response: serde_json::Value = match rpc
+                    .call_raw("listpeerchannels", &serde_json::json!({}))
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(serde_json::json!({
+                            "error": format!("listpeerchannels: {error}")
+                        }));
+                    }
+                };
+                let channels = response
+                    .get("channels")
+                    .and_then(|value| value.as_array())
+                    .map(|values| values.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|channel| {
+                        revops::rpc_rebalance::planner_channel_from_rpc(
+                            channel,
+                            revops::rpc_rebalance::DEFAULT_BAND_LOW,
+                            revops::rpc_rebalance::DEFAULT_BAND_HIGH,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Ok(revops::rpc_rebalance::build_rebalance_plan(
+                    &channels, 200_000, 8, 1_000,
+                ))
+            },
+        )
+}
+
 fn register_python_options<S, I, O>(
     mut builder: Builder<S, I, O>,
     canonical: bool,
@@ -891,6 +1067,11 @@ async fn main() -> Result<()> {
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
+    let profile_preview_name = rpc_name("profile-preview");
+    let profile_preview_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-profile-preview",
+    );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
     let rebalance_debug_name = rpc_name("rebalance-debug");
@@ -1124,11 +1305,6 @@ async fn main() -> Result<()> {
             },
         )
         .rpcmethod(
-            &ping_name,
-            "liveness probe for the Rust port",
-            |_p, _v| async move { Ok(serde_json::json!({"pong": true, "version": VERSION})) },
-        )
-        .rpcmethod(
             &status_name,
             "status snapshot for the Rust port",
             |p: Plugin<SharedState>, _v| async move {
@@ -1206,48 +1382,6 @@ async fn main() -> Result<()> {
                     db_tables,
                     fee_runway,
                 }))
-            },
-        )
-        .rpcmethod(
-            &rebalance_plan_name,
-            "read-only rebalance plan: what the ported planner WOULD pair (sends nothing)",
-            |p: Plugin<SharedState>, _v: serde_json::Value| async move {
-                // First production caller of the revops-rebalance crate,
-                // which until 2026-07-27 was not even linked into this
-                // binary. READ-ONLY: one listpeerchannels call, then the
-                // pure planner. No sendpay, no reservation, no spend.
-                let cfg = p.configuration();
-                let socket = PathBuf::from(&cfg.lightning_dir).join(&cfg.rpc_file);
-                let mut rpc = match cln_rpc::ClnRpc::new(&socket).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return Ok(serde_json::json!({"error": format!("connect {}: {e}", socket.display())}))
-                    }
-                };
-                let resp: serde_json::Value = match rpc
-                    .call_raw("listpeerchannels", &serde_json::json!({}))
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => return Ok(serde_json::json!({"error": format!("listpeerchannels: {e}")})),
-                };
-                let channels: Vec<_> = resp
-                    .get("channels")
-                    .and_then(|c| c.as_array())
-                    .map(|a| a.as_slice())
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter_map(|c| {
-                        revops::rpc_rebalance::planner_channel_from_rpc(
-                            c,
-                            revops::rpc_rebalance::DEFAULT_BAND_LOW,
-                            revops::rpc_rebalance::DEFAULT_BAND_HIGH,
-                        )
-                    })
-                    .collect();
-                Ok(revops::rpc_rebalance::build_rebalance_plan(
-                    &channels, 200_000, 8, 1_000,
-                ))
             },
         )
         .rpcmethod(
@@ -2728,6 +2862,8 @@ async fn main() -> Result<()> {
                 Ok(result.unwrap_or_else(|e| serde_json::json!({"error": e.to_string()})))
             },
         );
+    let builder = register_profile_preview(builder, &profile_preview_name, profile_preview_spec);
+    let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
     let Some(configured) = builder.configure().await? else {
@@ -3427,6 +3563,15 @@ async fn main() -> Result<()> {
         });
     }
 
+    let active_profile = match db.as_ref() {
+        Some(handle) => revops::rpc_profile_preview::startup_active_profile(
+            queries::config_override(handle, "risk_profile")
+                .await
+                .map_err(|error| format!("{error:#}")),
+        ),
+        None => revops::rpc_profile_preview::startup_active_profile(Ok(None)),
+    };
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -3435,6 +3580,7 @@ async fn main() -> Result<()> {
         observer_db,
         config_names: config_name_map(),
         python_options,
+        active_profile,
         scheduler,
         mode_label: resolved_mode_label,
         authority_runtime,

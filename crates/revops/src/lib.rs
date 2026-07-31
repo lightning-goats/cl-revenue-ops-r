@@ -76,6 +76,7 @@ pub mod rpc_planner_execute;
 pub mod rpc_planner_history;
 pub mod rpc_planner_status;
 pub mod rpc_policy;
+pub mod rpc_profile_preview;
 pub mod rpc_profitability;
 pub mod rpc_rebalance;
 pub mod rpc_rebalance_debug;

@@ -309,7 +309,14 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert!(methods.contains(&"revenue-ping"), "methods: {methods:?}");
+    assert!(
+        !methods.contains(&"revenue-ping"),
+        "Rust-only ping must not occupy the Python canonical namespace: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-profile-preview"),
+        "methods: {methods:?}"
+    );
     assert!(methods.contains(&"revenue-status"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-config"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-history"), "methods: {methods:?}");
@@ -343,12 +350,9 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&lnplus), "missing {lnplus}: {methods:?}");
     }
-    // 2026-07-27: the first production surface over the revops-rebalance
-    // crate, which until then was not even linked into this binary.
-    // READ-ONLY -- it plans, it never sends.
     assert!(
-        methods.contains(&"revenue-rebalance-plan"),
-        "methods: {methods:?}"
+        !methods.contains(&"revenue-rebalance-plan"),
+        "Rust-only rebalance-plan must not occupy the Python canonical namespace: {methods:?}"
     );
     // Task 49 (Wave 2 / RPC Batch A): ten more read-only builders --
     // health, profitability, analyze, policy, list-banned, list-ignored,
@@ -406,11 +410,11 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
     }
-    // Exactly 54 rpc methods total (no leftover revenue-r-* names bleeding
-    // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
+    // Exactly 53 rpc methods total (no leftover revenue-r-* names bleeding
+    // through from shadow mode) -- status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
-    // rebalance planner, Task 49's ten Batch A builders, Task 56's four
+    // profile-preview, Task 49's ten Batch A builders, Task 56's four
     // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
     // (status/breaker-clear/abandon/backfill through the LN+ owner),
     // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
@@ -423,7 +427,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        54,
+        53,
         "methods: {methods:?}"
     );
 
@@ -483,6 +487,120 @@ fn canonical_mode_registers_exactly_the_python_rpc_set() {
         actual, expected,
         "canonical RPC set differs from Python; missing={missing:?}, unexpected={unexpected:?}"
     );
+}
+
+#[test]
+fn canonical_mode_keeps_rust_only_diagnostics_outside_python_namespace() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    for forbidden in [
+        "revenue-ping",
+        "revenue-rebalance-plan",
+        "revenue-r-ping",
+        "revenue-r-rebalance-plan",
+        "revops-ping",
+        "revops-rebalance-plan",
+    ] {
+        assert!(
+            !canonical.contains(&forbidden),
+            "{forbidden}: {canonical:?}"
+        );
+    }
+
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(shadow.contains(&"revenue-r-ping"), "methods: {shadow:?}");
+    assert!(
+        shadow.contains(&"revenue-r-rebalance-plan"),
+        "methods: {shadow:?}"
+    );
+}
+
+#[test]
+fn profile_preview_is_reachable_in_both_naming_modes() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        canonical.contains(&"revenue-profile-preview"),
+        "methods: {canonical:?}"
+    );
+
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        shadow.contains(&"revenue-r-profile-preview"),
+        "methods: {shadow:?}"
+    );
+}
+
+#[test]
+fn profile_preview_rpc_uses_startup_bundle_and_explicit_override_precedence() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        for (key, value, version) in [
+            ("risk_profile", "balanced", 1_i64),
+            ("daily_budget_sats", "7000", 2_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO config_overrides (key, value, version, updated_at) VALUES (?1, ?2, ?3, 1800000000)",
+                rusqlite::params![key, value, version],
+            )
+            .expect("seed config override");
+        }
+    }
+
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-profile-preview",
+        serde_json::json!(["growth"]),
+    );
+
+    assert_eq!(result["active_profile"], "balanced");
+    assert_eq!(result["persisted_profile"], "balanced");
+    assert_eq!(result["pending_restart"], false);
+    assert_eq!(
+        result["explicit_override_keys"],
+        serde_json::json!(["daily_budget_sats"])
+    );
+    let preview = &result["preview"];
+    assert_eq!(preview["profile"], "growth");
+    assert!(preview["blocked_by_explicit_override"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| {
+            entry["key"] == "daily_budget_sats" && entry["current"] == serde_json::json!(7000)
+        })));
+    assert!(preview["would_change"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| {
+            entry["key"] == "weekly_budget_sats"
+                && entry["current"] == serde_json::json!(56000)
+                && entry["profile_value"] == serde_json::json!(84000)
+        })));
 }
 
 /// Shadow mode (both plugins loaded) must keep the opt-in-empty default --

@@ -426,3 +426,39 @@ fn analyze_serves_persisted_flow_state_and_gaps_the_rest() {
         "unknown channel is not an error: {v}"
     );
 }
+
+#[test]
+fn profile_preview_freezes_validated_active_profile_at_startup() {
+    use revops::rpc_profile_preview::startup_active_profile;
+
+    assert_eq!(startup_active_profile(Ok(None)), Ok("custom".to_string()));
+    assert_eq!(
+        startup_active_profile(Ok(Some(" BALANCED ".to_string()))),
+        Ok("balanced".to_string())
+    );
+    assert_eq!(
+        startup_active_profile(Ok(Some("not-a-profile".to_string()))),
+        Ok("custom".to_string()),
+        "Python skips an invalid persisted enum and keeps the default"
+    );
+    assert_eq!(
+        startup_active_profile(Err("config override read failed".to_string())),
+        Err("config override read failed".to_string()),
+        "a failed startup read must not fabricate an active profile"
+    );
+}
+
+#[test]
+fn profile_preview_applies_startup_bundle_below_explicit_overrides() {
+    let mut current = serde_json::Map::from_iter([
+        ("daily_budget_sats".to_string(), serde_json::json!(5000)),
+        ("weekly_budget_sats".to_string(), serde_json::json!(35000)),
+    ]);
+    let explicit = std::collections::BTreeSet::from(["daily_budget_sats".to_string()]);
+
+    revops::rpc_profile_preview::apply_active_profile(&mut current, "balanced", &explicit);
+
+    assert_eq!(current["daily_budget_sats"], serde_json::json!(5000));
+    assert_eq!(current["weekly_budget_sats"], serde_json::json!(56000));
+    assert_eq!(current["growth_budget_enabled"], serde_json::json!(true));
+}
