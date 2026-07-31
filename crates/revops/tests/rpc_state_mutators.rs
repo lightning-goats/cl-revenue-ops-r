@@ -1,10 +1,15 @@
+use revops::rpc_params::{decode_params, load_rpc_contract, method_spec, ParamBinding};
 use revops::rpc_state_mutators::{
-    ban_plan, ban_success, completed_write_response, deprecated_policy_write_gate, ignore_plan,
-    ignore_success, invalid_peer_id_error, policy_write_override, unban_plan, unban_success,
-    unignore_success,
+    ban_plan, ban_success, completed_spend_response, completed_write_response,
+    deprecated_policy_write_gate, ignore_plan, ignore_success, invalid_peer_id_error,
+    parse_spend_release_params, parse_spend_release_stale_params, parse_spend_reserve_params,
+    parse_spend_settle_params, policy_write_override, spend_release_response,
+    spend_release_stale_response, spend_reserve_rejection, spend_reserve_response,
+    spend_settle_response, unban_plan, unban_success, unignore_success,
 };
 use revops::state_writer::StateWriteAck;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
+use revops_db::state_writer::SpendReleaseBatch;
 use serde_json::{json, Map, Value};
 
 const PEER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -189,4 +194,150 @@ fn only_completed_durable_ack_can_return_success() {
         assert_eq!(value["error"]["code"], expected_code);
         assert_ne!(value, json!({"ok": true}));
     }
+}
+
+fn decoded_spend_params(name: &str, raw: Value) -> Map<String, Value> {
+    let spec = method_spec(&load_rpc_contract(), name);
+    decode_params(&spec, &raw, ParamBinding::PositionalOrNamed).unwrap()
+}
+
+#[test]
+fn spend_mutator_params_bind_positionally_with_python_handler_coercions() {
+    let reserve = parse_spend_reserve_params(&decoded_spend_params(
+        "revenue-spend-reserve",
+        json!(["r-1", " Rebalance ", "25", "sub", null, 123, "{\"z\": 2}"]),
+    ))
+    .unwrap();
+    assert_eq!(reserve.request.reservation_id, "r-1");
+    assert_eq!(reserve.request.category, " Rebalance ");
+    assert_eq!(reserve.request.amount_sats, 25);
+    assert_eq!(reserve.request.subcategory.as_deref(), Some("sub"));
+    assert_eq!(reserve.request.reference_id, None);
+    assert_eq!(reserve.request.channel_id.as_deref(), Some("123"));
+    assert_eq!(reserve.request.metadata, Some(json!({"z": 2})));
+
+    let release =
+        parse_spend_release_params(&decoded_spend_params("revenue-spend-release", json!([7])));
+    assert_eq!(release, "7");
+
+    let stale = parse_spend_release_stale_params(&decoded_spend_params(
+        "revenue-spend-release-stale",
+        json!(["0", " FOO ", 0]),
+    ))
+    .unwrap();
+    assert_eq!(stale.max_age_seconds, 1);
+    assert_eq!(stale.category.as_deref(), Some("foo"));
+    assert_eq!(stale.limit, 1);
+
+    let settle = parse_spend_settle_params(&decoded_spend_params(
+        "revenue-spend-settle",
+        json!(["r-1", "12", "", "false"]),
+    ))
+    .unwrap();
+    assert_eq!(settle.reservation_id, "r-1");
+    assert_eq!(settle.actual_spent_sats, Some(12));
+    assert_eq!(settle.source, None, "empty source uses Python fallback");
+    assert!(settle.record_event, "bool(false-string) is true in Python");
+}
+
+#[test]
+fn spend_reserve_validation_and_metadata_fallback_match_python() {
+    let zero = decoded_spend_params(
+        "revenue-spend-reserve",
+        json!({"reservation_id": "r", "category": "misc", "amount_sats": 0}),
+    );
+    assert_eq!(
+        parse_spend_reserve_params(&zero).unwrap_err(),
+        json!({"error": "amount_sats must be > 0"})
+    );
+
+    let bad_int = decoded_spend_params(
+        "revenue-spend-reserve",
+        json!({"reservation_id": "r", "category": "misc", "amount_sats": null}),
+    );
+    assert!(parse_spend_reserve_params(&bad_int).unwrap_err()["error"]
+        .as_str()
+        .unwrap()
+        .contains("int() argument"));
+
+    let raw = decoded_spend_params(
+        "revenue-spend-reserve",
+        json!({
+            "reservation_id": "r",
+            "category": "misc",
+            "amount_sats": 1,
+            "metadata_json": "not-json"
+        }),
+    );
+    assert_eq!(
+        parse_spend_reserve_params(&raw).unwrap().request.metadata,
+        Some(json!({"raw": "not-json"}))
+    );
+}
+
+#[test]
+fn spend_mutator_responses_are_exact_and_only_follow_completed_results() {
+    let args = parse_spend_reserve_params(&decoded_spend_params(
+        "revenue-spend-reserve",
+        json!(["r-1", "misc", 25]),
+    ))
+    .unwrap();
+    let before = json!({"remaining_sats": 100, "effective_budget_sats": 100});
+    let after = json!({"remaining_sats": 75, "effective_budget_sats": 100});
+
+    assert_eq!(
+        spend_reserve_rejection(25, 10, &before),
+        json!({
+            "status": "rejected",
+            "reason": "insufficient_unified_budget",
+            "requested_sats": 25,
+            "remaining_sats": 10,
+            "budget": before,
+        })
+    );
+    assert_eq!(
+        spend_reserve_response(false, &args, &before, &after),
+        json!({"status": "error", "error": "Failed to reserve spend"})
+    );
+    assert_eq!(
+        spend_reserve_response(true, &args, &before, &after),
+        json!({
+            "status": "success",
+            "reservation_id": "r-1",
+            "category": "misc",
+            "amount_sats": 25,
+            "budget_before": before,
+            "budget_after_estimate": after,
+        })
+    );
+    assert_eq!(
+        spend_release_response("r-1", true),
+        json!({"status": "success", "reservation_id": "r-1"})
+    );
+    assert_eq!(
+        spend_settle_response("r-1", false),
+        json!({"status": "not_found", "reservation_id": "r-1"})
+    );
+    let released = SpendReleaseBatch {
+        released_count: 2,
+        released_sats: 75,
+        reservation_ids: vec!["a".into(), "b".into()],
+    };
+    assert_eq!(
+        spend_release_stale_response(&released, &after),
+        json!({
+            "status": "success",
+            "released_count": 2,
+            "released_sats": 75,
+            "reservation_ids": ["a", "b"],
+            "budget_after": after,
+        })
+    );
+
+    let response = completed_spend_response::<()>(
+        StateWriteAck::NotAdmitted("queue full".into()),
+        |_| json!({"status": "success"}),
+    );
+    assert_eq!(response, json!({"error": "queue full"}));
+    assert_ne!(response["status"], "success");
 }
