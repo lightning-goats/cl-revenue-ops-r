@@ -523,7 +523,12 @@ upgraded, not implemented this round):**
   round** (unranked, not required for this batch): P3 (policy's tactical-
   action refusal message says "deprecated", which misattributes WHY an
   `internal=true` write doesn't happen in Rust — Rust implements no write path
-  to unlock at all); P4 (the policy `get`-purge asymmetry vs. Rust's stable
+  to unlock at all) — **RESOLVED by Task 66 slice 8f (2026-07-31,
+  `480182a`): the `internal`/`admin` override path now EXISTS and routes to
+  the sealed mutation owner (py's full set/delete/tag/untag/batch semantics,
+  staged behind Task 69's assembly), and the no-override arm answers py's own
+  deprecation refusal byte-exact — the misattribution is gone in both
+  directions**; P4 (the policy `get`-purge asymmetry vs. Rust's stable
   `last_change_timestamp`, folded into item 2 above); H8 (hot-channel-
   protection-peers' row decode has no per-row `.ok()` isolation, unlike
   `peer_policies` — one mistyped cell fails the WHOLE call where Python passes
