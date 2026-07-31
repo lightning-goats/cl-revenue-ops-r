@@ -288,6 +288,66 @@ pub async fn handle_external_pay_ignores(deps: &BoltzRpcDeps) -> Value {
 
 // -- 7/8. budget / wallet ---------------------------------------------------
 
+/// The Boltz component of `revenue-total-cost-budget`, port of
+/// `_boltz_liquidity_cost_components` (cl-revenue-ops.py:8136-8176): no
+/// owner → Python's `boltz_manager is None` zeros dict (`available:
+/// false`); a failed listswaps read → the exception arm with the error
+/// text; otherwise `boltz_cost_components` over the live swap list.
+///
+/// KNOWN PARITY DELTA (workspace-wide, not this fn's): Python augments
+/// listswaps with its swap journal before counting
+/// (`_augment_with_swap_journal`), so a swap evicted from boltzcli's list
+/// but still journaled keeps counting against spend. The journal logic is
+/// ported (`revops_boltz::journal`) but not yet assembled into a live swap
+/// source; every registered Boltz RPC currently reads `live_swaps`
+/// (listswaps only), and this component uses the same list rather than
+/// inventing a second, different one.
+pub async fn total_cost_boltz_component(
+    deps: &BoltzRpcDeps,
+    window_hours: i64,
+    global_budget_cap_sats: Option<i64>,
+) -> Value {
+    if read_owner(deps).is_none() {
+        return json!({
+            "source": "boltz",
+            "spent_24h_sats": 0,
+            "reserved_24h_sats": 0,
+            "available": false,
+        });
+    }
+    let swaps = match live_swaps(deps) {
+        Ok(swaps) => swaps,
+        Err(e) => {
+            let text = e
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("listswaps failed")
+                .to_string();
+            return json!({
+                "source": "boltz",
+                "available": false,
+                "error": text,
+                "spent_24h_sats": 0,
+                "reserved_24h_sats": 0,
+            });
+        }
+    };
+    let components = revops_boltz::budget::boltz_cost_components(
+        &swaps,
+        deps.now,
+        window_hours,
+        deps.cfg.daily_budget_sats,
+        global_budget_cap_sats,
+    );
+    json!({
+        "source": "boltz",
+        "available": true,
+        "spent_24h_sats": components.spent_24h_sats,
+        "reserved_24h_sats": components.reserved_24h_sats,
+        "counted_swaps": components.counted_swaps,
+    })
+}
+
 pub async fn handle_budget(deps: &BoltzRpcDeps) -> Value {
     if read_owner(deps).is_none() {
         return uninitialized();

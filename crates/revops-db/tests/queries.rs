@@ -18,9 +18,10 @@
 use revops_db::actor::spawn_read_only;
 use revops_db::queries::{
     active_spend_reservations, all_config_overrides, all_policies, closed_channels_summary,
-    closure_costs_windows, config_override, hot_channel_protection_override_peers,
-    last_policy_change_timestamp, lifetime_stats, planner_actions, planner_candidates, pnl_summary,
-    policies_by_tag, policy_changes_since, policy_for_peer, spend_ledger_aggregates,
+    closure_costs_windows, config_override, cost_evidence_coverage,
+    hot_channel_protection_override_peers, last_policy_change_timestamp, lifetime_stats,
+    opening_costs_since, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
+    policy_changes_since, policy_for_peer, rebalance_spend_component, spend_ledger_aggregates,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -189,6 +190,234 @@ async fn closed_channels_summary_on_empty_table_is_all_zero() {
     assert_eq!(summary.total_capacity, 0);
     assert_eq!(summary.total_net_pnl, 0);
     assert_eq!(summary.avg_days_open, 0.0);
+}
+
+/// Port of `Database.get_opening_costs_since` (database.py:6334-6350):
+/// `SUM(open_cost_sats) FROM channel_costs WHERE opened_at >= since`. The
+/// seeded copy carries one 90-day-old open (500 sats); a second recent row
+/// makes the window boundary discriminating in both directions.
+#[tokio::test]
+async fn opening_costs_since_windows_on_opened_at() {
+    let (_dir, path) = seeded_db(NOW);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO channel_costs (channel_id, peer_id, open_cost_sats, capacity_sats, opened_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params!["6x6x0", "5".repeat(66), 250i64, 2_000_000i64, NOW - 1800],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    // Both rows inside a 91-day window.
+    assert_eq!(
+        opening_costs_since(&handle, NOW - 91 * 86400)
+            .await
+            .unwrap(),
+        750
+    );
+    // Only the 30-minute-old row inside the last day.
+    assert_eq!(
+        opening_costs_since(&handle, NOW - 86400).await.unwrap(),
+        250
+    );
+    // `opened_at >= since` is inclusive-of-boundary, exclusive of older rows.
+    assert_eq!(opening_costs_since(&handle, NOW - 1800).await.unwrap(), 250);
+    assert_eq!(opening_costs_since(&handle, NOW).await.unwrap(), 0);
+}
+
+/// Port of `Database.get_daily_rebalance_spend`'s budget-component subset
+/// (database.py:4590-4678): spend from `rebalance_costs`, reserved from
+/// ACTIVE `budget_reservations` PLUS active `spend_reservations` rows under
+/// `category='rebalance'` (Phase 2J unified holds), job/success counts from
+/// `rebalance_history` — all windowed on `now - window_hours*3600`.
+#[tokio::test]
+async fn rebalance_spend_component_sums_both_reservation_tables_and_windows() {
+    let (_dir, path) = seeded_db(NOW);
+    let conn = Connection::open(&path).unwrap();
+    // Second rebalance_costs row OUTSIDE the 24h window: must not count on
+    // top of the seeded in-window 200-sat row.
+    conn.execute(
+        "INSERT INTO rebalance_costs (channel_id, peer_id, cost_sats, cost_msat, amount_sats, timestamp) \
+         VALUES ('2x2x0', ?1, 999, 999000, 10000, ?2)",
+        rusqlite::params!["1".repeat(66), NOW - 2 * 86400],
+    )
+    .unwrap();
+    // Legacy budget_reservations: one countable active hold; a released row
+    // and an active-but-stale row prove the status AND window filters.
+    conn.execute(
+        "INSERT INTO budget_reservations (reservation_id, reserved_sats, reserved_at, job_channel_id, status) VALUES \
+         ('br-1', 100, ?1, '2x2x0', 'active'), \
+         ('br-2', 999, ?1, '2x2x0', 'released'), \
+         ('br-3', 555, ?2, '2x2x0', 'active')",
+        rusqlite::params![NOW - 1800, NOW - 2 * 86400],
+    )
+    .unwrap();
+    // Unified holds: only category='rebalance' AND status='active' counts.
+    conn.execute(
+        "INSERT INTO spend_reservations (reservation_id, category, reserved_sats, reserved_at, status) VALUES \
+         ('sr-1', 'rebalance', 40, ?1, 'active'), \
+         ('sr-2', 'channel_open', 70, ?1, 'active'), \
+         ('sr-3', 'rebalance', 80, ?1, 'spent')",
+        rusqlite::params![NOW - 900],
+    )
+    .unwrap();
+    // History: 2 success + 1 failed + 1 pending in-window (job_count counts
+    // every attempt), one out-of-window success excluded.
+    conn.execute(
+        "INSERT INTO rebalance_history (from_channel, to_channel, amount_sats, max_fee_sats, expected_profit_sats, status, timestamp) VALUES \
+         ('1x1x0','2x2x0',1000,10,5,'success',?1), \
+         ('1x1x0','2x2x0',1000,10,5,'success',?1), \
+         ('1x1x0','2x2x0',1000,10,5,'failed',?1), \
+         ('1x1x0','2x2x0',1000,10,5,'pending',?1), \
+         ('1x1x0','2x2x0',1000,10,5,'success',?2)",
+        rusqlite::params![NOW - 3600, NOW - 2 * 86400],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+
+    let component = rebalance_spend_component(&handle, 24, NOW).await.unwrap();
+    assert_eq!(component.total_spent_sats, 200);
+    assert_eq!(
+        component.total_reserved_sats, 140,
+        "100 legacy + 40 unified"
+    );
+    assert_eq!(component.job_count, 4);
+    assert_eq!(component.success_count, 2);
+}
+
+#[tokio::test]
+async fn rebalance_spend_component_on_empty_tables_is_all_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+    let component = rebalance_spend_component(&handle, 24, NOW).await.unwrap();
+    assert_eq!(component.total_spent_sats, 0);
+    assert_eq!(component.total_reserved_sats, 0);
+    assert_eq!(component.job_count, 0);
+    assert_eq!(component.success_count, 0);
+}
+
+/// Port of `Database.get_cost_evidence_coverage` (database.py:4465-4481):
+/// earliest evidence across SEVEN sources (`_TOTAL_COST_EVIDENCE_SOURCES`,
+/// database.py:4410-4420), then the same honest coverage math the
+/// spend-ledger uses. With no evidence anywhere: unknown, never a
+/// fabricated "complete".
+#[tokio::test]
+async fn cost_evidence_coverage_on_empty_db_is_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+    let coverage = cost_evidence_coverage(&handle, 24, NOW).await.unwrap();
+    assert_eq!(coverage.covered_hours, None);
+    assert_eq!(coverage.coverage_status, "unknown");
+}
+
+/// Evidence ONLY in `channel_costs` — a source the spend-ledger scan does
+/// NOT read. A scan limited to `_SPEND_LEDGER_EVIDENCE_SOURCES` would
+/// answer "unknown" here; the total-cost scan must answer "complete".
+#[tokio::test]
+async fn cost_evidence_coverage_reads_beyond_the_spend_ledger_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO channel_costs (channel_id, peer_id, open_cost_sats, capacity_sats, opened_at) \
+         VALUES ('2x2x0', ?1, 500, 1000000, ?2)",
+        rusqlite::params!["0".repeat(66), NOW - 90 * 86400],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let coverage = cost_evidence_coverage(&handle, 24, NOW).await.unwrap();
+    assert_eq!(coverage.covered_hours, Some(24.0));
+    assert_eq!(coverage.coverage_status, "complete");
+}
+
+/// Evidence younger than the window: measured hours, rounded to 2 places
+/// (Python `round(span/3600.0, 2)`), status "partial".
+#[tokio::test]
+async fn cost_evidence_coverage_measures_partial_hours() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO rebalance_history (from_channel, to_channel, amount_sats, max_fee_sats, expected_profit_sats, status, timestamp) \
+         VALUES ('1x1x0','2x2x0',1000,10,5,'success',?1)",
+        rusqlite::params![NOW - 5400],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let coverage = cost_evidence_coverage(&handle, 24, NOW).await.unwrap();
+    assert_eq!(coverage.covered_hours, Some(1.5));
+    assert_eq!(coverage.coverage_status, "partial");
+}
+
+/// Python's non-positive filter operates on each source's MIN, not per row
+/// (`if ts <= 0: continue`, database.py:4441-4442): an epoch-zero row makes
+/// that WHOLE source's minimum non-positive, so the source is skipped even
+/// though a genuine newer row exists in the same table. With no other
+/// source, the honest answer is unknown — never evidence dated 1970, which
+/// would fake a "complete" window.
+#[tokio::test]
+async fn cost_evidence_coverage_skips_a_source_whose_min_is_epoch_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO rebalance_history (from_channel, to_channel, amount_sats, max_fee_sats, expected_profit_sats, status, timestamp) \
+         VALUES ('1x1x0','2x2x0',1000,10,5,'success',?1), \
+                ('1x1x0','2x2x0',1000,10,5,'success',0)",
+        rusqlite::params![NOW - 5400],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let coverage = cost_evidence_coverage(&handle, 24, NOW).await.unwrap();
+    assert_eq!(coverage.covered_hours, None);
+    assert_eq!(coverage.coverage_status, "unknown");
+}
+
+/// Python skips a source whose query raises (`except sqlite3.Error:
+/// continue`) instead of failing the whole read. Drop one source table from
+/// the copy and the remaining six must still answer.
+#[tokio::test]
+async fn cost_evidence_coverage_tolerates_a_missing_source_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seed.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE budget_reservations;")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO channel_closure_costs \
+         (channel_id, peer_id, close_type, closure_fee_sats, htlc_sweep_fee_sats, penalty_fee_sats, total_closure_cost_sats, closed_at, resolution_complete) \
+         VALUES ('3x3x0', ?1, 'mutual', 300, 0, 0, 300, ?2, 1)",
+        rusqlite::params!["2".repeat(66), NOW - 30 * 86400],
+    )
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let coverage = cost_evidence_coverage(&handle, 24, NOW).await.unwrap();
+    assert_eq!(coverage.covered_hours, Some(24.0));
+    assert_eq!(coverage.coverage_status, "complete");
+}
+
+/// Python's `COALESCE(SUM(...), 0)`: an empty table answers 0, not an error.
+#[tokio::test]
+async fn opening_costs_since_on_empty_table_is_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.db");
+    std::fs::copy(fixture_path(), &path).unwrap();
+    let handle = spawn_read_only(&path).await.unwrap();
+    assert_eq!(opening_costs_since(&handle, 0).await.unwrap(), 0);
 }
 
 #[tokio::test]

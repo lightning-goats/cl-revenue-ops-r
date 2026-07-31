@@ -432,7 +432,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
     }
-    // Exactly 61 rpc methods total (no leftover revenue-r-* names bleeding
+    // Exactly 63 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
@@ -441,7 +441,8 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // (status/breaker-clear/abandon/backfill through the LN+ owner),
     // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
     // Task 62's planner-execute (capital owner), and Task 63's 22 Boltz
-    // RPCs (serialized Boltz owner).
+    // RPCs (serialized Boltz owner), Task 66's completed core-state
+    // mutators and total-cost-budget.
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -449,8 +450,14 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        62,
+        63,
         "methods: {methods:?}"
+    );
+
+    // Task 66 slice 1: the unified total-cost budget read.
+    assert!(
+        methods.contains(&"revenue-total-cost-budget"),
+        "missing revenue-total-cost-budget: {methods:?}"
     );
 
     // Per the design spec's db-path ruling (docs/superpowers/specs/
@@ -1975,6 +1982,83 @@ fn revenue_r_hot_channel_protection_peers_action_normalization_matches_python() 
     assert_ne!(
         write_refused_err, leading_space_err,
         "a real write action's refusal must read differently from an unknown-action refusal"
+    );
+}
+
+/// Task 66 slice 1: the registered total-cost-budget handler END-TO-END
+/// through the spawned binary — this is what pins the GLUE the
+/// assembly-level tests (`tests/total_cost_budget.rs`) cannot see: the
+/// window_hours param actually reaching the response, the config layer
+/// actually resolving `daily-budget-sats`' fixture default, and the seeded
+/// DB evidence actually flowing through the registered handler.
+#[test]
+fn revenue_r_total_cost_budget_serves_seeded_evidence_and_config_defaults() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let event_ts = now_unix() - 3600;
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO spend_events (event_id, category, amount_sats, timestamp) \
+             VALUES ('tcb-ev1', 'rebalance', 60, ?1)",
+            rusqlite::params![event_ts],
+        )
+        .expect("seed spend_events");
+        conn.execute(
+            "INSERT INTO rebalance_costs \
+             (channel_id, peer_id, cost_sats, cost_msat, amount_sats, timestamp) \
+             VALUES ('2x2x0', ?1, 200, 200000, 50000, ?2)",
+            rusqlite::params!["1".repeat(66), event_ts],
+        )
+        .expect("seed rebalance_costs");
+    }
+
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-total-cost-budget",
+        serde_json::json!({"window_hours": 48}),
+    );
+
+    // The requested window round-trips (not the 24 default).
+    assert_eq!(result["window_hours"], 48, "result: {result:?}");
+    // `daily-budget-sats`' fixture default (5000) resolved through the
+    // handler's own config path; growth disabled default -> fixed mode.
+    assert_eq!(result["daily_budget_sats"], 5_000);
+    assert_eq!(result["mode"], "fixed");
+    assert_eq!(result["effective_budget_sats"], 5_000);
+    // Seeded evidence: rebalance 200 + generic ledger 60, nothing else.
+    assert_eq!(
+        result["actual_spent_by_category"],
+        serde_json::json!({"rebalance": 200, "boltz": 0, "open": 0, "close": 0, "ledger": 60})
+    );
+    assert_eq!(result["actual_spent_sats"], 260);
+    assert_eq!(result["reserved_sats"], 0);
+    assert_eq!(result["remaining_sats"], 5_000 - 260);
+    assert_eq!(result["revenue_sats"], 0);
+    assert_eq!(result["net_profit_sats_after_costs"], -260);
+    // No Boltz transport in this environment: the component must say so,
+    // never fabricate a live zero reading.
+    assert_eq!(result["components"]["boltz"]["available"], false);
+    assert_eq!(result["components"]["boltz"]["spent_24h_sats"], 0);
+    // Evidence is 1h old: measured partial coverage, honest not an echo.
+    assert_eq!(result["coverage_status"], "partial");
+    // Every pipeline is wired: nothing left to declare.
+    assert_eq!(result["_phase1b_gaps"], serde_json::json!([]));
+}
+
+/// Python's guard order (cl-revenue-ops.py:8306-8309): no DB answers the
+/// EXACT "Plugin not initialized" 1-key arm — not the spend-ledger's
+/// "Database not initialized" string.
+#[test]
+fn revenue_r_total_cost_budget_without_db_is_plugin_not_initialized() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init(false, None, home.path(), &[], "revenue-r-total-cost-budget");
+    assert_eq!(
+        result,
+        serde_json::json!({"error": "Plugin not initialized"})
     );
 }
 

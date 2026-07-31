@@ -457,6 +457,18 @@ fn spend_coverage(
         .flatten()
         .filter(|timestamp| *timestamp > 0)
         .min();
+    coverage_from_earliest(earliest, now, window_hours, window_seconds)
+}
+
+/// Port of `Database._coverage_from_earliest` (database.py:4447-4463): the
+/// shared honest-coverage math — unknown without a measurement basis, never
+/// a fabricated "complete" echo of the requested window.
+fn coverage_from_earliest(
+    earliest: Option<i64>,
+    now: i64,
+    window_hours: i64,
+    window_seconds: i64,
+) -> (Option<f64>, String) {
     let Some(earliest) = earliest else {
         return (None, "unknown".to_string());
     };
@@ -561,6 +573,59 @@ pub async fn spend_ledger_aggregates(
         reserved_by_category,
         event_count_by_category,
         active_reservation_count_by_category,
+        covered_hours,
+        coverage_status,
+    })
+}
+
+/// Measured coverage of the unified total-cost budget window, port of
+/// `Database.get_cost_evidence_coverage` (database.py:4465-4481).
+pub struct CostEvidenceCoverage {
+    pub covered_hours: Option<f64>,
+    pub coverage_status: String,
+}
+
+/// `_TOTAL_COST_EVIDENCE_SOURCES` (database.py:4410-4420): the spend-ledger
+/// pair plus every other cost-evidence table. `query_row` takes `&'static
+/// str`, so each (table, column) pair is spelled as its full MIN query.
+const TOTAL_COST_EVIDENCE_SOURCES: [&str; 7] = [
+    "SELECT MIN(timestamp) FROM spend_events",
+    "SELECT MIN(reserved_at) FROM spend_reservations",
+    "SELECT MIN(timestamp) FROM rebalance_history",
+    "SELECT MIN(timestamp) FROM rebalance_costs",
+    "SELECT MIN(reserved_at) FROM budget_reservations",
+    "SELECT MIN(opened_at) FROM channel_costs",
+    "SELECT MIN(closed_at) FROM channel_closure_costs",
+];
+
+/// Oldest cost-evidence timestamp across all seven sources, then the shared
+/// coverage math. A source whose query errors is skipped (Python `except
+/// sqlite3.Error: continue` — partial/minimal schemas must degrade to the
+/// remaining sources, not fail the read); non-positive and unparseable
+/// timestamps are ignored per source.
+pub async fn cost_evidence_coverage(
+    handle: &DbHandle,
+    window_hours: i64,
+    now: i64,
+) -> Result<CostEvidenceCoverage> {
+    let window_hours = window_hours.max(1);
+    let window_seconds = window_hours * 3600;
+    let mut earliest: Option<i64> = None;
+    for sql in TOTAL_COST_EVIDENCE_SOURCES {
+        let Ok(candidate) = handle
+            .query_row(sql, vec![], python_int_timestamp_cell)
+            .await
+        else {
+            continue;
+        };
+        let Some(timestamp) = candidate.filter(|timestamp| *timestamp > 0) else {
+            continue;
+        };
+        earliest = Some(earliest.map_or(timestamp, |current: i64| current.min(timestamp)));
+    }
+    let (covered_hours, coverage_status) =
+        coverage_from_earliest(earliest, now, window_hours, window_seconds);
+    Ok(CostEvidenceCoverage {
         covered_hours,
         coverage_status,
     })
@@ -939,6 +1004,78 @@ pub async fn closed_channels_summary(handle: &DbHandle) -> Result<ClosedChannels
                 avg_days_open: r.get(8)?,
             })
         })
+        .await
+}
+
+/// The budget-component subset of `Database.get_daily_rebalance_spend`
+/// (database.py:4590-4678) — exactly the four values
+/// `_rebalance_liquidity_cost_components` (cl-revenue-ops.py:8111-8134)
+/// consumes. The full Python method also reports failed_count/success_rate/
+/// stale_reservations; no Rust caller needs those yet, and inventing an
+/// unconsumed surface would be untestable-by-construction.
+pub struct RebalanceSpendComponent {
+    pub total_spent_sats: i64,
+    pub total_reserved_sats: i64,
+    pub job_count: i64,
+    pub success_count: i64,
+}
+
+/// Windowed rebalance spend/reservation totals. Reserved is the sum of BOTH
+/// hold tables: legacy `budget_reservations` plus Phase 2J's unified
+/// `spend_reservations` rows under `category='rebalance'`. Python tolerates
+/// a missing `spend_reservations` table (`except sqlite3.OperationalError`,
+/// for pre-2J partial schemas); this port's fixture schema always carries
+/// it, so an error here is a real fault and propagates.
+pub async fn rebalance_spend_component(
+    handle: &DbHandle,
+    window_hours: i64,
+    now: i64,
+) -> Result<RebalanceSpendComponent> {
+    let cutoff = now - window_hours * 3600;
+    let (job_count, success_count) = handle
+        .query_row(
+            "SELECT COUNT(*), \
+             COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) \
+             FROM rebalance_history WHERE timestamp >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .await?;
+    let total_spent_sats = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(cost_sats), 0) FROM rebalance_costs WHERE timestamp >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    let legacy_reserved = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(reserved_sats), 0) FROM budget_reservations \
+             WHERE status = 'active' AND reserved_at >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    let unified_reserved = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(reserved_sats), 0) FROM spend_reservations \
+             WHERE status = 'active' AND category = 'rebalance' AND reserved_at >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    Ok(RebalanceSpendComponent {
+        total_spent_sats,
+        total_reserved_sats: legacy_reserved + unified_reserved,
+        job_count,
+        success_count,
+    })
+}
+
+/// Port of `Database.get_opening_costs_since` (database.py:6334-6350).
+pub async fn opening_costs_since(handle: &DbHandle, since_timestamp: i64) -> Result<i64> {
+    handle
+        .query_i64(
+            "SELECT COALESCE(SUM(open_cost_sats), 0) FROM channel_costs WHERE opened_at >= ?1",
+            vec![SqlValue::Integer(since_timestamp)],
+        )
         .await
 }
 

@@ -618,6 +618,89 @@ fn register_fee_cycle(
     )
 }
 
+fn register_total_cost_budget(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "unified budget status across rebalances, Boltz, and on-chain liquidity costs",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                // Python's guard ORDER (cl-revenue-ops.py:8306-8309): the
+                // db/config presence check fires BEFORE window_hours is
+                // parsed, so bad window + no DB answers the init error.
+                if p.state().db.is_none() {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                }
+                let window_hours = match revops::rpc_total_cost_budget::parse_window_hours(
+                    decoded.get("window_hours"),
+                ) {
+                    Ok(window_hours) => window_hours,
+                    Err(error) => return Ok(error),
+                };
+                // Config scalars, Python's cfg-getattr defaults on absence
+                // (cl-revenue-ops.py:8407-8419). A failed config read is
+                // in-band, like every read RPC here.
+                let config_error =
+                    |error: anyhow::Error| serde_json::json!({"error": format!("{error:#}")});
+                macro_rules! cfg_value {
+                    ($key:expr, $as:ident, $default:expr) => {
+                        match resolved_config_json(&p, $key).await {
+                            Ok(value) => value.and_then(|v| v.$as()).unwrap_or($default),
+                            Err(error) => return Ok(config_error(error)),
+                        }
+                    };
+                }
+                let daily_budget_sats = cfg_value!("daily-budget-sats", as_i64, 0);
+                let growth_enabled = cfg_value!("growth-budget-enabled", as_bool, false);
+                let growth_earned_fraction =
+                    cfg_value!("growth-budget-earned-fraction", as_f64, 0.25);
+                let growth_experiment_fraction =
+                    cfg_value!("growth-budget-experiment-fraction", as_f64, 0.10);
+                let growth_max_extra_sats = cfg_value!("growth-budget-max-extra-sats", as_i64, 0);
+                let growth_hard_ceiling_sats =
+                    cfg_value!("growth-budget-hard-ceiling-sats", as_i64, daily_budget_sats);
+                // Python passes the unified daily budget as the explicit
+                // global cap so the Boltz side never recurses into the
+                // budget provider (cl-revenue-ops.py:8147-8158).
+                let boltz_component = revops::rpc_boltz_ops::total_cost_boltz_component(
+                    &boltz_rpc_deps(&p),
+                    window_hours,
+                    Some(daily_budget_sats.max(0)),
+                )
+                .await;
+                let state = p.state();
+                Ok(revops::rpc_total_cost_budget::total_cost_budget_response(
+                    window_hours,
+                    revops::rpc_total_cost_budget::TotalCostBudgetSources {
+                        db: state.db.as_ref(),
+                        boltz_component,
+                        daily_budget_sats,
+                        growth_enabled,
+                        growth_earned_fraction,
+                        growth_experiment_fraction,
+                        growth_max_extra_sats,
+                        growth_hard_ceiling_sats,
+                        now: now_unix(),
+                    },
+                )
+                .await)
+            }
+        },
+    )
+}
+
 fn register_core_mutator(
     builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
     name: &str,
@@ -1246,6 +1329,12 @@ async fn main() -> Result<()> {
     let capacity_report_name = rpc_name("capacity-report");
     let econ_snapshot_name = rpc_name("econ-snapshot");
     let spend_ledger_name = rpc_name("spend-ledger");
+    // Task 66 slice 1: the unified total-cost budget read.
+    let total_cost_budget_name = rpc_name("total-cost-budget");
+    let total_cost_budget_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-total-cost-budget",
+    );
 
     // Task 56: the read-only planner quartet. These builders were already
     // ported, but were unreachable until their production DB/config seams
@@ -3000,6 +3089,8 @@ async fn main() -> Result<()> {
                 Ok(result.unwrap_or_else(|e| serde_json::json!({"error": e.to_string()})))
             },
         );
+    let builder =
+        register_total_cost_budget(builder, &total_cost_budget_name, total_cost_budget_spec);
     let builder = register_profile_preview(builder, &profile_preview_name, profile_preview_spec);
     let builder = register_fee_authority_status(
         builder,
