@@ -188,6 +188,217 @@ pub fn classify_startup_receipt(
 }
 
 // =====================================================================
+// R68-3: startup ordering
+// =====================================================================
+
+/// The ordered startup phases. Like [`Phase`], the order IS the contract.
+///
+/// Two orderings carry the weight. Intake is bound only after the stores
+/// are open and the deferred cursors are hydrated -- bound earlier, every
+/// notification in the gap is a `Dropped` (R68-2 counts those, but not
+/// creating the hole beats counting it) and hydration would re-derive a
+/// cursor from rows arriving underneath it. And the current-boot receipt
+/// is written LAST, so [`classify_startup_receipt`] can never pass for a
+/// process that only got halfway up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StartupPhase {
+    /// [`assert_distinct_stores`] -- before anything is opened read-write.
+    StoresIdentified,
+    StoresOpened,
+    CursorsHydrated,
+    OwnersStarted,
+    IntakeBound,
+    ReceiptWritten,
+}
+
+impl StartupPhase {
+    pub const ALL: [StartupPhase; 6] = [
+        StartupPhase::StoresIdentified,
+        StartupPhase::StoresOpened,
+        StartupPhase::CursorsHydrated,
+        StartupPhase::OwnersStarted,
+        StartupPhase::IntakeBound,
+        StartupPhase::ReceiptWritten,
+    ];
+}
+
+/// What actually came up. `completed` is true only when every phase ran
+/// and none failed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StartupOutcome {
+    pub completed: bool,
+    pub reached: Vec<StartupPhase>,
+    pub failure: Option<String>,
+}
+
+/// The steps a real runtime supplies, in the same shape as
+/// [`LifecycleSteps`] so both halves of the process lifetime are driven
+/// by one testable contract.
+pub trait StartupSteps: Send + Sync {
+    fn identify_stores(&self) -> StepFuture<'_>;
+    fn open_stores(&self) -> StepFuture<'_>;
+    fn hydrate_cursors(&self) -> StepFuture<'_>;
+    fn start_owners(&self) -> StepFuture<'_>;
+    fn bind_intake(&self) -> StepFuture<'_>;
+    fn write_receipt(&self) -> StepFuture<'_>;
+}
+
+/// Bring the plugin up in order, ABORTING at the first failed step.
+///
+/// That is the deliberate asymmetry against [`shutdown`], which runs its
+/// remaining steps even after one fails. Shutdown continues because
+/// skipping a later step loses data the failure itself did not. Startup
+/// stops because every step after a failure -- above all binding the four
+/// subscriptions -- would accept work this process has nowhere to keep.
+///
+/// Unbounded on purpose: Python's plugin init is not time-bounded either,
+/// and a bound here would mean "give up waiting for the store and start
+/// taking notifications anyway", which is the exact failure the ordering
+/// exists to prevent. The bound belongs on shutdown, where the alternative
+/// to giving up is never exiting.
+pub async fn startup<S>(steps: std::sync::Arc<S>) -> StartupOutcome
+where
+    S: StartupSteps + 'static,
+{
+    let mut outcome = StartupOutcome::default();
+    for phase in StartupPhase::ALL {
+        let result = match phase {
+            StartupPhase::StoresIdentified => steps.identify_stores().await,
+            StartupPhase::StoresOpened => steps.open_stores().await,
+            StartupPhase::CursorsHydrated => steps.hydrate_cursors().await,
+            StartupPhase::OwnersStarted => steps.start_owners().await,
+            StartupPhase::IntakeBound => steps.bind_intake().await,
+            StartupPhase::ReceiptWritten => steps.write_receipt().await,
+        };
+        outcome.reached.push(phase);
+        if let Err(detail) = result {
+            outcome.failure = Some(format!("{phase:?}: {detail}"));
+            return outcome;
+        }
+    }
+    outcome.completed = true;
+    outcome
+}
+
+// =====================================================================
+// R68-3: retention health
+// =====================================================================
+
+/// How long retention may produce nothing before that is a fault.
+///
+/// A sweep rides only a SUCCESSFUL SCHEDULED CYCLE COMMIT, and py's
+/// `fee_interval` defaults to 1800s (cl-revenue-ops.py:4369), so the
+/// window must tolerate several non-committing intervals in a row. Four
+/// hours is eight default intervals.
+pub const RETENTION_MAX_SILENCE_SECONDS: i64 = 4 * 3600;
+
+/// How long an unbroken run of TRUNCATED sweeps may last before it stops
+/// being catch-up and starts being a growth trend.
+///
+/// Each sweep deletes up to `RETENTION_MAX_BATCHES_PER_SWEEP *
+/// RETENTION_BATCH_ROWS` rows, so a backlog left by a bounded outage
+/// drains in a bounded number of sweeps. Truncation still continuous a
+/// full day later means arrivals are outrunning deletions.
+pub const RETENTION_TRUNCATION_TOLERANCE_SECONDS: i64 = 24 * 3600;
+
+/// What the sweep owner has observed. Produced by the fee scheduler, which
+/// is the only thing that schedules sweeps.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RetentionObservation {
+    /// Task 59's never-reset red counter.
+    pub failures: u64,
+    /// Reported, never gated on: a count says nothing about WHEN.
+    pub sweeps_completed: u64,
+    /// When the last sweep RETURNED. `None` = none has, this process.
+    pub last_sweep_at: Option<i64>,
+    /// When the current unbroken run of truncated sweeps began. Cleared by
+    /// any sweep that completes without truncating.
+    pub truncated_since: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetentionRefusal {
+    /// A sweep that ran, failed.
+    Failing { failures: u64 },
+    /// No sweep has run at all this process.
+    NeverSwept { silent_seconds: i64 },
+    /// Sweeps ran and then stopped.
+    Stalled { silent_seconds: i64 },
+    /// Sweeps run, succeed, and never catch up.
+    PersistentlyTruncated { truncated_seconds: i64 },
+}
+
+impl RetentionRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Failing { .. } => "retention_sweep_failing",
+            Self::NeverSwept { .. } => "retention_never_swept",
+            Self::Stalled { .. } => "retention_stalled",
+            Self::PersistentlyTruncated { .. } => "retention_persistently_truncated",
+        }
+    }
+}
+
+/// Age in seconds.
+///
+/// Saturating because both operands come from wall clocks that a
+/// correction, a bad config or a corrupt row can put arbitrarily far
+/// apart, and a health check that PANICS on a strange timestamp is worse
+/// than one that reports a strange age.
+///
+/// Deliberately NOT clamped at zero. A `.max(0)` was here and no input
+/// could observe it -- a negative age already compares as "well inside the
+/// window", which is the right answer for a clock that stepped backwards.
+/// An unfalsifiable clause is one a later refactor can quietly invert.
+fn age(now: i64, since: i64) -> i64 {
+    now.saturating_sub(since)
+}
+
+/// Readiness over retention.
+///
+/// Task 59 counts sweeps that FAILED. Nothing counted the two states that
+/// precede disk exhaustion with `failures == 0` the whole way: sweeps that
+/// stopped happening, and sweeps that run forever without catching up.
+/// This node has already run itself out of disk once.
+///
+/// No Python parity applies: Python has no automated retention at all
+/// (only an operator-run `DELETE FROM` hint, cl-revenue-ops.py:7447).
+pub fn retention_is_healthy(
+    observation: &RetentionObservation,
+    startup_at: i64,
+    now: i64,
+) -> Result<(), RetentionRefusal> {
+    // An explicit error first: when retention has both failed and gone
+    // quiet, the failure is the actionable cause, and reporting the
+    // silence would send the operator after a stopped cycle loop instead
+    // of reading the error.
+    if observation.failures > 0 {
+        return Err(RetentionRefusal::Failing {
+            failures: observation.failures,
+        });
+    }
+
+    // Silence is measured from the last sweep, falling back to boot so a
+    // process that has never swept is judged from when it could have.
+    let silent_seconds = age(now, observation.last_sweep_at.unwrap_or(startup_at));
+    if silent_seconds > RETENTION_MAX_SILENCE_SECONDS {
+        return Err(match observation.last_sweep_at {
+            None => RetentionRefusal::NeverSwept { silent_seconds },
+            Some(_) => RetentionRefusal::Stalled { silent_seconds },
+        });
+    }
+
+    if let Some(since) = observation.truncated_since {
+        let truncated_seconds = age(now, since);
+        if truncated_seconds > RETENTION_TRUNCATION_TOLERANCE_SECONDS {
+            return Err(RetentionRefusal::PersistentlyTruncated { truncated_seconds });
+        }
+    }
+
+    Ok(())
+}
+
+// =====================================================================
 // bounded shutdown
 // =====================================================================
 

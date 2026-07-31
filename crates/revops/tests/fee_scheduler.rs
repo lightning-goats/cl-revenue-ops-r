@@ -1683,7 +1683,13 @@ mod seedonce_restart {
     /// inline dispatch, one call drains the full
     /// idempotency -> decide -> commit -> install chain.
     fn pump_store_results(owner: &mut CycleOwner, rx: &TestOwnerReceiver) {
-        let mut clock = || NOW;
+        pump_store_results_at(owner, rx, NOW)
+    }
+
+    /// [`pump_store_results`] at an explicit clock value -- R68-3 needs to
+    /// tell one sweep report's arrival time from the next's.
+    fn pump_store_results_at(owner: &mut CycleOwner, rx: &TestOwnerReceiver, now: i64) {
+        let mut clock = || now;
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 CycleMsg::InitialFeeStoreResult(result) => {
@@ -2824,6 +2830,181 @@ mod seedonce_restart {
         assert_eq!(h.run_cycle(), CycleOutcome::PersistenceFailed);
         assert!(h.retention.cursors.lock().unwrap().is_empty());
         assert_eq!(h.owner.retention_failures(), 0);
+    }
+
+    /// R68-3: fill one Class-W table past what a single globally-bounded
+    /// sweep can delete, so the report genuinely comes back `truncated`.
+    fn insert_old_trigger_events(h: &SeedOnceHarness, rows: i64) {
+        h.store_conn()
+            .execute(
+                "WITH RECURSIVE seq(n) AS (
+                     SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?1
+                 )
+                 INSERT INTO rust_fee_trigger_events
+                     (trigger_type, received_at, coalesced, detail)
+                 SELECT 'test', 1000, 0, 'old row' FROM seq",
+                [rows],
+            )
+            .expect("insert old trigger events");
+    }
+
+    /// R68-3: the failure Task 59's counter cannot see.
+    ///
+    /// A sweep is scheduled ONLY off a successful scheduled commit. A node
+    /// whose cycles stop committing therefore stops sweeping -- and
+    /// `retention_failures` stays 0, which reads as healthy all the way to
+    /// a full disk. Only the timestamp distinguishes the two.
+    #[test]
+    fn retention_that_never_ran_is_not_the_same_as_retention_that_never_failed() {
+        let h = seedonce_harness_with_one_channel();
+        let observation = h.owner.retention_observation();
+
+        assert_eq!(observation.failures, 0, "nothing has failed...");
+        assert_eq!(observation.sweeps_completed, 0);
+        assert_eq!(
+            observation.last_sweep_at, None,
+            "...because nothing has run"
+        );
+
+        // Inside the grace window a boot that has not swept yet is fine.
+        assert!(revops::lifecycle::retention_is_healthy(&observation, NOW, NOW + 60).is_ok());
+        // Past it, the zero failure count is not health.
+        let refusal = revops::lifecycle::retention_is_healthy(
+            &observation,
+            NOW,
+            NOW + revops::lifecycle::RETENTION_MAX_SILENCE_SECONDS + 1,
+        )
+        .expect_err("silent retention is not healthy retention");
+        assert_eq!(refusal.code(), "retention_never_swept");
+    }
+
+    /// R68-3: a delivered report is the only proof retention is alive.
+    #[test]
+    fn a_delivered_sweep_report_records_when_retention_last_ran() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+        insert_old_trigger_events(&h, 1);
+
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        assert_eq!(
+            h.owner.retention_observation().last_sweep_at,
+            None,
+            "a DISPATCHED sweep is not yet a completed one"
+        );
+
+        pump_store_results_at(&mut h.owner, &rx, NOW + 10);
+        let observation = h.owner.retention_observation();
+        assert_eq!(observation.sweeps_completed, 1);
+        assert_eq!(observation.last_sweep_at, Some(NOW + 10));
+        assert_eq!(observation.truncated_since, None, "the sweep caught up");
+        assert!(revops::lifecycle::retention_is_healthy(&observation, NOW, NOW + 20).is_ok());
+    }
+
+    /// R68-3: Task 59 kept only `next_cursor` from the report and threw
+    /// `truncated` away, so retention that is permanently behind was
+    /// indistinguishable from retention that had finished the job. The run
+    /// is stamped where it BEGAN, so a long backlog is one run rather than
+    /// a fresh one every sweep -- otherwise the tolerance restarts forever
+    /// and never fires.
+    #[test]
+    fn a_persistently_truncated_sweep_run_is_stamped_where_it_began() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+        // Two full sweeps' worth of deletions, plus a remainder.
+        insert_old_trigger_events(&h, 8_001);
+
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        pump_store_results_at(&mut h.owner, &rx, NOW + 100);
+        assert_eq!(
+            h.owner.retention_observation().truncated_since,
+            Some(NOW + 100),
+            "a sweep that hit the global batch cap with work left is truncated"
+        );
+
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        pump_store_results_at(&mut h.owner, &rx, NOW + 200);
+        let observation = h.owner.retention_observation();
+        assert_eq!(
+            observation.truncated_since,
+            Some(NOW + 100),
+            "a continuing run keeps its ORIGINAL start"
+        );
+        assert_eq!(observation.sweeps_completed, 2);
+
+        // Still inside the tolerance -- truncation is by design, and a
+        // draining backlog is the bound working.
+        assert!(revops::lifecycle::retention_is_healthy(&observation, NOW, NOW + 200).is_ok());
+
+        // Outlast it and the store is growing despite retention running.
+        // Note what "running" means here: the truncation refusal is only
+        // reachable while sweeps are still ARRIVING, because silence is
+        // checked first. A node that both stopped sweeping and was behind
+        // reports the stall -- the actionable cause. So the sustained case
+        // carries a FRESH last sweep alongside the old truncation start,
+        // which is exactly what a node an entire day behind looks like.
+        let sustained_now =
+            NOW + 100 + revops::lifecycle::RETENTION_TRUNCATION_TOLERANCE_SECONDS + 1;
+        let sustained = revops::lifecycle::RetentionObservation {
+            last_sweep_at: Some(sustained_now - 60),
+            ..observation
+        };
+        let refusal = revops::lifecycle::retention_is_healthy(&sustained, NOW, sustained_now)
+            .expect_err("retention permanently behind is not healthy");
+        assert_eq!(refusal.code(), "retention_persistently_truncated");
+    }
+
+    /// R68-3: and the run clears the moment a sweep catches up, so a node
+    /// that recovered hours ago does not stay red forever.
+    #[test]
+    fn a_sweep_that_catches_up_clears_the_truncation_run() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+        insert_old_trigger_events(&h, 8_001);
+
+        for (cycle, at) in [(1, NOW + 100), (2, NOW + 200), (3, NOW + 300)] {
+            assert!(
+                matches!(h.run_cycle(), CycleOutcome::Ran { .. }),
+                "cycle {cycle}"
+            );
+            pump_store_results_at(&mut h.owner, &rx, at);
+        }
+
+        let observation = h.owner.retention_observation();
+        assert_eq!(observation.sweeps_completed, 3);
+        assert_eq!(
+            observation.truncated_since, None,
+            "the third sweep drained the remainder and caught up"
+        );
+        let remaining: i64 = h
+            .store_conn()
+            .query_row(
+                "SELECT COUNT(*) FROM rust_fee_trigger_events WHERE received_at = 1000",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    /// R68-3: and the same evidence reaches the operator surface, not just
+    /// the in-process gate.
+    #[test]
+    fn fee_debug_reports_the_retention_liveness_evidence() {
+        let mut h = seedonce_harness_with_one_channel();
+        let rx = self_channel(&mut h.owner);
+        insert_old_trigger_events(&h, 1);
+
+        let debug = h.owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert_eq!(debug["retention"]["sweeps_completed"], 0);
+        assert!(debug["retention"]["last_sweep_at"].is_null());
+        assert!(debug["retention"]["truncated_since"].is_null());
+
+        assert!(matches!(h.run_cycle(), CycleOutcome::Ran { .. }));
+        pump_store_results_at(&mut h.owner, &rx, NOW + 10);
+        let debug = h.owner.fee_debug(&FeeDebugQuery::RunwayCounters);
+        assert_eq!(debug["retention"]["sweeps_completed"], 1);
+        assert_eq!(debug["retention"]["last_sweep_at"], NOW + 10);
+        assert!(debug["retention"]["truncated_since"].is_null());
     }
 
     #[test]

@@ -1641,6 +1641,19 @@ pub struct CycleOwner {
     /// previous sweep's report is outstanding schedules nothing (the next
     /// committed cycle re-schedules).
     retention_in_flight: bool,
+    /// R68-3: sweeps whose report came back, this process. Reported, never
+    /// gated on -- a count says nothing about WHEN.
+    retention_sweeps_completed: u64,
+    /// R68-3: when the last sweep report was applied. `None` = retention
+    /// has produced nothing at all this process, which the counter above
+    /// and `retention_failures` both report as a clean zero.
+    retention_last_sweep_at: Option<i64>,
+    /// R68-3: when the current unbroken run of TRUNCATED sweeps began.
+    /// Cleared by any sweep that catches up. Task 59 kept only
+    /// `next_cursor` from the report and discarded `truncated`, so
+    /// retention that is permanently behind looked exactly like retention
+    /// that had finished the job.
+    retention_truncated_since: Option<i64>,
     db_path: PathBuf,
     /// `None` only if the journal dir could not be created -- logged
     /// loudly at construction; cycles still run (decisions are lost to
@@ -1763,6 +1776,9 @@ impl CycleOwner {
             retention_failures: 0,
             retention_cursor: revops_db::retention::RetentionCursor::default(),
             retention_in_flight: false,
+            retention_sweeps_completed: 0,
+            retention_last_sweep_at: None,
+            retention_truncated_since: None,
             db_path: cfg.db_path.clone(),
             journal,
             state_sink,
@@ -2142,6 +2158,21 @@ impl CycleOwner {
     /// not be dispatched. Never reset.
     pub fn retention_failures(&self) -> u64 {
         self.retention_failures
+    }
+
+    /// R68-3: everything `revops::lifecycle::retention_is_healthy` needs.
+    ///
+    /// The scheduler is the only thing that schedules sweeps, so it is the
+    /// only honest producer of this. Exposed as the observation type
+    /// rather than four getters so a caller cannot assemble a partial one
+    /// and still satisfy the gate.
+    pub fn retention_observation(&self) -> crate::lifecycle::RetentionObservation {
+        crate::lifecycle::RetentionObservation {
+            failures: self.retention_failures,
+            sweeps_completed: self.retention_sweeps_completed,
+            last_sweep_at: self.retention_last_sweep_at,
+            truncated_since: self.retention_truncated_since,
+        }
     }
 
     /// Task 59 §3.6: age of the OLDEST in-flight A3 occurrence, if any.
@@ -3530,6 +3561,20 @@ impl CycleOwner {
                 match result {
                     Ok(report) => {
                         self.retention_cursor = report.next_cursor;
+                        // R68-3: a sweep that came back is the only proof
+                        // retention is still alive, and `truncated` is the
+                        // only proof it is keeping up.
+                        let now = clock();
+                        self.retention_sweeps_completed += 1;
+                        self.retention_last_sweep_at = Some(now);
+                        if report.truncated {
+                            // The run is stamped where it BEGAN, so a
+                            // long backlog is one run rather than a fresh
+                            // one every sweep.
+                            self.retention_truncated_since.get_or_insert(now);
+                        } else {
+                            self.retention_truncated_since = None;
+                        }
                     }
                     Err(e) => {
                         // Loud + counted red, never reset -- and never
@@ -4217,6 +4262,12 @@ impl CycleOwner {
                 "retention": {
                     "failures": self.retention_failures,
                     "in_flight": self.retention_in_flight,
+                    // R68-3: the two states a zero failure count cannot
+                    // distinguish from health -- sweeps that stopped, and
+                    // sweeps that never catch up.
+                    "sweeps_completed": self.retention_sweeps_completed,
+                    "last_sweep_at": self.retention_last_sweep_at,
+                    "truncated_since": self.retention_truncated_since,
                 },
                 })
             }
