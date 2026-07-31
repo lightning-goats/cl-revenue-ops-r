@@ -450,7 +450,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        69,
+        70,
         "methods: {methods:?}"
     );
 
@@ -458,7 +458,8 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // generic-ledger reserve and stale-release mutators; slice 3: the
     // closed-channel archival backfill; slice 4: the econ-ledger
     // reconciliation sweep; slice 5: the read-only shadow-cycle
-    // diagnostic; slice 6: the unified capex allocations read.
+    // diagnostic; slice 6: the unified capex allocations read; slice 7:
+    // the authority-gated manual fee write, closing the Python RPC set.
     for name in [
         "revenue-total-cost-budget",
         "revenue-spend-reserve",
@@ -467,6 +468,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         "revenue-econ-reconcile",
         "revenue-econ-cycle",
         "revenue-capex-status",
+        "revenue-set-fee",
     ] {
         assert!(methods.contains(&name), "missing {name}: {methods:?}");
     }
@@ -2262,6 +2264,31 @@ fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
         }),
         "the pre-Task-69 runtime has no candidate source and must say so"
     );
+}
+
+/// `revenue-r-set-fee` through the spawned binary: every e2e mode is
+/// non-live, so the shared fee-authority lease DENIES with Python's exact
+/// merged dict (cl-revenue-ops.py:4721-4728) — before any validation, so
+/// even a garbage fee_ppm gets the denial, not a validation error. The
+/// manual fee write can never execute pre-Task-69.
+#[test]
+fn revenue_r_set_fee_is_denied_by_the_authority_lease() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let denied = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-set-fee",
+        serde_json::json!({"channel_id": "100x1x0", "fee_ppm": "garbage", "force": true}),
+    );
+    assert_eq!(denied["error"], "Fee authority disabled", "{denied:?}");
+    assert_eq!(denied["status"], "blocked");
+    assert_eq!(denied["reason"], "fee_authority_disabled");
+    assert_eq!(denied["operation"], "revenue-set-fee");
+    assert!(denied["generation"].is_i64() || denied["generation"].is_u64());
+    assert!(denied["transitioned_at"].is_i64());
 }
 
 /// `revenue-r-capex-status` through the spawned binary: Python's engine

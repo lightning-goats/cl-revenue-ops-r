@@ -767,6 +767,59 @@ fn register_econ_reconcile(
     )
 }
 
+fn register_set_fee(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "manually set a channel fee while holding the shared authority lease (denied in \
+         every non-live mode; the manual execution seam stays unassembled until Task 69)",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let state = p.state();
+                let fee_cfg = revops::fee_config::resolve_fee_cfg(
+                    state.db.as_ref(),
+                    &state.python_options.snapshot(),
+                )
+                .await;
+                Ok(revops::rpc_set_fee::set_fee_response(
+                    revops::rpc_set_fee::SetFeeSources {
+                        gate: &state.fee_authority_status,
+                        channel_id: decoded.get("channel_id"),
+                        fee_ppm: decoded.get("fee_ppm"),
+                        force: decoded
+                            .get("force")
+                            .map(revops::rpc_params::is_truthy_py)
+                            .unwrap_or(false),
+                        // NO manual fee execution capability exists until
+                        // Task 69's authority-gated assembly; with the
+                        // gate enabled this arm answers Python's exact
+                        // "Plugin not fully initialized".
+                        setter: None,
+                        // py's ONE global ForceRateLimiter, keyed per
+                        // command -- shared with revenue-rebalance.
+                        rate_limiter: &state.rebalance_rate_limiter,
+                        min_fee_ppm: fee_cfg.min_fee_ppm,
+                        max_fee_ppm: fee_cfg.max_fee_ppm,
+                        now_seconds: now_unix() as f64,
+                    },
+                ))
+            }
+        },
+    )
+}
+
 fn register_capex_status(
     builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
     name: &str,
@@ -1651,6 +1704,13 @@ async fn main() -> Result<()> {
     let capex_status_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-capex-status",
+    );
+    // Task 66 slice 7: the authority-gated manual fee write -- the final
+    // RPC closing the Python canonical set.
+    let set_fee_name = rpc_name("set-fee");
+    let set_fee_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-set-fee",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -3515,6 +3575,7 @@ async fn main() -> Result<()> {
     let builder = register_econ_reconcile(builder, &econ_reconcile_name, econ_reconcile_spec);
     let builder = register_econ_cycle(builder, &econ_cycle_name, econ_cycle_spec);
     let builder = register_capex_status(builder, &capex_status_name, capex_status_spec);
+    let builder = register_set_fee(builder, &set_fee_name, set_fee_spec);
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 

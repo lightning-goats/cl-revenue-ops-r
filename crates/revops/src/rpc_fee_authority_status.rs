@@ -45,6 +45,24 @@ impl FeeAuthorityStatusSnapshot {
         )
     }
 
+    /// Python-parity `execution_lease` denial (fee_authority.py:109-147,
+    /// 165-175): the `_blocked_reason` dict merged under Python's
+    /// `{"error": "Fee authority disabled", **denial}` (cl-revenue-ops.py:
+    /// 4721-4728). Startup mode is immutable, so no authority transition
+    /// can race this observation.
+    pub fn execution_lease_denial(&self, operation: &str) -> Option<Value> {
+        (!self.enabled).then(|| {
+            json!({
+                "error": "Fee authority disabled",
+                "status": "blocked",
+                "reason": "fee_authority_disabled",
+                "operation": operation,
+                "generation": self.generation,
+                "transitioned_at": self.transitioned_at,
+            })
+        })
+    }
+
     /// Python-parity denial for the immediate fee-cycle RPC. Startup mode
     /// is immutable, so no authority transition can race this observation.
     pub fn fee_cycle_denial_response(&self) -> Option<Value> {

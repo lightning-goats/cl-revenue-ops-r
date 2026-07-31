@@ -66,6 +66,24 @@ fn python_schema(path: &PathBuf) {
             metadata_json TEXT
         );
         CREATE TABLE rebalance_costs (cost_sats INTEGER, timestamp INTEGER);
+        CREATE TABLE closed_channels (
+            channel_id TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL,
+            capacity_sats INTEGER NOT NULL,
+            opened_at INTEGER,
+            closed_at INTEGER NOT NULL,
+            close_type TEXT NOT NULL,
+            open_cost_sats INTEGER NOT NULL DEFAULT 0,
+            closure_cost_sats INTEGER NOT NULL DEFAULT 0,
+            total_revenue_sats INTEGER NOT NULL DEFAULT 0,
+            total_rebalance_cost_sats INTEGER NOT NULL DEFAULT 0,
+            forward_count INTEGER NOT NULL DEFAULT 0,
+            net_pnl_sats INTEGER NOT NULL DEFAULT 0,
+            days_open INTEGER NOT NULL DEFAULT 0,
+            funding_txid TEXT,
+            closing_txid TEXT,
+            closer TEXT DEFAULT 'unknown'
+        );
         "#,
     )
     .unwrap();
