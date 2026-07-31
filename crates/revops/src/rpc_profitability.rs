@@ -12,10 +12,14 @@
 //! takes them as already-fetched inputs, same convention as
 //! `rpc_dashboard::build_dashboard` taking a `&PnlSummary`.
 //!
-//! `fee_multiplier` (`profitability_analyzer.get_fee_multiplier`,
-//! cl-revenue-ops.py:4968) reads the fee controller's live in-memory DTS
-//! posterior state, which has no Rust-side equivalent wired to this
-//! read-only batch -- always `null`, gap-listed.
+//! C71-29: `fee_multiplier` (`profitability_analyzer.get_fee_multiplier`,
+//! cl-revenue-ops.py:4963) is now served. The note that used to sit here
+//! said it "reads the fee controller's live in-memory DTS posterior
+//! state" -- that was wrong. Python derives it from MARGINAL ROI plus the
+//! F8 reliability gate and the ZOMBIE classification, all of which are
+//! already fields of the `ChannelProfitability` this builder receives. The
+//! `null` was never a missing input, only an unwritten branch, and the
+//! `_gaps` entry that advertised it is gone with it.
 
 use revops_analytics::profitability::{ChannelProfitability, ProfitabilityClass};
 use serde_json::{json, Value};
@@ -98,7 +102,7 @@ pub fn build_profitability_channel(
             "roi_percentage": revops_econ::pyfloat::py_round(r.roi_percent, 2),
             "profitability_class": r.classification.as_value(),
             "days_active": r.days_open,
-            "fee_multiplier": Value::Null,
+            "fee_multiplier": crate::profitability_assembler::fee_multiplier(r),
             "outbound_flow": {
                 "payment_count": outbound_count,
                 "volume_sats": r.revenue.volume_routed_sats(),
@@ -115,7 +119,6 @@ pub fn build_profitability_channel(
             "volume_routed_sats": r.revenue.volume_routed_sats(),
             "forward_count": outbound_count,
         },
-        "_gaps": ["profitability.fee_multiplier"],
     })
 }
 
@@ -389,9 +392,14 @@ mod tests {
         assert_eq!(p["forward_count"], 10);
         assert_eq!(p["outbound_flow"]["payment_count"], 10);
         assert_eq!(p["inbound_flow"]["payment_count"], 5);
-        // fee_multiplier is an honest, always-declared gap.
-        assert_eq!(p["fee_multiplier"], Value::Null);
-        assert_eq!(v["_gaps"][0], "profitability.fee_multiplier");
+        // C71-29: served, not gap-marked. This channel has no 30d
+        // rebalance spend, so py's F8 gate makes it neutral -- Python's own
+        // answer, reached by evaluating the rule rather than skipping it.
+        assert_eq!(p["fee_multiplier"], json!(1.0));
+        assert!(
+            v.get("_gaps").is_none(),
+            "no gaps remain on the single-channel shape: {v:?}"
+        );
     }
 
     #[test]

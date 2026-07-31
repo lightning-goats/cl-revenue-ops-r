@@ -429,3 +429,43 @@ pub fn assemble_fleet(
     }
     out
 }
+
+/// py `ProfitabilityAnalyzer.get_fee_multiplier`
+/// (profitability_analyzer.py:979-1033).
+///
+/// C71-29: `build_profitability_channel` used to hardcode
+/// `fee_multiplier: null` under a `_gaps` marker. It needs no new source --
+/// it is a pure function of the channel this port has already assembled,
+/// so a null there was never a missing input, only an unwritten branch.
+///
+/// The metric is MARGINAL ROI, deliberately not total ROI: a channel must
+/// not be punished with higher fees for an opening cost it has not yet
+/// recovered. What matters operationally is whether its fee revenue covers
+/// its ONGOING rebalance spend.
+pub fn fee_multiplier(channel: &ChannelProfitability) -> f64 {
+    // py audit F8: under 100 sats of 30d rebalance spend the ratio swings
+    // on a handful of sats, so it is neutral rather than a fee driver.
+    // Neutral here is Python's own answer, not a fabricated default.
+    if !channel.marginal_roi_reliable() {
+        return 1.0;
+    }
+    let marginal_roi = channel.marginal_roi();
+    if marginal_roi > 0.20 {
+        // Highly profitable operationally -- keep fees competitive.
+        0.95
+    } else if marginal_roi >= 0.0 {
+        1.0
+    } else if marginal_roi >= -0.20 {
+        1.05
+    } else if marginal_roi >= -0.50 {
+        1.10
+    } else if channel.classification == revops_analytics::profitability::ProfitabilityClass::Zombie
+    {
+        // Severe loss AND a zombie: py does not bother re-pricing it, it
+        // flags it for closure. Returning 1.15 here would keep raising
+        // fees on a channel nobody is routing through.
+        1.0
+    } else {
+        1.15
+    }
+}

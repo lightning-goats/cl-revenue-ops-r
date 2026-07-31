@@ -253,3 +253,127 @@ fn fleet_assembly_uses_the_evidence_last_routed_rather_than_reporting_never_rout
         "the opener must come from the live snapshot, not a fabricated \"local\""
     );
 }
+
+// ---------------------------------------------------------------------
+// C71-29: the fee multiplier the single-channel response used to gap-mark.
+//
+// py `get_fee_multiplier` (profitability_analyzer.py:979-1033) is a pure
+// function of MARGINAL ROI -- deliberately not total ROI, so a channel is
+// never punished with higher fees for an opening cost it has not yet
+// recovered. Every input is already a field of the assembled channel, so
+// the old `fee_multiplier: null` was an unwritten branch, not a missing
+// source.
+// ---------------------------------------------------------------------
+
+use revops::profitability_assembler::fee_multiplier;
+
+/// Build a channel with an exact marginal ROI: marginal profit over 30d
+/// rebalance spend. Spend is >= 100 sats so py's F8 reliability gate is
+/// satisfied and the ladder actually runs.
+fn with_marginal_roi(
+    profit_30d: i64,
+    spend_30d: i64,
+) -> revops_analytics::profitability::ChannelProfitability {
+    let c = costs(1_000, spend_30d, spend_30d, 5_000_000, NOW - 100 * DAY);
+    let mut i = input(revenue(0, 0, 0), revenue(0, 0, 0), c);
+    i.last_routed = Some(NOW - DAY);
+    let mut p = assemble_channel_profitability(i, NOW).expect("assembles");
+    // Set the marginal numerator directly: the ladder is what is under
+    // test, not the 30d revenue arithmetic that feeds it.
+    p.marginal_profit_30d_sats = profit_30d;
+    p.rebalance_cost_30d_sats = spend_30d;
+    p
+}
+
+#[test]
+fn the_fee_multiplier_ladder_matches_pythons_marginal_roi_bands() {
+    // > 20%: operationally strong, keep fees competitive.
+    assert_eq!(fee_multiplier(&with_marginal_roi(300, 1_000)), 0.95);
+    // >= 0: covering ongoing costs, no change.
+    assert_eq!(fee_multiplier(&with_marginal_roi(200, 1_000)), 1.0);
+    assert_eq!(fee_multiplier(&with_marginal_roi(0, 1_000)), 1.0);
+    // -20%..0: modest increase.
+    assert_eq!(fee_multiplier(&with_marginal_roi(-200, 1_000)), 1.05);
+    // -50%..-20%: larger increase.
+    assert_eq!(fee_multiplier(&with_marginal_roi(-500, 1_000)), 1.10);
+    // < -50%: try to recover.
+    assert_eq!(fee_multiplier(&with_marginal_roi(-600, 1_000)), 1.15);
+}
+
+#[test]
+fn the_ladder_boundaries_are_pythons_exact_comparisons() {
+    // py uses `> 0.20` and `>= 0`, `>= -0.20`, `>= -0.50`. Exactly 20%
+    // is NOT the competitive band; exactly -20% and -50% ARE the gentler
+    // ones. Flipping any comparison changes a real channel's fee.
+    assert_eq!(
+        fee_multiplier(&with_marginal_roi(200, 1_000)),
+        1.0,
+        "exactly +20% is not > 20%"
+    );
+    assert_eq!(
+        fee_multiplier(&with_marginal_roi(-200, 1_000)),
+        1.05,
+        "exactly -20% stays modest"
+    );
+    assert_eq!(
+        fee_multiplier(&with_marginal_roi(-500, 1_000)),
+        1.10,
+        "exactly -50% stays 1.10"
+    );
+}
+
+#[test]
+fn a_thinly_evidenced_marginal_roi_is_neutral_rather_than_a_fee_driver() {
+    // py audit F8: under 100 sats of 30d rebalance spend the ratio swings
+    // on a handful of sats. A 99-sat spend with a catastrophic ratio must
+    // not raise fees.
+    let thin = with_marginal_roi(-900, 99);
+    assert!(
+        thin.marginal_roi() < -0.5,
+        "precondition: the raw ratio is severe"
+    );
+    assert_eq!(
+        fee_multiplier(&thin),
+        1.0,
+        "a 99-sat spend must not drive a fee change"
+    );
+    // One sat more of evidence and the rule engages.
+    assert_eq!(fee_multiplier(&with_marginal_roi(-900, 100)), 1.15);
+}
+
+#[test]
+fn a_zombie_in_severe_loss_is_left_alone_rather_than_repriced() {
+    // py: at < -50% marginal ROI a ZOMBIE returns 1.0 -- it is flagged for
+    // closure, not re-priced. Returning 1.15 would keep raising fees on a
+    // channel nobody routes through.
+    let mut zombie = with_marginal_roi(-900, 1_000);
+    zombie.classification = ProfitabilityClass::Zombie;
+    assert_eq!(fee_multiplier(&zombie), 1.0);
+
+    // The same zombie in a SHALLOWER loss still takes the ordinary band --
+    // the zombie branch is reached only after the -50% test.
+    let mut shallow = with_marginal_roi(-300, 1_000);
+    shallow.classification = ProfitabilityClass::Zombie;
+    assert_eq!(fee_multiplier(&shallow), 1.10);
+}
+
+#[test]
+fn the_multiplier_uses_marginal_not_total_roi() {
+    // The sunk-cost guard, stated as behaviour: a channel drowning in
+    // OPENING cost but covering its ongoing spend must keep competitive
+    // fees. Using total ROI here would raise fees on exactly the channels
+    // that are working.
+    let c = costs(500_000, 1_000, 1_000, 5_000_000, NOW - 100 * DAY);
+    let mut i = input(revenue(0, 0, 0), revenue(0, 0, 0), c);
+    i.last_routed = Some(NOW - DAY);
+    let mut p = assemble_channel_profitability(i, NOW).expect("assembles");
+    p.marginal_profit_30d_sats = 300;
+    p.rebalance_cost_30d_sats = 1_000;
+
+    assert!(p.roi_percent < -50.0, "precondition: total ROI is dire");
+    assert_eq!(
+        fee_multiplier(&p),
+        0.95,
+        "marginal ROI is +30%: the channel is operationally healthy"
+    );
+}

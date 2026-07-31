@@ -562,3 +562,56 @@ fn an_unavailable_store_never_answers_with_pythons_unknown_channel_shape() {
         "an unconfigured store must be named, not silently empty"
     );
 }
+
+/// C71-29: a channel whose posterior could not be read must never reach a
+/// fee multiplier at all.
+///
+/// The multiplier is computed from an assembled `ChannelProfitability`, and
+/// a channel with a malformed posterior is SKIPPED before assembly -- so
+/// there is no path on which a null, a fabricated 1.0, or a stale prior
+/// value is emitted. The refusal shape carries no `profitability` object,
+/// which is what makes that structural rather than incidental.
+#[tokio::test]
+async fn a_channel_skipped_for_an_unreadable_posterior_emits_no_fee_multiplier() {
+    let f = fixture(
+        &seed_one_channel(),
+        vec![FeeStateRow {
+            channel_id: "700x1x0".to_string(),
+            v2_state_json: "{not json".to_string(),
+            last_update: NOW,
+        }],
+    )
+    .await;
+    let chans = channels("700x1x0", "remote");
+
+    let fleet = gather_profitability(ProfitabilitySources {
+        production_db: &f.production,
+        observer: &f.observer,
+        channels: &chans,
+        now: NOW,
+    })
+    .await
+    .expect("a corrupt row is a per-channel fact");
+
+    assert!(
+        !fleet.profitability.contains_key("700x1x0"),
+        "the channel must not be assembled at all"
+    );
+    let (_, reason) = fleet
+        .skipped
+        .iter()
+        .find(|(scid, _)| scid == "700x1x0")
+        .expect("the skip is reported");
+
+    let response =
+        revops::rpc_profitability::build_profitability_channel_unavailable("700x1x0", reason);
+    assert!(
+        response.get("profitability").is_none(),
+        "a refusal carries no profitability object, so no multiplier can be \
+         read from it: {response:?}"
+    );
+    assert!(
+        response.get("_gaps").is_none(),
+        "and no gap marker either: {response:?}"
+    );
+}
