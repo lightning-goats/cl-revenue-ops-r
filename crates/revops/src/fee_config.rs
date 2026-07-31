@@ -144,7 +144,7 @@ pub(crate) async fn resolve_int(
     }
 }
 
-async fn resolve_float(
+pub(crate) async fn resolve_float(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
     db_query_failures: &AtomicU64,

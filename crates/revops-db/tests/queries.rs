@@ -22,8 +22,9 @@ use revops_db::queries::{
     closure_costs_windows, config_override, cost_evidence_coverage,
     hot_channel_protection_override_peers, last_policy_change_timestamp, lifetime_stats,
     opening_costs_since, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
-    policy_changes_since, policy_for_peer, rebalance_spend_component, recent_fee_change_timestamps,
-    spend_ledger_aggregates, spend_reservation_states,
+    policy_changes_since, policy_for_peer, rebalance_spend_component, rebalance_success_rates,
+    recent_fee_change_timestamps, spend_ledger_aggregates, spend_reservation_states,
+    total_capex_by_channel,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -1823,5 +1824,79 @@ async fn zero_revenue_channels_appear_but_unknown_ones_do_not() {
     assert!(
         !costs.contains_key("999x9x9"),
         "unknown channels are absent, not zeroed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 66 slice 6: capex evidence reads
+// ---------------------------------------------------------------------------
+
+/// py `get_total_capex_by_channel` (database.py:7886-7917): rebalance_costs
+/// + spend_events summed per channel over the window, sats, RAW channel_id
+/// keys (Python does not normalize here). NULL/empty channel ids and
+/// out-of-window rows are excluded.
+///
+/// Seeded: fixture rebalance_costs row (2x2x0, cost 200, now-3600); plus a
+/// spend_events row for 2x2x0 (300), one for 5x5x0 (40), one with NULL
+/// channel_id (never counted), one empty-string channel_id (py `if cid`
+/// skips), and one for 2x2x0 OUTSIDE the 30d window. Expected:
+/// {2x2x0: 200+300=500, 5x5x0: 40}.
+#[tokio::test]
+async fn total_capex_by_channel_sums_both_sources_within_window() {
+    let (_dir, path) = seeded_db(NOW);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO spend_events (event_id, category, amount_sats, timestamp, channel_id) VALUES
+            ('cx1','channel_open',300,{recent},'2x2x0'),
+            ('cx2','channel_open',40,{recent},'5x5x0'),
+            ('cx3','channel_open',999,{recent},NULL),
+            ('cx4','channel_open',777,{recent},''),
+            ('cx5','channel_open',888,{old},'2x2x0');",
+        recent = NOW - 7200,
+        old = NOW - 31 * 86400,
+    ))
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let capex = total_capex_by_channel(&handle, 30, NOW).await.unwrap();
+    assert_eq!(capex.get("2x2x0"), Some(&500));
+    assert_eq!(capex.get("5x5x0"), Some(&40));
+    assert_eq!(capex.len(), 2, "{capex:?}");
+}
+
+/// py `get_all_channel_rebalance_success_rates` (database.py:5848-5887):
+/// one GROUP BY over rebalance_history's to_channel; only 'success' and
+/// 'failed' rows count toward `total`; a channel whose windowed rows are
+/// all pending has total 0 and is ABSENT; keys are normalize_scid'd
+/// (':' -> 'x'); out-of-window rows excluded.
+///
+/// Seeded for 4:4:0 (legacy colon spelling): success, failed, success in
+/// window + one success OUTSIDE the window -> total 3, successes 2,
+/// success_rate 2/3. For 6x6x0: only a pending row -> absent.
+#[tokio::test]
+async fn rebalance_success_rates_group_and_normalize_to_channel() {
+    let (_dir, path) = seeded_db(NOW);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO rebalance_history (from_channel, to_channel, amount_sats, max_fee_sats, expected_profit_sats, status, timestamp) VALUES
+            ('1x1x0','4:4:0',1000,10,5,'success',{w}),
+            ('1x1x0','4:4:0',1000,10,5,'failed',{w}),
+            ('1x1x0','4:4:0',1000,10,5,'success',{w}),
+            ('1x1x0','4:4:0',1000,10,5,'success',{old}),
+            ('1x1x0','6x6x0',1000,10,5,'pending',{w});",
+        w = NOW - 3600,
+        old = NOW - 31 * 86400,
+    ))
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    let rates = rebalance_success_rates(&handle, 30, NOW).await.unwrap();
+    let row = rates.get("4x4x0").expect("normalized key present");
+    assert_eq!(row.total, 3);
+    assert_eq!(row.successes, 2);
+    assert!((row.success_rate - 2.0 / 3.0).abs() < 1e-12);
+    assert!(
+        !rates.contains_key("6x6x0"),
+        "pending-only channel has total 0 and must be absent: {rates:?}"
     );
 }

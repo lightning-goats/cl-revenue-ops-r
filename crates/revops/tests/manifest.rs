@@ -450,7 +450,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        68,
+        69,
         "methods: {methods:?}"
     );
 
@@ -458,7 +458,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // generic-ledger reserve and stale-release mutators; slice 3: the
     // closed-channel archival backfill; slice 4: the econ-ledger
     // reconciliation sweep; slice 5: the read-only shadow-cycle
-    // diagnostic.
+    // diagnostic; slice 6: the unified capex allocations read.
     for name in [
         "revenue-total-cost-budget",
         "revenue-spend-reserve",
@@ -466,6 +466,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         "revenue-cleanup-closed",
         "revenue-econ-reconcile",
         "revenue-econ-cycle",
+        "revenue-capex-status",
     ] {
         assert!(methods.contains(&name), "missing {name}: {methods:?}");
     }
@@ -2261,6 +2262,46 @@ fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
         }),
         "the pre-Task-69 runtime has no candidate source and must say so"
     );
+}
+
+/// `revenue-r-capex-status` through the spawned binary: Python's engine
+/// gate without a DB ("Capex engine not initialized", cl-revenue-ops.py:
+/// 7718-7719); with a DB the full read path serves real allocations —
+/// this harness has no observer store, which is Python's
+/// `analyze_all_channels` fail-soft arm (all_prof = {}), so the shape is
+/// an EMPTY fleet with a real priority class, never an error. No
+/// datastore push happens (declared delta; the read RPC stays read-only
+/// pre-cutover).
+#[test]
+fn revenue_r_capex_status_guard_then_empty_fleet_allocations() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let no_db = call_after_init(false, None, home.path(), &[], "revenue-r-capex-status");
+    assert_eq!(
+        no_db,
+        serde_json::json!({"error": "Capex engine not initialized"})
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    let with_db = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-capex-status",
+    );
+    assert_eq!(with_db["status"], "ok", "{with_db:?}");
+    assert_eq!(with_db["ttl_seconds"], 1800);
+    assert_eq!(with_db["channel_count"], 0);
+    assert_eq!(with_db["channels"], serde_json::json!({}));
+    assert!(
+        ["defensive", "preservation", "operational", "growth"]
+            .contains(&with_db["priority_class"].as_str().unwrap_or("?")),
+        "{with_db:?}"
+    );
+    assert!(with_db["global_envelope_sats"].is_i64());
+    assert!(with_db["fleet_exploration_budget_sats"].is_i64());
+    assert!(with_db["allocated_by_priority_sats"].is_object());
 }
 
 /// `revenue-r-spend-ledger` must read the real `spend_events` table

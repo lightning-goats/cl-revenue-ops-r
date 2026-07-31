@@ -9,6 +9,7 @@ pub mod analytics_passes;
 pub mod boltz_boundaries;
 pub mod boltz_config;
 pub mod boltz_owner;
+pub mod capex_evidence;
 pub mod capital_adapters;
 pub mod capital_boundaries;
 pub mod capital_candidates;

@@ -1069,6 +1069,108 @@ pub async fn rebalance_spend_component(
     })
 }
 
+/// py `get_total_capex_by_channel` (database.py:7886-7917): windowed capex
+/// per channel from `rebalance_costs` + `spend_events`, in SATS, keyed by
+/// RAW channel_id (Python does not normalize scid spellings here — two
+/// alias spellings stay two keys, exactly as Python's dict does). NULL and
+/// empty channel ids are skipped (py `if cid:`).
+///
+/// The capex engine treats a FAILED read as CB-4 fail-closed `None`
+/// ("deny all spend this cycle", capex_budget.py:744-757) — that mapping
+/// belongs to the caller; this function just surfaces `Err`.
+pub async fn total_capex_by_channel(
+    handle: &DbHandle,
+    window_days: i64,
+    now: i64,
+) -> Result<BTreeMap<String, i64>> {
+    let since = now - window_days * 86400;
+    let mut out: BTreeMap<String, i64> = BTreeMap::new();
+    for sql in [
+        "SELECT channel_id, COALESCE(SUM(cost_sats), 0) FROM rebalance_costs \
+         WHERE timestamp >= ?1 GROUP BY channel_id",
+        "SELECT channel_id, COALESCE(SUM(amount_sats), 0) FROM spend_events \
+         WHERE timestamp >= ?1 AND channel_id IS NOT NULL GROUP BY channel_id",
+    ] {
+        let rows = handle
+            .query_rows(sql, vec![SqlValue::Integer(since)], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, i64>(1)?,
+                ))
+            })
+            .await?;
+        for (channel_id, total) in rows {
+            if channel_id.is_empty() {
+                continue;
+            }
+            *out.entry(channel_id).or_insert(0) += total;
+        }
+    }
+    Ok(out)
+}
+
+/// One channel's windowed rebalance outcome counts — the
+/// `get_all_channel_rebalance_success_rates` fields the capex engine and
+/// the bleeder scan consume (py capex_budget.py:567-575,
+/// profitability_analyzer.py:1680-1687: `total` and `success_rate`;
+/// `successes` kept because the rate derives from it). Python's
+/// failures/avg_cost_ppm/avg_amount_sats have no Rust consumer and are
+/// not ported.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RebalanceSuccessRateRow {
+    pub total: i64,
+    pub successes: i64,
+    pub success_rate: f64,
+}
+
+/// py `get_all_channel_rebalance_success_rates` (database.py:5848-5887):
+/// one GROUP BY over `rebalance_history.to_channel`; only 'success' and
+/// 'failed' rows count toward `total` (a pending-only channel has total 0
+/// and is absent); keys are `normalize_scid`'d exactly like Python's
+/// result dict (later alias spellings overwrite earlier ones — ORDER BY
+/// makes that overwrite order deterministic where sqlite's GROUP BY
+/// ordering is not contractual).
+pub async fn rebalance_success_rates(
+    handle: &DbHandle,
+    window_days: i64,
+    now: i64,
+) -> Result<BTreeMap<String, RebalanceSuccessRateRow>> {
+    let cutoff = now - window_days * 86400;
+    let rows = handle
+        .query_rows(
+            "SELECT to_channel, \
+             SUM(CASE WHEN status IN ('success', 'failed') THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) \
+             FROM rebalance_history \
+             WHERE timestamp >= ?1 AND to_channel IS NOT NULL \
+             GROUP BY to_channel ORDER BY to_channel",
+            vec![SqlValue::Integer(cutoff)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .await?;
+    let mut out = BTreeMap::new();
+    for (to_channel, total, successes) in rows {
+        if total <= 0 {
+            continue;
+        }
+        out.insert(
+            to_channel.replace(':', "x"),
+            RebalanceSuccessRateRow {
+                total,
+                successes,
+                success_rate: successes as f64 / total as f64,
+            },
+        );
+    }
+    Ok(out)
+}
+
 /// Actor-side port of `Database.get_spend_reservation_states`' no-filter
 /// form (the only form `revenue-econ-reconcile` uses): every reservation's
 /// (status, reserved_sats) keyed by id, ordered, capped at 10000 —

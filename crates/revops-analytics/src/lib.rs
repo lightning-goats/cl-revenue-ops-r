@@ -9,6 +9,7 @@
 //! comments only until their owning task replaces them.
 #![forbid(unsafe_code)]
 
+pub mod bleeder;
 pub mod classification;
 pub mod demand_flow;
 pub mod flow;

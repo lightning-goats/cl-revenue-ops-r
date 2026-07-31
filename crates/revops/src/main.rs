@@ -68,6 +68,12 @@ struct State {
     /// 6147): the shadow-cycle sequence counter, consumed only after the
     /// enabled + engine gates pass (see `rpc_econ_cycle`).
     econ_cycle_seq: std::sync::atomic::AtomicI64,
+    /// Port of the profitability analyzer's bleeder verdict cache
+    /// (`_bleeder_cache`/`_bleeder_cache_time`, profitability_analyzer.py:
+    /// 1808-1813): `(refreshed_at, scid -> classification)`. Fresh
+    /// (<= 300s) verdicts are reused without a rescan; a STALE map still
+    /// feeds the F4a hysteresis hold on the next rescan (py 1634).
+    bleeder_cache: std::sync::Mutex<Option<(i64, std::collections::BTreeMap<String, String>)>>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -756,6 +762,153 @@ fn register_econ_reconcile(
                     },
                 )
                 .await)
+            }
+        },
+    )
+}
+
+fn register_capex_status(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "unified capex budget allocations (per-channel budgets, fleet exploration, \
+         tactical, priority class, global envelope); READ-ONLY -- Python's datastore \
+         push is a declared delta (see revops::capex_evidence)",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                // py `**kwargs` swallows extras -- the contract entry
+                // carries allow_extra_named=true, so this only rejects
+                // shapes pyln itself would reject.
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                let state = p.state();
+                // py: `capex_engine` stays None until init constructed it
+                // over the database (cl-revenue-ops.py:3078); no DB, no
+                // engine.
+                let Some(db) = state.db.as_ref() else {
+                    return Ok(serde_json::json!({"error": "Capex engine not initialized"}));
+                };
+                let now = now_unix();
+
+                let channels =
+                    revops::profitability_assembler::fetch_channel_snapshot(&state.socket_path)
+                        .await;
+                let (profitability, active_scids) = match &channels {
+                    Ok(list) => {
+                        // py `_get_all_channels` (profitability_analyzer.
+                        // py:1921-1935): CHANNELD_NORMAL only, normalized.
+                        let active: Vec<String> = list
+                            .iter()
+                            .filter(|c| {
+                                c.get("state").and_then(serde_json::Value::as_str)
+                                    == Some("CHANNELD_NORMAL")
+                            })
+                            .filter_map(|c| {
+                                c.get("short_channel_id")
+                                    .and_then(serde_json::Value::as_str)
+                            })
+                            .filter(|scid| !scid.is_empty())
+                            .map(|scid| scid.replace(':', "x"))
+                            .collect();
+                        let profitability = match state.observer_db.as_ref() {
+                            Some(observer) => {
+                                revops::profitability_assembler::gather_profitability(
+                                    revops::profitability_assembler::ProfitabilitySources {
+                                        production_db: db,
+                                        observer,
+                                        channels: list,
+                                        now,
+                                    },
+                                )
+                                .await
+                                .map(|fleet| fleet.profitability)
+                                .map_err(|refusal| refusal.detail().to_string())
+                            }
+                            None => Err("observer store not configured".to_string()),
+                        };
+                        (profitability, active)
+                    }
+                    Err(error) => (Err(error.clone()), Vec::new()),
+                };
+                let flow_states = match state.observer_db.as_ref() {
+                    Some(observer) => observer
+                        .channel_flow_states()
+                        .await
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(|row| (row.scid.clone(), row))
+                                .collect::<HashMap<_, _>>()
+                        })
+                        .map_err(|error| error.to_string()),
+                    None => Err("observer store not configured".to_string()),
+                };
+                let cfg = revops::capex_evidence::resolve_capex_config(
+                    Some(db),
+                    &state.python_options.snapshot(),
+                )
+                .await;
+                let (cached_bleeder, prev_bleeder) = {
+                    let cache = state.bleeder_cache.lock().expect("bleeder cache lock");
+                    match cache.as_ref() {
+                        // py 1808-1809: refresh only when older than 300s.
+                        Some((at, map)) if now - at <= 300 => (Some(map.clone()), map.clone()),
+                        Some((_, map)) => (None, map.clone()),
+                        None => (None, std::collections::BTreeMap::new()),
+                    }
+                };
+
+                let day30 = now - 30 * 86400;
+                let day7 = now - 7 * 86400;
+                let (response, verdicts) = revops::capex_evidence::capex_status_response(
+                    revops::capex_evidence::CapexStatusSources {
+                        profitability,
+                        active_scids,
+                        revenue_30d: queries::per_channel_revenue(db, day30)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        costs_30d: queries::per_channel_costs(db, day30)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        revenue_7d: queries::per_channel_revenue(db, day7)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        costs_7d: queries::per_channel_costs(db, day7)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        success_rates: queries::rebalance_success_rates(db, 30, now)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        capex_by_channel: queries::total_capex_by_channel(db, 30, now)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        spend_aggregates: queries::spend_ledger_aggregates(db, 30 * 24, now)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        listfunds: revops::profitability_assembler::fetch_read_rpc(
+                            &state.socket_path,
+                            "listfunds",
+                        )
+                        .await,
+                        flow_states,
+                        cached_bleeder,
+                        prev_bleeder,
+                        cfg,
+                        now,
+                    },
+                );
+                // py refresh assigns the new cache unconditionally
+                // (profitability_analyzer.py:1810-1813).
+                *state.bleeder_cache.lock().expect("bleeder cache lock") = Some((now, verdicts));
+                Ok(response)
             }
         },
     )
@@ -1492,6 +1645,12 @@ async fn main() -> Result<()> {
     let econ_cycle_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-econ-cycle",
+    );
+    // Task 66 slice 6: the unified capex allocations read.
+    let capex_status_name = rpc_name("capex-status");
+    let capex_status_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-capex-status",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -3355,6 +3514,7 @@ async fn main() -> Result<()> {
     let builder = register_cleanup_closed(builder, &cleanup_closed_name, cleanup_closed_spec);
     let builder = register_econ_reconcile(builder, &econ_reconcile_name, econ_reconcile_spec);
     let builder = register_econ_cycle(builder, &econ_cycle_name, econ_cycle_spec);
+    let builder = register_capex_status(builder, &capex_status_name, capex_status_spec);
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
@@ -4087,6 +4247,7 @@ async fn main() -> Result<()> {
         core_mutations,
         journal_dir: journal_dir.clone(),
         econ_cycle_seq: std::sync::atomic::AtomicI64::new(0),
+        bleeder_cache: std::sync::Mutex::new(None),
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,
