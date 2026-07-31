@@ -1,16 +1,19 @@
 //! Exact policy-mutator planning and response contracts for canonical RPCs.
 
-use revops_analytics::policy::PeerPolicy;
+use revops_analytics::policy::{is_valid_peer_id, PeerPolicy};
 use revops_db::{
+    actor::DbHandle,
     budget::ReserveRequest,
-    state_writer::{PeerPolicyWrite, SpendReleaseBatch},
+    state_writer::{PeerPolicyWrite, PolicyDelete, SpendReleaseBatch},
 };
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use crate::{
+    fee_scheduler::{CycleMsg, SchedulerIngress},
     rpc_params::{is_truthy_py, python_int},
-    state_writer::StateWriteAck,
+    state_writer::{CoreMutators, StateWriteAck},
 };
 
 const BANNED_TAG: &str = "banned";
@@ -106,7 +109,8 @@ pub fn unban_plan(existing: &PeerPolicy) -> PeerPolicyWrite {
     write_from_policy(existing, "dynamic", "enabled", tags, existing.expires_at)
 }
 
-pub fn ignore_success(peer_id: &str, reason: &str) -> Value {
+pub fn ignore_success(peer_id: &str, reason: impl Into<Value>) -> Value {
+    let reason = reason.into();
     json!({
         "status": "success",
         "action": "ignore",
@@ -129,7 +133,8 @@ pub fn unignore_success(peer_id: &str) -> Value {
     })
 }
 
-pub fn ban_success(peer_id: &str, reason: &str, tags: &[String]) -> Value {
+pub fn ban_success(peer_id: &str, reason: impl Into<Value>, tags: &[String]) -> Value {
+    let reason = reason.into();
     json!({
         "status": "success",
         "action": "ban",
@@ -620,4 +625,449 @@ pub fn build_profile_preview(
         );
     }
     Value::Object(response)
+}
+
+const MAX_POLICY_CHANGES_PER_MINUTE: usize = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyMutationAction {
+    Ignore,
+    Unignore,
+    Ban,
+    Unban,
+}
+
+pub struct PolicyMutationOwner {
+    core: CoreMutators,
+    reader: DbHandle,
+    fee_ingress: SchedulerIngress,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    rate_limit: Mutex<HashMap<String, Vec<i64>>>,
+}
+
+impl PolicyMutationOwner {
+    pub fn assemble(
+        core: CoreMutators,
+        reader: DbHandle,
+        fee_ingress: SchedulerIngress,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Self {
+        Self {
+            core,
+            reader,
+            fee_ingress,
+            clock,
+            rate_limit: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn handle(&self, action: PolicyMutationAction, params: &Map<String, Value>) -> Value {
+        match action {
+            PolicyMutationAction::Ignore => self.ignore(params).await,
+            PolicyMutationAction::Unignore => self.unignore(params).await,
+            PolicyMutationAction::Ban => self.ban(params).await,
+            PolicyMutationAction::Unban => self.unban(params).await,
+        }
+    }
+
+    fn peer_id(params: &Map<String, Value>) -> Result<String, Value> {
+        let peer_id = params
+            .get("peer_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !is_valid_peer_id(peer_id) {
+            return Err(invalid_peer_id_error());
+        }
+        Ok(peer_id.to_string())
+    }
+
+    async fn existing_policy(&self, peer_id: &str, now: i64) -> Result<PeerPolicy, Value> {
+        revops_db::queries::policy_for_peer(&self.reader, peer_id, now)
+            .await
+            .map_err(|error| write_error("read_failed", &format!("{error:#}")))
+    }
+
+    fn rate_limit_allows(&self, peer_id: &str, now: i64) -> bool {
+        let window_start = now - 60;
+        let mut all = self.rate_limit.lock().expect("policy rate limit poisoned");
+        let timestamps = all.entry(peer_id.to_string()).or_default();
+        timestamps.retain(|timestamp| *timestamp > window_start);
+        timestamps.len() < MAX_POLICY_CHANGES_PER_MINUTE
+    }
+
+    fn record_completed_change(&self, peer_id: &str, now: i64) {
+        let window_start = now - 60;
+        let mut all = self.rate_limit.lock().expect("policy rate limit poisoned");
+        let timestamps = all.entry(peer_id.to_string()).or_default();
+        timestamps.retain(|timestamp| *timestamp > window_start);
+        timestamps.push(now);
+    }
+
+    fn rate_limit_error(peer_id: &str) -> Value {
+        json!({
+            "status": "error",
+            "error": format!(
+                "Rate limited: max {} changes/minute for {}...",
+                MAX_POLICY_CHANGES_PER_MINUTE,
+                &peer_id[..12]
+            ),
+        })
+    }
+
+    async fn wake_after_commit(&self, peer_id: &str) {
+        if self
+            .fee_ingress
+            .send(CycleMsg::PolicyChanged {
+                peer_id: peer_id.to_string(),
+            })
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "revops: committed peer policy for {peer_id}, but fee owner is unavailable; the next cycle still rehydrates policy state"
+            );
+        }
+    }
+
+    async fn complete_upsert(
+        &self,
+        peer_id: &str,
+        now: i64,
+        write: PeerPolicyWrite,
+        success: Value,
+    ) -> Value {
+        let ack = self.core.upsert_peer_policy(write, now).await;
+        let applied = matches!(&ack, StateWriteAck::Applied(()));
+        let response = completed_write_response(ack, |_| success);
+        if applied {
+            self.record_completed_change(peer_id, now);
+            self.wake_after_commit(peer_id).await;
+        }
+        response
+    }
+
+    pub async fn ignore(&self, params: &Map<String, Value>) -> Value {
+        if let Some(denial) = deprecated_policy_write_gate("ignore", params) {
+            return denial;
+        }
+        let peer_id = match Self::peer_id(params) {
+            Ok(peer_id) => peer_id,
+            Err(error) => return error,
+        };
+        let now = (self.clock)();
+        let existing = match self.existing_policy(&peer_id, now).await {
+            Ok(existing) => existing,
+            Err(error) => return error,
+        };
+        if !self.rate_limit_allows(&peer_id, now) {
+            return Self::rate_limit_error(&peer_id);
+        }
+        let reason = params
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| json!("manual"));
+        let write = ignore_plan(&existing, &python_str(&reason));
+        let success = ignore_success(&peer_id, reason);
+        self.complete_upsert(&peer_id, now, write, success).await
+    }
+
+    pub async fn unignore(&self, params: &Map<String, Value>) -> Value {
+        if let Some(denial) = deprecated_policy_write_gate("unignore", params) {
+            return denial;
+        }
+        let peer_id = match Self::peer_id(params) {
+            Ok(peer_id) => peer_id,
+            Err(error) => return error,
+        };
+        let ack = self.core.delete_peer_policy(peer_id.clone()).await;
+        let changed = matches!(&ack, StateWriteAck::Applied(PolicyDelete::Deleted));
+        let response = completed_write_response(ack, |_| unignore_success(&peer_id));
+        if changed {
+            self.wake_after_commit(&peer_id).await;
+        }
+        response
+    }
+
+    pub async fn ban(&self, params: &Map<String, Value>) -> Value {
+        let peer_id = match Self::peer_id(params) {
+            Ok(peer_id) => peer_id,
+            Err(error) => return error,
+        };
+        let now = (self.clock)();
+        let existing = match self.existing_policy(&peer_id, now).await {
+            Ok(existing) => existing,
+            Err(error) => return error,
+        };
+        if !self.rate_limit_allows(&peer_id, now) {
+            return Self::rate_limit_error(&peer_id);
+        }
+        let reason = params
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| json!("operator"));
+        let mut tags = existing.tags.clone();
+        if !tags.iter().any(|tag| tag == BANNED_TAG) {
+            tags.push(BANNED_TAG.to_string());
+        }
+        let write = ban_plan(&existing);
+        let success = ban_success(&peer_id, reason, &tags);
+        self.complete_upsert(&peer_id, now, write, success).await
+    }
+
+    pub async fn unban(&self, params: &Map<String, Value>) -> Value {
+        let peer_id = match Self::peer_id(params) {
+            Ok(peer_id) => peer_id,
+            Err(error) => return error,
+        };
+        let now = (self.clock)();
+        let existing = match self.existing_policy(&peer_id, now).await {
+            Ok(existing) => existing,
+            Err(error) => return error,
+        };
+        if !self.rate_limit_allows(&peer_id, now) {
+            return Self::rate_limit_error(&peer_id);
+        }
+        let tags = existing
+            .tags
+            .iter()
+            .filter(|tag| tag.as_str() != BANNED_TAG)
+            .cloned()
+            .collect::<Vec<_>>();
+        let write = unban_plan(&existing);
+        let success = unban_success(&peer_id, &tags);
+        self.complete_upsert(&peer_id, now, write, success).await
+    }
+}
+
+#[cfg(test)]
+mod policy_owner_tests {
+    use super::PolicyMutationOwner;
+    use crate::fee_scheduler::{CycleMsg, SchedulerIngress};
+    use crate::state_writer::{CoreMutators, CoreStateLiveCapability, ProductionStateWriter};
+    use revops_db::state_writer::spawn_state_writer;
+    use rusqlite::Connection;
+    use serde_json::{json, Map, Value};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    const NOW: i64 = 1_800_000_000;
+    const PEER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    async fn fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PolicyMutationOwner,
+        tokio::sync::mpsc::Receiver<CycleMsg>,
+    ) {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("production.db");
+        std::fs::copy(source, &path).expect("copy fixture");
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("enable WAL");
+        drop(conn);
+
+        let reader = revops_db::actor::spawn_read_only(&path)
+            .await
+            .expect("spawn read actor");
+        let writer = ProductionStateWriter::assemble(
+            spawn_state_writer(&path).await.expect("spawn state writer"),
+        );
+        let live = CoreStateLiveCapability::for_tests();
+        let core = CoreMutators::assemble(writer, live);
+        let (ingress, receiver) = SchedulerIngress::bounded_channel(16);
+        let owner = PolicyMutationOwner::assemble(core, reader, ingress, Arc::new(|| NOW));
+        (dir, path, owner, receiver)
+    }
+
+    fn params(entries: &[(&str, Value)]) -> Map<String, Value> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ignore_returns_only_after_commit_and_then_wakes_the_fee_owner() {
+        let (_dir, path, owner, mut receiver) = fixture().await;
+        let response = owner
+            .ignore(&params(&[
+                ("peer_id", json!(PEER)),
+                ("reason", json!(7)),
+                ("internal", json!(true)),
+            ]))
+            .await;
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["reason"], json!(7));
+
+        let conn = Connection::open(path).expect("read committed policy");
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT strategy, rebalance_mode, tags FROM peer_policies WHERE peer_id = ?1",
+                [PEER],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("policy row committed before response");
+        assert_eq!(
+            row,
+            (
+                "passive".into(),
+                "disabled".into(),
+                "[\"ignored\",\"7\"]".into()
+            )
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(CycleMsg::PolicyChanged { peer_id }) if peer_id == PEER
+        ));
+    }
+
+    #[tokio::test]
+    async fn unignore_of_an_absent_policy_succeeds_without_a_false_change_wake() {
+        let (_dir, _path, owner, mut receiver) = fixture().await;
+        let response = owner
+            .unignore(&params(&[
+                ("peer_id", json!(PEER)),
+                ("internal", json!("yes")),
+            ]))
+            .await;
+        assert_eq!(response["status"], "success");
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ban_and_unban_preserve_tags_and_wake_only_after_each_commit() {
+        let (_dir, path, owner, mut receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed policy");
+        conn.execute(
+            "INSERT INTO peer_policies
+             (peer_id, strategy, rebalance_mode, tags, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                PEER,
+                "static",
+                "source_only",
+                r#"["no_close","whale"]"#,
+                NOW - 1,
+                NOW + 1000,
+            ],
+        )
+        .expect("seed policy");
+        drop(conn);
+
+        let banned = owner
+            .ban(&params(&[
+                ("peer_id", json!(PEER)),
+                ("reason", json!("operator")),
+            ]))
+            .await;
+        assert_eq!(banned["tags"], json!(["no_close", "whale", "banned"]));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(CycleMsg::PolicyChanged { .. })
+        ));
+
+        let unbanned = owner.unban(&params(&[("peer_id", json!(PEER))])).await;
+        assert_eq!(unbanned["tags"], json!(["no_close", "whale"]));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(CycleMsg::PolicyChanged { .. })
+        ));
+
+        let conn = Connection::open(path).expect("read final policy");
+        let row: (String, String, String, Option<i64>) = conn
+            .query_row(
+                "SELECT strategy, rebalance_mode, tags, expires_at FROM peer_policies WHERE peer_id = ?1",
+                [PEER],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read unbanned row");
+        assert_eq!(
+            row,
+            (
+                "dynamic".into(),
+                "enabled".into(),
+                "[\"no_close\",\"whale\"]".into(),
+                None
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_rate_limit_counts_only_ten_completed_writes_per_peer() {
+        let (_dir, _path, owner, _receiver) = fixture().await;
+        for index in 0..10 {
+            let response = owner
+                .ban(&params(&[
+                    ("peer_id", json!(PEER)),
+                    ("reason", json!(format!("attempt-{index}"))),
+                ]))
+                .await;
+            assert_eq!(
+                response["status"], "success",
+                "attempt {index}: {response:?}"
+            );
+        }
+        assert_eq!(
+            owner
+                .ban(&params(&[
+                    ("peer_id", json!(PEER)),
+                    ("reason", json!("eleventh")),
+                ]))
+                .await,
+            json!({
+                "status": "error",
+                "error": format!("Rate limited: max 10 changes/minute for {}...", &PEER[..12]),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_policy_writes_consume_neither_rate_budget_nor_a_wake() {
+        let (_dir, path, owner, mut receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("open fixture for failure injection");
+        conn.execute_batch(
+            "CREATE TRIGGER reject_peer_policy_insert
+             BEFORE INSERT ON peer_policies
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected peer policy failure');
+             END;",
+        )
+        .expect("install failure trigger");
+
+        for index in 0..10 {
+            let response = owner
+                .ban(&params(&[
+                    ("peer_id", json!(PEER)),
+                    ("reason", json!(format!("failed-{index}"))),
+                ]))
+                .await;
+            assert_eq!(
+                response["error"]["code"], "storage_failure",
+                "attempt {index}: {response:?}"
+            );
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        conn.execute_batch("DROP TRIGGER reject_peer_policy_insert;")
+            .expect("remove failure trigger");
+        let recovered = owner
+            .ban(&params(&[
+                ("peer_id", json!(PEER)),
+                ("reason", json!("recovered")),
+            ]))
+            .await;
+        assert_eq!(recovered["status"], "success", "{recovered:?}");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(CycleMsg::PolicyChanged { peer_id }) if peer_id == PEER
+        ));
+    }
 }

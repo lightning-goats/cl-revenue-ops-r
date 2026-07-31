@@ -56,6 +56,9 @@ struct State {
     /// pass owns no broadcaster; all state evolution remains serialized by
     /// the scheduler owner. Live construction is completed by Task69.
     fee_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>>,
+    /// Empty until Task69 consumes the whole-plugin live capability and
+    /// assembles the sealed core-state mutator owner.
+    policy_mutators: std::sync::OnceLock<revops::rpc_state_mutators::PolicyMutationOwner>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -615,6 +618,35 @@ fn register_fee_cycle(
     )
 }
 
+fn register_policy_mutator(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+    action: revops::rpc_state_mutators::PolicyMutationAction,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "apply a completed peer-policy mutation through the sealed live state writer",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let params = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(params) => params,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let Some(owner) = p.state().policy_mutators.get() else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                Ok(owner.handle(action, &params).await)
+            }
+        },
+    )
+}
+
 fn register_rust_diagnostics(
     builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
     ping_name: &str,
@@ -1149,6 +1181,20 @@ async fn main() -> Result<()> {
         &revops::rpc_params::load_rpc_contract(),
         "revenue-fee-cycle",
     );
+    let ignore_name = rpc_name("ignore");
+    let ignore_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-ignore");
+    let unignore_name = rpc_name("unignore");
+    let unignore_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-unignore",
+    );
+    let ban_name = rpc_name("ban");
+    let ban_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-ban");
+    let unban_name = rpc_name("unban");
+    let unban_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-unban");
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
     let rebalance_debug_name = rpc_name("rebalance-debug");
@@ -2946,6 +2992,30 @@ async fn main() -> Result<()> {
         fee_authority_status_spec,
     );
     let builder = register_fee_cycle(builder, &fee_cycle_name, fee_cycle_spec);
+    let builder = register_policy_mutator(
+        builder,
+        &ignore_name,
+        ignore_spec,
+        revops::rpc_state_mutators::PolicyMutationAction::Ignore,
+    );
+    let builder = register_policy_mutator(
+        builder,
+        &unignore_name,
+        unignore_spec,
+        revops::rpc_state_mutators::PolicyMutationAction::Unignore,
+    );
+    let builder = register_policy_mutator(
+        builder,
+        &ban_name,
+        ban_spec,
+        revops::rpc_state_mutators::PolicyMutationAction::Ban,
+    );
+    let builder = register_policy_mutator(
+        builder,
+        &unban_name,
+        unban_spec,
+        revops::rpc_state_mutators::PolicyMutationAction::Unban,
+    );
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
@@ -3281,6 +3351,7 @@ async fn main() -> Result<()> {
 
     let resolved_mode_label = mode_label(&mode);
     let scheduler = std::sync::OnceLock::new();
+    let policy_mutators = std::sync::OnceLock::new();
     let authority_plan = mode.into_authority_plan(|live_mode| {
         let store = observer_db
             .clone()
@@ -3674,6 +3745,7 @@ async fn main() -> Result<()> {
         active_profile,
         scheduler,
         fee_pass: fee_rpc_pass,
+        policy_mutators,
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,

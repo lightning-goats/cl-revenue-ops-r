@@ -500,3 +500,25 @@ fn planner_execute_registers_exactly_once_through_rpc_name() {
         );
     }
 }
+
+#[test]
+fn core_state_mutators_require_the_sealed_live_capability() {
+    let root = workspace_root();
+    let state_writer = std::fs::read_to_string(root.join("crates/revops/src/state_writer.rs"))
+        .expect("read state_writer.rs");
+    let rpc_mutators =
+        std::fs::read_to_string(root.join("crates/revops/src/rpc_state_mutators.rs"))
+            .expect("read rpc_state_mutators.rs");
+    let runtime = std::fs::read_to_string(root.join("crates/revops/src/runtime.rs"))
+        .expect("read runtime.rs");
+    let main =
+        std::fs::read_to_string(root.join("crates/revops/src/main.rs")).expect("read main.rs");
+
+    assert!(state_writer.contains("pub struct CoreStateLiveCapability"));
+    assert!(state_writer.contains("pub struct CoreMutators"));
+    assert!(rpc_mutators.contains("pub struct PolicyMutationOwner"));
+    for observer_surface in [runtime.as_str(), main.as_str()] {
+        assert!(!observer_surface.contains("CoreMutators"));
+        assert!(!observer_surface.contains("ProductionStateWriter"));
+    }
+}

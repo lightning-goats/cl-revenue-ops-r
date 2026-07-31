@@ -325,6 +325,17 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-fee-cycle"),
         "methods: {methods:?}"
     );
+    for policy_mutator in [
+        "revenue-ignore",
+        "revenue-unignore",
+        "revenue-ban",
+        "revenue-unban",
+    ] {
+        assert!(
+            methods.contains(&policy_mutator),
+            "missing {policy_mutator}: {methods:?}"
+        );
+    }
     assert!(methods.contains(&"revenue-status"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-config"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-history"), "methods: {methods:?}");
@@ -418,7 +429,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
     }
-    // Exactly 55 rpc methods total (no leftover revenue-r-* names bleeding
+    // Exactly 59 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
@@ -435,7 +446,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        55,
+        59,
         "methods: {methods:?}"
     );
 
@@ -586,6 +597,63 @@ fn fee_authority_status_is_reachable_in_both_naming_modes() {
         shadow.contains(&"revenue-r-fee-authority-status"),
         "methods: {shadow:?}"
     );
+}
+
+#[test]
+fn peer_policy_mutators_are_reachable_in_both_naming_modes() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("canonical rpcmethods")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("shadow rpcmethods")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    for suffix in ["ignore", "unignore", "ban", "unban"] {
+        assert!(canonical.contains(&format!("revenue-{suffix}").as_str()));
+        assert!(shadow.contains(&format!("revenue-r-{suffix}").as_str()));
+    }
+}
+
+#[test]
+fn peer_policy_mutators_refuse_when_live_capability_is_unassembled() {
+    for (method, params) in [
+        (
+            "revenue-ignore",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'a'), "internal": true}),
+        ),
+        (
+            "revenue-unignore",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'b'), "internal": true}),
+        ),
+        (
+            "revenue-ban",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'c')}),
+        ),
+        (
+            "revenue-unban",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'd')}),
+        ),
+    ] {
+        assert_eq!(
+            call_after_init_with_params(
+                true,
+                None,
+                tempfile::tempdir().unwrap().path(),
+                &[],
+                method,
+                params
+            ),
+            serde_json::json!({"error": "Plugin not initialized"}),
+            "{method}"
+        );
+    }
 }
 
 #[test]

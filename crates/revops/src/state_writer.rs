@@ -110,6 +110,48 @@ pub struct ProductionStateWriter {
     receipt_budget: Duration,
 }
 
+/// Sealed proof that the whole-plugin live handoff authorized core state
+/// mutations. No production constructor exists before Task69 composes the
+/// single WholePluginLiveCapability; unit tests receive a cfg(test) token.
+pub struct CoreStateLiveCapability {
+    _seal: (),
+}
+
+impl CoreStateLiveCapability {
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self { _seal: () }
+    }
+}
+
+/// Non-cloneable live core-state mutation bundle. RPC handlers can hold this
+/// bundle only after consuming the sealed live capability above.
+pub struct CoreMutators {
+    writer: ProductionStateWriter,
+    _live: CoreStateLiveCapability,
+}
+
+impl CoreMutators {
+    pub fn assemble(writer: ProductionStateWriter, live: CoreStateLiveCapability) -> Self {
+        Self {
+            writer,
+            _live: live,
+        }
+    }
+
+    pub(crate) async fn upsert_peer_policy(
+        &self,
+        write: PeerPolicyWrite,
+        now: i64,
+    ) -> StateWriteAck<()> {
+        self.writer.upsert_peer_policy(write, now).await
+    }
+
+    pub(crate) async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
+        self.writer.delete_peer_policy(peer_id).await
+    }
+}
+
 impl ProductionStateWriter {
     /// Build the capability over a spawned writer actor. ZERO production
     /// call sites exist (source-scan pinned) until Task 69's
