@@ -44,6 +44,23 @@ impl FeeAuthorityStatusSnapshot {
             self.reason,
         )
     }
+
+    /// Python-parity denial for the immediate fee-cycle RPC. Startup mode
+    /// is immutable, so no authority transition can race this observation.
+    pub fn fee_cycle_denial_response(&self) -> Option<Value> {
+        (!self.enabled).then(|| {
+            json!({
+                "ok": false,
+                "adjusted_channels": 0,
+                "fee_debug": {},
+                "status": "blocked",
+                "reason": "fee_authority_disabled",
+                "operation": "revenue-fee-cycle",
+                "generation": self.generation,
+                "transitioned_at": self.transitioned_at,
+            })
+        })
+    }
 }
 
 pub fn build_fee_authority_status(

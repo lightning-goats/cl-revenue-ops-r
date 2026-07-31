@@ -489,3 +489,26 @@ fn fee_authority_status_matches_pythons_fixed_startup_states() {
         })
     );
 }
+
+#[test]
+fn fee_cycle_denial_matches_python_execution_gate_shape() {
+    use revops::rpc_fee_authority_status::FeeAuthorityStatusSnapshot;
+
+    let disabled = FeeAuthorityStatusSnapshot::from_startup_mode(false, 1_700_000_000);
+    assert_eq!(
+        disabled.fee_cycle_denial_response(),
+        Some(serde_json::json!({
+            "ok": false,
+            "adjusted_channels": 0,
+            "fee_debug": {},
+            "status": "blocked",
+            "reason": "fee_authority_disabled",
+            "operation": "revenue-fee-cycle",
+            "generation": 1,
+            "transitioned_at": 1_700_000_000,
+        }))
+    );
+
+    let enabled = FeeAuthorityStatusSnapshot::from_startup_mode(true, 1_700_000_000);
+    assert_eq!(enabled.fee_cycle_denial_response(), None);
+}

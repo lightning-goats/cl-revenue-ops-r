@@ -52,6 +52,10 @@ struct State {
     /// producer uses the scheduler's bounded ingress; full-cycle cadence also
     /// routes through `AuthorityRuntime::Observer`'s bounded `LoopHandle`.
     scheduler: std::sync::OnceLock<revops::fee_scheduler::SchedulerHandle>,
+    /// Async prefetch half retained for the immediate fee-cycle RPC. The
+    /// pass owns no broadcaster; all state evolution remains serialized by
+    /// the scheduler owner. Live construction is completed by Task69.
+    fee_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -570,6 +574,42 @@ fn register_fee_authority_status(
                     return Ok(serde_json::json!({"error": error.to_string()}));
                 }
                 Ok(p.state().fee_authority_status.response(now_unix()))
+            }
+        },
+    )
+}
+
+fn register_fee_cycle(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "run one complete fee adjustment cycle immediately",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                let state = p.state();
+                if let Some(denial) = state.fee_authority_status.fee_cycle_denial_response() {
+                    return Ok(denial);
+                }
+                let Some(pass) = state.fee_pass.as_ref() else {
+                    return Ok(serde_json::json!({"error": "Plugin not fully initialized"}));
+                };
+                match pass.run_with_completion().await {
+                    Ok(completed) => {
+                        Ok(revops::fee_scheduler::build_fee_cycle_response(&completed))
+                    }
+                    Err(error) => Ok(serde_json::json!({"error": format!("{error:#}")})),
+                }
             }
         },
     )
@@ -1103,6 +1143,11 @@ async fn main() -> Result<()> {
     let fee_authority_status_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-fee-authority-status",
+    );
+    let fee_cycle_name = rpc_name("fee-cycle");
+    let fee_cycle_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-fee-cycle",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -2900,6 +2945,7 @@ async fn main() -> Result<()> {
         &fee_authority_status_name,
         fee_authority_status_spec,
     );
+    let builder = register_fee_cycle(builder, &fee_cycle_name, fee_cycle_spec);
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
@@ -3247,6 +3293,7 @@ async fn main() -> Result<()> {
         )
     });
     let mut fee_cadence = None;
+    let mut fee_rpc_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>> = None;
     let mut lnplus_cadence = None;
     // Task 71 / R26: the three analytics cadences. Built during
     // composition, started only after `configured.start()` returns.
@@ -3391,6 +3438,7 @@ async fn main() -> Result<()> {
                                 let initial_interval = revops::fee_config::resolve_fee_cfg(db.as_ref(), &python_options.snapshot()).await.fee_interval.max(1) as u64;
                                 let pass = Arc::new(revops::fee_scheduler::FeeObserverPass::new(init_socket_path.clone(), db.clone(), python_options.clone(), handle.tx.clone(), initial_interval));
                                 passes = passes.with_fee(pass.clone());
+                                fee_rpc_pass = Some(pass.clone());
                                 fee_pass = Some(pass);
                                 let _ = scheduler.set(handle);
                             }
@@ -3625,6 +3673,7 @@ async fn main() -> Result<()> {
         python_options,
         active_profile,
         scheduler,
+        fee_pass: fee_rpc_pass,
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,

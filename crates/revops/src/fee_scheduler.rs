@@ -634,7 +634,7 @@ pub enum CycleMsg {
     /// message == one cycle on the owner thread.
     RunPrepared(
         Box<PreparedCycle>,
-        tokio::sync::oneshot::Sender<Result<(), String>>,
+        tokio::sync::oneshot::Sender<Result<FeeCycleCompletion, String>>,
     ),
     /// Ask for an immediate out-of-schedule cycle: the owner thread
     /// forwards this to the async half (only IT can prefetch), which
@@ -1060,7 +1060,10 @@ pub enum SeedOnceBootstrapState {
 #[derive(Debug, PartialEq, Eq)]
 pub enum CycleOutcome {
     /// Ran to completion; `decisions` FeeDecision lines appended.
-    Ran { decisions: usize },
+    Ran {
+        decisions: usize,
+        adjusted_channels: usize,
+    },
     /// Fail-closed rule (Phase 4b Task 8a): `neighbor_median_min_competitors`
     /// resolved to something unusable -- missing, non-integer, or
     /// non-positive. Any resolvable positive integer (2, 3, or otherwise)
@@ -1096,7 +1099,7 @@ pub enum CycleOutcome {
 /// cycle").
 fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
     match outcome {
-        CycleOutcome::Ran { decisions } => format!("ran: {decisions} decision(s)"),
+        CycleOutcome::Ran { decisions, .. } => format!("ran: {decisions} decision(s)"),
         CycleOutcome::SkippedMinCompetitors => {
             "skipped: neighbor_median_min_competitors unresolvable".to_string()
         }
@@ -1117,9 +1120,19 @@ fn describe_cycle_outcome(outcome: &CycleOutcome) -> String {
     }
 }
 
-fn cycle_completion(outcome: &CycleOutcome) -> Result<(), String> {
+fn cycle_completion(
+    owner: &CycleOwner,
+    outcome: &CycleOutcome,
+) -> Result<FeeCycleCompletion, String> {
     match outcome {
-        CycleOutcome::Ran { .. } => Ok(()),
+        CycleOutcome::Ran {
+            adjusted_channels, ..
+        } => Ok(FeeCycleCompletion {
+            adjusted_channels: *adjusted_channels,
+            generation: owner.state_generation,
+            completed_at: owner.last_cycle_at.unwrap_or_default(),
+            fee_debug: owner.fee_debug(&FeeDebugQuery::Summary),
+        }),
         other => Err(describe_cycle_outcome(other)),
     }
 }
@@ -1704,7 +1717,7 @@ pub struct CycleOwner {
     /// the two. Bounded to ONE entry: a newer prepared snapshot
     /// supersedes an older deferred one (loudly, counted).
     deferred_cycle: Option<Box<PreparedCycle>>,
-    deferred_cycle_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    deferred_cycle_ack: Option<tokio::sync::oneshot::Sender<Result<FeeCycleCompletion, String>>>,
     /// F7: deferred prepared cycles that were superseded by a newer one
     /// before they could run (each one loud, never silent). Never reset.
     deferred_cycles_superseded: u64,
@@ -2125,9 +2138,14 @@ impl CycleOwner {
             self.schedule_retention_sweep(now);
         }
 
+        let adjusted_channels = decisions
+            .iter()
+            .filter(|decision| decision.would_broadcast)
+            .count();
         (
             CycleOutcome::Ran {
                 decisions: decisions.len(),
+                adjusted_channels,
             },
             committed_cycle_id,
         )
@@ -3555,7 +3573,7 @@ impl CycleOwner {
                 );
                 let outcome = self.run_cycle(*deferred, clock);
                 if let Some(completion) = self.deferred_cycle_ack.take() {
-                    let _ = completion.send(cycle_completion(&outcome));
+                    let _ = completion.send(cycle_completion(self, &outcome));
                 }
             }
         }
@@ -4020,7 +4038,7 @@ impl CycleOwner {
         &mut self,
         prepared: Box<PreparedCycle>,
         clock: &mut dyn FnMut() -> i64,
-        completion: tokio::sync::oneshot::Sender<Result<(), String>>,
+        completion: tokio::sync::oneshot::Sender<Result<FeeCycleCompletion, String>>,
     ) {
         let prior_completion = if !self.pending_initial_fees.is_empty() {
             self.deferred_cycle_ack.take()
@@ -4029,7 +4047,7 @@ impl CycleOwner {
         };
         match self.run_or_defer_cycle(prepared, clock) {
             Some(outcome) => {
-                let _ = completion.send(cycle_completion(&outcome));
+                let _ = completion.send(cycle_completion(self, &outcome));
             }
             None => {
                 if let Some(prior) = prior_completion {
@@ -4231,6 +4249,26 @@ pub struct SchedulerHandle {
     pub tx: SchedulerIngress,
 }
 
+/// Completed result of one serialized fee cycle. Generation and completion time
+/// are internal receipt evidence; the Python RPC response intentionally exposes
+/// only adjusted_channels and the post-cycle fee_debug object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeeCycleCompletion {
+    pub adjusted_channels: usize,
+    pub generation: Option<u64>,
+    pub completed_at: i64,
+    pub fee_debug: serde_json::Value,
+}
+
+/// Exact Python-compatible success response for a completed revenue-fee-cycle.
+pub fn build_fee_cycle_response(completed: &FeeCycleCompletion) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "adjusted_channels": completed.adjusted_channels,
+        "fee_debug": completed.fee_debug,
+    })
+}
+
 /// Completed result of one owner-thread wake-all mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeeWakeCompletion {
@@ -4301,6 +4339,32 @@ impl FeeObserverPass {
             interval_secs: std::sync::atomic::AtomicU64::new(initial_interval_secs.max(1)),
         }
     }
+    /// Prepare one fresh cycle on the async side, dispatch it through the
+    /// bounded owner ingress, and wait for the real serialized outcome.
+    pub async fn run_with_completion(&self) -> anyhow::Result<FeeCycleCompletion> {
+        let _ = self.python_options.refresh(&self.socket_path).await;
+        let prepared = prepare_cycle(
+            &self.socket_path,
+            self.db_handle.as_ref(),
+            &self.python_options.snapshot(),
+        )
+        .await
+        .map_err(|error| error.context("fee prefetch"))?;
+        self.interval_secs.store(
+            prepared.cfg.fee_interval.max(1) as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let (completion, acknowledged) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(CycleMsg::RunPrepared(Box::new(prepared), completion))
+            .await
+            .map_err(|_| anyhow::anyhow!("fee owner disconnected before dispatch"))?;
+        acknowledged
+            .await
+            .map_err(|error| anyhow::anyhow!("fee owner disconnected before completion: {error}"))?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub fn interval_secs(&self) -> u64 {
         self.interval_secs.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -4311,31 +4375,7 @@ impl crate::loop_health::ObserverPass for FeeObserverPass {
         &self,
         _key: crate::loop_health::RequestKey,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            let _ = self.python_options.refresh(&self.socket_path).await;
-            let prepared = prepare_cycle(
-                &self.socket_path,
-                self.db_handle.as_ref(),
-                &self.python_options.snapshot(),
-            )
-            .await
-            .map_err(|error| error.context("fee prefetch"))?;
-            self.interval_secs.store(
-                prepared.cfg.fee_interval.max(1) as u64,
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            let (completion, acknowledged) = tokio::sync::oneshot::channel();
-            self.tx
-                .send(CycleMsg::RunPrepared(Box::new(prepared), completion))
-                .await
-                .map_err(|_| anyhow::anyhow!("fee owner disconnected before dispatch"))?;
-            acknowledged
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("fee owner disconnected before completion: {error}")
-                })?
-                .map_err(anyhow::Error::msg)
-        })
+        Box::pin(async move { self.run_with_completion().await.map(|_| ()) })
     }
 }
 
@@ -4575,7 +4615,7 @@ async fn dispatch_cycle(
                 return Dispatch::OwnerGone;
             }
             match acknowledged.await {
-                Ok(Ok(())) => Dispatch::Sent(interval_secs),
+                Ok(Ok(_)) => Dispatch::Sent(interval_secs),
                 Ok(Err(error)) => {
                     eprintln!("revops: fee cycle owner reported failure: {error}");
                     Dispatch::Skipped
