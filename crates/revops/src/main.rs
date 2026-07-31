@@ -902,7 +902,11 @@ async fn main() -> Result<()> {
     // gated on the fee-cycle scheduler actually running (see the
     // `s.scheduler.get()` checks in each handler below).
     let fee_debug_name = rpc_name("fee-debug");
-    let fee_wake_name = rpc_name("fee-wake");
+    let fee_wake_name = if canonical_names() {
+        rpc_name("wake-all")
+    } else {
+        rpc_name("fee-wake")
+    };
     // Task 10: the read-only runway status RPC. Deliberately NOT run
     // through `rpc_name()` -- this is a new capability with no Python
     // analog to shadow/canonicalize, so it keeps one fixed name in every
@@ -1574,8 +1578,8 @@ async fn main() -> Result<()> {
         .rpcmethod(
             &fee_wake_name,
             "operator/diagnostic: wake every sleeping channel immediately \
-             (mirrors Python's revenue-wake-all semantics -- fire-and-forget: \
-             see revenue-r-fee-debug for the resulting state); requires the \
+             (canonical mode mirrors Python's completed revenue-wake-all response; \
+             shadow mode uses the same completed owner path); requires the \
              fee-cycle scheduler running (autonomous shadow: \
              revops-r-fee-stateful-shadow=true)",
             |p: Plugin<SharedState>, _v| async move {
@@ -1587,19 +1591,11 @@ async fn main() -> Result<()> {
                                   -- see plugin log)"
                     }));
                 };
-                match handle
-                    .tx
-                    .send(revops::fee_scheduler::CycleMsg::WakeAll)
-                    .await
-                {
-                    Ok(()) => Ok(serde_json::json!({
-                        "status": "ok",
-                        "message": "wake-all requested; sleeping channels will be evaluated on \
-                                     the next fee cycle"
-                    })),
-                    Err(_) => {
-                        Ok(serde_json::json!({"error": "fee-cycle owner thread not running"}))
-                    }
+                match handle.wake_all().await {
+                    Ok(completed) => Ok(revops::fee_scheduler::build_wake_all_response(
+                        &completed,
+                    )),
+                    Err(error) => Ok(serde_json::json!({"error": error})),
                 }
             },
         )
