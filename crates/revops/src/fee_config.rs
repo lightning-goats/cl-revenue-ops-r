@@ -136,10 +136,24 @@ pub(crate) async fn resolve_int(
     default: i64,
 ) -> i64 {
     let field = config_resolve::db_override_key(suffix);
+    // Task 74: a CLN startup option has been through NO range check, and
+    // Python CLAMPS it (`_validate_numeric_config_options`).
+    //
+    // The clamp is applied to whichever layer wins rather than to layer (b)
+    // alone, because it is provably a no-op on layer (a): `db_layer` runs
+    // `config_resolve::validate_override`, which REJECTS an out-of-range row
+    // outright, so every DB value reaching here is already inside the same
+    // window this clamps to. An explicit layer split would read as though it
+    // were load-bearing while no input could tell the two apart -- the
+    // asymmetry Python needs (startup clamps, persisted SKIPS) is enforced
+    // by that rejection, not by where the clamp sits.
     match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
-        Some(raw) => config_types::typed_value(&field, &raw)
-            .as_i64()
-            .unwrap_or(default),
+        Some(raw) => {
+            let value = config_types::typed_value(&field, &raw)
+                .as_i64()
+                .unwrap_or(default);
+            config_resolve::clamp_startup_int(&field, value)
+        }
         None => default,
     }
 }
@@ -152,10 +166,15 @@ async fn resolve_float(
     default: f64,
 ) -> f64 {
     let field = config_resolve::db_override_key(suffix);
+    // Clamped for the same reason, and no-op on layer (a) for the same
+    // reason, as `resolve_int` above.
     match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
-        Some(raw) => config_types::typed_value(&field, &raw)
-            .as_f64()
-            .unwrap_or(default),
+        Some(raw) => {
+            let value = config_types::typed_value(&field, &raw)
+                .as_f64()
+                .unwrap_or(default);
+            config_resolve::clamp_startup_float(&field, value)
+        }
         None => default,
     }
 }
@@ -488,13 +507,20 @@ pub async fn resolve_fee_cfg_observed(
     // Python load_overrides post-load repairs (config.py:946-951, 975-980)
     // for the two crossed pairs that are fee-cycle inputs. Warn-log like
     // Python; repair identically.
+    // The fee pair repairs UPWARD (Tasks 74/75, python main fc4c76b): raise
+    // the ceiling to the floor, never lower the floor, never swap. A
+    // persisted max_fee_ppm of 1-4 is individually in range but would drag
+    // the floor under its own CONFIG_FIELD_RANGES minimum (CRITICAL-02),
+    // and the two bounds have DIFFERENT lower limits (5 vs 1), so no
+    // downward repair can hold both invariants.
     if cfg.min_fee_ppm > cfg.max_fee_ppm {
         eprintln!(
-            "revops: contradictory min_fee_ppm ({}) > max_fee_ppm ({}); repaired min to max",
-            cfg.min_fee_ppm, cfg.max_fee_ppm
+            "revops: contradictory min_fee_ppm ({}) > max_fee_ppm ({}); repaired max_fee_ppm to {}",
+            cfg.min_fee_ppm, cfg.max_fee_ppm, cfg.min_fee_ppm
         );
-        cfg.min_fee_ppm = cfg.max_fee_ppm;
     }
+    (cfg.min_fee_ppm, cfg.max_fee_ppm) =
+        config_resolve::repair_crossed_fee_bounds(cfg.min_fee_ppm, cfg.max_fee_ppm);
     if cfg.receivable_ratio_floor > cfg.receivable_ratio_target {
         eprintln!(
             "revops: contradictory receivable_ratio_floor ({}) > target ({}); repaired floor to target",

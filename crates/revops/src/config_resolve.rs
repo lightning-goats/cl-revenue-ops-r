@@ -214,6 +214,55 @@ fn in_range(field: &str, value: f64) -> bool {
     }
 }
 
+/// py `_validate_numeric_config_options` (`cl-revenue-ops.py:483-497`): a
+/// CLN STARTUP option is CLAMPED into its canonical `CONFIG_FIELD_RANGES`
+/// window, warning on clamp.
+///
+/// This is the OPPOSITE of [`validate_override`], the PERSISTED path,
+/// which SKIPS an out-of-range row and leaves the previous layer standing.
+/// Both are right for their own layer, and applying either rule to the
+/// other is a real behaviour change: clamping a persisted row silently
+/// converts an override Python skipped into one it applied.
+///
+/// Expressed as `max(lo, min(num, hi))` in that order to match Python
+/// exactly -- for a malformed range with `lo > hi` the two orderings
+/// disagree, and this one returns `lo` as Python does.
+pub fn clamp_startup_int(field: &str, value: i64) -> i64 {
+    match config_types::field_range(field) {
+        Some((lo, hi)) => (lo.ceil() as i64).max((hi.floor() as i64).min(value)),
+        None => value,
+    }
+}
+
+/// [`clamp_startup_int`] for float-typed options -- Python's
+/// `_INIT_NUMERIC_RANGES` is `dict(CONFIG_FIELD_RANGES)` and clamps every
+/// numeric option, not only the integer ones.
+pub fn clamp_startup_float(field: &str, value: f64) -> f64 {
+    match config_types::field_range(field) {
+        Some((lo, hi)) => lo.max(hi.min(value)),
+        None => value,
+    }
+}
+
+/// py `_enforce_fee_bound_invariant` (`cl-revenue-ops.py:501-518`) and the
+/// matching post-load repair in `config.py`: when the fee bounds are
+/// crossed, raise the CEILING to the floor.
+///
+/// The direction is the contract. Never lower the floor, never swap.
+/// Python's own rationale: lowering `min_fee_ppm` to a persisted
+/// `max_fee_ppm` of 1-4 is individually in range but drags the floor under
+/// its own `CONFIG_FIELD_RANGES` minimum (CRITICAL-02), and the two bounds
+/// have DIFFERENT lower limits (5 vs 1), so no downward repair can hold
+/// both invariants. Raising the ceiling honours the operator's stated
+/// floor and only widens a cap.
+pub fn repair_crossed_fee_bounds(min_fee_ppm: i64, max_fee_ppm: i64) -> (i64, i64) {
+    if min_fee_ppm > max_fee_ppm {
+        (min_fee_ppm, min_fee_ppm)
+    } else {
+        (min_fee_ppm, max_fee_ppm)
+    }
+}
+
 /// Resolve which of the three layers wins, given each already fetched:
 /// `db_override` (a) beats `python_value` (b) beats `fixture_value` (c).
 /// Pure and total -- `None` only when all three are `None` (an unset,
