@@ -4238,6 +4238,21 @@ pub struct FeeWakeCompletion {
     pub completed_at: i64,
 }
 
+/// Exact Python-compatible response for a completed `revenue-wake-all`.
+///
+/// The completion value can only be produced after the owner thread has
+/// applied the wake, so this helper cannot turn queue admission into success.
+pub fn build_wake_all_response(completed: &FeeWakeCompletion) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "channels_woken": completed.channels_woken,
+        "message": format!(
+            "Woke {} sleeping channel(s). They will be evaluated on the next fee cycle.",
+            completed.channels_woken
+        ),
+    })
+}
+
 impl SchedulerHandle {
     /// Run wake-all through the bounded owner ingress and wait for the owner
     /// to confirm the state transition. A closed queue or dropped reply is

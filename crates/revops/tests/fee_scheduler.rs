@@ -1286,6 +1286,14 @@ async fn wake_all_completion_waits_for_the_owner_result() {
     let completed = completion.await.expect("owner completed wake-all");
     assert_eq!(completed.channels_woken, 0);
     assert!(completed.completed_at > 0);
+    assert_eq!(
+        revops::fee_scheduler::build_wake_all_response(&completed),
+        json!({
+            "status": "ok",
+            "channels_woken": 0,
+            "message": "Woke 0 sleeping channel(s). They will be evaluated on the next fee cycle."
+        })
+    );
 
     handle.tx.send(CycleMsg::Shutdown).await.ok();
     tokio::task::spawn_blocking(move || owner.join().unwrap())
