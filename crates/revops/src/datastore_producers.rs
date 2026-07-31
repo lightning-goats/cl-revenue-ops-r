@@ -26,7 +26,7 @@
 //! [`revops_analytics::telemetry::datastore_envelope`] kernel and are
 //! consumed here, never re-derived.
 
-use revops_analytics::telemetry::{datastore_envelope, PyDict};
+use revops_analytics::telemetry::{datastore_envelope, PyDict, PyVal};
 
 use crate::lifecycle::Owner;
 
@@ -81,6 +81,118 @@ impl Producer {
             Self::Rebalance => "segment_observations",
         }
     }
+}
+
+// =====================================================================
+// R68-7: payload assembly and the publish/withhold decision
+// =====================================================================
+
+/// Why a producer published nothing this cycle.
+///
+/// "Do not publish" is a real outcome, distinct from both a silent skip
+/// and a publish full of defaults. Python expresses it by returning
+/// early; here it is declared, so a producer that goes quiet leaves
+/// evidence of WHY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withheld {
+    /// py `cfg_snap = config.snapshot() if config else None` then
+    /// `if cfg_snap and data_service:` (`cl-revenue-ops.py:3720-3721`).
+    NoConfigSnapshot,
+    /// py `if store is None or not observer_member_id: return False`
+    /// (`modules/rebalance_engine_v2.py:3169-3171`).
+    NoObserverIdentity,
+    /// py `if not snapshot.get("segment_observations"): return False`
+    /// (`modules/rebalance_engine_v2.py:3174-3175`).
+    NoObservations,
+}
+
+impl Withheld {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoConfigSnapshot => "datastore_withheld_no_config_snapshot",
+            Self::NoObserverIdentity => "datastore_withheld_no_observer_identity",
+            Self::NoObservations => "datastore_withheld_no_observations",
+        }
+    }
+}
+
+/// Publish this cycle, or decline with a reason.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PublishDecision {
+    Publish(PyDict),
+    Withhold(Withheld),
+}
+
+/// py `{"min_fee_ppm": ..., "max_fee_ppm": ..., "mid_fee_ppm":
+/// (min + max) // 2}` (`cl-revenue-ops.py:3723-3725`).
+///
+/// `div_euclid` rather than `/`: Python's `//` floors toward negative
+/// infinity while Rust's `/` truncates toward zero. The two agree over
+/// the declared policy range for these fields
+/// (`CONFIG_FIELD_RANGES['min_fee_ppm'] = (5, 100000)`,
+/// `modules/config.py:355`), so this is the correct operator rather than
+/// a claim that out-of-range bounds are supported -- see the note in
+/// `tests/datastore_payloads.rs` and Task 74.
+pub fn fee_bounds_payload(min_fee_ppm: i64, max_fee_ppm: i64) -> PyDict {
+    let mut payload = PyDict::new();
+    payload.push("min_fee_ppm", PyVal::Int(min_fee_ppm));
+    payload.push("max_fee_ppm", PyVal::Int(max_fee_ppm));
+    payload.push(
+        "mid_fee_ppm",
+        PyVal::Int(min_fee_ppm.saturating_add(max_fee_ppm).div_euclid(2)),
+    );
+    payload
+}
+
+/// Fee-bounds publishes only with a config snapshot in hand.
+///
+/// Publishing zeros instead would be indistinguishable, to every
+/// external consumer, from an operator who really set the floor to zero.
+pub fn fee_bounds_decision(snapshot: Option<(i64, i64)>) -> PublishDecision {
+    match snapshot {
+        Some((min_fee_ppm, max_fee_ppm)) => {
+            PublishDecision::Publish(fee_bounds_payload(min_fee_ppm, max_fee_ppm))
+        }
+        None => PublishDecision::Withhold(Withheld::NoConfigSnapshot),
+    }
+}
+
+/// py `{"operator_controls": {"values": ...}, "fee_decision": ...}`
+/// (`cl-revenue-ops.py:3706-3714`).
+///
+/// The opposite absence rule to fee-bounds, and deliberately so: an
+/// absent config yields an EMPTY `values` dict rather than withholding,
+/// because an operator watching this key needs to see that the plugin is
+/// alive and holding no config -- something silence cannot express.
+pub fn status_payload(operator_controls: Option<PyDict>, fee_decision: Option<PyDict>) -> PyDict {
+    let mut controls_wrapper = PyDict::new();
+    controls_wrapper.push("values", PyVal::Dict(operator_controls.unwrap_or_default()));
+
+    let mut payload = PyDict::new();
+    payload.push("operator_controls", PyVal::Dict(controls_wrapper));
+    payload.push(
+        "fee_decision",
+        PyVal::Dict(fee_decision.unwrap_or_default()),
+    );
+    payload
+}
+
+/// Both of the rebalance engine's guards, in Python's order.
+///
+/// The identity is checked first: an unnamed observer keeps withholding
+/// no matter how many observations arrive, so it is the one the operator
+/// must fix.
+pub fn segment_publish_is_allowed(
+    observer_member_id: &str,
+    observation_count: usize,
+) -> Result<(), Withheld> {
+    if observer_member_id.is_empty() {
+        return Err(Withheld::NoObserverIdentity);
+    }
+    if observation_count == 0 {
+        return Err(Withheld::NoObservations);
+    }
+    Ok(())
 }
 
 /// The CLN datastore, as this module needs it.
