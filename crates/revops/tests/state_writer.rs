@@ -43,6 +43,29 @@ fn python_schema(path: &PathBuf) {
             job_channel_id TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active'
         );
+        CREATE TABLE spend_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            reserved_sats INTEGER NOT NULL,
+            reserved_at INTEGER NOT NULL,
+            reference_id TEXT,
+            channel_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT
+        );
+        CREATE TABLE spend_events (
+            event_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            amount_sats INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            reference_id TEXT,
+            channel_id TEXT,
+            source TEXT,
+            metadata_json TEXT
+        );
+        CREATE TABLE rebalance_costs (cost_sats INTEGER, timestamp INTEGER);
         "#,
     )
     .unwrap();
