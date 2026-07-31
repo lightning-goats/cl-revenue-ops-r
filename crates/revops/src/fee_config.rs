@@ -136,24 +136,16 @@ pub(crate) async fn resolve_int(
     default: i64,
 ) -> i64 {
     let field = config_resolve::db_override_key(suffix);
-    // Task 74: a CLN startup option has been through NO range check, and
-    // Python CLAMPS it (`_validate_numeric_config_options`).
-    //
-    // The clamp is applied to whichever layer wins rather than to layer (b)
-    // alone, because it is provably a no-op on layer (a): `db_layer` runs
-    // `config_resolve::validate_override`, which REJECTS an out-of-range row
-    // outright, so every DB value reaching here is already inside the same
-    // window this clamps to. An explicit layer split would read as though it
-    // were load-bearing while no input could tell the two apart -- the
-    // asymmetry Python needs (startup clamps, persisted SKIPS) is enforced
-    // by that rejection, not by where the clamp sits.
+    // No clamp here (Tasks 74/75). Layer (b) values are already clamped at
+    // the single gate they enter through,
+    // `config_resolve::PythonOptionCache::apply_fetch`, and layer (a) is
+    // range-checked by `validate_override`, which SKIPS an out-of-range row
+    // rather than clamping it. A clamp at this seam could not change any
+    // input either layer can produce.
     match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
-        Some(raw) => {
-            let value = config_types::typed_value(&field, &raw)
-                .as_i64()
-                .unwrap_or(default);
-            config_resolve::clamp_startup_int(&field, value)
-        }
+        Some(raw) => config_types::typed_value(&field, &raw)
+            .as_i64()
+            .unwrap_or(default),
         None => default,
     }
 }
@@ -166,15 +158,11 @@ async fn resolve_float(
     default: f64,
 ) -> f64 {
     let field = config_resolve::db_override_key(suffix);
-    // Clamped for the same reason, and no-op on layer (a) for the same
-    // reason, as `resolve_int` above.
+    // Not clamped here, for the same reason as `resolve_int` above.
     match resolve_raw(db, python_option_values, db_query_failures, suffix).await {
-        Some(raw) => {
-            let value = config_types::typed_value(&field, &raw)
-                .as_f64()
-                .unwrap_or(default);
-            config_resolve::clamp_startup_float(&field, value)
-        }
+        Some(raw) => config_types::typed_value(&field, &raw)
+            .as_f64()
+            .unwrap_or(default),
         None => default,
     }
 }
@@ -504,7 +492,8 @@ pub async fn resolve_fee_cfg_observed(
         .await,
     };
 
-    // Python load_overrides post-load repairs (config.py:946-951, 975-980)
+    // Python load_overrides post-load repairs (config.py:955-961 after
+    // fc4c76b, and 975-980)
     // for the two crossed pairs that are fee-cycle inputs. Warn-log like
     // Python; repair identically.
     // The fee pair repairs UPWARD (Tasks 74/75, python main fc4c76b): raise

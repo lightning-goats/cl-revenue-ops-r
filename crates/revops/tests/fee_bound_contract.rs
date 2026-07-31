@@ -51,10 +51,22 @@ fn startup_options(pairs: &[(&str, i64)]) -> HashMap<String, OptValue> {
         .collect()
 }
 
+/// Push a `listconfigs` map through the REAL cache gate, exactly as
+/// production does: `apply_fetch` is where every startup value enters and
+/// where the clamp lives.
+fn cached(opts: HashMap<String, OptValue>) -> HashMap<String, OptValue> {
+    let cache = revops::config_resolve::PythonOptionCache::empty();
+    assert!(cache.apply_fetch(Ok(opts)), "a successful fetch applies");
+    cache.snapshot()
+}
+
 /// Resolve with the startup layer only (`db = None` -> layer (a) falls
 /// through immediately).
 async fn startup_bounds(min_fee_ppm: i64, max_fee_ppm: i64) -> (i64, i64) {
-    let opts = startup_options(&[("min-fee-ppm", min_fee_ppm), ("max-fee-ppm", max_fee_ppm)]);
+    let opts = cached(startup_options(&[
+        ("min-fee-ppm", min_fee_ppm),
+        ("max-fee-ppm", max_fee_ppm),
+    ]));
     let cfg = revops::fee_config::resolve_fee_cfg(None, &opts).await;
     (cfg.min_fee_ppm, cfg.max_fee_ppm)
 }
@@ -257,7 +269,7 @@ async fn the_startup_and_persisted_layers_treat_out_of_range_oppositely() {
 #[tokio::test]
 async fn a_persisted_override_still_beats_a_startup_option() {
     let (handle, _tmp) = fixture_db_with_overrides(&[("max-fee-ppm", "1500")]).await;
-    let opts = startup_options(&[("max-fee-ppm", 1_234)]);
+    let opts = cached(startup_options(&[("max-fee-ppm", 1_234)]));
     let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &opts).await;
     assert_eq!(cfg.max_fee_ppm, 1_500);
 }
@@ -280,7 +292,7 @@ async fn a_float_startup_option_is_clamped_into_its_range() {
         "revenue-ops-drain-fee-discount-max".to_string(),
         OptValue::String("5.0".to_string()),
     );
-    let cfg = revops::fee_config::resolve_fee_cfg(None, &opts).await;
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &cached(opts)).await;
     assert_eq!(cfg.drain_fee_discount_max, 0.5);
 }
 
@@ -295,4 +307,417 @@ async fn a_float_persisted_override_out_of_range_is_skipped_not_clamped() {
         FeeCfgSnapshot::default().drain_fee_discount_max,
         "an out-of-range persisted float must fall through to the default"
     );
+}
+
+// =====================================================================
+// the clamp covers EVERY numeric field, not just the fee pair
+// =====================================================================
+
+/// The scope ruling on task 74: Python's `_INIT_NUMERIC_RANGES` is
+/// `dict(CONFIG_FIELD_RANGES)`, deliberately covering all 96 numeric
+/// fields "so startup cannot silently omit a newly governed field". A
+/// clamp that only reached the ~18 fee-cycle resolver sites would leave
+/// the other numeric fields exposed on the operator-facing config surface.
+///
+/// Asserted on the CACHE SNAPSHOT rather than on any one consumer, because
+/// that snapshot is what every consumer reads.
+#[test]
+fn the_startup_clamp_covers_numeric_fields_beyond_the_fee_pair() {
+    let mut opts = HashMap::new();
+    // int, not a fee bound, and not a FeeCfgSnapshot field
+    opts.insert(
+        "revenue-ops-planner-max-closes-per-cycle".to_string(),
+        OptValue::Integer(1_000_000),
+    );
+    // float, not a fee bound
+    opts.insert(
+        "revenue-ops-growth-budget-earned-fraction".to_string(),
+        OptValue::String("9.5".to_string()),
+    );
+    let snap = cached(opts);
+
+    let planner = snap
+        .get("revenue-ops-planner-max-closes-per-cycle")
+        .expect("present");
+    let fraction = snap
+        .get("revenue-ops-growth-budget-earned-fraction")
+        .expect("present");
+
+    let (_, planner_hi) = revops::config_types::field_range("planner_max_closes_per_cycle")
+        .expect("planner_max_closes_per_cycle declares a range");
+    assert_eq!(
+        revops::config_resolve::option_value_to_string(planner).and_then(|s| s.parse::<i64>().ok()),
+        Some(planner_hi as i64),
+        "an out-of-range non-fee int must be clamped at the cache gate"
+    );
+    assert_eq!(
+        revops::config_resolve::option_value_to_string(fraction)
+            .and_then(|s| s.parse::<f64>().ok()),
+        Some(1.0),
+        "growth_budget_earned_fraction is declared (0.0, 1.0)"
+    );
+}
+
+/// An in-band value passes through the gate untouched, and a field with no
+/// declared range is never rewritten.
+#[test]
+fn the_cache_gate_leaves_in_band_and_unranged_values_alone() {
+    let mut opts = HashMap::new();
+    opts.insert("revenue-ops-min-fee-ppm".to_string(), OptValue::Integer(50));
+    opts.insert(
+        "revenue-ops-not-a-real-option".to_string(),
+        OptValue::Integer(-42),
+    );
+    let snap = cached(opts);
+    assert_eq!(
+        revops::config_resolve::option_value_to_string(
+            snap.get("revenue-ops-min-fee-ppm").unwrap()
+        )
+        .and_then(|s| s.parse::<i64>().ok()),
+        Some(50)
+    );
+    assert_eq!(
+        revops::config_resolve::option_value_to_string(
+            snap.get("revenue-ops-not-a-real-option").unwrap()
+        )
+        .and_then(|s| s.parse::<i64>().ok()),
+        Some(-42)
+    );
+}
+
+/// Task 75's parametrisation: every crossed pair ends ORDERED and IN BAND,
+/// and the two already-ordered pairs are no-ops.
+#[tokio::test]
+async fn task75_edge_cases_all_end_ordered_and_in_band() {
+    for (min, max) in [(5, 1), (900, 100), (100_000, 1), (10, 1), (10, 4)] {
+        let (out_min, out_max) = startup_bounds(min, max).await;
+        assert!(
+            out_min <= out_max,
+            "({min}, {max}) -> ({out_min}, {out_max})"
+        );
+        assert!(
+            (5..=100_000).contains(&out_min),
+            "min out of band: {out_min}"
+        );
+        assert!(
+            (1..=100_000).contains(&out_max),
+            "max out of band: {out_max}"
+        );
+    }
+    for (min, max) in [(10, 2_000), (5, 5)] {
+        assert_eq!(startup_bounds(min, max).await, (min, max), "no-op expected");
+    }
+}
+
+// =====================================================================
+// the plugin's OWN startup option, through the production helpers
+// =====================================================================
+//
+// The cached `listconfigs` map is not the only way a startup value reaches
+// a consumer. `resolved_config_json` and the config RPC also read this
+// plugin's OWN registered option, which is operator-supplied. Two ways that
+// value escapes the cache entirely:
+//
+//   - SHADOW NAMING: this plugin registers `revenue-r-*`, so its own option
+//     never appears in the cached `revenue-ops-*` map.
+//   - LISTCONFIGS OUTAGE: the cache is empty, but the supplied option still
+//     carries a value.
+//
+// These tests drive `resolve_startup_option_value` and
+// `parse_clamped_startup_i64` -- the SAME functions main.rs calls -- rather
+// than re-assembling the rule locally, so a mutation in either is caught
+// here.
+
+fn as_i64(value: &OptValue) -> Option<i64> {
+    revops::config_resolve::option_value_to_string(value).and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Layer (c), the own option, IS clamped -- and the clamp keys off the
+/// `Config` field name, never the CLN option name, which is why a
+/// shadow-named `revenue-r-*` option is covered despite never entering the
+/// cached map.
+#[test]
+fn the_own_option_layer_is_clamped_by_the_production_resolver() {
+    let resolved = revops::config_resolve::resolve_startup_option_value(
+        "min_fee_ppm",
+        None,
+        None,
+        Some(OptValue::Integer(0)),
+    )
+    .expect("the own option resolves");
+    assert_eq!(as_i64(&resolved), Some(5));
+}
+
+/// A `listconfigs` outage empties the cache; the own option still resolves
+/// and is still clamped.
+#[test]
+fn a_listconfigs_outage_still_clamps_the_own_option() {
+    let cache = revops::config_resolve::PythonOptionCache::empty();
+    assert!(!cache.apply_fetch(Err("listconfigs unavailable".to_string())));
+    assert!(
+        cache.snapshot().is_empty(),
+        "outage leaves no cached values"
+    );
+
+    let cached = cache.snapshot().get("revenue-ops-min-fee-ppm").cloned();
+    let resolved = revops::config_resolve::resolve_startup_option_value(
+        "min_fee_ppm",
+        None,
+        cached,
+        Some(OptValue::Integer(200_000)),
+    )
+    .expect("the own option resolves during an outage");
+    assert_eq!(as_i64(&resolved), Some(100_000));
+}
+
+/// Layer (a) is NOT clamped: a persisted override has already been
+/// range-checked by `validate_override`, which SKIPS an out-of-range row.
+/// If the resolver clamped it, a skipped row would become an applied one.
+#[test]
+fn the_persisted_layer_is_not_clamped_by_the_production_resolver() {
+    let resolved = revops::config_resolve::resolve_startup_option_value(
+        "min_fee_ppm",
+        // 3 is BELOW min_fee_ppm's floor of 5, so a clamp would rewrite it to
+        // 5 and be indistinguishable from an applied override. Production
+        // rejects such a row upstream in `validate_override`; this pins the
+        // resolver's own contract, that it never clamps layer (a).
+        Some(OptValue::Integer(3)),
+        Some(OptValue::Integer(50)),
+        Some(OptValue::Integer(0)),
+    )
+    .expect("the db override wins");
+    assert_eq!(
+        as_i64(&resolved),
+        Some(3),
+        "layer (a) must win and pass through UNCLAMPED"
+    );
+}
+
+/// Precedence is unchanged by the clamp.
+#[test]
+fn the_production_resolver_keeps_db_over_cached_over_own() {
+    let r = |db, cached, own| {
+        revops::config_resolve::resolve_startup_option_value("min_fee_ppm", db, cached, own)
+            .as_ref()
+            .and_then(as_i64)
+    };
+    assert_eq!(
+        r(
+            Some(OptValue::Integer(11)),
+            Some(OptValue::Integer(22)),
+            Some(OptValue::Integer(33))
+        ),
+        Some(11)
+    );
+    assert_eq!(
+        r(
+            None,
+            Some(OptValue::Integer(22)),
+            Some(OptValue::Integer(33))
+        ),
+        Some(22)
+    );
+    assert_eq!(r(None, None, Some(OptValue::Integer(33))), Some(33));
+    assert_eq!(r(None, None, None), None);
+}
+
+/// Item 213, driven through the helper main.rs actually calls.
+/// `flow_window_days` is declared `[1, 365]` with a fallback of 7, so an
+/// out-of-range 999 must resolve to 365. The boundary is deliberately not
+/// the fallback: a regression to `as_str` drops the clamped value onto 7,
+/// which this catches.
+#[test]
+fn the_production_parse_helper_survives_a_clamped_integer() {
+    let got = revops::config_resolve::parse_clamped_startup_i64(
+        "flow_window_days",
+        Some(OptValue::Integer(999)),
+        7,
+    );
+    assert_eq!(
+        got, 365,
+        "999 must clamp to the ceiling, not fall back to 7"
+    );
+    assert_ne!(got, 7, "the fallback must not mask the clamp");
+
+    assert_eq!(
+        revops::config_resolve::parse_clamped_startup_i64(
+            "flow_window_days",
+            Some(OptValue::Integer(0)),
+            7
+        ),
+        1
+    );
+    assert_eq!(
+        revops::config_resolve::parse_clamped_startup_i64("flow_window_days", None, 7),
+        7,
+        "an absent option uses the caller's default"
+    );
+    assert_eq!(
+        revops::config_resolve::parse_clamped_startup_i64(
+            "flow_window_days",
+            Some(OptValue::String("30".into())),
+            7
+        ),
+        30,
+        "a String-valued option parses too"
+    );
+}
+
+// =====================================================================
+// EXHAUSTIVE: every declared numeric range, through the real gate
+// =====================================================================
+
+/// The 19 ranged `Config` fields that are NOT operator startup options.
+///
+/// Python's `_validate_numeric_config_options` iterates all 96 of
+/// `CONFIG_FIELD_RANGES` but only clamps keys PRESENT in `kwargs`, so these
+/// are never reached at startup -- they are reachable only as persisted
+/// overrides, where the contract is SKIP, not clamp. Pinned as an exact set
+/// so a field silently gaining or losing a startup option is caught.
+const RANGED_WITHOUT_STARTUP_OPTION: [&str; 19] = [
+    "base_fee_msat",
+    "capex_bootstrap_bps",
+    "capex_bootstrap_max_sats",
+    "capex_exploration_rate",
+    "capex_global_envelope_sats",
+    "capex_grace_days",
+    "capex_probability_budget_bonus",
+    "capex_reinvestment_rate",
+    "capex_tactical_rate",
+    "estimated_open_cost_sats",
+    "high_liquidity_threshold",
+    "inbound_fee_estimate_ppm",
+    "low_liquidity_threshold",
+    "max_concurrent_jobs",
+    "rebalance_cooldown_hours",
+    "rebalance_max_amount",
+    "sink_threshold",
+    "source_threshold",
+    "thompson_prior_std_fee",
+];
+
+/// The startup option names lightningd actually registers.
+fn registered_option_names() -> std::collections::BTreeSet<String> {
+    let raw = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/options.json"),
+    )
+    .expect("read fixtures/options.json");
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("valid options fixture");
+    parsed
+        .iter()
+        .filter_map(|o| o.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect()
+}
+
+/// The canonical Python option name for a `Config` field -- the inverse of
+/// `config_resolve::db_override_key`, including its four irregular remaps.
+fn canonical_option_name(field: &str) -> String {
+    const IRREGULAR: [(&str, &str); 4] = [
+        ("enable_vegas_reflex", "vegas-reflex"),
+        ("vegas_decay_rate", "vegas-decay"),
+        ("planner_max_fee_rate_sat_vb", "planner-max-fee-rate"),
+        (
+            "boltz_structural_budget_sats_per_day",
+            "boltz-structural-budget-sats",
+        ),
+    ];
+    for (f, suffix) in IRREGULAR {
+        if field == f {
+            return format!("revenue-ops-{suffix}");
+        }
+    }
+    format!("revenue-ops-{}", field.replace('_', "-"))
+}
+
+/// Item 215's reachability gate, corrected by item 216's fixture audit.
+///
+/// Sampling two fields would let the other 94 range entries be deleted, or
+/// an irregular name remap be broken, without any test noticing. So this
+/// walks EVERY numeric ranged field, synthesizes a below-floor and an
+/// above-ceiling value, and pushes each through the real
+/// `PythonOptionCache::apply_fetch` gate under the field's exact canonical
+/// option name.
+///
+/// Crucially it checks each name against the REGISTERED option set rather
+/// than against a name transform: an earlier version of this test round-
+/// tripped the transform only, which meant it invented option names for the
+/// 19 fields that have none and "proved" they clamp. Those 19 are asserted
+/// as an exact set instead.
+#[test]
+fn every_declared_numeric_range_is_clamped_at_the_startup_gate() {
+    let types = revops::config_types::load();
+    let registered = registered_option_names();
+
+    let mut ranged: Vec<(String, (f64, f64))> = types
+        .ranges
+        .iter()
+        .filter(|(field, _)| {
+            matches!(
+                revops::config_types::field_type_for(field),
+                Some(revops::config_types::FieldType::Int)
+                    | Some(revops::config_types::FieldType::Float)
+            )
+        })
+        .map(|(f, r)| (f.clone(), *r))
+        .collect();
+    ranged.sort_by(|a, b| a.0.cmp(&b.0));
+
+    assert_eq!(
+        ranged.len(),
+        96,
+        "expected 96 numeric ranged fields; the fixture changed"
+    );
+
+    let mut without_option = Vec::new();
+    let mut proven = 0usize;
+
+    for (field, (lo, hi)) in &ranged {
+        let option_name = canonical_option_name(field);
+        if !registered.contains(&option_name) {
+            without_option.push(field.clone());
+            continue;
+        }
+        let is_int = revops::config_types::field_type_for(field)
+            == Some(revops::config_types::FieldType::Int);
+
+        for (probe, expected) in [(lo - 1.0, *lo), (hi + 1.0, *hi)] {
+            let supplied = if is_int {
+                OptValue::Integer(probe as i64)
+            } else {
+                OptValue::String(probe.to_string())
+            };
+            let mut opts = HashMap::new();
+            opts.insert(option_name.clone(), supplied);
+            let snap = cached(opts);
+            let got = revops::config_resolve::option_value_to_string(
+                snap.get(&option_name)
+                    .expect("the option survives the gate"),
+            )
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("{field}: value unreadable after the gate"));
+
+            let want = if is_int { expected.trunc() } else { expected };
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{field}: probe {probe} should clamp to {want}, got {got}"
+            );
+        }
+        proven += 1;
+    }
+
+    without_option.sort();
+    assert_eq!(
+        without_option,
+        RANGED_WITHOUT_STARTUP_OPTION
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        "the set of ranged fields lacking a startup option changed"
+    );
+    assert_eq!(
+        proven,
+        96 - RANGED_WITHOUT_STARTUP_OPTION.len(),
+        "every ranged field with a real startup option must be proven clamped"
+    );
+    assert_eq!(proven, 77, "77 real startup options carry a declared range");
 }

@@ -743,8 +743,8 @@ async fn resolved_config_json(
     let Some(full_name) = s.config_names.get(key) else {
         return Ok(None);
     };
-    let fixture_value = p.option_str(full_name)?;
     let db_key = revops::config_resolve::db_override_key(key);
+    let fixture_value = p.option_str(full_name)?;
     let field_type = config_types::field_type_for(&db_key);
     let (db_override, python_value) = match revops::config_resolve::python_option_name(key) {
         Some(python_name) => {
@@ -773,11 +773,14 @@ async fn resolved_config_json(
         }
         None => (None, None),
     };
-    Ok(
-        revops::config_resolve::resolve_option_value(db_override, python_value, fixture_value)
-            .as_ref()
-            .map(|raw| config_types::convert_value(field_type, raw)),
+    Ok(revops::config_resolve::resolve_startup_option_value(
+        &db_key,
+        db_override,
+        python_value,
+        fixture_value,
     )
+    .as_ref()
+    .map(|raw| config_types::convert_value(field_type, raw)))
 }
 
 #[tokio::main]
@@ -1394,7 +1397,8 @@ async fn main() -> Result<()> {
                                 }
                                 None => (None, None),
                             };
-                        let effective = revops::config_resolve::resolve_option_value(
+                        let effective = revops::config_resolve::resolve_startup_option_value(
+                            &db_key,
                             db_override,
                             python_value,
                             fixture_value,
@@ -3490,12 +3494,16 @@ async fn main() -> Result<()> {
             // option (not a hardcoded default) so an operator running a
             // non-default flow window still gets the correct backfill
             // bounds (plan Task 2 self-review, second-order risk).
-            let flow_window_days = hydration_plugin
-                .option_str(&opt_name("flow-window-days"))
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
-                .unwrap_or(7);
+            // Tasks 74/75: an own-option read is a startup value; the helper
+            // owns the clamp AND the Integer-safe parse.
+            let flow_window_days = revops::config_resolve::parse_clamped_startup_i64(
+                "flow_window_days",
+                hydration_plugin
+                    .option_str(&opt_name("flow-window-days"))
+                    .ok()
+                    .flatten(),
+                7,
+            );
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)

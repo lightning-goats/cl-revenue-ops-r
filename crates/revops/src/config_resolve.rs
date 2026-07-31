@@ -244,6 +244,89 @@ pub fn clamp_startup_float(field: &str, value: f64) -> f64 {
     }
 }
 
+/// py `_validate_numeric_config_options` applied to the WHOLE startup
+/// option set at once (`cl-revenue-ops.py:483-497`, driven by
+/// `_INIT_NUMERIC_RANGES = dict(CONFIG_FIELD_RANGES)` -- deliberately the
+/// same authoritative table as runtime overrides, "so startup cannot
+/// silently omit a newly governed field").
+///
+/// Applied at the ONE gate every startup value passes through
+/// ([`PythonOptionCache::apply_fetch`]) rather than at each consumer, for
+/// the same reason Python clamps the kwargs once before `Config` is built:
+/// every reader then sees in-band values by construction, and there is a
+/// single place to test, mutate, and reason about. Clamping per consumer
+/// would leave each new reader a fresh chance to forget.
+///
+/// Covers every numeric field with a declared range, not just the fee
+/// pair. `revenue-ops-<suffix>` maps back to its `Config` field name via
+/// [`db_override_key`], which carries the four irregular remaps.
+pub fn clamp_startup_option_map(values: &mut HashMap<String, options::Value>) {
+    for (full_name, value) in values.iter_mut() {
+        let Some(suffix) = full_name.strip_prefix("revenue-ops-") else {
+            continue;
+        };
+        let field = db_override_key(suffix);
+        let mut clamped = value.clone();
+        clamp_in_place(&field, full_name, &mut clamped);
+        *value = clamped;
+    }
+}
+
+/// [`clamp_startup_option_map`] for a SINGLE startup value, given the
+/// `Config` field name it belongs to.
+///
+/// Needed because the cached `listconfigs` map is not the only way a
+/// startup value reaches a consumer: the plugin's OWN registered option
+/// (`p.option_str(..)`, the layer-(c) "fixture" value) is operator-supplied
+/// too. Under the shadow `revenue-r-*` name it never appears in the cached
+/// `revenue-ops-*` map at all, and when `listconfigs` is unavailable the
+/// cache is empty while that option still carries a value. Both layers
+/// therefore share this one implementation rather than two that can drift.
+pub fn clamp_startup_value(field: &str, value: options::Value) -> options::Value {
+    let mut out = value;
+    clamp_in_place(field, field, &mut out);
+    out
+}
+
+fn clamp_in_place(field: &str, label: &str, value: &mut options::Value) {
+    match config_types::field_type_for(field) {
+        Some(FieldType::Int) => {
+            let Some(raw) = option_value_to_string(value) else {
+                return;
+            };
+            let Ok(parsed) = raw.trim().parse::<i64>() else {
+                return;
+            };
+            let clamped = clamp_startup_int(field, parsed);
+            if clamped != parsed {
+                eprintln!(
+                    "revops: startup option {label}={parsed} out of range; clamped to {clamped}"
+                );
+                *value = options::Value::Integer(clamped);
+            }
+        }
+        Some(FieldType::Float) => {
+            let Some(raw) = option_value_to_string(value) else {
+                return;
+            };
+            let Ok(parsed) = raw.trim().parse::<f64>() else {
+                return;
+            };
+            if !parsed.is_finite() {
+                return;
+            }
+            let clamped = clamp_startup_float(field, parsed);
+            if clamped != parsed {
+                eprintln!(
+                    "revops: startup option {label}={parsed} out of range; clamped to {clamped}"
+                );
+                *value = options::Value::String(clamped.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
 /// py `_enforce_fee_bound_invariant` (`cl-revenue-ops.py:501-518`) and the
 /// matching post-load repair in `config.py`: when the fee bounds are
 /// crossed, raise the CEILING to the floor.
@@ -294,6 +377,52 @@ pub async fn read_db_override(
         )),
         Ok(raw) => Ok(raw.and_then(|raw| validate_override(&db_key, &raw))),
     }
+}
+
+/// The full startup/persisted contract for ONE field, as a production
+/// helper rather than a shape re-assembled at each call site.
+///
+/// Precedence is unchanged -- (a) DB override > (b) cached `listconfigs`
+/// value > (c) this plugin's own registered option -- and the CLAMP applies
+/// to exactly one of them here:
+///
+///   (a) is NEVER clamped. A persisted override is range-checked by
+///       [`validate_override`], which SKIPS an out-of-range row and leaves
+///       the next layer standing. Startup CLAMPS, persisted SKIPS.
+///   (b) is already clamped at the single gate it enters through
+///       ([`PythonOptionCache::apply_fetch`]), so it is not clamped again.
+///   (c) is clamped HERE, because it never passes through that gate: this
+///       plugin registers shadow `revenue-r-*` names, so its own option is
+///       absent from the cached `revenue-ops-*` map, and during a
+///       `listconfigs` outage the cache is empty while the operator's
+///       supplied option still carries a value.
+pub fn resolve_startup_option_value(
+    field: &str,
+    db_override: Option<options::Value>,
+    cached: Option<options::Value>,
+    own: Option<options::Value>,
+) -> Option<options::Value> {
+    if let Some(value) = db_override {
+        return Some(value);
+    }
+    if let Some(value) = cached {
+        return Some(value);
+    }
+    own.map(|value| clamp_startup_value(field, value))
+}
+
+/// Read a startup option as an `i64`, clamped, falling back to `default`.
+///
+/// Reads the value through [`option_value_to_string`] rather than
+/// `options::Value::as_str`: [`clamp_startup_value`] can return
+/// `Value::Integer`, for which `as_str` yields `None` -- a consumer using
+/// it would silently drop a clamped value onto its own fallback (e.g.
+/// `flow_window_days` 999 clamping to 365 and then landing on 7).
+pub fn parse_clamped_startup_i64(field: &str, value: Option<options::Value>, default: i64) -> i64 {
+    value
+        .map(|v| clamp_startup_value(field, v))
+        .and_then(|v| option_value_to_string(&v).and_then(|s| s.trim().parse::<i64>().ok()))
+        .unwrap_or(default)
 }
 
 pub fn resolve_option_value(
@@ -454,7 +583,19 @@ impl PythonOptionCache {
     pub fn apply_fetch(&self, fetched: Result<HashMap<String, options::Value>, String>) -> bool {
         let mut state = self.inner.write().expect("option cache lock poisoned");
         match fetched {
-            Ok(map) => {
+            Ok(mut map) => {
+                // Tasks 74/75: the single startup CLAMP gate. Every consumer
+                // reads this snapshot, so clamping here is the Rust
+                // equivalent of Python clamping its kwargs once before
+                // `Config` is constructed -- see
+                // [`clamp_startup_option_map`].
+                //
+                // Layer (a) is deliberately NOT clamped anywhere: a
+                // persisted override is range-checked by
+                // [`validate_override`], which SKIPS an out-of-range row and
+                // leaves the previous layer standing. Startup CLAMPS,
+                // persisted SKIPS.
+                clamp_startup_option_map(&mut map);
                 state.values = map;
                 state.succeeded_once = true;
                 state.consecutive_failures = 0;
