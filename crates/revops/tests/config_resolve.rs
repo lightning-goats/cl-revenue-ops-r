@@ -380,3 +380,118 @@ mod whitespace_padded_overrides {
         assert_eq!(validate_override("daily_budget_sats", ""), None);
     }
 }
+
+// ---------------------------------------------------------------------
+// C71-30: `econ_shadow_enabled`, the key that kept `revenue-r-econ-snapshot`
+// marked not-yet-ported.
+//
+// It is a PUBLIC_RUNTIME_KEYS entry with NO registered CLN option, so it
+// lives only in `config_overrides`. The old handler refused to guess, which
+// was right: hardcoding `enabled: false` is a FALSE statement about node
+// state on any node whose operator turned it on.
+// ---------------------------------------------------------------------
+
+async fn seeded_db(rows: &[(&str, &str)]) -> revops_db::actor::DbHandle {
+    let fixture_db =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("econ.db");
+    std::fs::copy(&fixture_db, &path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (key, value) in rows {
+            conn.execute(
+                "INSERT INTO config_overrides (key, value, version, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![key, value, 1i64, 1_800_000_000i64],
+            )
+            .unwrap();
+        }
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+    std::mem::forget(dir);
+    handle
+}
+
+#[tokio::test]
+async fn econ_shadow_enabled_reads_the_operators_override() {
+    use revops::config_resolve::econ_shadow_enabled;
+    let handle = seeded_db(&[("econ_shadow_enabled", "true")]).await;
+    assert_eq!(econ_shadow_enabled(Some(&handle)).await, Ok(true));
+}
+
+#[tokio::test]
+async fn econ_shadow_enabled_uses_pythons_four_value_override_cast() {
+    use revops::config_resolve::econ_shadow_enabled;
+    // py `_apply_override` (config.py:1025): `value.lower() in
+    // ('true','1','yes','on')`. The FOUR-value set is the DB-override
+    // cast, wider than the startup-option cast. An operator who wrote
+    // `on` has this enabled in Python; reading it as disabled would be a
+    // false statement about node state.
+    for truthy in ["true", "TRUE", "1", "yes", "YES", "on", "On"] {
+        let handle = seeded_db(&[("econ_shadow_enabled", truthy)]).await;
+        assert_eq!(
+            econ_shadow_enabled(Some(&handle)).await,
+            Ok(true),
+            "`{truthy}` is truthy to Python's override cast"
+        );
+    }
+    for falsy in ["false", "0", "no", "off", "enabled", ""] {
+        let handle = seeded_db(&[("econ_shadow_enabled", falsy)]).await;
+        assert_eq!(
+            econ_shadow_enabled(Some(&handle)).await,
+            Ok(false),
+            "`{falsy}` is falsy to Python's override cast"
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_override_row_is_pythons_dataclass_default_of_false() {
+    use revops::config_resolve::econ_shadow_enabled;
+    // Consulted and absent IS a real answer here: the dataclass default is
+    // False (config.py:554), so a node with no row genuinely has the shadow
+    // off.
+    let handle = seeded_db(&[]).await;
+    assert_eq!(econ_shadow_enabled(Some(&handle)).await, Ok(false));
+}
+
+#[tokio::test]
+async fn an_unconfigured_database_refuses_rather_than_reporting_disabled() {
+    use revops::config_resolve::econ_shadow_enabled;
+    // The distinction the whole slice rests on. With no production DB there
+    // is no way to know whether the operator enabled the shadow, and
+    // `enabled: false` would be a claim about node state with no evidence
+    // behind it -- precisely what the old not_yet_ported marker guarded.
+    let refusal = econ_shadow_enabled(None)
+        .await
+        .expect_err("an unreadable config surface is not a disabled one");
+    assert!(
+        refusal.contains("econ_shadow_enabled"),
+        "the refusal must name the key: {refusal}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_config_overrides_read_refuses_rather_than_reporting_disabled() {
+    use revops::config_resolve::econ_shadow_enabled;
+    // The table is gone, so the read ERRORS -- it does not return "no row".
+    // Those are different facts and only one of them means the operator
+    // left the shadow off.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("no-overrides.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);")
+            .unwrap();
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+
+    let refusal = econ_shadow_enabled(Some(&handle))
+        .await
+        .expect_err("a failed read is not a disabled shadow");
+    assert!(
+        refusal.contains("econ_shadow_enabled"),
+        "the refusal must name the key: {refusal}"
+    );
+}

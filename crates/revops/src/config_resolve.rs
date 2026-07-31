@@ -522,6 +522,51 @@ fn extract_value(entry: &Value) -> Option<options::Value> {
     None
 }
 
+/// py `Config.econ_shadow_enabled` (modules/config.py:554, dataclass
+/// default `False`).
+///
+/// C71-30: this key is a `PUBLIC_RUNTIME_KEYS` entry with NO registered
+/// CLN option -- `cl-revenue-ops.py` never calls `add_option` for it -- so
+/// layer (b) does not exist and it lives ONLY in `config_overrides`. That
+/// is why the econ-snapshot surface could not simply read the option
+/// table.
+///
+/// Three outcomes, deliberately distinct:
+///
+/// - a row exists -> Python's `_apply_override` bool cast
+///   (`value.lower() in ('true','1','yes','on')`, config.py:1025). Note the
+///   FOUR-value set: this is the DB-override cast, not the narrower
+///   startup-option cast in `config_types::python_startup_bool`. An
+///   operator who wrote `on` has it enabled in Python, and reading that as
+///   disabled would be a false statement about node state.
+/// - no row -> `false`, Python's own dataclass default. Consulted and
+///   absent is a real answer.
+/// - the read failed, or there is no production database to read ->
+///   `Err`. Neither is "disabled": reporting `enabled: false` because a
+///   database was unreachable is exactly the false claim about node state
+///   that the old `not_yet_ported` marker existed to avoid.
+pub async fn econ_shadow_enabled(db: Option<&revops_db::actor::DbHandle>) -> Result<bool, String> {
+    const FIELD: &str = "econ_shadow_enabled";
+    let Some(handle) = db else {
+        return Err(format!(
+            "the production database is not configured, so {FIELD} cannot be read; \
+             reporting \"disabled\" would be a claim about node state this port \
+             has no evidence for"
+        ));
+    };
+    match revops_db::queries::config_override(handle, FIELD).await {
+        Err(e) => Err(format!(
+            "config_overrides read failed for {FIELD}: {e:#} -- a failed read is \
+             not \"disabled\""
+        )),
+        Ok(None) => Ok(false),
+        Ok(Some(raw)) => Ok(config_types::convert_value(
+            Some(config_types::FieldType::Bool),
+            &options::Value::String(raw),
+        ) == serde_json::json!(true)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
