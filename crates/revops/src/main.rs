@@ -68,6 +68,12 @@ struct State {
     /// 6147): the shadow-cycle sequence counter, consumed only after the
     /// enabled + engine gates pass (see `rpc_econ_cycle`).
     econ_cycle_seq: std::sync::atomic::AtomicI64,
+    /// Task 66 slice 8e: the flow loop's bounded trigger handle, set
+    /// when the flow cadence is wired. `revenue-analyze`'s whole-fleet
+    /// arm enqueues one tick on it (py `run_flow_analysis()`'s trigger,
+    /// coalescing with any pending periodic tick); unset = the flow
+    /// pipeline is unwired -> py's "Plugin not fully initialized".
+    flow_trigger: std::sync::OnceLock<revops::loop_health::LoopHandle>,
     /// Port of the profitability analyzer's bleeder verdict cache
     /// (`_bleeder_cache`/`_bleeder_cache_time`, profitability_analyzer.py:
     /// 1808-1813): `(refreshed_at, scid -> classification)`. Fresh
@@ -3398,11 +3404,44 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &analyze_name,
-            "read-only flow analysis for a single channel_id (SCID); the whole-fleet \
-             sweep (no channel_id) is a mutating background job and is NOT ported here",
+            "flow analysis: single channel_id (SCID) served from the flow pass's \
+             persisted state; no channel_id triggers one bounded flow-loop pass \
+             over the Rust-owned observer store (Task 66 slice 8e)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
+                }
+                // py 4536-4542 fleet arm: absent, null, and "" channel_id
+                // are all falsy -> trigger one pass. The Rust pass writes
+                // ONLY the Rust-owned observer store (never production),
+                // so the trigger is safe pre-cutover.
+                let fleet = match v.get("channel_id") {
+                    None | Some(serde_json::Value::Null) => true,
+                    Some(serde_json::Value::String(s)) if s.is_empty() => true,
+                    _ => false,
+                };
+                if fleet {
+                    let state = p.state();
+                    return Ok(match state.flow_trigger.get() {
+                        Some(handle) => revops::rpc_analyze::fleet_trigger_response(
+                            handle
+                                .request(revops::loop_health::RequestKey::from(
+                                    "fixed_interval",
+                                ))
+                                .await
+                                .map_err(|e| format!("{e:#}")),
+                        ),
+                        // py's flow_analyzer-None guard: the flow loop is
+                        // unwired in this runtime. The builder's fleet arm
+                        // ignores the lookup argument entirely (no store
+                        // read happens on this path), so Ready(None) keeps
+                        // the F71-R23 tripwire's no-NotWired-in-main
+                        // invariant intact.
+                        None => revops::rpc_analyze::build_analyze(
+                            v.get("channel_id"),
+                            revops::rpc_analyze::MetricsLookup::Ready(None),
+                        ),
+                    });
                 }
                 // F71-R23: served from the flow pass's own persisted
                 // state, gated on THIS boot having completed a pass. The
@@ -4147,6 +4186,7 @@ async fn main() -> Result<()> {
     // Task 71 / R26: the three analytics cadences. Built during
     // composition, started only after `configured.start()` returns.
     let mut flow_cadence = None;
+    let flow_trigger_cell = std::sync::OnceLock::new();
     let mut startup_snapshot_cadence = None;
     let mut financial_cadence = None;
     let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
@@ -4342,6 +4382,7 @@ async fn main() -> Result<()> {
                     if let Some(handle) =
                         runtime.handle(revops_db::loop_health::LoopId::FlowAnalysis)
                     {
+                        let _ = flow_trigger_cell.set(handle.clone());
                         flow_cadence = Some(revops::analytics_cadence::FlowCadenceActivation::new(
                             handle, flow_pass,
                         ));
@@ -4527,6 +4568,7 @@ async fn main() -> Result<()> {
         journal_dir: journal_dir.clone(),
         econ_cycle_seq: std::sync::atomic::AtomicI64::new(0),
         bleeder_cache: std::sync::Mutex::new(None),
+        flow_trigger: flow_trigger_cell,
         mode_label: resolved_mode_label,
         fee_authority_status,
         authority_runtime,

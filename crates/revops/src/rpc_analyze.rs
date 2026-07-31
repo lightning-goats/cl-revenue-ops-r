@@ -95,12 +95,13 @@ pub fn build_analyze(channel_id_raw: Option<&Value>, metrics: MetricsLookup) -> 
                 }
             }
         }
-        None => json!({
-            "error": "not_yet_ported",
-            "reason": "whole-fleet flow analysis (run_flow_analysis) is a \
-                       mutating background sweep, not read-only reporting; \
-                       pass channel_id for the single-channel report",
-        }),
+        // Task 66 slice 8e: the fleet arm is real now -- `main.rs`
+        // routes a present trigger through [`fleet_trigger_response`],
+        // and reaches THIS arm only when the flow loop is unwired in
+        // this runtime (no observer store / passive mode), which is
+        // exactly py's `flow_analyzer is None` guard
+        // (cl-revenue-ops.py:4521-4522).
+        None => json!({"error": "Plugin not fully initialized"}),
     }
 }
 
@@ -257,6 +258,29 @@ pub fn build_analyze_from_evidence(
     }
 }
 
+/// Port of the whole-fleet arm (cl-revenue-ops.py:4536-4542): Python
+/// runs `run_flow_analysis()` and acks with the fixed status string, or
+/// catches the failure in-band. This port's flow pass runs behind the
+/// bounded flow loop, so the trigger is an ADMISSION: enqueued or
+/// coalesced-with-a-pending-tick both mean the pass will run (py's
+/// trigger semantics); a dropped/failed admission is py's except arm --
+/// the pass will NOT run, and saying "triggered" would be a lie.
+pub fn fleet_trigger_response(admission: Result<crate::loop_health::Admission, String>) -> Value {
+    match admission {
+        Ok(crate::loop_health::Admission::Enqueued)
+        | Ok(crate::loop_health::Admission::Coalesced) => {
+            json!({"status": "Flow analysis triggered"})
+        }
+        Ok(crate::loop_health::Admission::Dropped) => json!({
+            "error": "Flow analysis failed: the bounded flow loop dropped the request \
+                      (suspended or queue full)",
+        }),
+        Err(error) => json!({
+            "error": format!("Flow analysis failed: {error}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,19 +358,44 @@ mod tests {
         );
     }
 
+    /// Task 66 slice 8e: the builder's fleet arm is the UNWIRED case
+    /// only (py `flow_analyzer is None`, cl-revenue-ops.py:4521-4522);
+    /// a wired runtime routes the fleet arm through
+    /// `fleet_trigger_response` instead.
     #[test]
-    fn missing_channel_id_is_documented_not_faked() {
+    fn missing_channel_id_without_a_flow_loop_is_pys_init_guard() {
         let v = build_analyze(None, MetricsLookup::NotWired);
-        assert_eq!(v["error"], "not_yet_ported");
+        assert_eq!(v["error"], "Plugin not fully initialized");
         // Control: must NOT claim Python's "Flow analysis triggered" --
         // this builder performs no side effect.
         assert_ne!(v.get("status"), Some(&json!("Flow analysis triggered")));
     }
 
+    /// py `if channel_id and ...`: "" is falsy, so an empty string takes
+    /// the FLEET arm exactly like an absent param.
     #[test]
     fn empty_string_channel_id_behaves_like_absent() {
         let v = build_analyze(Some(&json!("")), MetricsLookup::NotWired);
-        assert_eq!(v["error"], "not_yet_ported");
+        assert_eq!(v["error"], "Plugin not fully initialized");
+    }
+
+    /// The admission mapping (py 4536-4542): enqueued/coalesced both mean
+    /// the pass WILL run -> py's fixed ack; dropped/failed mean it will
+    /// NOT -> py's except arm, never a fabricated "triggered".
+    #[test]
+    fn fleet_trigger_admission_arms() {
+        use crate::loop_health::Admission;
+        let ack = json!({"status": "Flow analysis triggered"});
+        assert_eq!(fleet_trigger_response(Ok(Admission::Enqueued)), ack);
+        assert_eq!(fleet_trigger_response(Ok(Admission::Coalesced)), ack);
+        let dropped = fleet_trigger_response(Ok(Admission::Dropped));
+        assert!(dropped["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Flow analysis failed:"));
+        assert!(dropped.get("status").is_none());
+        let failed = fleet_trigger_response(Err("ingress store gone".to_string()));
+        assert_eq!(failed["error"], "Flow analysis failed: ingress store gone");
     }
 
     #[test]

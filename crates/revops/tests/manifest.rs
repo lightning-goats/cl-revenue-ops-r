@@ -3171,12 +3171,31 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         "must not collide with Python's real unknown-channel answer: {profitability_single:?}"
     );
 
-    // No channel_id: the whole-fleet sweep is a mutating background job
-    // and is deliberately NOT ported here (RPC_BATCH_A.md's contract) --
-    // the handler must say so honestly, not silently return an empty
-    // single-channel shape.
+    // Task 66 slice 8e: no channel_id is py's FLEET arm -- the flow loop
+    // is wired in this harness, so the bounded trigger admits one pass
+    // over the Rust-owned observer store and answers py's exact ack
+    // (cl-revenue-ops.py:4542). The retired not_yet_ported marker is gone.
     let analyze_no_id = call_after_init(false, None, home.path(), &[], "revenue-r-analyze");
-    assert_eq!(analyze_no_id["error"], serde_json::json!("not_yet_ported"));
+    assert_eq!(
+        analyze_no_id,
+        serde_json::json!({"status": "Flow analysis triggered"}),
+        "{analyze_no_id:?}"
+    );
+
+    // py `if channel_id and ...`: "" is falsy -> the SAME fleet arm.
+    let analyze_empty = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-analyze",
+        serde_json::json!({"channel_id": ""}),
+    );
+    assert_eq!(
+        analyze_empty,
+        serde_json::json!({"status": "Flow analysis triggered"}),
+        "{analyze_empty:?}"
+    );
 
     // F71-R23: with a channel_id, analyze is no longer a declared gap --
     // it is served from the flow pass's persisted state. This harness
