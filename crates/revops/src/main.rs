@@ -2179,16 +2179,32 @@ async fn main() -> Result<()> {
                             python_value,
                             fixture_value,
                         );
-                        // Phase 1b has no DB-backed config-override-write
-                        // path yet, so there is no live per-key version to
-                        // report; build_config_response documents this
-                        // placeholder in its `_phase1b_gaps` array.
+                        // Task 66 slice 8b: the REAL config version --
+                        // Python's MAX(version) over config_overrides
+                        // (config.py:919 seeds _version from the same
+                        // read). No DB = py's pre-attach default of 0;
+                        // a FAILED read surfaces as an error, never a
+                        // silent 0 that could masquerade as "no writes
+                        // yet".
+                        let version = match s.db.as_ref() {
+                            Some(handle) => match queries::config_version(handle).await {
+                                Ok(version) => version,
+                                Err(e) => {
+                                    return Ok(serde_json::json!({
+                                        "error": format!(
+                                            "config_overrides version read failed: {e:#}"
+                                        ),
+                                    }))
+                                }
+                            },
+                            None => 0,
+                        };
                         Ok(build_config_response(
                             key,
                             true,
                             effective.as_ref(),
                             field_type,
-                            0,
+                            version,
                         ))
                     }
                     None => Ok(build_config_response(key, false, None, None, 0)),

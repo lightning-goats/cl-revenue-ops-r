@@ -2266,6 +2266,37 @@ fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
     );
 }
 
+/// `revenue-r-config get` through the spawned binary must report the REAL
+/// config version — Python's `MAX(version)` over `config_overrides`
+/// (database.py:7374-7378) — with the retired `version` gap entry gone.
+/// The seeded override also proves the layer-(a) value path end-to-end.
+#[test]
+fn revenue_r_config_get_reports_the_real_db_config_version() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('daily_budget_sats', '7777', 7, ?1), \
+                    ('weekly_budget_sats', '50000', 3, ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("seed overrides");
+    }
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-config",
+        serde_json::json!({"action": "get", "key": "daily-budget-sats"}),
+    );
+    assert_eq!(result["value"], 7777, "{result:?}");
+    assert_eq!(result["version"], 7, "MAX(version) over config_overrides");
+    assert_eq!(result["_phase1b_gaps"], serde_json::json!([]));
+}
+
 /// `revenue-r-set-fee` through the spawned binary: every e2e mode is
 /// non-live, so the shared fee-authority lease DENIES with Python's exact
 /// merged dict (cl-revenue-ops.py:4721-4728) — before any validation, so

@@ -43,6 +43,11 @@ fn known_key_shape_has_version_and_classification() {
     assert_eq!(v["key"], "daily-budget-sats");
     assert_eq!(v["value"], 5000);
     assert_eq!(v["version"], 3);
+    // Task 66 slice 8b: version is REAL now (queries::config_version,
+    // Python's MAX(version) FROM config_overrides) -- the gap entry that
+    // told the diff harness to skip it is retired. Empty, not absent:
+    // the project-wide honesty convention emits the empty list.
+    assert_eq!(v["_phase1b_gaps"], serde_json::json!([]));
     // daily_budget_sats IS in PUBLIC_RUNTIME_KEYS -- confirmed against the
     // fixture (fixtures/config_types.json).
     assert_eq!(v["classification"], "public");

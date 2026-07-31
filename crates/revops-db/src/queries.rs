@@ -1069,6 +1069,21 @@ pub async fn rebalance_spend_component(
     })
 }
 
+/// py `Database.get_config_version` (database.py:7374-7378): the live
+/// config version is `MAX(version)` over `config_overrides`, 0 when the
+/// table is empty (py `row['max_v'] or 0` — MAX over no rows is NULL).
+/// This is the value `revenue-config get` reports as `version`
+/// (cl-revenue-ops.py:5861 via `config._version`, seeded from this same
+/// read at startup, config.py:919).
+pub async fn config_version(handle: &DbHandle) -> Result<i64> {
+    handle
+        .query_i64(
+            "SELECT COALESCE(MAX(version), 0) FROM config_overrides",
+            vec![],
+        )
+        .await
+}
+
 /// py `get_total_capex_by_channel` (database.py:7886-7917): windowed capex
 /// per channel from `rebalance_costs` + `spend_events`, in SATS, keyed by
 /// RAW channel_id (Python does not normalize scid spellings here — two
