@@ -1,16 +1,18 @@
 use revops::rpc_params::{decode_params, load_rpc_contract, method_spec, ParamBinding};
 use revops::rpc_state_mutators::{
-    ban_plan, ban_success, completed_spend_response, completed_write_response,
-    deprecated_policy_write_gate, ignore_plan, ignore_success, invalid_peer_id_error,
-    parse_spend_release_params, parse_spend_release_stale_params, parse_spend_reserve_params,
-    parse_spend_settle_params, policy_write_override, spend_release_response,
-    spend_release_stale_response, spend_reserve_rejection, spend_reserve_response,
-    spend_settle_response, unban_plan, unban_success, unignore_success,
+    ban_plan, ban_success, build_profile_preview, completed_spend_response,
+    completed_write_response, deprecated_policy_write_gate, ignore_plan, ignore_success,
+    invalid_peer_id_error, parse_spend_release_params, parse_spend_release_stale_params,
+    parse_spend_reserve_params, parse_spend_settle_params, policy_write_override, preview_all,
+    preview_profile, profile_bundles, spend_release_response, spend_release_stale_response,
+    spend_reserve_rejection, spend_reserve_response, spend_settle_response, unban_plan,
+    unban_success, unignore_success,
 };
 use revops::state_writer::StateWriteAck;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
 use revops_db::state_writer::SpendReleaseBatch;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 
 const PEER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -340,4 +342,134 @@ fn spend_mutator_responses_are_exact_and_only_follow_completed_results() {
     );
     assert_eq!(response, json!({"error": "queue full"}));
     assert_ne!(response["status"], "success");
+}
+
+fn conservative_profile_current() -> Map<String, Value> {
+    profile_bundles()["conservative"].clone()
+}
+
+#[test]
+fn profile_preview_matches_python_sorted_diff_and_never_mutates_inputs() {
+    let current = conservative_profile_current();
+    let before = current.clone();
+    let conservative = preview_profile(&current, &json!("conservative"), &BTreeSet::new());
+    assert_eq!(conservative["would_change"], json!([]));
+    assert_eq!(conservative["blocked_by_explicit_override"], json!([]));
+    assert_eq!(conservative["already_equal"].as_array().unwrap().len(), 11);
+
+    let growth = preview_profile(&current, &json!("growth"), &BTreeSet::new());
+    let daily = growth["would_change"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "daily_budget_sats")
+        .unwrap();
+    assert_eq!(daily["current"], 5000);
+    assert_eq!(daily["profile_value"], 12000);
+    assert_eq!(
+        growth["activation"],
+        "takes effect at plugin restart after `revenue-config set risk_profile growth`"
+    );
+    assert_eq!(current, before, "preview must be observe-only");
+}
+
+#[test]
+fn profile_preview_preserves_explicit_precedence_and_exact_contradiction() {
+    let mut current = conservative_profile_current();
+    current.insert("daily_budget_sats".into(), json!(700));
+    let explicit = BTreeSet::from(["daily_budget_sats".to_string()]);
+    let blocked = preview_profile(&current, &json!("growth"), &explicit);
+    assert_eq!(
+        blocked["blocked_by_explicit_override"],
+        json!([
+            {"key": "daily_budget_sats", "current": 700, "profile_value": 12000, "blocked_by": "explicit_override"},
+        ])
+    );
+    assert!(blocked["would_change"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["key"] != "daily_budget_sats"));
+    let mut contradictory = conservative_profile_current();
+    contradictory.insert("weekly_budget_sats".into(), json!(1000));
+    let weekly_explicit = BTreeSet::from(["weekly_budget_sats".to_string()]);
+    let preview = preview_profile(&contradictory, &json!("growth"), &weekly_explicit);
+    assert_eq!(
+        preview["contradiction_precheck"],
+        json!(["daily_budget_sats (12000) > weekly_budget_sats (1000) in the merged result; the weekly cap binds first"])
+    );
+}
+
+#[test]
+fn profile_preview_unknown_and_all_profiles_match_python_contract() {
+    let current = conservative_profile_current();
+    assert_eq!(
+        preview_profile(&current, &json!("yolo"), &BTreeSet::new()),
+        json!({
+            "error": "unknown profile: \x27yolo\x27",
+            "valid_profiles": ["preserve", "conservative", "balanced", "growth", "custom"]
+        })
+    );
+    let all = preview_all(&current, &BTreeSet::new());
+    assert_eq!(
+        all.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "preserve".to_string(),
+            "conservative".to_string(),
+            "balanced".to_string(),
+            "growth".to_string(),
+        ])
+    );
+    assert!(all["preserve"]["would_change"]
+        .as_array()
+        .is_some_and(|values| !values.is_empty()));
+}
+
+#[test]
+fn profile_preview_rpc_header_filters_non_bundle_overrides_and_flags_restart() {
+    let positional = decode_params(
+        &method_spec(&load_rpc_contract(), "revenue-profile-preview"),
+        &json!(["growth"]),
+        ParamBinding::PositionalOrNamed,
+    )
+    .unwrap();
+    assert_eq!(positional["profile"], "growth");
+    let current = conservative_profile_current();
+    let overrides = Map::from_iter([
+        ("risk_profile".into(), json!(" BALANCED ")),
+        ("daily_budget_sats".into(), json!("700")),
+        ("paused".into(), json!("false")),
+    ]);
+    let response = build_profile_preview(&current, "custom", &overrides, None);
+    assert_eq!(response["active_profile"], "custom");
+    assert_eq!(response["persisted_profile"], "balanced");
+    assert_eq!(response["pending_restart"], true);
+    assert_eq!(
+        response["explicit_override_keys"],
+        json!(["daily_budget_sats"])
+    );
+    assert_eq!(
+        response["comparison"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "preserve".to_string(),
+            "conservative".to_string(),
+            "balanced".to_string(),
+            "growth".to_string(),
+        ])
+    );
+
+    let explicit_null = json!(null);
+    let null_response = build_profile_preview(&current, "custom", &overrides, Some(&explicit_null));
+    assert!(null_response.get("comparison").is_some());
+    assert!(null_response.get("preview").is_none());
+
+    let requested = json!("growth");
+    let single = build_profile_preview(&current, "custom", &overrides, Some(&requested));
+    assert_eq!(single["preview"]["profile"], "growth");
+    assert!(single.get("comparison").is_none());
 }

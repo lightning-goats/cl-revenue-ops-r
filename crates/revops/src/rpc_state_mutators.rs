@@ -6,6 +6,7 @@ use revops_db::{
     state_writer::{PeerPolicyWrite, SpendReleaseBatch},
 };
 use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     rpc_params::{is_truthy_py, python_int},
@@ -370,4 +371,253 @@ pub fn completed_spend_response<T>(
         | StateWriteAck::AdmittedOutcomeUnknown(detail)
         | StateWriteAck::StorageFailure(detail) => in_band_error(detail),
     }
+}
+
+fn profile_bundle(entries: &[(&str, Value)]) -> Map<String, Value> {
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
+}
+
+/// Python `PROFILE_BUNDLES`; authority controls and safety invariants never belong here.
+pub fn profile_bundles() -> BTreeMap<String, Map<String, Value>> {
+    BTreeMap::from([
+        ("custom".into(), Map::new()),
+        (
+            "preserve".into(),
+            profile_bundle(&[
+                ("daily_budget_sats", json!(2000)),
+                ("weekly_budget_sats", json!(14000)),
+                ("rebalance_hold_margin", json!(5.0)),
+                ("growth_budget_enabled", json!(false)),
+                ("growth_budget_earned_fraction", json!(0.1)),
+                ("growth_budget_experiment_fraction", json!(0.05)),
+                ("growth_budget_max_extra_sats", json!(1000)),
+                ("planner_min_annual_roi_pct", json!(5.0)),
+                ("planner_max_opens_per_cycle", json!(0)),
+                ("planner_max_closes_per_cycle", json!(0)),
+                ("lnplus_swap_preference_margin", json!(0.5)),
+            ]),
+        ),
+        (
+            "conservative".into(),
+            profile_bundle(&[
+                ("daily_budget_sats", json!(5000)),
+                ("weekly_budget_sats", json!(35000)),
+                ("rebalance_hold_margin", json!(0.0)),
+                ("growth_budget_enabled", json!(false)),
+                ("growth_budget_earned_fraction", json!(0.25)),
+                ("growth_budget_experiment_fraction", json!(0.1)),
+                ("growth_budget_max_extra_sats", json!(2000)),
+                ("planner_min_annual_roi_pct", json!(1.0)),
+                ("planner_max_opens_per_cycle", json!(1)),
+                ("planner_max_closes_per_cycle", json!(0)),
+                ("lnplus_swap_preference_margin", json!(0.2)),
+            ]),
+        ),
+        (
+            "balanced".into(),
+            profile_bundle(&[
+                ("daily_budget_sats", json!(8000)),
+                ("weekly_budget_sats", json!(56000)),
+                ("rebalance_hold_margin", json!(0.0)),
+                ("growth_budget_enabled", json!(true)),
+                ("growth_budget_earned_fraction", json!(0.25)),
+                ("growth_budget_experiment_fraction", json!(0.1)),
+                ("growth_budget_max_extra_sats", json!(2000)),
+                ("planner_min_annual_roi_pct", json!(1.0)),
+                ("planner_max_opens_per_cycle", json!(1)),
+                ("planner_max_closes_per_cycle", json!(1)),
+                ("lnplus_swap_preference_margin", json!(0.2)),
+            ]),
+        ),
+        (
+            "growth".into(),
+            profile_bundle(&[
+                ("daily_budget_sats", json!(12000)),
+                ("weekly_budget_sats", json!(84000)),
+                ("rebalance_hold_margin", json!(0.0)),
+                ("growth_budget_enabled", json!(true)),
+                ("growth_budget_earned_fraction", json!(0.4)),
+                ("growth_budget_experiment_fraction", json!(0.2)),
+                ("growth_budget_max_extra_sats", json!(5000)),
+                ("planner_min_annual_roi_pct", json!(0.5)),
+                ("planner_max_opens_per_cycle", json!(2)),
+                ("planner_max_closes_per_cycle", json!(1)),
+                ("lnplus_swap_preference_margin", json!(0.1)),
+            ]),
+        ),
+    ])
+}
+
+fn python_profile_name(profile: &Value) -> String {
+    if is_truthy_py(profile) {
+        python_str(profile).trim().to_ascii_lowercase()
+    } else {
+        String::new()
+    }
+}
+
+fn python_repr(value: &Value) -> String {
+    match value {
+        Value::String(value) => {
+            let slash = char::from_u32(92).expect("valid slash");
+            let quote = char::from_u32(39).expect("valid quote");
+            let doubled_slash = format!("{slash}{slash}");
+            let escaped_quote = format!("{slash}{quote}");
+            let escaped = value
+                .replace(slash, &doubled_slash)
+                .replace(quote, &escaped_quote);
+            format!("{quote}{escaped}{quote}")
+        }
+        other => python_str(other),
+    }
+}
+
+fn python_numeric(value: &Value) -> Option<f64> {
+    match value {
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        Value::Number(value) => value.as_f64(),
+        _ => None,
+    }
+}
+
+fn python_equal(left: &Value, right: &Value) -> bool {
+    match (python_numeric(left), python_numeric(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Read-only Python `preview_profile`; all per-key arrays are ordered by key.
+pub fn preview_profile(
+    current_values: &Map<String, Value>,
+    profile: &Value,
+    explicit_keys: &BTreeSet<String>,
+) -> Value {
+    let name = python_profile_name(profile);
+    let bundles = profile_bundles();
+    let Some(bundle) = bundles.get(&name) else {
+        return json!({
+            "error": format!("unknown profile: {}", python_repr(profile)),
+            "valid_profiles": ["preserve", "conservative", "balanced", "growth", "custom"],
+        });
+    };
+
+    let mut changes = Vec::new();
+    let mut blocked = Vec::new();
+    let mut unchanged = Vec::new();
+    let mut merged = current_values.clone();
+    let mut keys = bundle.keys().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {
+        let profile_value = &bundle[key];
+        let current = current_values.get(key).cloned().unwrap_or(Value::Null);
+        let mut entry = json!({
+            "key": key,
+            "current": current,
+            "profile_value": profile_value,
+        });
+        if explicit_keys.contains(key) {
+            entry["blocked_by"] = json!("explicit_override");
+            blocked.push(entry);
+        } else if python_equal(&current, profile_value) {
+            unchanged.push(entry);
+        } else {
+            merged.insert(key.clone(), profile_value.clone());
+            changes.push(entry);
+        }
+    }
+
+    let mut contradictions = Vec::new();
+    if let (Some(daily), Some(weekly)) = (
+        merged.get("daily_budget_sats"),
+        merged.get("weekly_budget_sats"),
+    ) {
+        if matches!(
+            (python_numeric(daily), python_numeric(weekly)),
+            (Some(d), Some(w)) if d > w
+        ) {
+            contradictions.push(format!(
+                "daily_budget_sats ({}) > weekly_budget_sats ({}) in the merged result; the weekly cap binds first",
+                python_str(daily),
+                python_str(weekly)
+            ));
+        }
+    }
+
+    json!({
+        "profile": name,
+        "would_change": changes,
+        "blocked_by_explicit_override": blocked,
+        "already_equal": unchanged,
+        "contradiction_precheck": contradictions,
+        "activation": format!(
+            "takes effect at plugin restart after `revenue-config set risk_profile {name}`"
+        ),
+    })
+}
+
+pub fn preview_all(
+    current_values: &Map<String, Value>,
+    explicit_keys: &BTreeSet<String>,
+) -> Map<String, Value> {
+    ["preserve", "conservative", "balanced", "growth"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                preview_profile(current_values, &json!(name), explicit_keys),
+            )
+        })
+        .collect()
+}
+
+/// Assemble Python `revenue_profile_preview` after config and overrides are read.
+pub fn build_profile_preview(
+    current_values: &Map<String, Value>,
+    active_profile: &str,
+    overrides: &Map<String, Value>,
+    requested_profile: Option<&Value>,
+) -> Value {
+    let bundle_keys = profile_bundles()
+        .values()
+        .flat_map(|bundle| bundle.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let explicit = overrides
+        .keys()
+        .filter(|key| key.as_str() != "risk_profile")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let explicit_bundle_keys = explicit
+        .intersection(&bundle_keys)
+        .cloned()
+        .collect::<Vec<_>>();
+    let persisted_value = overrides
+        .get("risk_profile")
+        .filter(|value| is_truthy_py(value))
+        .cloned()
+        .unwrap_or_else(|| json!(active_profile));
+    let persisted = python_str(&persisted_value).trim().to_ascii_lowercase();
+
+    let mut response = Map::from_iter([
+        ("active_profile".into(), json!(active_profile)),
+        ("persisted_profile".into(), json!(persisted)),
+        ("pending_restart".into(), json!(persisted != active_profile)),
+        ("explicit_override_keys".into(), json!(explicit_bundle_keys)),
+    ]);
+    if let Some(profile) = requested_profile.filter(|value| !value.is_null()) {
+        response.insert(
+            "preview".into(),
+            preview_profile(current_values, profile, &explicit),
+        );
+    } else {
+        response.insert(
+            "comparison".into(),
+            Value::Object(preview_all(current_values, &explicit)),
+        );
+    }
+    Value::Object(response)
 }
