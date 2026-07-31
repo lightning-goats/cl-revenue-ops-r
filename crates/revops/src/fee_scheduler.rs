@@ -620,6 +620,10 @@ pub enum FeeDebugQuery {
     /// pending/dropped counts, the last cycle's timestamp/outcome, and
     /// whether the dry-run governor/ledger is open. Answered synchronously
     /// off this owner's own fields, no IO -- never blocks the cycle loop.
+    /// `revenue-health`'s fees section (cl-revenue-ops.py:6232-6257):
+    /// managed/converged/still_learning/sleeping counts off the live
+    /// controller state (`revops_fees::cycle::fee_health_counts`).
+    HealthCounts,
     RunwayCounters,
 }
 
@@ -4181,6 +4185,7 @@ impl CycleOwner {
                     },
                 })
             }
+            FeeDebugQuery::HealthCounts => revops_fees::cycle::fee_health_counts(&self.state),
             FeeDebugQuery::RunwayCounters => {
                 // Task 59 §3.6: warn (visibility only) when the oldest
                 // in-flight A3 occurrence crosses the threshold.

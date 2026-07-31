@@ -664,56 +664,60 @@ fn register_total_cost_budget(
                     Ok(window_hours) => window_hours,
                     Err(error) => return Ok(error),
                 };
-                // Config scalars, Python's cfg-getattr defaults on absence
-                // (cl-revenue-ops.py:8407-8419). A failed config read is
-                // in-band, like every read RPC here.
-                let config_error =
-                    |error: anyhow::Error| serde_json::json!({"error": format!("{error:#}")});
-                macro_rules! cfg_value {
-                    ($key:expr, $as:ident, $default:expr) => {
-                        match resolved_config_json(&p, $key).await {
-                            Ok(value) => value.and_then(|v| v.$as()).unwrap_or($default),
-                            Err(error) => return Ok(config_error(error)),
-                        }
-                    };
-                }
-                let daily_budget_sats = cfg_value!("daily-budget-sats", as_i64, 0);
-                let growth_enabled = cfg_value!("growth-budget-enabled", as_bool, false);
-                let growth_earned_fraction =
-                    cfg_value!("growth-budget-earned-fraction", as_f64, 0.25);
-                let growth_experiment_fraction =
-                    cfg_value!("growth-budget-experiment-fraction", as_f64, 0.10);
-                let growth_max_extra_sats = cfg_value!("growth-budget-max-extra-sats", as_i64, 0);
-                let growth_hard_ceiling_sats =
-                    cfg_value!("growth-budget-hard-ceiling-sats", as_i64, daily_budget_sats);
-                // Python passes the unified daily budget as the explicit
-                // global cap so the Boltz side never recurses into the
-                // budget provider (cl-revenue-ops.py:8147-8158).
-                let boltz_component = revops::rpc_boltz_ops::total_cost_boltz_component(
-                    &boltz_rpc_deps(&p),
-                    window_hours,
-                    Some(daily_budget_sats.max(0)),
-                )
-                .await;
-                let state = p.state();
-                Ok(revops::rpc_total_cost_budget::total_cost_budget_response(
-                    window_hours,
-                    revops::rpc_total_cost_budget::TotalCostBudgetSources {
-                        db: state.db.as_ref(),
-                        boltz_component,
-                        daily_budget_sats,
-                        growth_enabled,
-                        growth_earned_fraction,
-                        growth_experiment_fraction,
-                        growth_max_extra_sats,
-                        growth_hard_ceiling_sats,
-                        now: now_unix(),
-                    },
-                )
-                .await)
+                Ok(total_cost_budget_status(&p, window_hours).await)
             }
         },
     )
+}
+
+/// The post-guard half of `_total_cost_budget_status`
+/// (cl-revenue-ops.py:8296-8430), shared by `revenue-total-cost-budget`
+/// and `revenue-health`'s budget section (py 6279-6293 calls the same
+/// provider). Config-read failures return the in-band error dict.
+async fn total_cost_budget_status(p: &Plugin<SharedState>, window_hours: i64) -> serde_json::Value {
+    // Config scalars, Python's cfg-getattr defaults on absence
+    // (cl-revenue-ops.py:8407-8419). A failed config read is in-band,
+    // like every read RPC here.
+    macro_rules! cfg_value {
+        ($key:expr, $as:ident, $default:expr) => {
+            match resolved_config_json(p, $key).await {
+                Ok(value) => value.and_then(|v| v.$as()).unwrap_or($default),
+                Err(error) => return serde_json::json!({"error": format!("{error:#}")}),
+            }
+        };
+    }
+    let daily_budget_sats = cfg_value!("daily-budget-sats", as_i64, 0);
+    let growth_enabled = cfg_value!("growth-budget-enabled", as_bool, false);
+    let growth_earned_fraction = cfg_value!("growth-budget-earned-fraction", as_f64, 0.25);
+    let growth_experiment_fraction = cfg_value!("growth-budget-experiment-fraction", as_f64, 0.10);
+    let growth_max_extra_sats = cfg_value!("growth-budget-max-extra-sats", as_i64, 0);
+    let growth_hard_ceiling_sats =
+        cfg_value!("growth-budget-hard-ceiling-sats", as_i64, daily_budget_sats);
+    // Python passes the unified daily budget as the explicit global cap
+    // so the Boltz side never recurses into the budget provider
+    // (cl-revenue-ops.py:8147-8158).
+    let boltz_component = revops::rpc_boltz_ops::total_cost_boltz_component(
+        &boltz_rpc_deps(p),
+        window_hours,
+        Some(daily_budget_sats.max(0)),
+    )
+    .await;
+    let state = p.state();
+    revops::rpc_total_cost_budget::total_cost_budget_response(
+        window_hours,
+        revops::rpc_total_cost_budget::TotalCostBudgetSources {
+            db: state.db.as_ref(),
+            boltz_component,
+            daily_budget_sats,
+            growth_enabled,
+            growth_earned_fraction,
+            growth_experiment_fraction,
+            growth_max_extra_sats,
+            growth_hard_ceiling_sats,
+            now: now_unix(),
+        },
+    )
+    .await
 }
 
 fn register_econ_reconcile(
@@ -3132,8 +3136,9 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &health_name,
-            "consolidated operator health check (Phase: financials.today/.week are \
-             DB-backed; annualized_roc_pct and sections 2-9 are gap-marked, see _gaps)",
+            "consolidated operator health check: financials/roc/channels/fees/budget/\
+             top_routes/boltz/loops served from real evidence (Task 66 slice 8d); \
+             rebalancer/planner stay gap-marked until Task 69's engine assembly",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
@@ -3178,16 +3183,95 @@ async fn main() -> Result<()> {
                     Ok::<_, anyhow::Error>((pnl_1d, pnl_7d))
                 }
                 .await;
-                // total_capacity_sats: a live `listpeerchannels` sum -- omit
-                // (pass `None`) until that RPC call is wired; annualized_roc_pct
-                // will then show as `null` + gap-listed, per the builder's
-                // contract.
-                match pnl {
-                    Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health_with_loops(
-                        now, Some(&pnl_1d), Some(&pnl_7d), None,
+                // Task 66 slice 8d: the live listpeerchannels snapshot
+                // feeds BOTH annualized_roc_pct's capacity sum (py
+                // calculate_roc; a fetch failure is py's own except -> 0
+                // capacity -> 0.0, profitability_analyzer.py:1837-1841)
+                // and the channels section's classification gather.
+                let snapshot =
+                    revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
+                        .await;
+                let total_capacity_sats: i64 = match &snapshot {
+                    Ok(channels) => channels
+                        .iter()
+                        .filter_map(|c| c.get("total_msat").and_then(serde_json::Value::as_i64))
+                        .map(|msat| msat.div_euclid(1000))
+                        .sum(),
+                    Err(_) => 0,
+                };
+                // channels section (py 6216-6229): classification counts
+                // over the SAME gather revenue-profitability serves. No
+                // observer store = the pipeline is unwired here (gap);
+                // a failed snapshot/gather = py's except arm.
+                let channels_section = match (&s.observer_db, &snapshot) {
+                    (None, _) => None,
+                    (Some(_), Err(error)) => Some(Err(error.clone())),
+                    (Some(observer), Ok(channels)) => Some(
+                        match revops::profitability_assembler::gather_profitability(
+                            revops::profitability_assembler::ProfitabilitySources {
+                                production_db: handle,
+                                observer,
+                                channels,
+                                now,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(fleet) => {
+                                let mut classifications =
+                                    std::collections::BTreeMap::new();
+                                for prof in fleet.profitability.values() {
+                                    *classifications
+                                        .entry(
+                                            prof.classification.as_value().to_string(),
+                                        )
+                                        .or_insert(0i64) += 1;
+                                }
+                                Ok((fleet.profitability.len(), classifications))
+                            }
+                            Err(refusal) => Err(refusal.detail().to_string()),
+                        },
+                    ),
+                };
+                // fees section (py 6232-6259): the owner's live counts;
+                // no running scheduler = unwired (gap). A bridge failure
+                // Value doubles as py's except arm.
+                let fees_section = match s.scheduler.get() {
+                    Some(handle) => Some(
+                        revops::fee_scheduler::query_owner_bounded(
+                            &handle.tx,
+                            revops::fee_scheduler::FeeDebugQuery::HealthCounts,
+                            revops::fee_scheduler::RPC_BRIDGE_RECV_TIMEOUT,
+                        )
+                        .await,
+                    ),
+                    None => None,
+                };
+                // budget section (py 6279-6293): the same provider the
+                // total-cost-budget RPC serves, 24h window (py default).
+                let budget_section = Some(Ok(total_cost_budget_status(&p, 24).await));
+                // top_routes (py 6326-6339): fetch failure is py's own
+                // except -> [].
+                let top_routes = Some(
+                    queries::top_route_pairs(handle, 7, 2, 5, now)
+                        .await
+                        .unwrap_or_default(),
+                );
+                let extras = revops::rpc_health::HealthExtras {
+                    channels: channels_section,
+                    fees: fees_section,
+                    budget: budget_section,
+                    top_routes,
+                };
+                let mut out = match pnl {
+                    Ok((pnl_1d, pnl_7d)) => revops::rpc_health::build_health_with_loops(
+                        now,
+                        Some(&pnl_1d),
+                        Some(&pnl_7d),
+                        Some(total_capacity_sats),
                         loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()),
                         &p.state().boot_id,
-                    )),
+                    ),
                     Err(e) => {
                         let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()), &p.state().boot_id);
                         out["financials"] = serde_json::json!({"error": e.to_string()});
@@ -3198,9 +3282,11 @@ async fn main() -> Result<()> {
                         if let Some(gaps) = out["_gaps"].as_array_mut() {
                             gaps.retain(|g| g != "financials");
                         }
-                        Ok(out)
+                        out
                     }
-                }
+                };
+                revops::rpc_health::apply_health_extras(&mut out, extras);
+                Ok(out)
             },
         )
         .rpcmethod(

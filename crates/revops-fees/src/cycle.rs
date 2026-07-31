@@ -536,6 +536,41 @@ pub struct SkipGateEpoch {
     pub is_sleeping: bool,
 }
 
+/// Port of `revenue_health`'s fee-convergence counting rule
+/// (cl-revenue-ops.py:6232-6257): every fee-state channel is managed;
+/// converged when the DTS posterior std is under 50; sleeping from the
+/// fee state, PLUS cycle-state-only channels (managed and counted
+/// sleeping off the cycle flag); `still_learning` is Python's
+/// sparse-count approximation `max(0, total - converged)`.
+pub fn fee_health_counts(state: &ControllerState) -> serde_json::Value {
+    let mut total_managed: i64 = 0;
+    let mut converged: i64 = 0;
+    let mut sleeping: i64 = 0;
+    for fs in state.fee_states.values() {
+        total_managed += 1;
+        if fs.thompson.posterior_std < 50.0 {
+            converged += 1;
+        }
+        if fs.is_sleeping {
+            sleeping += 1;
+        }
+    }
+    for (channel_id, cs) in &state.cycle_states {
+        if !state.fee_states.contains_key(channel_id) {
+            total_managed += 1;
+            if cs.is_sleeping {
+                sleeping += 1;
+            }
+        }
+    }
+    serde_json::json!({
+        "managed_channels": total_managed,
+        "converged": converged,
+        "still_learning": (total_managed - converged).max(0),
+        "sleeping": sleeping,
+    })
+}
+
 /// The single-owner controller state (py instance dicts + Vegas globals).
 #[derive(Debug, Default)]
 pub struct ControllerState {
@@ -3806,6 +3841,42 @@ fn skip_reason_code(reason: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fee_health_counts_matches_pythons_counting_rule() {
+        use super::*;
+        let mut state = ControllerState::default();
+        // Three fee-state channels: converged+awake (std 10), sparse+
+        // sleeping (std 200), boundary std exactly 50 is NOT converged
+        // (py `< 50` strict).
+        let mut a = crate::state_store::ChannelFeeState::default();
+        a.thompson.posterior_std = 10.0;
+        let mut b = crate::state_store::ChannelFeeState::default();
+        b.thompson.posterior_std = 200.0;
+        b.is_sleeping = true;
+        let mut c = crate::state_store::ChannelFeeState::default();
+        c.thompson.posterior_std = 50.0;
+        state.fee_states.insert("a".into(), a);
+        state.fee_states.insert("b".into(), b);
+        state.fee_states.insert("c".into(), c);
+        // One cycle-only channel, sleeping (counts managed + sleeping);
+        // one cycle state SHADOWING a fee state (must NOT double-count).
+        let mut d = ChannelCycleState::default();
+        d.is_sleeping = true;
+        state.cycle_states.insert("d".into(), d);
+        let mut shadow = ChannelCycleState::default();
+        shadow.is_sleeping = true;
+        state.cycle_states.insert("a".into(), shadow);
+
+        let v = fee_health_counts(&state);
+        assert_eq!(v["managed_channels"], 4, "3 fee states + 1 cycle-only");
+        assert_eq!(v["converged"], 1, "std 10 only; 50 is not < 50");
+        assert_eq!(v["still_learning"], 3);
+        assert_eq!(
+            v["sleeping"], 2,
+            "fee-state b + cycle-only d; the shadowing cycle state for a never counts"
+        );
+    }
+
     use super::*;
 
     fn gossip(

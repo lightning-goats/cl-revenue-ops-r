@@ -24,7 +24,7 @@ use revops_db::queries::{
     opening_costs_since, planner_actions, planner_candidates, pnl_summary, policies_by_tag,
     policy_changes_since, policy_for_peer, rebalance_spend_component, rebalance_success_rates,
     recent_fee_change_timestamps, spend_ledger_aggregates, spend_reservation_states,
-    total_capex_by_channel,
+    top_route_pairs, total_capex_by_channel,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -1936,4 +1936,43 @@ async fn all_channel_state_rows_orders_and_passes_nulls_through() {
         17,
         "full dict(row) column set"
     );
+}
+
+/// py `get_top_route_pairs` (database.py:5629-5650): positive-fee rows
+/// only, HAVING floor on forward count, ordered by total fee DESC, LIMIT.
+/// Seeded on top of seeded_db's two forwards (1x1x0->2x2x0 fee 1000,
+/// 1x1x0->3x3x0 fee 2000, both in-window).
+#[tokio::test]
+async fn top_route_pairs_filters_and_orders_by_fee() {
+    let (_dir, path) = seeded_db(NOW);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO forwards (in_channel, out_channel, in_msat, out_msat, fee_msat, timestamp, resolved_time) VALUES
+            ('1x1x0','2x2x0',1000000,999000,5000,{w},{w}),
+            ('4x4x0','5x5x0',1000000,999000,0,{w},{w}),
+            ('1x1x0','3x3x0',1000000,999000,9000,{old},{old});",
+        w = NOW - 100,
+        old = NOW - 8 * 86400,
+    ))
+    .unwrap();
+    drop(conn);
+    let handle = spawn_read_only(&path).await.unwrap();
+    // days=7, min_forwards=2: only 1x1x0->2x2x0 has 2 positive-fee rows
+    // in-window (1000 + 5000); 1x1x0->3x3x0 has ONE in-window (2000 --
+    // the 9000 row is outside 7d); zero-fee rows never count.
+    let pairs = top_route_pairs(&handle, 7, 2, 5, NOW).await.unwrap();
+    assert_eq!(pairs.len(), 1, "{pairs:?}");
+    assert_eq!(pairs[0].in_channel, "1x1x0");
+    assert_eq!(pairs[0].out_channel, "2x2x0");
+    assert_eq!(pairs[0].total_fee_msat, 6000);
+    assert_eq!(pairs[0].forward_count, 2);
+
+    // min_forwards=1: both pairs qualify; ordered by total fee DESC.
+    let pairs = top_route_pairs(&handle, 7, 1, 5, NOW).await.unwrap();
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(pairs[0].total_fee_msat, 6000);
+    assert_eq!(pairs[1].total_fee_msat, 2000);
+    // LIMIT clips.
+    let pairs = top_route_pairs(&handle, 7, 1, 1, NOW).await.unwrap();
+    assert_eq!(pairs.len(), 1);
 }

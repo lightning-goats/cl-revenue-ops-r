@@ -1109,6 +1109,53 @@ pub async fn all_channel_state_rows(handle: &DbHandle) -> Result<Vec<serde_json:
         .await
 }
 
+/// One `get_top_route_pairs` row (database.py:5629-5650) — the fields
+/// `revenue-health`'s top_routes section consumes. `avg_fee_msat` is in
+/// the Python row but unused by every current consumer; not ported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopRoutePair {
+    pub in_channel: String,
+    pub out_channel: String,
+    pub total_fee_msat: i64,
+    pub forward_count: i64,
+}
+
+/// py `get_top_route_pairs(days, min_forwards, limit)` (database.py:
+/// 5629-5650): top revenue (in, out) pairs over `forwards`, positive-fee
+/// rows only, HAVING the forward-count floor, ordered by total fee.
+pub async fn top_route_pairs(
+    handle: &DbHandle,
+    days: i64,
+    min_forwards: i64,
+    limit: i64,
+    now: i64,
+) -> Result<Vec<TopRoutePair>> {
+    let cutoff = now - days * 86400;
+    handle
+        .query_rows(
+            "SELECT in_channel, out_channel, \
+             SUM(fee_msat) as total_fee_msat, COUNT(*) as forward_count \
+             FROM forwards WHERE timestamp >= ?1 AND fee_msat > 0 \
+             GROUP BY in_channel, out_channel \
+             HAVING forward_count >= ?2 \
+             ORDER BY total_fee_msat DESC LIMIT ?3",
+            vec![
+                SqlValue::Integer(cutoff),
+                SqlValue::Integer(min_forwards),
+                SqlValue::Integer(limit),
+            ],
+            |row| {
+                Ok(TopRoutePair {
+                    in_channel: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    out_channel: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    total_fee_msat: row.get::<_, i64>(2)?,
+                    forward_count: row.get::<_, i64>(3)?,
+                })
+            },
+        )
+        .await
+}
+
 /// py `Database.get_config_version` (database.py:7374-7378): the live
 /// config version is `MAX(version)` over `config_overrides`, 0 when the
 /// table is empty (py `row['max_v'] or 0` — MAX over no rows is NULL).

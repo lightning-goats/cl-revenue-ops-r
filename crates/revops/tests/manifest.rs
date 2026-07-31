@@ -2880,26 +2880,52 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
     );
     assert_eq!(result["financials"]["today"]["forward_count"], 1);
     assert_eq!(result["financials"]["week"]["forward_count"], 1);
+    // Task 66 slice 8d: annualized_roc_pct is REAL now -- the fake
+    // node's listpeerchannels has no channels, and py's calculate_roc
+    // over zero capacity is 0.0 (profitability_analyzer.py:1846-1855),
+    // never null.
     assert_eq!(
         result["financials"]["week"]["annualized_roc_pct"],
-        serde_json::Value::Null
+        serde_json::json!(0.0)
     );
+    // channels: the observer store is configured so the pipeline is
+    // WIRED -- and this harness variant serves no lightning-rpc socket,
+    // so the snapshot fetch fails. That is py's own except arm
+    // (analyze_all_channels raising -> {"error": ...}), a real answer,
+    // never a gap and never a fabricated empty fleet.
+    assert!(
+        result["channels"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("lightning-rpc")),
+        "result: {result:?}"
+    );
+    // budget: the same provider revenue-total-cost-budget serves, 24h
+    // window, projected to py 6281-6291's subset over the empty fixture.
+    assert_eq!(result["budget"]["effective_budget_sats"], 5000);
+    assert_eq!(result["budget"]["total_spent_sats"], 0);
+    assert_eq!(result["budget"]["remaining_sats"], 5000);
+    assert_eq!(result["budget"]["utilization_pct"], 0.0);
+    // top_routes: real -- the single seeded forward misses the
+    // min_forwards=2 floor, so py's answer is [].
+    assert_eq!(result["top_routes"], serde_json::json!([]));
     let gaps: Vec<&str> = result["_gaps"]
         .as_array()
         .unwrap()
         .iter()
         .map(|g| g.as_str().unwrap())
         .collect();
+    // fees stays a gap in THIS e2e (no fee-cycle scheduler running);
+    // rebalancer/planner stay gaps until Task 69's engine assembly.
+    for g in ["fees", "rebalancer", "planner"] {
+        assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
+    }
     for g in [
         "financials.week.annualized_roc_pct",
         "channels",
-        "fees",
-        "rebalancer",
         "budget",
-        "planner",
         "top_routes",
     ] {
-        assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
+        assert!(!gaps.contains(&g), "{g} must be closed: {gaps:?}");
     }
     assert!(!gaps.contains(&"financials"), "gaps: {gaps:?}");
     assert!(

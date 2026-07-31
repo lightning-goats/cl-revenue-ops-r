@@ -11,27 +11,24 @@
 //! already-fetched `total_capacity_sats`, else it is `null` and
 //! gap-listed, exactly like `rpc_dashboard`'s `tlv_sats`.
 //!
-//! Sections 2-9 (channel classifications, fee-controller convergence,
-//! rebalancer state, unified budget, Boltz auto-cycle, capacity planner,
-//! top routing-fee route pairs, daemon-loop heartbeat liveness) are
-//! unconditionally `null` and gap-listed here -- not a fabricated
-//! zero/empty value. Round-2 correction, P2 (codex re-review): the "fees"
-//! gap specifically is NOT "no Rust fee controller exists" -- it does:
-//! `revops-fees::cycle`'s `ControllerState` (`cycle.rs:534`) is a real,
-//! running fee-decision kernel driven by `fee_scheduler.rs`'s scheduler
-//! loop (see the fee control stack in `docs/port/PARITY-CHECKLIST.md`
-//! §1, all sixteen components `[x]`). The gap is narrower: this
-//! `revenue-r-health` handler is not GIVEN that live `ControllerState` --
-//! nothing plumbs the scheduler's current state into `build_health`'s
-//! caller in `main.rs` yet, so `fees` stays `null`+gap-listed for lack of
-//! wiring, not for lack of a controller to read from. Rebalancer state,
-//! capacity planner, and top routing-fee route pairs genuinely have no
-//! Rust-side equivalent running in this plugin at all (no rebalance loop,
-//! no capacity-planner daemon, no route-tracking); Boltz auto-cycle
-//! likewise has no Rust manager wired (see `boltz` below, which IS
-//! answered honestly rather than gapped); and the `_loop_heartbeats`
-//! registry (cl-revenue-ops.py:322-323) is a Python-only in-memory
-//! structure this plugin has no counterpart for.
+//! Task 66 slice 8d closed most of the former gaps via
+//! [`apply_health_extras`]: `channels` (classification counts over the
+//! same profitability gather `revenue-profitability` runs), `fees` (the
+//! live controller's counts through `FeeDebugQuery::HealthCounts` /
+//! `revops_fees::cycle::fee_health_counts`), `budget` (the
+//! total-cost-budget status subset, py 6279-6291), and `top_routes`
+//! (`queries::top_route_pairs`, py 6326-6339). Each follows Python's
+//! per-section try/except: a section whose fetch FAILED renders
+//! `{"error": ...}` (a real py arm, not a gap); a section whose pipeline
+//! is genuinely unwired in this runtime (no observer store, no running
+//! scheduler) stays `null` + gap-listed. `rebalancer` and `planner`
+//! remain gap-listed deliberately: their owners exist but the engine /
+//! capacity-planner capabilities are unassembled until Task 69's
+//! authority-gated construction, and their Python sections read live
+//! engine internals this port cannot honestly synthesize yet. `boltz` is
+//! answered honestly (`{"enabled": false}`, Python's own no-manager
+//! answer); `loops` is the Rust-owned durable inventory
+//! ([`build_health_with_loops`]).
 
 use revops_db::queries::PnlSummary;
 use revops_econ::pyfloat::py_round;
@@ -181,6 +178,236 @@ pub fn build_health_with_loops(
         gaps.retain(|gap| gap != "loops");
     }
     value
+}
+
+/// The census-closed sections' prefetched inputs (Task 66 slice 8d).
+/// The three-state encoding per section: `None` = the pipeline is
+/// UNWIRED in this runtime (stays null + gap-listed); `Some(Err(e))` =
+/// the fetch ran and FAILED (Python's per-section except arm,
+/// `{"error": e}` -- a real answer, gap pruned); `Some(Ok(..))` = real
+/// data. `top_routes` has no error form: Python's except arm there is
+/// `[]` (cl-revenue-ops.py:6338-6339), so the caller maps a fetch
+/// failure to `Some(vec![])`.
+/// The channels section's fetched form: `(total, classification -> count)`.
+pub type ChannelClassCounts = (usize, std::collections::BTreeMap<String, i64>);
+
+pub struct HealthExtras {
+    /// py 6216-6229.
+    pub channels: Option<Result<ChannelClassCounts, String>>,
+    /// The owner's `fee_health_counts` payload, py 6232-6259 (the
+    /// bounded-bridge error Value doubles as py's except arm).
+    pub fees: Option<Value>,
+    /// The FULL total-cost-budget status response, py 6279-6293; the
+    /// subset projection happens here.
+    pub budget: Option<Result<Value, String>>,
+    pub top_routes: Option<Vec<revops_db::queries::TopRoutePair>>,
+}
+
+/// Fill the census-closed sections into a [`build_health_with_loops`]
+/// value and prune exactly the gap entries that now carry real answers.
+pub fn apply_health_extras(value: &mut Value, extras: HealthExtras) {
+    let mut filled: Vec<&'static str> = Vec::new();
+
+    if let Some(channels) = extras.channels {
+        value["channels"] = match channels {
+            Ok((total, classifications)) => json!({
+                "total": total,
+                "classifications": classifications,
+            }),
+            Err(error) => json!({"error": error}),
+        };
+        filled.push("channels");
+    }
+
+    if let Some(fees) = extras.fees {
+        value["fees"] = fees;
+        filled.push("fees");
+    }
+
+    if let Some(budget) = extras.budget {
+        value["budget"] = match budget {
+            Ok(status) => {
+                // py 6281-6291: the subset projection. A status carrying
+                // an "error" key is the raised-provider case -> py's
+                // except arm, never zeros dressed as a real budget.
+                match status.get("error") {
+                    Some(error) => json!({"error": error}),
+                    None => {
+                        let actual_spent = status
+                            .get("actual_spent_sats")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0);
+                        let effective = status
+                            .get("effective_budget_sats")
+                            .cloned()
+                            .unwrap_or(json!(0));
+                        let utilization = py_round(
+                            100.0 * actual_spent as f64
+                                / (effective.as_i64().unwrap_or(0).max(1)) as f64,
+                            1,
+                        );
+                        json!({
+                            "effective_budget_sats": effective,
+                            "total_spent_sats": actual_spent,
+                            "remaining_sats": status.get("remaining_sats").cloned().unwrap_or(json!(0)),
+                            "spent_by_category": status
+                                .get("actual_spent_by_category")
+                                .cloned()
+                                .unwrap_or(json!({})),
+                            "utilization_pct": utilization,
+                        })
+                    }
+                }
+            }
+            Err(error) => json!({"error": error}),
+        };
+        filled.push("budget");
+    }
+
+    if let Some(routes) = extras.top_routes {
+        // py 6329-6337: normalized scids, floor msat->sats, count.
+        value["top_routes"] = Value::Array(
+            routes
+                .iter()
+                .map(|route| {
+                    json!({
+                        "in_channel": route.in_channel.replace(':', "x"),
+                        "out_channel": route.out_channel.replace(':', "x"),
+                        "fee_sats_7d": route.total_fee_msat.div_euclid(1000),
+                        "forward_count": route.forward_count,
+                    })
+                })
+                .collect(),
+        );
+        filled.push("top_routes");
+    }
+
+    if let Some(gaps) = value["_gaps"].as_array_mut() {
+        gaps.retain(|gap| {
+            gap.as_str()
+                .map(|gap| !filled.contains(&gap))
+                .unwrap_or(true)
+        });
+    }
+}
+
+#[cfg(test)]
+mod extras_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn base() -> Value {
+        build_health(1_800_000_000, None, None, None)
+    }
+
+    fn remaining_gaps(v: &Value) -> Vec<String> {
+        v["_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Every wired section fills and prunes its gap; rebalancer/planner
+    /// stay gap-listed (Task-69 staging).
+    #[test]
+    fn filled_sections_prune_their_gaps_only() {
+        let mut v = base();
+        let mut classifications = std::collections::BTreeMap::new();
+        classifications.insert("profitable".to_string(), 3i64);
+        classifications.insert("zombie".to_string(), 1i64);
+        apply_health_extras(
+            &mut v,
+            HealthExtras {
+                channels: Some(Ok((4, classifications))),
+                fees: Some(json!({
+                    "managed_channels": 4, "converged": 2,
+                    "still_learning": 2, "sleeping": 1,
+                })),
+                budget: Some(Ok(json!({
+                    "effective_budget_sats": 5000,
+                    "actual_spent_sats": 811,
+                    "remaining_sats": 3980,
+                    "actual_spent_by_category": {"rebalance": 811},
+                }))),
+                top_routes: Some(vec![revops_db::queries::TopRoutePair {
+                    in_channel: "1:1:0".to_string(),
+                    out_channel: "2x2x0".to_string(),
+                    total_fee_msat: 6999,
+                    forward_count: 2,
+                }]),
+            },
+        );
+        assert_eq!(v["channels"]["total"], 4);
+        assert_eq!(v["channels"]["classifications"]["profitable"], 3);
+        assert_eq!(v["fees"]["converged"], 2);
+        // py 6281-6291 subset projection + round-1 utilization:
+        // 100*810/5000 = 16.2.
+        assert_eq!(v["budget"]["total_spent_sats"], 811);
+        assert_eq!(v["budget"]["spent_by_category"]["rebalance"], 811);
+        assert_eq!(
+            v["budget"]["utilization_pct"], 16.2,
+            "py round(16.22, 1) -- the third decimal makes round-1 observable"
+        );
+        // py 6329-6337: normalize + floor msat -> sats.
+        assert_eq!(v["top_routes"][0]["in_channel"], "1x1x0");
+        assert_eq!(v["top_routes"][0]["fee_sats_7d"], 6, "floor(6999 msat)");
+        let gaps = remaining_gaps(&v);
+        assert!(gaps.contains(&"rebalancer".to_string()), "{gaps:?}");
+        assert!(gaps.contains(&"planner".to_string()));
+        assert!(!gaps.contains(&"channels".to_string()));
+        assert!(!gaps.contains(&"fees".to_string()));
+        assert!(!gaps.contains(&"budget".to_string()));
+        assert!(!gaps.contains(&"top_routes".to_string()));
+    }
+
+    /// py's per-section except arms: a FAILED fetch is {"error": e} and
+    /// NOT a gap; an unwired pipeline (None) keeps null + the gap entry.
+    #[test]
+    fn failed_fetch_is_pys_error_arm_unwired_stays_a_gap() {
+        let mut v = base();
+        apply_health_extras(
+            &mut v,
+            HealthExtras {
+                channels: Some(Err("listpeerchannels failed".to_string())),
+                fees: None,
+                budget: Some(Err("budget provider raised".to_string())),
+                top_routes: Some(vec![]),
+            },
+        );
+        assert_eq!(v["channels"]["error"], "listpeerchannels failed");
+        assert_eq!(v["fees"], Value::Null);
+        assert_eq!(v["budget"]["error"], "budget provider raised");
+        assert_eq!(v["top_routes"], json!([]), "py except -> []");
+        let gaps = remaining_gaps(&v);
+        assert!(gaps.contains(&"fees".to_string()), "unwired keeps its gap");
+        assert!(
+            !gaps.contains(&"channels".to_string()),
+            "an error IS an answer"
+        );
+        assert!(!gaps.contains(&"budget".to_string()));
+        assert!(!gaps.contains(&"top_routes".to_string()));
+    }
+
+    /// A budget status that itself carries an "error" key (the raised
+    /// provider case) must surface as py's except arm, never as a
+    /// zero-valued budget dressed as real.
+    #[test]
+    fn error_shaped_budget_status_never_projects_zeros() {
+        let mut v = base();
+        apply_health_extras(
+            &mut v,
+            HealthExtras {
+                channels: None,
+                fees: None,
+                budget: Some(Ok(json!({"error": "Plugin not initialized"}))),
+                top_routes: None,
+            },
+        );
+        assert_eq!(v["budget"], json!({"error": "Plugin not initialized"}));
+        assert!(v["budget"].get("effective_budget_sats").is_none());
+    }
 }
 
 #[cfg(test)]
