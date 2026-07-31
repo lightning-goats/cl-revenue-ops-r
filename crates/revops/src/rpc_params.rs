@@ -124,6 +124,18 @@ pub fn load_rpc_contract() -> RpcParameterContract {
         .expect("embedded RPC parameter contract is valid")
 }
 
+/// Resolve one exact generated Python RPC contract. Startup and manifest
+/// wiring use this instead of hand-maintained parameter lists, so a renamed
+/// or missing method fails before its handler can accept calls.
+pub fn method_spec(contract: &RpcParameterContract, name: &str) -> RpcMethodSpec {
+    contract
+        .methods
+        .iter()
+        .find(|method| method.name == name)
+        .unwrap_or_else(|| panic!("missing embedded RPC contract for {name}"))
+        .clone()
+}
+
 fn value_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",

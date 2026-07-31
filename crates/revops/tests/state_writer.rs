@@ -19,7 +19,10 @@ fn python_schema(path: &PathBuf) {
             rebalance_mode TEXT NOT NULL DEFAULT 'enabled',
             fee_ppm_target INTEGER,
             tags TEXT,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            fee_multiplier_min REAL,
+            fee_multiplier_max REAL,
+            expires_at INTEGER
         );
         CREATE TABLE hot_channel_protection_overrides (
             peer_id TEXT PRIMARY KEY,
@@ -90,6 +93,9 @@ async fn ack_arms_map_from_real_actor_outcomes() {
             rebalance_mode: "enabled".into(),
             fee_ppm_target: None,
             tags: None,
+            fee_multiplier_min: None,
+            fee_multiplier_max: None,
+            expires_at: None,
         })
         .collect();
     let ack = writer.apply_policy_batch(oversized, 1_800_000_000).await;
@@ -216,6 +222,9 @@ async fn publish_and_wake_fire_only_after_commit() {
         rebalance_mode: "enabled".into(),
         fee_ppm_target: Some(120),
         tags: None,
+        fee_multiplier_min: None,
+        fee_multiplier_max: None,
+        expires_at: None,
     };
     let ack = writer
         .upsert_peer_policy_then_wake(write.clone(), 1_800_000_000, move || {

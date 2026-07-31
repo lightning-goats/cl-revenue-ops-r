@@ -35,27 +35,15 @@
 use revops_analytics::growth::{compute_growth_budget_status, GrowthBudgetInputs};
 use serde_json::{json, Map, Value};
 
+use crate::rpc_params::{is_truthy_py, python_int};
+
 /// `wh = max(1, min(168, int(window_hours or 24)))` (cl-revenue-ops.py:
-/// 8312-8313). Unlike [`crate::rpc_dashboard::parse_window_days`] (range
-/// `[1,365]`, default 30) this RPC's window is hours, range `[1,168]`,
-/// default 24 -- distinct enough from that sibling parser that sharing code
-/// would obscure both ranges' provenance.
+/// 8312-8313). Python applies `or 24` before `int()`, so every falsy JSON
+/// value defaults to 24; truthy values use the shared exact `int()` port.
 pub fn parse_window_hours(raw: Option<&Value>) -> Result<i64, Value> {
-    let bad = || json!({"error": "window_hours must be an integer"});
-    let parsed: i64 = match raw {
-        None | Some(Value::Null) => 24,
-        Some(Value::Number(n)) => {
-            if let Some(i) = n.as_i64() {
-                i
-            } else if let Some(f) = n.as_f64() {
-                f.trunc() as i64
-            } else {
-                return Err(bad());
-            }
-        }
-        Some(Value::String(s)) => s.trim().parse::<i64>().map_err(|_| bad())?,
-        Some(_) => return Err(bad()),
-    };
+    let default = Value::Number(24.into());
+    let value = raw.filter(|value| is_truthy_py(value)).unwrap_or(&default);
+    let parsed = python_int(value).map_err(|error| json!({"error": error}))?;
     Ok(parsed.clamp(1, 168))
 }
 
@@ -427,11 +415,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_hours_defaults_to_24_and_clamps_to_168() {
+    fn window_hours_matches_python_or_default_then_int_then_clamp() {
         assert_eq!(parse_window_hours(None).unwrap(), 24);
+        for falsy in [
+            json!(null),
+            json!(false),
+            json!(0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
+            assert_eq!(parse_window_hours(Some(&falsy)).unwrap(), 24, "{falsy}");
+        }
+        assert_eq!(parse_window_hours(Some(&json!(true))).unwrap(), 1);
         assert_eq!(parse_window_hours(Some(&json!(9999))).unwrap(), 168);
-        assert_eq!(parse_window_hours(Some(&json!(0))).unwrap(), 1);
-        assert!(parse_window_hours(Some(&json!("nope"))).is_err());
+        assert_eq!(parse_window_hours(Some(&json!(-1))).unwrap(), 1);
+        assert_eq!(parse_window_hours(Some(&json!("0"))).unwrap(), 1);
+        assert_eq!(parse_window_hours(Some(&json!(" 45 "))).unwrap(), 45);
+        assert_eq!(
+            parse_window_hours(Some(&json!("nope"))).unwrap_err(),
+            json!({"error": "invalid literal for int() with base 10: \x27nope\x27"})
+        );
+        assert_eq!(
+            parse_window_hours(Some(&json!({"not": "empty"}))).unwrap_err(),
+            json!({"error": "int() argument must be a string, a bytes-like object or a real number, not \x27dict\x27"})
+        );
     }
 
     #[test]

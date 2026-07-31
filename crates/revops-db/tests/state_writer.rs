@@ -3,8 +3,9 @@
 //! (cl_revenue_ops/modules/database.py) -- the production file is never
 //! involved anywhere in this workspace.
 
+use revops_db::budget::ReserveRequest;
 use revops_db::state_writer::{
-    spawn_state_writer, BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite,
+    spawn_state_writer, BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete,
     StateWriterOpenError,
 };
 use rusqlite::Connection;
@@ -22,7 +23,10 @@ fn python_schema(path: &PathBuf) {
             rebalance_mode TEXT NOT NULL DEFAULT 'enabled',
             fee_ppm_target INTEGER,
             tags TEXT,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            fee_multiplier_min REAL,
+            fee_multiplier_max REAL,
+            expires_at INTEGER
         );
         CREATE TABLE hot_channel_protection_overrides (
             peer_id TEXT PRIMARY KEY,
@@ -43,6 +47,29 @@ fn python_schema(path: &PathBuf) {
             job_channel_id TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active'
         );
+        CREATE TABLE spend_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            reserved_sats INTEGER NOT NULL,
+            reserved_at INTEGER NOT NULL,
+            reference_id TEXT,
+            channel_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT
+        );
+        CREATE TABLE spend_events (
+            event_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            amount_sats INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            reference_id TEXT,
+            channel_id TEXT,
+            source TEXT,
+            metadata_json TEXT
+        );
+        CREATE TABLE rebalance_costs (cost_sats INTEGER, timestamp INTEGER);
         CREATE TABLE channel_states (channel_id TEXT PRIMARY KEY, peer_id TEXT);
         CREATE TABLE channel_failures (channel_id TEXT, at INTEGER);
         CREATE TABLE channel_probes (channel_id TEXT, at INTEGER);
@@ -261,6 +288,117 @@ async fn budget_transitions_are_guarded_and_terminal() {
     assert_eq!(status, "released");
 }
 
+#[tokio::test]
+async fn generic_spend_commands_share_the_writer_and_preserve_atomic_results() {
+    let (_d, path) = fixture();
+    let writer = spawn_state_writer(&path).await.unwrap();
+
+    let request = |id: &str, amount: i64, category: &str| ReserveRequest {
+        reservation_id: id.to_string(),
+        amount_sats: amount,
+        category: category.to_string(),
+        effective_budget_sats: Some(1_000),
+        since_timestamp: Some(0),
+        ..ReserveRequest::default()
+    };
+    assert_eq!(
+        writer
+            .reserve_spend(request("r1", 400, " Rebalance "), 100)
+            .await
+            .unwrap(),
+        (true, 600)
+    );
+    assert_eq!(
+        writer
+            .reserve_spend(request("r2", 700, "misc"), 101)
+            .await
+            .unwrap(),
+        (false, 600),
+        "the actor transaction must enforce the live cross-category total"
+    );
+    assert!(writer.release_spend_reservation("r1".into()).await.unwrap());
+    assert!(!writer.release_spend_reservation("r1".into()).await.unwrap());
+
+    for (id, amount, category, at) in [
+        ("old-a", 100, "foo", 1),
+        ("old-b", 200, "foo", 2),
+        ("old-c", 300, "bar", 3),
+        ("fresh", 50, "foo", 950),
+    ] {
+        assert!(
+            writer
+                .reserve_spend(request(id, amount, category), at)
+                .await
+                .unwrap()
+                .0
+        );
+    }
+    let released = writer
+        .release_spend_reservations(Some("foo".into()), 100, 1, 1_000)
+        .await
+        .unwrap();
+    assert_eq!(released.released_count, 1);
+    assert_eq!(released.released_sats, 100);
+    assert_eq!(released.reservation_ids, vec!["old-a"]);
+
+    assert!(writer
+        .settle_spend_reservation(
+            "old-b".into(),
+            Some(150),
+            Some("operator".into()),
+            true,
+            2_000,
+        )
+        .await
+        .unwrap());
+    assert!(!writer
+        .settle_spend_reservation("old-b".into(), None, None, false, 2_001)
+        .await
+        .unwrap());
+
+    assert!(
+        writer
+            .reserve_spend(request("bad-event", 40, "foo"), 1_500)
+            .await
+            .unwrap()
+            .0
+    );
+    assert!(!writer
+        .settle_spend_reservation("bad-event".into(), Some(-1), None, true, 2_100)
+        .await
+        .unwrap());
+
+    let conn = Connection::open(&path).unwrap();
+    let bad_status: String = conn
+        .query_row(
+            "SELECT status FROM spend_reservations WHERE reservation_id = 'bad-event'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let bad_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM spend_events WHERE event_id = 'resv:bad-event'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bad_status, "active", "rejected event must roll settle back");
+    assert_eq!(bad_events, 0);
+
+    let row: (String, i64, String) = conn
+        .query_row(
+            "SELECT r.status, e.amount_sats, e.source
+             FROM spend_reservations r JOIN spend_events e
+               ON e.event_id = 'resv:' || r.reservation_id
+             WHERE r.reservation_id = 'old-b'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("spent".into(), 150, "operator".into()));
+}
+
 // ---------------------------------------------------------------------------
 // Batches: bounded to 100, all-or-nothing
 // ---------------------------------------------------------------------------
@@ -272,7 +410,73 @@ fn policy(peer: &str) -> PeerPolicyWrite {
         rebalance_mode: "enabled".to_string(),
         fee_ppm_target: Some(150),
         tags: None,
+        fee_multiplier_min: None,
+        fee_multiplier_max: None,
+        expires_at: None,
     }
+}
+
+type StoredPolicyRow = (
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+);
+
+#[tokio::test]
+async fn policy_upsert_preserves_all_python_policy_columns_and_delete_is_explicit() {
+    let (_d, path) = fixture();
+    let writer = spawn_state_writer(&path).await.unwrap();
+    let write = PeerPolicyWrite {
+        peer_id: "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        strategy: "passive".into(),
+        rebalance_mode: "disabled".into(),
+        fee_ppm_target: Some(321),
+        tags: Some(r#"["no_close","banned"]"#.into()),
+        fee_multiplier_min: Some(0.75),
+        fee_multiplier_max: Some(2.25),
+        expires_at: Some(1_900_000_000),
+    };
+
+    writer
+        .upsert_peer_policy(write.clone(), 1_800_000_000)
+        .await
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let stored: StoredPolicyRow = conn.query_row(
+            "SELECT strategy, rebalance_mode, fee_ppm_target, tags, fee_multiplier_min, fee_multiplier_max, expires_at FROM peer_policies WHERE peer_id = ?1",
+            [&write.peer_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (
+            "passive".into(),
+            "disabled".into(),
+            Some(321),
+            Some(r#"["no_close","banned"]"#.into()),
+            Some(0.75),
+            Some(2.25),
+            Some(1_900_000_000),
+        )
+    );
+    drop(conn);
+
+    assert_eq!(
+        writer
+            .delete_peer_policy(write.peer_id.clone())
+            .await
+            .unwrap(),
+        PolicyDelete::Deleted
+    );
+    assert_eq!(
+        writer.delete_peer_policy(write.peer_id).await.unwrap(),
+        PolicyDelete::AlreadyAbsent
+    );
 }
 
 #[tokio::test]

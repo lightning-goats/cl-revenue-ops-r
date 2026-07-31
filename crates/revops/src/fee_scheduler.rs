@@ -654,6 +654,10 @@ pub enum CycleMsg {
     /// channel. Fire-and-forget (see module doc) -- the manual
     /// `revenue-r-fee-wake` RPC's trigger.
     WakeAll,
+    /// Task 66 canonical `revenue-wake-all`: the same owner-thread mutation,
+    /// but with a typed reply sent only after the sleeping-channel state was
+    /// changed. Queue admission alone is never reported as success.
+    WakeAllWithReply(tokio::sync::oneshot::Sender<FeeWakeCompletion>),
     /// `record_failed_forward`'s scheduler-facing hook (py
     /// `fee_controller.py:9179`): a fee-relevant failed forward on the
     /// OUTGOING `channel_id`.
@@ -2744,6 +2748,14 @@ impl CycleOwner {
         woken
     }
 
+    /// Completion-bearing wrapper for canonical `revenue-wake-all`.
+    pub fn handle_wake_all_completion(&mut self, now: i64) -> FeeWakeCompletion {
+        FeeWakeCompletion {
+            channels_woken: self.handle_wake_all(now),
+            completed_at: now,
+        }
+    }
+
     /// [`CycleMsg::VegasSpikeCheck`]'s full handling (see
     /// [`Self::vegas_spike_check`] for the underlying effect).
     pub fn handle_vegas_spike_check(&mut self, now: i64) -> bool {
@@ -4219,6 +4231,44 @@ pub struct SchedulerHandle {
     pub tx: SchedulerIngress,
 }
 
+/// Completed result of one owner-thread wake-all mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeeWakeCompletion {
+    pub channels_woken: i64,
+    pub completed_at: i64,
+}
+
+/// Exact Python-compatible response for a completed `revenue-wake-all`.
+///
+/// The completion value can only be produced after the owner thread has
+/// applied the wake, so this helper cannot turn queue admission into success.
+pub fn build_wake_all_response(completed: &FeeWakeCompletion) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "channels_woken": completed.channels_woken,
+        "message": format!(
+            "Woke {} sleeping channel(s). They will be evaluated on the next fee cycle.",
+            completed.channels_woken
+        ),
+    })
+}
+
+impl SchedulerHandle {
+    /// Run wake-all through the bounded owner ingress and wait for the owner
+    /// to confirm the state transition. A closed queue or dropped reply is
+    /// failure, never successful admission.
+    pub async fn wake_all(&self) -> Result<FeeWakeCompletion, String> {
+        let (reply, completed) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(CycleMsg::WakeAllWithReply(reply))
+            .await
+            .map_err(|_| "fee-cycle owner thread not running".to_string())?;
+        completed
+            .await
+            .map_err(|_| "fee-cycle owner thread exited before completing wake-all".to_string())
+    }
+}
+
 pub fn spawn_owner_for_runtime(
     mut cfg: SchedulerConfig,
     store: Option<Box<dyn RunwayStateStore>>,
@@ -4434,6 +4484,10 @@ where
                 }
                 CycleMsg::WakeAll => {
                     let _ = owner.handle_wake_all(crate::now_unix());
+                }
+                CycleMsg::WakeAllWithReply(reply) => {
+                    let completed = owner.handle_wake_all_completion(crate::now_unix());
+                    let _ = reply.send(completed);
                 }
                 CycleMsg::FailedForward(signal) => {
                     owner.handle_failed_forward(&signal);

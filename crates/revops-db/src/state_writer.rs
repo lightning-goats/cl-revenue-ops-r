@@ -7,7 +7,7 @@
 //! - **Opens EXISTING files only** (`SQLITE_OPEN_READWRITE`, no CREATE):
 //!   the production database is Python-owned; a missing file is a typed
 //!   refusal, never a fresh database.
-//! - **Schema identity check before any command**: the four write-target
+//! - **Schema identity check before any command**: the seven write-target
 //!   tables must exist with their required columns (PRAGMA table_info),
 //!   else a typed `SchemaMismatch` naming the table and detail. The
 //!   writer CREATEs and ALTERs nothing, ever.
@@ -35,6 +35,10 @@ use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::budget::{
+    mark_spent_in_tx, release_spend_reservation_on, reserve_spend_in_tx, MarkSpentTx,
+    ReserveRequest,
+};
 use crate::owner::{StoreAdmissionRefused, StoreReceipt};
 
 /// The hard batch bound (the Task 65 contract's number).
@@ -71,13 +75,23 @@ impl std::fmt::Display for StateWriterOpenError {
 impl std::error::Error for StateWriterOpenError {}
 
 /// One peer-policy upsert row (py `peer_policies`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PeerPolicyWrite {
     pub peer_id: String,
     pub strategy: String,
     pub rebalance_mode: String,
     pub fee_ppm_target: Option<i64>,
     pub tags: Option<String>,
+    pub fee_multiplier_min: Option<f64>,
+    pub fee_multiplier_max: Option<f64>,
+    pub expires_at: Option<i64>,
+}
+
+/// Peer-policy delete outcome (durable either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyDelete {
+    Deleted,
+    AlreadyAbsent,
 }
 
 /// Config delete outcome (durable either way).
@@ -95,6 +109,14 @@ pub enum BudgetTransition {
     /// resurrect (py guard `AND status = 'active'`).
     AlreadyTerminal,
     NotFound,
+}
+
+/// Exact result of Python's filtered generic-reservation recovery operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendReleaseBatch {
+    pub released_count: i64,
+    pub released_sats: i64,
+    pub reservation_ids: Vec<String>,
 }
 
 /// Bounded-batch outcome.
@@ -123,6 +145,10 @@ enum Command {
         write: PeerPolicyWrite,
         now: i64,
         reply: oneshot::Sender<Result<()>>,
+    },
+    DeletePeerPolicy {
+        peer_id: String,
+        reply: oneshot::Sender<Result<PolicyDelete>>,
     },
     ApplyPolicyBatch {
         writes: Vec<PeerPolicyWrite>,
@@ -153,6 +179,30 @@ enum Command {
         max_age_seconds: i64,
         now: i64,
         reply: oneshot::Sender<Result<i64>>,
+    },
+    ReserveSpend {
+        request: ReserveRequest,
+        now: i64,
+        reply: oneshot::Sender<Result<(bool, i64)>>,
+    },
+    ReleaseSpendReservation {
+        reservation_id: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    ReleaseSpendReservations {
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+        reply: oneshot::Sender<Result<SpendReleaseBatch>>,
+    },
+    SettleSpendReservation {
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+        reply: oneshot::Sender<Result<bool>>,
     },
     CleanupClosedChannels {
         channel_ids: Vec<String>,
@@ -223,6 +273,13 @@ impl StateWriterHandle {
             now,
             reply
         })
+    }
+
+    pub fn try_delete_peer_policy(
+        &self,
+        peer_id: String,
+    ) -> std::result::Result<StoreReceipt<PolicyDelete>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::DeletePeerPolicy { peer_id, reply })
     }
 
     pub fn try_apply_policy_batch(
@@ -297,6 +354,62 @@ impl StateWriterHandle {
         })
     }
 
+    pub fn try_reserve_spend(
+        &self,
+        request: ReserveRequest,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<(bool, i64)>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ReserveSpend {
+            request,
+            now,
+            reply
+        })
+    }
+
+    pub fn try_release_spend_reservation(
+        &self,
+        reservation_id: String,
+    ) -> std::result::Result<StoreReceipt<bool>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ReleaseSpendReservation {
+            reservation_id,
+            reply
+        })
+    }
+
+    pub fn try_release_spend_reservations(
+        &self,
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<SpendReleaseBatch>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ReleaseSpendReservations {
+            category,
+            older_than_seconds,
+            limit,
+            now,
+            reply
+        })
+    }
+
+    pub fn try_settle_spend_reservation(
+        &self,
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+    ) -> std::result::Result<StoreReceipt<bool>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::SettleSpendReservation {
+            reservation_id,
+            actual_spent_sats,
+            source,
+            record_event,
+            now,
+            reply
+        })
+    }
+
     pub fn try_cleanup_closed_channels(
         &self,
         channel_ids: Vec<String>,
@@ -327,6 +440,10 @@ impl StateWriterHandle {
             now,
             reply
         })
+    }
+
+    pub async fn delete_peer_policy(&self, peer_id: String) -> Result<PolicyDelete> {
+        roundtrip!(self, |reply| Command::DeletePeerPolicy { peer_id, reply })
     }
 
     pub async fn apply_policy_batch(
@@ -394,6 +511,55 @@ impl StateWriterHandle {
         })
     }
 
+    pub async fn reserve_spend(&self, request: ReserveRequest, now: i64) -> Result<(bool, i64)> {
+        roundtrip!(self, |reply| Command::ReserveSpend {
+            request,
+            now,
+            reply
+        })
+    }
+
+    pub async fn release_spend_reservation(&self, reservation_id: String) -> Result<bool> {
+        roundtrip!(self, |reply| Command::ReleaseSpendReservation {
+            reservation_id,
+            reply
+        })
+    }
+
+    pub async fn release_spend_reservations(
+        &self,
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+    ) -> Result<SpendReleaseBatch> {
+        roundtrip!(self, |reply| Command::ReleaseSpendReservations {
+            category,
+            older_than_seconds,
+            limit,
+            now,
+            reply
+        })
+    }
+
+    pub async fn settle_spend_reservation(
+        &self,
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+    ) -> Result<bool> {
+        roundtrip!(self, |reply| Command::SettleSpendReservation {
+            reservation_id,
+            actual_spent_sats,
+            source,
+            record_event,
+            now,
+            reply
+        })
+    }
+
     pub async fn cleanup_closed_channels(&self, channel_ids: Vec<String>) -> Result<BatchAck> {
         roundtrip!(self, |reply| Command::CleanupClosedChannels {
             channel_ids,
@@ -418,6 +584,9 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
             "fee_ppm_target",
             "tags",
             "updated_at",
+            "fee_multiplier_min",
+            "fee_multiplier_max",
+            "expires_at",
         ],
     ),
     (
@@ -434,6 +603,35 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
             "status",
         ],
     ),
+    (
+        "spend_reservations",
+        &[
+            "reservation_id",
+            "category",
+            "subcategory",
+            "reserved_sats",
+            "reserved_at",
+            "reference_id",
+            "channel_id",
+            "status",
+            "metadata_json",
+        ],
+    ),
+    (
+        "spend_events",
+        &[
+            "event_id",
+            "category",
+            "subcategory",
+            "amount_sats",
+            "timestamp",
+            "reference_id",
+            "channel_id",
+            "source",
+            "metadata_json",
+        ],
+    ),
+    ("rebalance_costs", &["cost_sats", "timestamp"]),
 ];
 
 fn verify_schema(conn: &Connection) -> std::result::Result<(), StateWriterOpenError> {
@@ -495,6 +693,9 @@ pub async fn spawn_state_writer(
                 Command::UpsertPeerPolicy { write, now, reply } => {
                     let _ = reply.send(upsert_peer_policy(&conn, &write, now));
                 }
+                Command::DeletePeerPolicy { peer_id, reply } => {
+                    let _ = reply.send(delete_peer_policy(&conn, &peer_id));
+                }
                 Command::ApplyPolicyBatch { writes, now, reply } => {
                     let _ = reply.send(apply_policy_batch(&conn, &writes, now));
                 }
@@ -541,6 +742,54 @@ pub async fn spawn_state_writer(
                 } => {
                     let _ = reply.send(cleanup_stale_reservations(&conn, max_age_seconds, now));
                 }
+                Command::ReserveSpend {
+                    request,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(reserve_generic_spend(&conn, &request, now));
+                }
+                Command::ReleaseSpendReservation {
+                    reservation_id,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        release_spend_reservation_on(&conn, &reservation_id)
+                            .map_err(anyhow::Error::from),
+                    );
+                }
+                Command::ReleaseSpendReservations {
+                    category,
+                    older_than_seconds,
+                    limit,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(release_generic_spend_reservations(
+                        &conn,
+                        category.as_deref(),
+                        older_than_seconds,
+                        limit,
+                        now,
+                    ));
+                }
+                Command::SettleSpendReservation {
+                    reservation_id,
+                    actual_spent_sats,
+                    source,
+                    record_event,
+                    now,
+                    reply,
+                } => {
+                    let _ = reply.send(settle_generic_spend_reservation(
+                        &conn,
+                        &reservation_id,
+                        actual_spent_sats,
+                        source.as_deref(),
+                        record_event,
+                        now,
+                    ));
+                }
                 Command::CleanupClosedChannels { channel_ids, reply } => {
                     let _ = reply.send(cleanup_closed_channels(&conn, &channel_ids));
                 }
@@ -569,6 +818,123 @@ fn immediate_txn<T>(
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(e)
+        }
+    }
+}
+
+fn reserve_generic_spend(
+    conn: &Connection,
+    request: &ReserveRequest,
+    now: i64,
+) -> Result<(bool, i64)> {
+    if request.amount_sats <= 0
+        || request.reservation_id.trim().is_empty()
+        || request.category.trim().is_empty()
+    {
+        return Ok((false, 0));
+    }
+    immediate_txn(conn, "generic spend reserve", |tx| {
+        reserve_spend_in_tx(tx, request, now).map_err(anyhow::Error::from)
+    })
+}
+
+fn release_generic_spend_reservations(
+    conn: &Connection,
+    category: Option<&str>,
+    older_than_seconds: i64,
+    limit: i64,
+    now: i64,
+) -> Result<SpendReleaseBatch> {
+    let cutoff = now.saturating_sub(older_than_seconds.max(1));
+    let limit = limit.max(1);
+    let category = category
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+
+    immediate_txn(conn, "generic spend stale release", |tx| {
+        let mut selected = Vec::<(String, i64)>::new();
+        if let Some(category) = category.as_deref() {
+            let mut stmt = tx.prepare(
+                "SELECT reservation_id, reserved_sats
+                 FROM spend_reservations
+                 WHERE status = 'active' AND category = ?1 AND reserved_at < ?2
+                 ORDER BY reserved_at ASC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![category, cutoff, limit], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            for row in rows {
+                selected.push(row?);
+            }
+        } else {
+            let mut stmt = tx.prepare(
+                "SELECT reservation_id, reserved_sats
+                 FROM spend_reservations
+                 WHERE status = 'active' AND reserved_at < ?1
+                 ORDER BY reserved_at ASC LIMIT ?2",
+            )?;
+            let rows =
+                stmt.query_map(params![cutoff, limit], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            for row in rows {
+                selected.push(row?);
+            }
+        }
+
+        let reservation_ids: Vec<String> = selected.iter().map(|(id, _)| id.clone()).collect();
+        if !reservation_ids.is_empty() {
+            let placeholders = vec!["?"; reservation_ids.len()].join(",");
+            tx.execute(
+                &format!(
+                    "UPDATE spend_reservations SET status = 'released'
+                     WHERE reservation_id IN ({placeholders})"
+                ),
+                rusqlite::params_from_iter(reservation_ids.iter()),
+            )?;
+        }
+        Ok(SpendReleaseBatch {
+            released_count: reservation_ids.len() as i64,
+            released_sats: selected.iter().map(|(_, sats)| *sats).sum(),
+            reservation_ids,
+        })
+    })
+}
+
+fn settle_generic_spend_reservation(
+    conn: &Connection,
+    reservation_id: &str,
+    actual_spent_sats: Option<i64>,
+    source: Option<&str>,
+    record_event: bool,
+    now: i64,
+) -> Result<bool> {
+    let reservation_id = reservation_id.trim();
+    if reservation_id.is_empty() {
+        return Ok(false);
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("begin generic spend settle txn")?;
+    match mark_spent_in_tx(
+        conn,
+        reservation_id,
+        actual_spent_sats,
+        source,
+        record_event,
+        now,
+    ) {
+        Ok(MarkSpentTx::Applied(changed)) => {
+            conn.execute_batch("COMMIT")
+                .context("commit generic spend settle")?;
+            Ok(changed)
+        }
+        Ok(MarkSpentTx::EventRejected) => {
+            conn.execute_batch("ROLLBACK")
+                .context("rollback rejected generic spend event")?;
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(anyhow::Error::from(error))
         }
     }
 }
@@ -617,19 +983,37 @@ fn delete_config_override(conn: &Connection, key: &str) -> Result<ConfigDelete> 
 fn upsert_peer_policy(conn: &Connection, write: &PeerPolicyWrite, now: i64) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO peer_policies
-             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at,
+              fee_multiplier_min, fee_multiplier_max, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             write.peer_id,
             write.strategy,
             write.rebalance_mode,
             write.fee_ppm_target,
             write.tags,
-            now
+            now,
+            write.fee_multiplier_min,
+            write.fee_multiplier_max,
+            write.expires_at,
         ],
     )
     .context("upsert peer policy")?;
     Ok(())
+}
+
+fn delete_peer_policy(conn: &Connection, peer_id: &str) -> Result<PolicyDelete> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM peer_policies WHERE peer_id = ?1",
+            params![peer_id],
+        )
+        .context("delete peer policy")?;
+    Ok(if deleted > 0 {
+        PolicyDelete::Deleted
+    } else {
+        PolicyDelete::AlreadyAbsent
+    })
 }
 
 fn apply_policy_batch(conn: &Connection, writes: &[PeerPolicyWrite], now: i64) -> Result<BatchAck> {
@@ -640,15 +1024,19 @@ fn apply_policy_batch(conn: &Connection, writes: &[PeerPolicyWrite], now: i64) -
         for write in writes {
             tx.execute(
                 "INSERT OR REPLACE INTO peer_policies
-                     (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at,
+                      fee_multiplier_min, fee_multiplier_max, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     write.peer_id,
                     write.strategy,
                     write.rebalance_mode,
                     write.fee_ppm_target,
                     write.tags,
-                    now
+                    now,
+                    write.fee_multiplier_min,
+                    write.fee_multiplier_max,
+                    write.expires_at,
                 ],
             )
             .with_context(|| format!("policy batch write for {}", write.peer_id))?;
