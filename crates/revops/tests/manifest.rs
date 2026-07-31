@@ -318,13 +318,13 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-dashboard"),
         "methods: {methods:?}"
     );
-    // Phase 4b Task 7's fee-debug/fee-wake pair, canonical-mapped.
+    // Task 66: fee-debug plus Python's exact canonical wake-all name.
     assert!(
         methods.contains(&"revenue-fee-debug"),
         "methods: {methods:?}"
     );
     assert!(
-        methods.contains(&"revenue-fee-wake"),
+        methods.contains(&"revenue-wake-all"),
         "methods: {methods:?}"
     );
     // Task 10's runway status RPC keeps its one fixed name in every mode

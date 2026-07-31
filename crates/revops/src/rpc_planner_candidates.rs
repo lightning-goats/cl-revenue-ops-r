@@ -21,33 +21,18 @@ use serde_json::{json, Value};
 /// `revenue-planner-candidates` and `revenue-planner-history`, both of
 /// which call it with Python's `default=20, lo=1, hi=1000` defaults.
 ///
-/// Deliberately narrower than Python's `int(x)` for one edge case (same
-/// documented tradeoff as `crate::rpc_dashboard::parse_window_days`): a
-/// JSON boolean is rejected here, where Python's `int(True) == 1` would
-/// succeed (`bool` is an `int` subclass). No real RPC caller passes a bool
-/// for `limit`.
+/// Uses the shared Python `int` coercion, including `True -> 1`, `False -> 0`,
+/// and an error for explicit `null` (`None`). Only omission selects the default.
 pub fn parse_query_limit(
     raw: Option<&Value>,
     default: i64,
     lo: i64,
     hi: i64,
 ) -> Result<i64, Value> {
-    let ivalue: i64 = match raw {
-        None | Some(Value::Null) => default,
-        Some(Value::Number(n)) => match n.as_i64() {
-            Some(i) => i,
-            None => match n.as_f64() {
-                Some(f) => f.trunc() as i64,
-                None => return Err(json!({"error": "limit must be an integer"})),
-            },
-        },
-        Some(Value::String(s)) => s
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| json!({"error": format!("limit must be an integer, got {s:?}")}))?,
-        Some(other) => {
-            return Err(json!({"error": format!("limit must be an integer, got {other}")}))
-        }
+    let ivalue = match raw {
+        None => default,
+        Some(value) => crate::rpc_params::python_int(value)
+            .map_err(|_| json!({"error": format!("limit must be an integer, got {value}")}))?,
     };
     Ok(ivalue.clamp(lo, hi))
 }
@@ -89,6 +74,20 @@ mod tests {
     #[test]
     fn query_limit_defaults_and_clamps() {
         assert_eq!(parse_query_limit(None, 20, 1, 1000).unwrap(), 20);
+        assert!(
+            parse_query_limit(Some(&Value::Null), 20, 1, 1000).is_err(),
+            "Python defaults only an omitted argument; explicit None reaches int(None) and errors"
+        );
+        assert_eq!(
+            parse_query_limit(Some(&json!(true)), 20, 1, 1000).unwrap(),
+            1,
+            "Python int(True) is 1"
+        );
+        assert_eq!(
+            parse_query_limit(Some(&json!(false)), 20, 1, 1000).unwrap(),
+            1,
+            "Python int(False) is 0, then the lower clamp raises it to 1"
+        );
         assert_eq!(
             parse_query_limit(Some(&json!(5000)), 20, 1, 1000).unwrap(),
             1000
@@ -107,6 +106,5 @@ mod tests {
     #[test]
     fn query_limit_rejects_non_integer_input() {
         assert!(parse_query_limit(Some(&json!("nope")), 20, 1, 1000).is_err());
-        assert!(parse_query_limit(Some(&json!(true)), 20, 1, 1000).is_err());
     }
 }
