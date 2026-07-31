@@ -450,15 +450,19 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        63,
+        65,
         "methods: {methods:?}"
     );
 
-    // Task 66 slice 1: the unified total-cost budget read.
-    assert!(
-        methods.contains(&"revenue-total-cost-budget"),
-        "missing revenue-total-cost-budget: {methods:?}"
-    );
+    // Task 66 slice 1: the unified total-cost budget read; slice 2: the
+    // generic-ledger reserve and stale-release mutators.
+    for name in [
+        "revenue-total-cost-budget",
+        "revenue-spend-reserve",
+        "revenue-spend-release-stale",
+    ] {
+        assert!(methods.contains(&name), "missing {name}: {methods:?}");
+    }
 
     // Per the design spec's db-path ruling (docs/superpowers/specs/
     // 2026-07-16-rust-port-design.md lines 78-87): in canonical mode (Python
@@ -632,6 +636,8 @@ fn core_state_mutators_are_reachable_in_both_naming_modes() {
         "unban",
         "clear-reservations",
         "spend-release",
+        "spend-release-stale",
+        "spend-reserve",
         "spend-settle",
     ] {
         assert!(canonical.contains(&format!("revenue-{suffix}").as_str()));
@@ -662,6 +668,14 @@ fn core_state_mutators_refuse_when_live_capability_is_unassembled() {
         (
             "revenue-spend-release",
             serde_json::json!({"reservation_id": "r"}),
+        ),
+        (
+            "revenue-spend-release-stale",
+            serde_json::json!({"max_age_seconds": 3600}),
+        ),
+        (
+            "revenue-spend-reserve",
+            serde_json::json!({"reservation_id": "r", "category": "misc", "amount_sats": 10}),
         ),
         (
             "revenue-spend-settle",

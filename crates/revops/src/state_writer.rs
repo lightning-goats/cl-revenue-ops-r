@@ -28,10 +28,11 @@
 
 use std::time::Duration;
 
-use revops_db::budget::ClearStats;
+use revops_db::budget::{ClearStats, ReserveRequest};
 use revops_db::owner::{StoreAdmissionRefused, StoreReceipt, StoreReceiptWait};
 use revops_db::state_writer::{
-    BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete, StateWriterHandle,
+    BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete, SpendReleaseBatch,
+    StateWriterHandle,
 };
 
 /// Receipt budget default: the Task 59 floor (one legitimate SQLite lock
@@ -163,6 +164,26 @@ impl CoreMutators {
         self.writer.release_spend_reservation(reservation_id).await
     }
 
+    pub(crate) async fn reserve_spend(
+        &self,
+        request: ReserveRequest,
+        now: i64,
+    ) -> StateWriteAck<(bool, i64)> {
+        self.writer.reserve_spend(request, now).await
+    }
+
+    pub(crate) async fn release_stale_spend_reservations(
+        &self,
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+    ) -> StateWriteAck<SpendReleaseBatch> {
+        self.writer
+            .release_stale_spend_reservations(category, older_than_seconds, limit, now)
+            .await
+    }
+
     pub(crate) async fn settle_spend_reservation(
         &self,
         reservation_id: String,
@@ -257,6 +278,33 @@ impl ProductionStateWriter {
     pub async fn release_spend_reservation(&self, reservation_id: String) -> StateWriteAck<bool> {
         resolve(
             self.handle.try_release_spend_reservation(reservation_id),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn reserve_spend(
+        &self,
+        request: ReserveRequest,
+        now: i64,
+    ) -> StateWriteAck<(bool, i64)> {
+        resolve(
+            self.handle.try_reserve_spend(request, now),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn release_stale_spend_reservations(
+        &self,
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+    ) -> StateWriteAck<SpendReleaseBatch> {
+        resolve(
+            self.handle
+                .try_release_spend_reservations(category, older_than_seconds, limit, now),
             self.receipt_budget,
         )
         .await

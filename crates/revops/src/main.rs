@@ -1293,6 +1293,18 @@ async fn main() -> Result<()> {
         &revops::rpc_params::load_rpc_contract(),
         "revenue-spend-settle",
     );
+    // Task 66 slice 2: reserve + stale-release through the same sealed
+    // owner (uninitialized arm until Task 69's authority assembly).
+    let spend_reserve_name = rpc_name("spend-reserve");
+    let spend_reserve_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-reserve",
+    );
+    let spend_release_stale_name = rpc_name("spend-release-stale");
+    let spend_release_stale_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-release-stale",
+    );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
     let rebalance_debug_name = rpc_name("rebalance-debug");
@@ -3139,6 +3151,18 @@ async fn main() -> Result<()> {
         &spend_settle_name,
         spend_settle_spec,
         revops::rpc_state_mutators::CoreStateMutationAction::SpendSettle,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_reserve_name,
+        spend_reserve_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendReserve,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_release_stale_name,
+        spend_release_stale_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendReleaseStale,
     );
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());

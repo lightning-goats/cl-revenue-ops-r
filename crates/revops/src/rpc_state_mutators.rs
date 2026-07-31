@@ -8,6 +8,8 @@ use revops_db::{
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -646,8 +648,18 @@ pub enum CoreStateMutationAction {
     Unban,
     ClearReservations,
     SpendRelease,
+    SpendReleaseStale,
+    SpendReserve,
     SpendSettle,
 }
+
+/// Async provider of the unified total-cost budget snapshot — the same
+/// shape `rpc_total_cost_budget::total_cost_budget_response` answers
+/// (Python `_total_cost_budget_status()`). The reserve gate and the
+/// budget-embedding responses consume it; Task 69's authority assembly
+/// supplies the live implementation over the real config/boltz/DB stack.
+pub type BudgetStatusProvider =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Value> + Send>> + Send + Sync>;
 
 pub struct CoreStateMutationOwner {
     core: CoreMutators,
@@ -655,6 +667,7 @@ pub struct CoreStateMutationOwner {
     fee_ingress: SchedulerIngress,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     daily_budget_sats: Arc<dyn Fn() -> i64 + Send + Sync>,
+    budget_status: BudgetStatusProvider,
     rate_limit: Mutex<HashMap<String, Vec<i64>>>,
 }
 
@@ -665,6 +678,7 @@ impl CoreStateMutationOwner {
         fee_ingress: SchedulerIngress,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         daily_budget_sats: Arc<dyn Fn() -> i64 + Send + Sync>,
+        budget_status: BudgetStatusProvider,
     ) -> Self {
         Self {
             core,
@@ -672,6 +686,7 @@ impl CoreStateMutationOwner {
             fee_ingress,
             clock,
             daily_budget_sats,
+            budget_status,
             rate_limit: Mutex::new(HashMap::new()),
         }
     }
@@ -688,6 +703,8 @@ impl CoreStateMutationOwner {
             CoreStateMutationAction::Unban => self.unban(params).await,
             CoreStateMutationAction::ClearReservations => self.clear_reservations(params).await,
             CoreStateMutationAction::SpendRelease => self.spend_release(params).await,
+            CoreStateMutationAction::SpendReleaseStale => self.spend_release_stale(params).await,
+            CoreStateMutationAction::SpendReserve => self.spend_reserve(params).await,
             CoreStateMutationAction::SpendSettle => self.spend_settle(params).await,
         }
     }
@@ -897,6 +914,82 @@ impl CoreStateMutationOwner {
         })
     }
 
+    /// Port of `revenue_spend_reserve` (cl-revenue-ops.py:7802-7870).
+    /// Order is Python's: amount sanity, then the FRIENDLY unified-budget
+    /// gate (a failed budget read returns verbatim; over-remaining answers
+    /// the rejection dict), then the write. The AUTHORITATIVE cross-
+    /// category rail is the `effective_budget_sats`/`since_timestamp` pair
+    /// carried into `reserve_spend`'s BEGIN IMMEDIATE (P2-011) — Python's
+    /// `_spend_reserve_lock` only serializes the friendly gate, so two
+    /// racing pre-checks here (no lock) are caught by the same in-tx rail
+    /// Python relies on. `budget_after_estimate` is fetched only on a
+    /// granted write, like Python's lazy success-dict construction.
+    pub async fn spend_reserve(&self, params: &Map<String, Value>) -> Value {
+        let parsed = match parse_spend_reserve_params(params) {
+            Ok(parsed) => parsed,
+            Err(error) => return error,
+        };
+
+        let budget = (self.budget_status)().await;
+        if budget.get("error").is_some() {
+            return budget;
+        }
+        let budget_i64 = |key: &str, default: i64| -> i64 {
+            budget.get(key).and_then(Value::as_i64).unwrap_or(default)
+        };
+        let remaining = budget_i64("remaining_sats", 0);
+        if parsed.request.amount_sats > remaining {
+            return spend_reserve_rejection(parsed.request.amount_sats, remaining, &budget);
+        }
+        let now = (self.clock)();
+        let mut request = parsed.request.clone();
+        request.effective_budget_sats = Some(budget_i64("effective_budget_sats", 0));
+        request.since_timestamp = Some(now - budget_i64("window_hours", 24).max(1) * 3600);
+
+        match self.core.reserve_spend(request, now).await {
+            StateWriteAck::Applied((true, _remaining_after)) => {
+                let budget_after = (self.budget_status)().await;
+                spend_reserve_response(true, &parsed, &budget, &budget_after)
+            }
+            StateWriteAck::Applied((false, _)) => {
+                spend_reserve_response(false, &parsed, &budget, &Value::Null)
+            }
+            other => completed_spend_response(other, |_: (bool, i64)| {
+                unreachable!("applied arms handled above")
+            }),
+        }
+    }
+
+    /// Port of `revenue_spend_release_stale` (cl-revenue-ops.py:7884-7908):
+    /// the safe recovery sweep for orphaned reservations — the same
+    /// operation `_compute_total_cost_budget_status` runs best-effort at
+    /// the top of every budget read in Python, which slice 1's read path
+    /// deliberately deferred to THIS mutator.
+    pub async fn spend_release_stale(&self, params: &Map<String, Value>) -> Value {
+        let parsed = match parse_spend_release_stale_params(params) {
+            Ok(parsed) => parsed,
+            Err(error) => return error,
+        };
+        let ack = self
+            .core
+            .release_stale_spend_reservations(
+                parsed.category,
+                parsed.max_age_seconds,
+                parsed.limit,
+                (self.clock)(),
+            )
+            .await;
+        match ack {
+            StateWriteAck::Applied(released) => {
+                let budget_after = (self.budget_status)().await;
+                spend_release_stale_response(&released, &budget_after)
+            }
+            other => completed_spend_response(other, |_: SpendReleaseBatch| {
+                unreachable!("applied arm handled above")
+            }),
+        }
+    }
+
     pub async fn spend_settle(&self, params: &Map<String, Value>) -> Value {
         let parsed = match parse_spend_settle_params(params) {
             Ok(parsed) => parsed,
@@ -933,7 +1026,38 @@ mod core_mutation_owner_tests {
     const NOW: i64 = 1_800_000_000;
     const PEER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+    /// A healthy unified-budget snapshot, the shape
+    /// `total_cost_budget_response` answers with. The provider seam lets
+    /// each test choose the budget the gate sees without a live boltz/
+    /// config stack.
+    fn budget_value(remaining: i64, effective: i64) -> Value {
+        json!({
+            "source": "total_cost_budget",
+            "window_hours": 24,
+            "remaining_sats": remaining,
+            "effective_budget_sats": effective,
+        })
+    }
+
+    fn budget_provider(value: Value) -> super::BudgetStatusProvider {
+        Arc::new(move || {
+            let value = value.clone();
+            Box::pin(async move { value })
+        })
+    }
+
     async fn fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        CoreStateMutationOwner,
+        tokio::sync::mpsc::Receiver<CycleMsg>,
+    ) {
+        fixture_with_budget(budget_provider(budget_value(5_000, 5_000))).await
+    }
+
+    async fn fixture_with_budget(
+        budget: super::BudgetStatusProvider,
+    ) -> (
         tempfile::TempDir,
         PathBuf,
         CoreStateMutationOwner,
@@ -963,6 +1087,7 @@ mod core_mutation_owner_tests {
             ingress,
             Arc::new(|| NOW),
             Arc::new(|| 100),
+            budget,
         );
         (dir, path, owner, receiver)
     }
@@ -1330,5 +1455,245 @@ mod core_mutation_owner_tests {
             )
             .expect("count settlement events");
         assert_eq!(event_count, 1);
+    }
+
+    /// Task 66 slice 2, `revenue-spend-reserve` (py cl-revenue-ops.py:
+    /// 7802-7870): grant path commits the row, and the response embeds the
+    /// gate's budget as `budget_before` plus a post-write
+    /// `budget_after_estimate`.
+    #[tokio::test]
+    async fn spend_reserve_commits_row_and_embeds_both_budgets() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let response = owner
+            .spend_reserve(&params(&[
+                ("reservation_id", json!("resv-1")),
+                ("category", json!("channel_open")),
+                ("amount_sats", json!(500)),
+                ("subcategory", json!("expand")),
+            ]))
+            .await;
+        assert_eq!(
+            response,
+            json!({
+                "status": "success",
+                "reservation_id": "resv-1",
+                "category": "channel_open",
+                "amount_sats": 500,
+                "budget_before": budget_value(5_000, 5_000),
+                "budget_after_estimate": budget_value(5_000, 5_000),
+            })
+        );
+
+        let conn = Connection::open(&path).expect("read committed reservation");
+        let row: (String, i64, String) = conn
+            .query_row(
+                "SELECT category, reserved_sats, status FROM spend_reservations \
+                 WHERE reservation_id = 'resv-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("reservation committed before response");
+        assert_eq!(row, ("channel_open".to_string(), 500, "active".to_string()));
+    }
+
+    /// The friendly pre-gate: amount above the unified remaining answers
+    /// Python's exact rejection dict (py 7833-7840) and writes NOTHING.
+    #[tokio::test]
+    async fn spend_reserve_rejects_over_remaining_without_writing() {
+        let (_dir, path, owner, _receiver) =
+            fixture_with_budget(budget_provider(budget_value(100, 5_000))).await;
+        let response = owner
+            .spend_reserve(&params(&[
+                ("reservation_id", json!("resv-over")),
+                ("category", json!("misc")),
+                ("amount_sats", json!(500)),
+            ]))
+            .await;
+        assert_eq!(
+            response,
+            json!({
+                "status": "rejected",
+                "reason": "insufficient_unified_budget",
+                "requested_sats": 500,
+                "remaining_sats": 100,
+                "budget": budget_value(100, 5_000),
+            })
+        );
+        let count: i64 = Connection::open(&path)
+            .expect("open")
+            .query_row("SELECT COUNT(*) FROM spend_reservations", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(count, 0, "a rejected reserve must not write");
+    }
+
+    /// The AUTHORITATIVE in-transaction rail: even when the friendly gate's
+    /// remaining is generous (stale/lying), the effective budget carried
+    /// into `reserve_spend`'s BEGIN IMMEDIATE refuses the grant (py's
+    /// P2-011 design: the pre-check is only a friendly early rejection).
+    #[tokio::test]
+    async fn spend_reserve_authoritative_rail_refuses_despite_generous_gate() {
+        let (_dir, path, owner, _receiver) =
+            fixture_with_budget(budget_provider(budget_value(1_000_000, 100))).await;
+        let response = owner
+            .spend_reserve(&params(&[
+                ("reservation_id", json!("resv-rail")),
+                ("category", json!("misc")),
+                ("amount_sats", json!(500)),
+            ]))
+            .await;
+        assert_eq!(
+            response,
+            json!({"status": "error", "error": "Failed to reserve spend"})
+        );
+        let count: i64 = Connection::open(&path)
+            .expect("open")
+            .query_row(
+                "SELECT COUNT(*) FROM spend_reservations WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 0, "the in-tx rail must refuse the insert");
+    }
+
+    /// Python: `if "error" in budget: return budget` (py 7828-7830) — a
+    /// failed budget read is returned verbatim, and nothing is written.
+    #[tokio::test]
+    async fn spend_reserve_propagates_a_budget_error_verbatim() {
+        let (_dir, _path, owner, _receiver) =
+            fixture_with_budget(budget_provider(json!({"error": "Plugin not initialized"}))).await;
+        let response = owner
+            .spend_reserve(&params(&[
+                ("reservation_id", json!("resv-err")),
+                ("category", json!("misc")),
+                ("amount_sats", json!(500)),
+            ]))
+            .await;
+        assert_eq!(response, json!({"error": "Plugin not initialized"}));
+    }
+
+    /// py 7818-7819: non-positive amounts are refused before any budget
+    /// read or write.
+    #[tokio::test]
+    async fn spend_reserve_refuses_non_positive_amount() {
+        let (_dir, _path, owner, _receiver) = fixture().await;
+        let response = owner
+            .spend_reserve(&params(&[
+                ("reservation_id", json!("resv-zero")),
+                ("category", json!("misc")),
+                ("amount_sats", json!(0)),
+            ]))
+            .await;
+        assert_eq!(response, json!({"error": "amount_sats must be > 0"}));
+    }
+
+    /// Task 66 slice 2, `revenue-spend-release-stale` (py 7884-7908): only
+    /// active rows older than max_age_seconds release, the category filter
+    /// applies lowercased, and the response embeds a post-write
+    /// `budget_after`. This is the same operation slice 1 deferred out of
+    /// the total-cost-budget read path.
+    #[tokio::test]
+    async fn spend_release_stale_releases_only_old_matching_rows() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed stale rows");
+        conn.execute(
+            "INSERT INTO spend_reservations \
+             (reservation_id, category, reserved_sats, reserved_at, status) VALUES \
+             ('old-rebalance', 'rebalance', 40, ?1, 'active'), \
+             ('old-open', 'channel_open', 70, ?1, 'active'), \
+             ('fresh-rebalance', 'rebalance', 25, ?2, 'active'), \
+             ('old-released', 'rebalance', 99, ?1, 'released')",
+            rusqlite::params![NOW - 7200, NOW - 100],
+        )
+        .expect("seed reservations");
+        drop(conn);
+
+        let response = owner
+            .spend_release_stale(&params(&[
+                ("max_age_seconds", json!(3600)),
+                ("category", json!("Rebalance")),
+            ]))
+            .await;
+        assert_eq!(
+            response,
+            json!({
+                "status": "success",
+                "released_count": 1,
+                "released_sats": 40,
+                "reservation_ids": ["old-rebalance"],
+                "budget_after": budget_value(5_000, 5_000),
+            })
+        );
+
+        let conn = Connection::open(&path).expect("verify statuses");
+        let status = |id: &str| -> String {
+            conn.query_row(
+                "SELECT status FROM spend_reservations WHERE reservation_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("row status")
+        };
+        assert_eq!(status("old-rebalance"), "released");
+        assert_eq!(status("old-open"), "active", "category filter must hold");
+        assert_eq!(status("fresh-rebalance"), "active", "age filter must hold");
+    }
+
+    /// Without a category the sweep crosses categories, still respecting
+    /// the age filter; defaults are max_age_seconds=3600, limit=100.
+    #[tokio::test]
+    async fn spend_release_stale_without_category_sweeps_all_old_actives() {
+        let (_dir, path, owner, _receiver) = fixture().await;
+        let conn = Connection::open(&path).expect("seed stale rows");
+        conn.execute(
+            "INSERT INTO spend_reservations \
+             (reservation_id, category, reserved_sats, reserved_at, status) VALUES \
+             ('old-a', 'rebalance', 40, ?1, 'active'), \
+             ('old-b', 'channel_open', 70, ?1, 'active'), \
+             ('fresh', 'misc', 25, ?2, 'active')",
+            rusqlite::params![NOW - 7200, NOW - 100],
+        )
+        .expect("seed reservations");
+        drop(conn);
+
+        let response = owner.spend_release_stale(&Map::new()).await;
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["released_count"], 2);
+        assert_eq!(response["released_sats"], 110);
+    }
+
+    /// The `handle()` dispatch edge for the two new actions — the other
+    /// tests call the methods directly, so a cross-wired dispatch arm
+    /// would otherwise survive every one of them. Each action is probed
+    /// with params whose response shape is DISTINCTIVE to its method.
+    #[tokio::test]
+    async fn handle_dispatches_the_two_new_spend_actions() {
+        let (_dir, _path, owner, _receiver) = fixture().await;
+
+        // Only spend_reserve refuses non-positive amounts with this arm.
+        let reserve = owner
+            .handle(
+                super::CoreStateMutationAction::SpendReserve,
+                &params(&[
+                    ("reservation_id", json!("d-1")),
+                    ("category", json!("misc")),
+                    ("amount_sats", json!(0)),
+                ]),
+            )
+            .await;
+        assert_eq!(reserve, json!({"error": "amount_sats must be > 0"}));
+
+        // Only spend_release_stale answers a released_count sweep summary
+        // on empty params (spend_reserve would refuse the missing amount).
+        let stale = owner
+            .handle(
+                super::CoreStateMutationAction::SpendReleaseStale,
+                &Map::new(),
+            )
+            .await;
+        assert_eq!(stale["status"], "success");
+        assert_eq!(stale["released_count"], 0);
     }
 }
