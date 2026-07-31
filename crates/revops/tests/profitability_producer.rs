@@ -471,3 +471,94 @@ async fn a_colon_spelled_fee_row_still_reaches_its_channel() {
         "a `:`-spelled fee row must widen the `x`-spelled channel's band"
     );
 }
+
+// ---------------------------------------------------------------------
+// C71-27: the RPC caller's composition.
+//
+// `main.rs` is a binary no integration test can import, which is exactly
+// where the previous fabricated wiring survived. These read its source.
+// ---------------------------------------------------------------------
+
+fn profitability_handler() -> String {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("main.rs is readable");
+    let after = source
+        .split_once("&profitability_name,")
+        .expect("the profitability RPC must be registered")
+        .1;
+    // Up to the start of the next registered method.
+    after
+        .split_once(".rpcmethod(")
+        .map(|(handler, _)| handler.to_string())
+        .unwrap_or(after.to_string())
+}
+
+#[test]
+fn the_rpc_takes_one_fresh_bounded_snapshot_and_passes_that_same_one_in() {
+    let handler = profitability_handler();
+    assert_eq!(
+        handler.matches("fetch_channel_snapshot").count(),
+        1,
+        "exactly one listpeerchannels snapshot per call"
+    );
+    assert_eq!(
+        handler.matches("gather_profitability").count(),
+        1,
+        "exactly one producer call"
+    );
+    assert!(
+        handler.contains("channels: &channels"),
+        "the snapshot the caller took must be the snapshot the producer uses; \
+         a second fetch could disagree and nothing downstream could tell"
+    );
+}
+
+#[test]
+fn the_rpc_no_longer_claims_the_pipeline_is_unported() {
+    let handler = profitability_handler();
+    for marker in [
+        "build_profitability_channel_not_wired",
+        "build_profitability_summary_not_wired",
+    ] {
+        assert!(
+            !handler.contains(marker),
+            "the pipeline is wired; `{marker}` would hide a real answer"
+        );
+    }
+}
+
+#[test]
+fn an_unavailable_store_never_answers_with_pythons_unknown_channel_shape() {
+    // `build_profitability_channel(id, None)` emits Python's own
+    // "No data available". Reaching for it on a store outage would tell
+    // the operator to close a channel that is fine. It may appear in the
+    // handler exactly once -- the genuine unknown-channel branch, taken
+    // only after a successful pass that neither classified nor skipped it.
+    // Comments stripped and whitespace normalised: prose ABOUT a call is
+    // not a call, and rustfmt's line breaks must not decide whether this
+    // pin holds.
+    let handler = profitability_handler();
+    let code: String = handler
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        flat.matches("build_profitability_channel( id, None,")
+            .count()
+            + flat
+                .matches("build_profitability_channel(id, None)")
+                .count(),
+        1,
+        "Python's unknown-channel answer belongs to exactly one branch: {flat}"
+    );
+    assert!(
+        handler.contains("build_profitability_channel_unavailable"),
+        "a skipped channel needs a shape of its own"
+    );
+    assert!(
+        handler.contains("profitability_store_not_configured"),
+        "an unconfigured store must be named, not silently empty"
+    );
+}

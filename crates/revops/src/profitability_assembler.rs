@@ -22,6 +22,8 @@
 
 use std::collections::HashMap;
 
+use serde_json::json;
+
 use revops_analytics::profitability::{
     classify_channel, ChannelCosts, ChannelProfitability, ChannelRevenue, ClassifyEvidence,
     DiagStats,
@@ -214,6 +216,44 @@ pub fn openers_from_channels(channels: &[serde_json::Value]) -> HashMap<String, 
         out.insert(normalize_scid(scid), opener.to_string());
     }
     out
+}
+
+/// Same timeout every other read-only CLN call in this port uses.
+const RPC_TIMEOUT_SECONDS: u64 = 30;
+
+/// One fresh, bounded `listpeerchannels`.
+///
+/// Separate from [`gather_profitability`] on purpose: the caller takes the
+/// snapshot ONCE and hands that same value in, so the opener the verdict
+/// is built from is the opener the caller saw. Fetching inside the
+/// producer would let a second query disagree with the first, and nothing
+/// downstream could tell.
+///
+/// A failed call is `Err`, never an empty channel list -- an empty list
+/// would skip every channel for "no opener", which reads like a fleet of
+/// unevaluable channels rather than an unreachable node.
+pub async fn fetch_channel_snapshot(
+    socket_path: &std::path::Path,
+) -> Result<Vec<serde_json::Value>, String> {
+    let call = async {
+        let mut rpc = cln_rpc::ClnRpc::new(socket_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "connect lightning-rpc socket {}: {e}",
+                socket_path.display()
+            )
+        })?;
+        rpc.call_raw::<serde_json::Value, serde_json::Value>("listpeerchannels", &json!({}))
+            .await
+            .map_err(|e| anyhow::anyhow!("listpeerchannels RPC error: {e}"))
+    };
+    let reply = revops_rpc::call_with_timeout("listpeerchannels", RPC_TIMEOUT_SECONDS, call)
+        .await
+        .map_err(|error| format!("{error}"))?;
+    reply
+        .get("channels")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| "listpeerchannels reply carries no channels array".to_string())
 }
 
 /// One fleet profitability pass: ONE production-database await, ONE

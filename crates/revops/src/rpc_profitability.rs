@@ -214,6 +214,58 @@ pub fn build_profitability_summary(results: &[ChannelProfitability]) -> Value {
     })
 }
 
+/// C71-27: a channel the fleet pass SKIPPED is not a channel that does not
+/// exist.
+///
+/// [`build_profitability_channel`]'s `None` branch emits
+/// `{"error": "No data available"}`, byte-identical to Python's
+/// unknown-channel answer (cl-revenue-ops.py:4985-4986). Reusing it for a
+/// skip would tell the operator their channel is unknown when what
+/// actually happened is that one of its evidence sources was unreadable --
+/// and the natural next action ("close it, it's not real") is the wrong
+/// one. This shape names the source instead.
+pub fn build_profitability_channel_unavailable(channel_id: &str, reason: &str) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "error": "evidence_unavailable",
+        "detail": reason,
+    })
+}
+
+/// A store-level failure: no channel was evaluated, so there is no partial
+/// answer to report. Deliberately does NOT reuse the `summary` /
+/// `channels_by_class` keys -- a caller keying off those must never see a
+/// zeroed fleet that looks like a real one.
+pub fn build_profitability_unavailable(code: &str, detail: &str) -> Value {
+    json!({
+        "error": code,
+        "detail": detail,
+    })
+}
+
+/// The fleet summary, plus the channels this pass could NOT evaluate.
+///
+/// Python has no skip concept -- it evaluates whatever it read and says
+/// nothing about the rest. Dropping skips silently here would make an
+/// unreadable source look like a smaller fleet, so they are reported under
+/// an underscore-prefixed port annotation alongside the existing `_gaps`
+/// convention rather than folded into Python's counts.
+pub fn build_profitability_summary_with_skips(
+    results: &[ChannelProfitability],
+    skipped: &[(String, String)],
+) -> Value {
+    let mut out = build_profitability_summary(results);
+    if !skipped.is_empty() {
+        out["_skipped"] = Value::Array(
+            skipped
+                .iter()
+                .map(|(scid, reason)| json!({"channel_id": scid, "reason": reason}))
+                .collect(),
+        );
+    }
+    out
+}
+
 /// Task 50 correction round, F4: until the `ChannelProfitability` assembly
 /// pipeline exists, the wiring layer has no way to tell "channel genuinely
 /// unknown" from "port not wired" -- [`build_profitability_channel`]'s

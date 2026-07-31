@@ -2223,29 +2223,108 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &profitability_name,
-            "channel profitability analysis (single channel_id, or fleet-wide summary) \
-             -- Phase: the ChannelProfitability assembly pipeline is not wired yet, so \
-             every call returns an explicit not_yet_ported marker (see \
-             revops::rpc_profitability)",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+            "channel profitability analysis (single channel_id, or fleet-wide summary), \
+             served from one production-DB snapshot, one observer read, and one fresh \
+             bounded listpeerchannels snapshot (see revops::profitability_assembler)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
                 }
-                // Task 50 correction round, F3/F4: this needs a
-                // `ChannelProfitability` assembly pipeline (see
-                // RPC_BATCH_A.md section 2) that does not exist yet. The
-                // OLD wiring called `build_profitability_channel(id, None)`
-                // / `build_profitability_summary(&[])` -- shapes that
-                // reuse Python's own legitimate "unknown channel" /
-                // "empty fleet" vocabulary and so cannot be told apart
-                // from real answers. Until the pipeline exists, return the
-                // explicitly-marked not-wired shapes instead.
+                // C71-25/C71-27. This used to return `not_yet_ported`
+                // because the assembly pipeline did not exist. It exists
+                // now, and every input it feeds the frozen classifier was
+                // read rather than assumed.
+                //
+                // The three unavailable branches below are deliberately
+                // NOT `build_profitability_channel(id, None)`: that shape
+                // is byte-identical to Python's "channel doesn't exist"
+                // answer, and returning it for a store outage would tell
+                // the operator to close a channel that is fine.
+                let s = p.state();
                 let channel_id = v.get("channel_id").and_then(|c| c.as_str());
-                match channel_id {
-                    Some(id) => Ok(
-                        revops::rpc_profitability::build_profitability_channel_not_wired(id),
+                let unavailable = |code: &str, detail: String| match channel_id {
+                    Some(id) => {
+                        revops::rpc_profitability::build_profitability_channel_unavailable(
+                            id, &detail,
+                        )
+                    }
+                    None => revops::rpc_profitability::build_profitability_unavailable(
+                        code, &detail,
                     ),
-                    None => Ok(revops::rpc_profitability::build_profitability_summary_not_wired()),
+                };
+
+                let (Some(db), Some(observer)) = (s.db.as_ref(), s.observer_db.as_ref()) else {
+                    return Ok(unavailable(
+                        "profitability_store_not_configured",
+                        "the production database and the observer store must both be \
+                         configured before profitability can be evaluated"
+                            .to_string(),
+                    ));
+                };
+
+                // ONE fresh bounded snapshot, taken here and handed to the
+                // producer, so the opener every verdict is built from is
+                // the opener this call actually saw.
+                let channels =
+                    match revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
+                        .await
+                    {
+                        Ok(channels) => channels,
+                        Err(detail) => {
+                            return Ok(unavailable("profitability_channels_unavailable", detail))
+                        }
+                    };
+
+                let fleet = match revops::profitability_assembler::gather_profitability(
+                    revops::profitability_assembler::ProfitabilitySources {
+                        production_db: db,
+                        observer,
+                        channels: &channels,
+                        now: revops::now_unix(),
+                    },
+                )
+                .await
+                {
+                    Ok(fleet) => fleet,
+                    Err(refusal) => {
+                        return Ok(unavailable(refusal.code(), refusal.detail().to_string()))
+                    }
+                };
+
+                match channel_id {
+                    Some(id) => {
+                        let scid = id.replace(':', "x");
+                        if let Some(result) = fleet.profitability.get(&scid) {
+                            return Ok(revops::rpc_profitability::build_profitability_channel(
+                                id,
+                                Some(result),
+                            ));
+                        }
+                        // A channel this pass skipped is NOT an unknown
+                        // channel; only a channel with no costs row at all
+                        // is Python's own "No data available".
+                        match fleet.skipped.iter().find(|(s, _)| *s == scid) {
+                            Some((_, reason)) => Ok(
+                                revops::rpc_profitability::build_profitability_channel_unavailable(
+                                    id, reason,
+                                ),
+                            ),
+                            None => Ok(revops::rpc_profitability::build_profitability_channel(
+                                id, None,
+                            )),
+                        }
+                    }
+                    None => {
+                        let mut results: Vec<_> =
+                            fleet.profitability.values().cloned().collect();
+                        results.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+                        Ok(
+                            revops::rpc_profitability::build_profitability_summary_with_skips(
+                                &results,
+                                &fleet.skipped,
+                            ),
+                        )
+                    }
                 }
             },
         )
