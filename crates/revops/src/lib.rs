@@ -63,6 +63,7 @@ pub mod rpc_capex_status;
 pub mod rpc_dashboard;
 pub mod rpc_econ_reconcile;
 pub mod rpc_econ_snapshot;
+pub mod rpc_fee_authority_status;
 pub mod rpc_health;
 pub mod rpc_history;
 pub mod rpc_hot_channel_protection_peers;

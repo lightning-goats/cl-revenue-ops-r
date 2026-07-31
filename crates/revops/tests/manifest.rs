@@ -317,6 +317,10 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revenue-profile-preview"),
         "methods: {methods:?}"
     );
+    assert!(
+        methods.contains(&"revenue-fee-authority-status"),
+        "methods: {methods:?}"
+    );
     assert!(methods.contains(&"revenue-status"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-config"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-history"), "methods: {methods:?}");
@@ -410,11 +414,11 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
     }
-    // Exactly 53 rpc methods total (no leftover revenue-r-* names bleeding
+    // Exactly 54 rpc methods total (no leftover revenue-r-* names bleeding
     // through from shadow mode) -- status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
-    // profile-preview, Task 49's ten Batch A builders, Task 56's four
+    // profile-preview and fixed-startup fee-authority-status, Task 49's ten Batch A builders, Task 56's four
     // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
     // (status/breaker-clear/abandon/backfill through the LN+ owner),
     // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
@@ -427,7 +431,7 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        53,
+        54,
         "methods: {methods:?}"
     );
 
@@ -551,6 +555,59 @@ fn profile_preview_is_reachable_in_both_naming_modes() {
         shadow.contains(&"revenue-r-profile-preview"),
         "methods: {shadow:?}"
     );
+}
+
+#[test]
+fn fee_authority_status_is_reachable_in_both_naming_modes() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        canonical.contains(&"revenue-fee-authority-status"),
+        "methods: {canonical:?}"
+    );
+
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        shadow.contains(&"revenue-r-fee-authority-status"),
+        "methods: {shadow:?}"
+    );
+}
+
+#[test]
+fn fee_authority_status_rpc_reports_the_fixed_observer_startup_state() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let before = now_unix();
+    let result = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-fee-authority-status",
+        serde_json::json!({}),
+    );
+    let after = now_unix();
+
+    assert_eq!(result["schema"], "revenue_ops_fee_authority/v1");
+    assert_eq!(result["enabled"], false);
+    assert_eq!(result["generation"], 1);
+    assert_eq!(result["reason"], "init");
+    assert!(result["transitioned_at"]
+        .as_i64()
+        .is_some_and(|ts| ts >= before && ts <= after));
+    assert!(result["observed_at"]
+        .as_i64()
+        .is_some_and(|ts| ts >= before && ts <= after));
 }
 
 #[test]

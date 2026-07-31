@@ -73,6 +73,9 @@ struct State {
     /// Surfaced by the runway status RPC; never changes for the process's
     /// whole lifetime (the mode-matrix options are not `.dynamic()`).
     mode_label: &'static str,
+    /// Python-equivalent fee-authority gate state, fixed at startup just
+    /// like `mode_label`; only the response's observation time changes.
+    fee_authority_status: revops::rpc_fee_authority_status::FeeAuthorityStatusSnapshot,
     /// Whole-plugin authority split. Observer variants hold only observer loop handles; the guarded action adapter exists only inside `LiveRuntime`.
     #[allow(dead_code)]
     authority_runtime: revops::runtime::AuthorityRuntime,
@@ -543,6 +546,30 @@ fn register_profile_preview(
                     &override_values,
                     decoded.get("profile"),
                 ))
+            }
+        },
+    )
+}
+
+fn register_fee_authority_status(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "report the fixed-at-startup fee-authority gate state",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                Ok(p.state().fee_authority_status.response(now_unix()))
             }
         },
     )
@@ -1071,6 +1098,11 @@ async fn main() -> Result<()> {
     let profile_preview_spec = revops::rpc_params::method_spec(
         &revops::rpc_params::load_rpc_contract(),
         "revenue-profile-preview",
+    );
+    let fee_authority_status_name = rpc_name("fee-authority-status");
+    let fee_authority_status_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-fee-authority-status",
     );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
@@ -2863,6 +2895,11 @@ async fn main() -> Result<()> {
             },
         );
     let builder = register_profile_preview(builder, &profile_preview_name, profile_preview_spec);
+    let builder = register_fee_authority_status(
+        builder,
+        &fee_authority_status_name,
+        fee_authority_status_spec,
+    );
     let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
@@ -3572,6 +3609,12 @@ async fn main() -> Result<()> {
         None => revops::rpc_profile_preview::startup_active_profile(Ok(None)),
     };
 
+    let fee_authority_status =
+        revops::rpc_fee_authority_status::FeeAuthorityStatusSnapshot::from_startup_mode(
+            resolved_mode_label == "live_authority",
+            boot_identity.started_at,
+        );
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -3583,6 +3626,7 @@ async fn main() -> Result<()> {
         active_profile,
         scheduler,
         mode_label: resolved_mode_label,
+        fee_authority_status,
         authority_runtime,
         socket_path: init_socket_path.clone(),
         production_db_path: production_db_path_expanded.clone(),

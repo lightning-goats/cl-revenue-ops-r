@@ -462,3 +462,30 @@ fn profile_preview_applies_startup_bundle_below_explicit_overrides() {
     assert_eq!(current["weekly_budget_sats"], serde_json::json!(56000));
     assert_eq!(current["growth_budget_enabled"], serde_json::json!(true));
 }
+#[test]
+fn fee_authority_status_matches_pythons_fixed_startup_states() {
+    use revops::rpc_fee_authority_status::build_fee_authority_status;
+
+    assert_eq!(
+        build_fee_authority_status(true, 0, 1_700_000_000, 1_700_000_005, "initial"),
+        serde_json::json!({
+            "schema": "revenue_ops_fee_authority/v1",
+            "enabled": true,
+            "generation": 0,
+            "transitioned_at": 1_700_000_000,
+            "observed_at": 1_700_000_005,
+            "reason": "initial",
+        })
+    );
+    assert_eq!(
+        build_fee_authority_status(false, 1, 1_700_000_000, 1_700_000_005, "init"),
+        serde_json::json!({
+            "schema": "revenue_ops_fee_authority/v1",
+            "enabled": false,
+            "generation": 1,
+            "transitioned_at": 1_700_000_000,
+            "observed_at": 1_700_000_005,
+            "reason": "init",
+        })
+    );
+}
