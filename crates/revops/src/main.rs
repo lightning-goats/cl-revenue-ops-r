@@ -1448,8 +1448,9 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &dashboard_name,
-            "P&L dashboard (Phase 1b: period.*/net_profit/margin are \
-             DB-backed; tlv/roc/warnings/bleeders are gap-marked)",
+            "P&L dashboard: period/net_profit/margin from the production DB, \
+             TLV from listfunds, annualized ROC from live channel capacity, \
+             and bleeder warnings from the windowed profitability snapshot",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 let s = p.state();
                 let Some(handle) = &s.db else {
@@ -1460,8 +1461,81 @@ async fn main() -> Result<()> {
                     Err(e) => return Ok(e),
                 };
                 let now = now_unix();
+
+                // C71-28. These four fields used to be `null`/`[]` under a
+                // `_phase1b_gaps` marker. `warnings: []` was the dangerous
+                // one: an empty array is a well-formed Python answer meaning
+                // "nothing is bleeding", so a node losing money on every
+                // channel reported exactly what a healthy one reports.
+                let funds = match revops::profitability_assembler::fetch_read_rpc(
+                    &s.socket_path,
+                    "listfunds",
+                )
+                .await
+                {
+                    Ok(funds) => funds,
+                    Err(detail) => {
+                        return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                            "dashboard_funds_unavailable",
+                            &detail,
+                        ))
+                    }
+                };
+                let tlv = match revops::dashboard_evidence::total_liquidating_value(&funds) {
+                    Ok(tlv) => tlv,
+                    Err(detail) => {
+                        return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                            "dashboard_funds_unavailable",
+                            &detail,
+                        ))
+                    }
+                };
+                let channels =
+                    match revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
+                        .await
+                    {
+                        Ok(channels) => channels,
+                        Err(detail) => {
+                            return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                                "dashboard_channels_unavailable",
+                                &detail,
+                            ))
+                        }
+                    };
+                let snapshot = match handle
+                    .profitability_snapshot(
+                        now,
+                        window_days,
+                        revops::profitability_assembler::DIAGNOSTIC_WINDOW_DAYS,
+                    )
+                    .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return Ok(revops::rpc_dashboard::build_dashboard_unavailable(
+                            "dashboard_snapshot_unavailable",
+                            &format!("{error:#}"),
+                        ))
+                    }
+                };
+
                 let pnl = queries::pnl_summary(handle, window_days, now).await?;
-                Ok(build_dashboard(&pnl))
+                let bleeders = revops::dashboard_evidence::bleeder_warnings(
+                    &channels,
+                    &snapshot.revenue_30d,
+                    &snapshot.costs,
+                );
+                let evidence = revops::rpc_dashboard::DashboardEvidence {
+                    tlv_sats: tlv.tlv_sats,
+                    annualized_roc_pct: revops::dashboard_evidence::annualized_roc_pct(
+                        pnl.net_profit_sats,
+                        revops::dashboard_evidence::total_capacity_sats(&channels),
+                        window_days,
+                    ),
+                    warnings: bleeders.warnings,
+                    bleeder_count: bleeders.bleeder_count,
+                };
+                Ok(build_dashboard(&pnl, &evidence))
             },
         )
         .rpcmethod(
@@ -2223,29 +2297,108 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &profitability_name,
-            "channel profitability analysis (single channel_id, or fleet-wide summary) \
-             -- Phase: the ChannelProfitability assembly pipeline is not wired yet, so \
-             every call returns an explicit not_yet_ported marker (see \
-             revops::rpc_profitability)",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+            "channel profitability analysis (single channel_id, or fleet-wide summary), \
+             served from one production-DB snapshot, one observer read, and one fresh \
+             bounded listpeerchannels snapshot (see revops::profitability_assembler)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
                 }
-                // Task 50 correction round, F3/F4: this needs a
-                // `ChannelProfitability` assembly pipeline (see
-                // RPC_BATCH_A.md section 2) that does not exist yet. The
-                // OLD wiring called `build_profitability_channel(id, None)`
-                // / `build_profitability_summary(&[])` -- shapes that
-                // reuse Python's own legitimate "unknown channel" /
-                // "empty fleet" vocabulary and so cannot be told apart
-                // from real answers. Until the pipeline exists, return the
-                // explicitly-marked not-wired shapes instead.
+                // C71-25/C71-27. This used to return `not_yet_ported`
+                // because the assembly pipeline did not exist. It exists
+                // now, and every input it feeds the frozen classifier was
+                // read rather than assumed.
+                //
+                // The three unavailable branches below are deliberately
+                // NOT `build_profitability_channel(id, None)`: that shape
+                // is byte-identical to Python's "channel doesn't exist"
+                // answer, and returning it for a store outage would tell
+                // the operator to close a channel that is fine.
+                let s = p.state();
                 let channel_id = v.get("channel_id").and_then(|c| c.as_str());
-                match channel_id {
-                    Some(id) => Ok(
-                        revops::rpc_profitability::build_profitability_channel_not_wired(id),
+                let unavailable = |code: &str, detail: String| match channel_id {
+                    Some(id) => {
+                        revops::rpc_profitability::build_profitability_channel_unavailable(
+                            id, &detail,
+                        )
+                    }
+                    None => revops::rpc_profitability::build_profitability_unavailable(
+                        code, &detail,
                     ),
-                    None => Ok(revops::rpc_profitability::build_profitability_summary_not_wired()),
+                };
+
+                let (Some(db), Some(observer)) = (s.db.as_ref(), s.observer_db.as_ref()) else {
+                    return Ok(unavailable(
+                        "profitability_store_not_configured",
+                        "the production database and the observer store must both be \
+                         configured before profitability can be evaluated"
+                            .to_string(),
+                    ));
+                };
+
+                // ONE fresh bounded snapshot, taken here and handed to the
+                // producer, so the opener every verdict is built from is
+                // the opener this call actually saw.
+                let channels =
+                    match revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
+                        .await
+                    {
+                        Ok(channels) => channels,
+                        Err(detail) => {
+                            return Ok(unavailable("profitability_channels_unavailable", detail))
+                        }
+                    };
+
+                let fleet = match revops::profitability_assembler::gather_profitability(
+                    revops::profitability_assembler::ProfitabilitySources {
+                        production_db: db,
+                        observer,
+                        channels: &channels,
+                        now: revops::now_unix(),
+                    },
+                )
+                .await
+                {
+                    Ok(fleet) => fleet,
+                    Err(refusal) => {
+                        return Ok(unavailable(refusal.code(), refusal.detail().to_string()))
+                    }
+                };
+
+                match channel_id {
+                    Some(id) => {
+                        let scid = id.replace(':', "x");
+                        if let Some(result) = fleet.profitability.get(&scid) {
+                            return Ok(revops::rpc_profitability::build_profitability_channel(
+                                id,
+                                Some(result),
+                            ));
+                        }
+                        // A channel this pass skipped is NOT an unknown
+                        // channel; only a channel with no costs row at all
+                        // is Python's own "No data available".
+                        match fleet.skipped.iter().find(|(s, _)| *s == scid) {
+                            Some((_, reason)) => Ok(
+                                revops::rpc_profitability::build_profitability_channel_unavailable(
+                                    id, reason,
+                                ),
+                            ),
+                            None => Ok(revops::rpc_profitability::build_profitability_channel(
+                                id, None,
+                            )),
+                        }
+                    }
+                    None => {
+                        let mut results: Vec<_> =
+                            fleet.profitability.values().cloned().collect();
+                        results.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+                        Ok(
+                            revops::rpc_profitability::build_profitability_summary_with_skips(
+                                &results,
+                                &fleet.skipped,
+                            ),
+                        )
+                    }
                 }
             },
         )
@@ -2253,20 +2406,36 @@ async fn main() -> Result<()> {
             &analyze_name,
             "read-only flow analysis for a single channel_id (SCID); the whole-fleet \
              sweep (no channel_id) is a mutating background job and is NOT ported here",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
                 }
-                // Task 50 correction round, F5: `metrics` needs a
-                // `FlowMetrics` assembly pipeline (live channel +
-                // forward-history evidence through revops_analytics::flow)
-                // that does not exist yet -- `NotWired` marks that this
-                // request never actually looked anything up, so the
-                // builder can distinguish it from a genuine "channel
-                // unknown to the flow analyzer" answer.
-                Ok(revops::rpc_analyze::build_analyze(
+                // F71-R23: served from the flow pass's own persisted
+                // state, gated on THIS boot having completed a pass. The
+                // old wiring answered `NotWired` unconditionally; the
+                // store has held real rows since F71-R22, so the marker
+                // had become a false statement about this port rather
+                // than an honest gap.
+                //
+                // A malformed/absent `channel_id` never reaches the
+                // store: its verdict is a pure function of the parameter.
+                let s = p.state();
+                let Some(scid) = revops::rpc_analyze::analyze_target_scid(v.get("channel_id"))
+                else {
+                    return Ok(revops::rpc_analyze::build_analyze(
+                        v.get("channel_id"),
+                        revops::rpc_analyze::MetricsLookup::Ready(None),
+                    ));
+                };
+                let evidence = revops::flow_evidence::current_boot_flow_evidence(
+                    s.observer_db.as_ref(),
+                    &scid,
+                    &s.boot_id,
+                )
+                .await;
+                Ok(revops::rpc_analyze::build_analyze_from_evidence(
                     v.get("channel_id"),
-                    revops::rpc_analyze::MetricsLookup::NotWired,
+                    evidence.as_ref(),
                 ))
             },
         )
@@ -2457,24 +2626,43 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &econ_snapshot_name,
-            "READ-ONLY preview of the canonical EconomicSnapshot, assembled from \
-             live channels + already-computed profitability + budget (requires \
-             econ_shadow_enabled) -- Phase: the econ_shadow_enabled config surface \
-             is not wired into this port yet, so every call returns an explicit \
-             not_yet_ported marker rather than a possibly-false enabled/disabled answer",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
+            "READ-ONLY preview of the canonical EconomicSnapshot, assembled from one \
+             fresh bounded listpeerchannels snapshot, the profitability evidence \
+             gathered against that same snapshot, and a one-transaction budget \
+             position (requires econ_shadow_enabled)",
+            |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
                 }
-                // Task 50 correction round, F1: there is no `EconShadow`
-                // equivalent (or `econ_shadow_enabled` config read) in this
-                // Rust port at all -- the OLD wiring hardcoded
-                // `let enabled = false`, which is a FALSE statement about
-                // node state on any node where Python's real config has
-                // econ_shadow_enabled=true, with no gap marker. Do NOT
-                // fabricate a config read that does not exist; return an
-                // explicitly-marked not-wired shape instead.
-                Ok(revops::rpc_econ_snapshot::build_econ_snapshot_not_wired())
+                // C71-35: the assembly itself lives in
+                // `revops::econ_producer` so integration tests can drive
+                // every gate against real stores and a fake CLN socket. A
+                // handler written inline here could only be checked by
+                // reading its source, which proves a call is WRITTEN, not
+                // that it BEHAVES.
+                let s = p.state();
+                let config_error = |error: anyhow::Error| format!("{error:#}");
+                Ok(revops::econ_producer::econ_snapshot_response(
+                    revops::econ_producer::EconSources {
+                        production_db: s.db.as_ref(),
+                        observer: s.observer_db.as_ref(),
+                        socket_path: &s.socket_path,
+                        receivable_ratio_target: resolved_config_json(
+                            &p,
+                            "receivable-ratio-target",
+                        )
+                        .await
+                        .map(|value| value.and_then(|v| v.as_f64()).unwrap_or(0.0))
+                        .map_err(config_error),
+                        daily_budget_sats: resolved_config_json(&p, "daily-budget-sats")
+                            .await
+                            .map(|value| value.and_then(|v| v.as_i64()).unwrap_or(0))
+                            .map_err(config_error),
+                        enabled: revops::config_resolve::econ_shadow_enabled(s.db.as_ref()).await,
+                        now: now_unix(),
+                    },
+                )
+                .await)
             },
         )
         .rpcmethod(
@@ -2891,6 +3079,11 @@ async fn main() -> Result<()> {
     });
     let mut fee_cadence = None;
     let mut lnplus_cadence = None;
+    // Task 71 / R26: the three analytics cadences. Built during
+    // composition, started only after `configured.start()` returns.
+    let mut flow_cadence = None;
+    let mut startup_snapshot_cadence = None;
+    let mut financial_cadence = None;
     let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
         None;
     // Task 67: ONE boot identity per process, minted before any loop can
@@ -2947,6 +3140,39 @@ async fn main() -> Result<()> {
                     let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
                     let mut lnplus_pass = None;
+                    // Task 71 / R26: the three analytics owners. Unlike the
+                    // fee and LN+ passes these are NOT gated on
+                    // autonomous-shadow authority: they issue read-only
+                    // RPCs, run the frozen kernels, and write only to the
+                    // Rust-owned observer store, so they hold no action
+                    // capability for a passive observer to escalate.
+                    //
+                    // `db` is the READ-ONLY production handle. Passing it
+                    // as `Some` is what makes `config_overrides` a readable
+                    // tier; `None` makes the flow resolver refuse rather
+                    // than silently run on defaults an operator replaced.
+                    let flow_pass = Arc::new(revops::analytics_passes::FlowAnalysisPass::live(
+                        init_socket_path.clone(),
+                        observer_handle.clone(),
+                        boot_id.clone(),
+                        db.clone(),
+                        python_options.clone(),
+                    ));
+                    passes = passes.with_flow_analysis(flow_pass.clone());
+                    passes = passes.with_startup_snapshot(Arc::new(
+                        revops::analytics_passes::StartupSnapshotPass::live(
+                            init_socket_path.clone(),
+                            observer_handle.clone(),
+                        ),
+                    ));
+                    passes = passes.with_financial_snapshot(Arc::new(
+                        revops::analytics_passes::FinancialSnapshotPass::live(
+                            observer_handle.clone(),
+                            boot_id.clone(),
+                            init_socket_path.clone(),
+                            db.clone(),
+                        ),
+                    ));
                     if autonomous_shadow {
                         // Task 61 4D: the REAL LN+ observer pass, against
                         // the Rust observer parallel-state DB (collision
@@ -3040,6 +3266,32 @@ async fn main() -> Result<()> {
                     ) {
                         lnplus_cadence = Some(
                             revops::lnplus_runtime::LnPlusCadenceActivation::new(handle, pass),
+                        );
+                    }
+                    // Task 71 / R26. Every one of these is INERT until
+                    // `activate()` below, which runs only after
+                    // `configured.start()` has returned: a flow pass that
+                    // landed mid-handshake would read a socket lightningd
+                    // has not finished answering on.
+                    if let Some(handle) =
+                        runtime.handle(revops_db::loop_health::LoopId::FlowAnalysis)
+                    {
+                        flow_cadence = Some(revops::analytics_cadence::FlowCadenceActivation::new(
+                            handle, flow_pass,
+                        ));
+                    }
+                    if let Some(handle) =
+                        runtime.handle(revops_db::loop_health::LoopId::StartupSnapshot)
+                    {
+                        startup_snapshot_cadence = Some(
+                            revops::analytics_cadence::StartupSnapshotActivation::new(handle),
+                        );
+                    }
+                    if let Some(handle) =
+                        runtime.handle(revops_db::loop_health::LoopId::FinancialSnapshot)
+                    {
+                        financial_cadence = Some(
+                            revops::analytics_cadence::FinancialCadenceActivation::new(handle),
                         );
                     }
                     revops::runtime::AuthorityRuntime::Observer(runtime)
@@ -3210,6 +3462,19 @@ async fn main() -> Result<()> {
     }
     if let Some(lnplus_cadence) = lnplus_cadence {
         lnplus_cadence.activate();
+    }
+    // Task 71 / R26: py starts its analytics threads at the very end of
+    // `init`, after the plugin is serving (cl-revenue-ops.py:3588-3600).
+    // Activation AFTER `start()` reproduces that ordering exactly, and it
+    // is the reason each activation is inert until this point.
+    if let Some(flow_cadence) = flow_cadence {
+        flow_cadence.activate();
+    }
+    if let Some(startup_snapshot_cadence) = startup_snapshot_cadence {
+        startup_snapshot_cadence.activate();
+    }
+    if let Some(financial_cadence) = financial_cadence {
+        financial_cadence.activate();
     }
 
     // Startup hydration runs as a background task, off the init-handshake

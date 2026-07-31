@@ -159,9 +159,21 @@ fn pnl() -> PnlSummary {
     }
 }
 
+fn evidence() -> revops::rpc_dashboard::DashboardEvidence {
+    revops::rpc_dashboard::DashboardEvidence {
+        tlv_sats: 7_000,
+        annualized_roc_pct: 12.17,
+        warnings: vec![
+            "Channel 700x1x0 is bleeding: Spent 3000 sats rebalancing, earned 1000 sats."
+                .to_string(),
+        ],
+        bleeder_count: 1,
+    }
+}
+
 #[test]
 fn build_dashboard_populates_db_backed_fields() {
-    let v = build_dashboard(&pnl());
+    let v = build_dashboard(&pnl(), &evidence());
 
     assert_eq!(v["period"]["window_days"], 30);
     assert_eq!(v["period"]["gross_revenue_sats"], 8);
@@ -174,36 +186,80 @@ fn build_dashboard_populates_db_backed_fields() {
     assert_eq!(v["financial_health"]["operating_margin_pct"], -6150.0);
 }
 
+/// C71-28: the four fields this test used to pin as GAPS are now served.
+///
+/// The replacement matters most for `warnings`. `tlv_sats: null` and
+/// `bleeder_count: null` are visibly absent, but `warnings: []` is a
+/// well-formed Python answer meaning "no channel is bleeding" -- so a node
+/// losing money on every channel reported exactly what a healthy one
+/// reports. That is the only one of the four a caller could act on while
+/// being wrong.
 #[test]
-fn build_dashboard_gap_marks_tlv_roc_warnings_bleeders() {
-    let v = build_dashboard(&pnl());
+fn build_dashboard_serves_tlv_roc_warnings_and_bleeders() {
+    let v = build_dashboard(&pnl(), &evidence());
 
-    assert!(v["financial_health"]["tlv_sats"].is_null());
-    assert!(v["financial_health"]["annualized_roc_pct"].is_null());
-    assert!(v["bleeder_count"].is_null());
-    assert_eq!(v["warnings"], json!([]));
-
-    let gaps: Vec<&str> = v["_phase1b_gaps"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|g| g.as_str().unwrap())
-        .collect();
+    assert_eq!(v["financial_health"]["tlv_sats"], json!(7_000));
+    assert_eq!(v["financial_health"]["annualized_roc_pct"], json!(12.17));
+    assert_eq!(v["bleeder_count"], json!(1));
     assert_eq!(
-        gaps,
-        vec![
-            "financial_health.tlv_sats",
-            "financial_health.annualized_roc_pct",
-            "warnings",
-            "bleeder_count",
-        ]
+        v["warnings"],
+        json!(["Channel 700x1x0 is bleeding: Spent 3000 sats rebalancing, earned 1000 sats."])
+    );
+    assert!(
+        v.get("_phase1b_gaps").is_none(),
+        "no Phase-1b gaps remain on this surface: {v:?}"
     );
 }
 
+/// An empty warnings list must still be reachable -- a healthy node really
+/// does have nothing to report, and that is not the same fact as the old
+/// placeholder.
 #[test]
-fn parse_window_days_defaults_to_30_when_absent() {
+fn a_healthy_node_reports_no_warnings_and_still_carries_no_gap_marker() {
+    let v = build_dashboard(&pnl(), &revops::rpc_dashboard::DashboardEvidence::default());
+    assert_eq!(v["warnings"], json!([]));
+    assert_eq!(v["bleeder_count"], json!(0));
+    assert_eq!(v["financial_health"]["tlv_sats"], json!(0));
+    assert!(v.get("_phase1b_gaps").is_none());
+}
+
+#[test]
+fn parse_window_days_defaults_to_30_only_when_the_parameter_is_omitted() {
+    // C71-30. Python binds the signature default of 30 only when the
+    // parameter is NEVER PASSED. This test used to assert that an explicit
+    // `null` also produced 30 -- see the test below for why that is wrong.
     assert_eq!(parse_window_days(None), Ok(30));
-    assert_eq!(parse_window_days(Some(&serde_json::Value::Null)), Ok(30));
+}
+
+/// An EXPLICIT null is not an omitted parameter.
+///
+/// Python's default binds at call time; an explicit `None` reaches
+/// `int(None)`, which raises `TypeError` and returns the error dict.
+/// Mapping it to 30 silently gave a caller a 30-day window when it had
+/// asked for something the server could not understand -- a wrong answer
+/// with no error, which is worse than either correct outcome.
+#[test]
+fn parse_window_days_rejects_an_explicit_null() {
+    let err = parse_window_days(Some(&serde_json::Value::Null)).unwrap_err();
+    assert_eq!(err["error"], "window_days must be an integer");
+}
+
+/// `bool` is an `int` subclass in Python, so `int(True) == 1` and
+/// `int(False) == 0` -- and `max(1, ...)` then makes BOTH of them 1.
+///
+/// This port previously rejected booleans, on the stated grounds that no
+/// real caller passes one. That is a divergence either way; matching
+/// Python is the objective, and the asymmetry (false also yielding 1, via
+/// the clamp rather than the cast) is exactly the kind of detail a
+/// reimplementation gets wrong.
+#[test]
+fn parse_window_days_treats_booleans_as_pythons_int_subclass() {
+    assert_eq!(parse_window_days(Some(&json!(true))), Ok(1));
+    assert_eq!(
+        parse_window_days(Some(&json!(false))),
+        Ok(1),
+        "int(False) is 0, and the min-clamp lifts it to 1"
+    );
 }
 
 #[test]
@@ -232,11 +288,16 @@ fn parse_window_days_rejects_non_integer() {
     let err = parse_window_days(Some(&json!("abc"))).unwrap_err();
     assert_eq!(err["error"], "window_days must be an integer");
 
-    let err2 = parse_window_days(Some(&json!(true))).unwrap_err();
-    assert_eq!(err2["error"], "window_days must be an integer");
-
     let err3 = parse_window_days(Some(&json!([1, 2]))).unwrap_err();
     assert_eq!(err3["error"], "window_days must be an integer");
+
+    let err4 = parse_window_days(Some(&json!({"a": 1}))).unwrap_err();
+    assert_eq!(err4["error"], "window_days must be an integer");
+
+    // Python's `int()` accepts surrounding whitespace but not a decimal
+    // string: `int(" 45 ")` is 45, `int("45.9")` raises.
+    assert_eq!(parse_window_days(Some(&json!(" 45 "))), Ok(45));
+    assert!(parse_window_days(Some(&json!("45.9"))).is_err());
 }
 
 /// **Guard-order test (Phase 1b Task 5 review finding 2):**
@@ -311,6 +372,10 @@ fn analyze_serves_persisted_flow_state_and_gaps_the_rest() {
         flow_ratio: 0.82,
         velocity: 1.5,
         confidence: 0.61,
+        kalman_flow_ratio: 0.0,
+        kalman_velocity: 0.0,
+        kalman_uncertainty: 0.0,
+        kalman_regime_change: false,
         forward_count: 12,
         updated_at: 1_800_000_000,
         boot_id: "boot-a".into(),

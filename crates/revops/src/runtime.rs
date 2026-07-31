@@ -39,6 +39,13 @@ pub struct ObserverRuntime {
 pub struct ObserverPassSet {
     fee: Option<Arc<crate::fee_scheduler::FeeObserverPass>>,
     lnplus: Option<Arc<crate::lnplus_runtime::LnPlusObserverPass>>,
+    // Task 71 / F71-R16: the three analytics owners. Each is its OWN
+    // concrete type (F71-R17) -- deliberately NOT `Arc<dyn ObserverPass>`,
+    // which would let any external crate hand the observer runtime an
+    // arbitrary action-bearing pass.
+    flow_analysis: Option<Arc<crate::analytics_passes::FlowAnalysisPass>>,
+    startup_snapshot: Option<Arc<crate::analytics_passes::StartupSnapshotPass>>,
+    financial_snapshot: Option<Arc<crate::analytics_passes::FinancialSnapshotPass>>,
 }
 
 impl ObserverPassSet {
@@ -46,7 +53,40 @@ impl ObserverPassSet {
         Self {
             fee: None,
             lnplus: None,
+            flow_analysis: None,
+            startup_snapshot: None,
+            financial_snapshot: None,
         }
+    }
+
+    /// Task 71: the flow-analysis observer pass. Observation-only -- it
+    /// reads `listpeerchannels`, runs the frozen analytics kernels, and
+    /// writes only to the plugin's own store, so unlike `with_fee` and
+    /// `with_lnplus` it is NOT gated on autonomous-shadow authority.
+    pub fn with_flow_analysis(
+        mut self,
+        pass: Arc<crate::analytics_passes::FlowAnalysisPass>,
+    ) -> Self {
+        self.flow_analysis = Some(pass);
+        self
+    }
+
+    /// Task 71: the one-shot startup peer snapshot. Observation-only.
+    pub fn with_startup_snapshot(
+        mut self,
+        pass: Arc<crate::analytics_passes::StartupSnapshotPass>,
+    ) -> Self {
+        self.startup_snapshot = Some(pass);
+        self
+    }
+
+    /// Task 71: the daily financial snapshot. Observation-only.
+    pub fn with_financial_snapshot(
+        mut self,
+        pass: Arc<crate::analytics_passes::FinancialSnapshotPass>,
+    ) -> Self {
+        self.financial_snapshot = Some(pass);
+        self
     }
 
     pub fn with_fee(mut self, pass: Arc<crate::fee_scheduler::FeeObserverPass>) -> Self {
@@ -101,6 +141,15 @@ impl ObserverRuntime {
         }
         if let Some(lnplus) = passes.lnplus {
             generic.insert(LoopId::LnPlus, lnplus);
+        }
+        if let Some(flow) = passes.flow_analysis {
+            generic.insert(LoopId::FlowAnalysis, flow);
+        }
+        if let Some(snapshot) = passes.startup_snapshot {
+            generic.insert(LoopId::StartupSnapshot, snapshot);
+        }
+        if let Some(financial) = passes.financial_snapshot {
+            generic.insert(LoopId::FinancialSnapshot, financial);
         }
         Self::start_internal(store, generic).await
     }

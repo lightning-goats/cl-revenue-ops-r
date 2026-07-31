@@ -278,6 +278,15 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     ChannelFlowStates(oneshot::Sender<Result<Vec<crate::analytics::ChannelFlowStateRow>>>),
+    /// F71-R23 / C71-14: the flow loop's health AND one channel's row, in
+    /// a single actor turn. Deliberately NOT two commands -- see
+    /// [`crate::analytics::flow_evidence_snapshot`] for what tears when a
+    /// flow pass runs between them. There is no single-row read command on
+    /// purpose: it would be the primitive that reintroduces the tear.
+    FlowEvidenceSnapshot {
+        scid: String,
+        reply: oneshot::Sender<Result<crate::analytics::FlowEvidenceSnapshot>>,
+    },
     UpsertKalmanState {
         scid: String,
         state: serde_json::Value,
@@ -296,9 +305,53 @@ enum Command {
         row: crate::analytics::FinancialSnapshotRow,
         reply: oneshot::Sender<Result<i64>>,
     },
+    CurrentBootFinancialSnapshot {
+        boot_id: String,
+        reply: oneshot::Sender<Result<Option<crate::analytics::FinancialSnapshotRow>>>,
+    },
     FinancialSnapshots {
         limit: i64,
         reply: oneshot::Sender<Result<Vec<crate::analytics::FinancialSnapshotRow>>>,
+    },
+    // -- Task 71 / F71-R16: the two analytics READS the concrete passes
+    // need. Everything else the passes touch already existed. --
+    DailyFlowBuckets {
+        now: i64,
+        window_days: i64,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<
+            Result<std::collections::BTreeMap<String, Vec<crate::analytics::FlowDailyBucket>>>,
+        >,
+    },
+    PeersWithRecentConnectionHistory {
+        since: i64,
+        reply: oneshot::Sender<Result<std::collections::BTreeSet<String>>>,
+    },
+    HourlyFlowHistogram {
+        now: i64,
+        window_days: i64,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<
+            Result<std::collections::BTreeMap<String, [crate::analytics::HourlyFlowBucket; 24]>>,
+        >,
+    },
+    ContinuousNetFlow {
+        since: i64,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<
+            Result<std::collections::BTreeMap<String, Vec<crate::analytics::NetFlowRow>>>,
+        >,
+    },
+    // F71-R18: one flow pass, one transaction. See
+    // `analytics::persist_flow_pass` for why per-row writes are not an
+    // acceptable substitute here.
+    PersistFlowPass {
+        states: Vec<crate::analytics::ChannelFlowStateRow>,
+        kalman: Vec<(String, serde_json::Value)>,
+        temporal: Vec<(String, serde_json::Value)>,
+        retain_scids: std::collections::BTreeSet<String>,
+        updated_at: i64,
+        reply: oneshot::Sender<Result<usize>>,
     },
     RecordBootSession {
         identity: crate::loop_health::BootIdentity,
@@ -1838,6 +1891,26 @@ impl ObserverHandle {
         rx.await.context("observer actor dropped reply")?
     }
 
+    /// F71-R23 / C71-14: the flow loop's health and one channel's row as a
+    /// single observation. The pair is what the caller reasons about, so
+    /// the pair is what the store returns -- reading the two halves with
+    /// separate awaits lets a flow pass land in between and produces a
+    /// combination that was never true.
+    pub async fn flow_evidence_snapshot(
+        &self,
+        scid: &str,
+    ) -> Result<crate::analytics::FlowEvidenceSnapshot> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::FlowEvidenceSnapshot {
+                scid: scid.to_string(),
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     /// Blocking sibling for the analytics owner threads.
     pub fn blocking_channel_flow_states(
         &self,
@@ -1991,6 +2064,24 @@ impl ObserverHandle {
             .context("observer actor dropped reply (blocking)")?
     }
 
+    /// Task 71 / F71-R28: the snapshot THIS boot took, or `None`. A
+    /// caller asking for CURRENT financial evidence must not be served a
+    /// prior process's numbers.
+    pub async fn current_boot_financial_snapshot(
+        &self,
+        boot_id: &str,
+    ) -> Result<Option<crate::analytics::FinancialSnapshotRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::CurrentBootFinancialSnapshot {
+                boot_id: boot_id.to_string(),
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
     pub async fn financial_snapshots(
         &self,
         limit: i64,
@@ -2014,6 +2105,101 @@ impl ObserverHandle {
             .context("observer actor gone (blocking)")?;
         rx.blocking_recv()
             .context("observer actor dropped reply (blocking)")?
+    }
+
+    /// Task 71 / F71-R16: the flow pass's own daily/EMA bucket inputs.
+    /// See [`crate::analytics::daily_flow_buckets`] for the py parity
+    /// contract (rolling age bins, zero-padded window, absent-not-zero).
+    #[allow(clippy::type_complexity)]
+    pub async fn daily_flow_buckets(
+        &self,
+        now: i64,
+        window_days: i64,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::analytics::FlowDailyBucket>>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::DailyFlowBuckets {
+                now,
+                window_days,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R25: the 24-bucket hour-of-day histogram the frozen
+    /// temporal kernel consumes. See [`crate::analytics::hourly_flow_histogram`].
+    #[allow(clippy::type_complexity)]
+    pub async fn hourly_flow_histogram(
+        &self,
+        now: i64,
+        window_days: i64,
+    ) -> Result<std::collections::BTreeMap<String, [crate::analytics::HourlyFlowBucket; 24]>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::HourlyFlowHistogram {
+                now,
+                window_days,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R19: the raw 24h per-forward entries the Kalman
+    /// filter actually observes. See [`crate::analytics::continuous_net_flow`].
+    #[allow(clippy::type_complexity)]
+    pub async fn continuous_net_flow(
+        &self,
+        since: i64,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::analytics::NetFlowRow>>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ContinuousNetFlow { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R18: persist one COMPLETE flow pass atomically.
+    /// Returns the number of state rows written.
+    pub async fn persist_flow_pass(
+        &self,
+        states: Vec<crate::analytics::ChannelFlowStateRow>,
+        kalman: Vec<(String, serde_json::Value)>,
+        temporal: Vec<(String, serde_json::Value)>,
+        retain_scids: std::collections::BTreeSet<String>,
+        updated_at: i64,
+    ) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::PersistFlowPass {
+                states,
+                kalman,
+                temporal,
+                retain_scids,
+                updated_at,
+                reply,
+            })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
+    }
+
+    /// Task 71 / F71-R16: the one-shot startup snapshot's required
+    /// "who already has recent history" read.
+    pub async fn peers_with_recent_connection_history(
+        &self,
+        since: i64,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::PeersWithRecentConnectionHistory { since, reply })
+            .await
+            .context("observer actor gone")?;
+        rx.await.context("observer actor dropped reply")?
     }
 
     /// Task 67: record this process's boot identity once at startup.
@@ -2144,7 +2330,7 @@ pub fn require_wal_mode(mode: &str, path: &Path) -> Result<()> {
 /// operator pointing `observer-db-path` at a path that doesn't exist yet
 /// is the expected first-run case, not a misconfiguration.
 pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
-    let conn = open_observer_db(path)?;
+    let mut conn = open_observer_db(path)?;
 
     let (tx, mut rx) = mpsc::channel::<Command>(64);
     tokio::task::spawn_blocking(move || {
@@ -2525,6 +2711,9 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 Command::ChannelFlowStates(reply) => {
                     let _ = reply.send(crate::analytics::channel_flow_states(&conn));
                 }
+                Command::FlowEvidenceSnapshot { scid, reply } => {
+                    let _ = reply.send(crate::analytics::flow_evidence_snapshot(&mut conn, &scid));
+                }
                 Command::UpsertKalmanState {
                     scid,
                     state,
@@ -2554,8 +2743,60 @@ pub async fn spawn_read_write(path: &Path) -> Result<ObserverHandle> {
                 Command::InsertFinancialSnapshot { row, reply } => {
                     let _ = reply.send(crate::analytics::insert_financial_snapshot(&conn, &row));
                 }
+                Command::CurrentBootFinancialSnapshot { boot_id, reply } => {
+                    let _ = reply.send(crate::analytics::current_boot_financial_snapshot(
+                        &conn, &boot_id,
+                    ));
+                }
                 Command::FinancialSnapshots { limit, reply } => {
                     let _ = reply.send(crate::analytics::financial_snapshots(&conn, limit));
+                }
+                Command::DailyFlowBuckets {
+                    now,
+                    window_days,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::daily_flow_buckets(
+                        &conn,
+                        now,
+                        window_days,
+                    ));
+                }
+                Command::HourlyFlowHistogram {
+                    now,
+                    window_days,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::hourly_flow_histogram(
+                        &conn,
+                        now,
+                        window_days,
+                    ));
+                }
+                Command::ContinuousNetFlow { since, reply } => {
+                    let _ = reply.send(crate::analytics::continuous_net_flow(&conn, since));
+                }
+                Command::PersistFlowPass {
+                    states,
+                    kalman,
+                    temporal,
+                    retain_scids,
+                    updated_at,
+                    reply,
+                } => {
+                    let _ = reply.send(crate::analytics::persist_flow_pass(
+                        &mut conn,
+                        &states,
+                        &kalman,
+                        &temporal,
+                        &retain_scids,
+                        updated_at,
+                    ));
+                }
+                Command::PeersWithRecentConnectionHistory { since, reply } => {
+                    let _ = reply.send(notifications::peers_with_recent_connection_history(
+                        &conn, since,
+                    ));
                 }
                 Command::RecordBootSession { identity, reply } => {
                     let _ = reply.send(crate::loop_health::record_boot_session(&conn, &identity));

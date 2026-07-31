@@ -130,6 +130,28 @@ async fn uninitialized_arms_are_python_verbatim() {
     assert_eq!(response, expected);
 }
 
+/// F71-R12(a): `OpenSideEvidence` has no `Default`, so even a test cannot
+/// fabricate one. This runs the REAL producer over empty discovery
+/// evidence, which is a genuine measured empty.
+fn produced_empty_open_side() -> revops::capital_producers::OpenSideEvidence {
+    revops::capital_producers::build_open_side(revops::capital_producers::OpenSideSources {
+        discovery: Default::default(),
+        winner_channels: Vec::new(),
+        enrichment: Default::default(),
+        listnodes: Ok(serde_json::json!({"nodes": []})),
+        closed_channel_daily_net_est: Default::default(),
+        observed_node_daily_ppm: None,
+        chain_costs: revops::open_ev_evidence::ChainCosts {
+            open_cost_sats: 5_000,
+            close_cost_sats: 3_000,
+            used_fallback: true,
+        },
+        planned_channel_size_sats: 1_000_000,
+        min_annual_roi_pct: 1.0,
+    })
+    .expect("producer runs over empty evidence")
+}
+
 fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
     EvidenceDeps {
         planner_enabled: true,
@@ -148,11 +170,14 @@ fn healthy_deps(budget: &ScriptedBudget) -> EvidenceDeps<'_> {
         recycle_block_height: 900_000,
         recycle_close_cost_sats: 1_000,
         now: NOW,
-        winner_channels: Vec::new(),
         loser_channels: Vec::new(),
         defib_gates: Default::default(),
         close_gates: Default::default(),
         open_guards: Default::default(),
+        open_side: produced_empty_open_side(),
+        recycle_protected_peers: None,
+        recycle_route_pair_scids: Default::default(),
+        recycle_close_protection: Default::default(),
     }
 }
 
@@ -217,8 +242,13 @@ async fn assembled_owner_runs_the_cycle_and_reports_gaps() {
         !gaps.iter().any(|g| g["field"] == "winner_channels"),
         "winner_channels is supplied by task 67b: {gaps:?}"
     );
-    // The genuinely-remaining analytics gaps are still surfaced.
-    assert!(gaps.iter().any(|g| g["field"] == "discovery"), "{gaps:?}");
+    // Task 67c closed the remaining six, so planner-status now advertises
+    // NO gaps. The list stays in the response shape: a future gap must be
+    // surfaced here rather than silently shrinking the plan.
+    assert!(
+        gaps.is_empty(),
+        "task 67c closed every gap; planner-status still advertises: {gaps:?}"
+    );
 
     // planner_enabled=false: the kernel skips; the response says so.
     let mut deps = healthy_deps(&healthy);

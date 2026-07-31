@@ -4,19 +4,28 @@
 //! unit-testing in isolation from the cln-plugin stdio handshake (which the
 //! `tests/manifest.rs` black-box test covers instead).
 
+pub mod analytics_cadence;
+pub mod analytics_passes;
 pub mod boltz_boundaries;
 pub mod boltz_config;
 pub mod boltz_owner;
 pub mod capital_adapters;
 pub mod capital_boundaries;
 pub mod capital_candidates;
+pub mod capital_efficiency;
 pub mod capital_evidence;
 pub mod capital_gates;
 pub mod capital_inputs;
 pub mod capital_owner;
+pub mod capital_producers;
 pub mod config_resolve;
 pub mod config_types;
 pub mod cutover_arm;
+pub mod dashboard_evidence;
+pub mod discovery_evidence;
+pub mod econ_evidence;
+pub mod econ_producer;
+pub mod enrichment_evidence;
 pub mod fee_config;
 pub mod fee_evidence;
 pub mod fee_execution;
@@ -26,18 +35,24 @@ pub mod fee_scheduler;
 pub mod fee_state;
 pub mod fee_triggers;
 pub mod financial_snapshot;
+pub mod flow_config;
+pub mod flow_evidence;
 pub mod flow_owner;
 pub mod hydration;
 pub mod lnplus_adapters;
 pub mod lnplus_runtime;
 pub mod loop_health;
+pub mod msat_evidence;
 pub mod notify;
+pub mod open_ev_evidence;
 pub mod options_table;
 pub mod profitability_assembler;
+pub mod profitability_evidence;
 pub mod python_authority;
 pub mod rebalance_adapters;
 pub mod rebalance_execution;
 pub mod rebalance_owner;
+pub mod recycle_evidence;
 pub mod rpc_analyze;
 pub mod rpc_boltz_budget;
 pub mod rpc_boltz_history;
@@ -73,6 +88,14 @@ pub mod runtime;
 pub mod startup_snapshot;
 pub mod state_writer;
 
+#[cfg(test)]
+mod analytics_cadence_tests;
+#[cfg(test)]
+mod analytics_passes_tests;
+#[cfg(test)]
+mod flow_evidence_tests;
+#[cfg(test)]
+mod profitability_evidence_tests;
 #[cfg(test)]
 mod runtime_tests;
 

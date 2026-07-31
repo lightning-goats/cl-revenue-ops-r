@@ -39,6 +39,33 @@ pub async fn config_override(handle: &DbHandle, key: &str) -> Result<Option<Stri
         .await
 }
 
+/// Port of `Database.get_all_config_overrides`
+/// (modules/database.py:7307-7315): `SELECT key, value FROM
+/// config_overrides`, with `_`-prefixed internal sentinel rows filtered out
+/// exactly as Python's own comprehension does (the LN+ breaker and backfill
+/// markers are written into this table by
+/// `modules/lnplus_swaps.py:876,924` and are not operator settings).
+///
+/// Callers that need SEVERAL overrides in one logical decision must use
+/// this rather than a `config_override` per key: production's DB is
+/// concurrently written by the Python plugin under WAL, so N independent
+/// reads can each land on a different snapshot. `source_threshold` and
+/// `sink_threshold` are validated against each other at write time
+/// (`config.py:1143-1146`), so reading them separately can observe a
+/// combination Python would have rejected.
+pub async fn all_config_overrides(handle: &DbHandle) -> Result<BTreeMap<String, String>> {
+    let rows = handle
+        .query_rows("SELECT key, value FROM config_overrides", vec![], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .await
+        .context("all_config_overrides")?;
+    Ok(rows
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with('_'))
+        .collect())
+}
+
 /// Lossy `SqlValue` -> `String`, defaulting to `default` on `NULL` and
 /// coercing any other storage class via its natural text representation
 /// (SQLite's own dynamic typing already allows a column to hold any class
@@ -1139,6 +1166,13 @@ pub struct PerChannelCosts {
     pub opened_at: i64,
     pub rebalance_cost_sats: i64,
     pub rebalance_cost_30d_sats: i64,
+    /// C71-28: msat-native rebalance cost, py's
+    /// `SUM(COALESCE(cost_msat, cost_sats * 1000))` (database.py:3122).
+    /// The bleeder verdict is `net < 0` over
+    /// `contribution_msat - rebalance_cost_msat`, so rounding to sats first
+    /// shifts the boundary and can flip a channel's bleeder status.
+    pub rebalance_cost_msat: i64,
+    pub rebalance_cost_30d_msat: i64,
 }
 
 /// Aggregate `forwards` per channel, from `since` (inclusive; 0 = all).
@@ -1257,6 +1291,12 @@ pub async fn per_channel_costs(
         }
         e.rebalance_cost_sats = total;
         e.rebalance_cost_30d_sats = windowed;
+        // This legacy split reader is NOT on the producer path (see
+        // `profitability_history::read_profitability_snapshot`, which is
+        // the msat-native one). It keeps the sats column's precision so
+        // nothing here silently claims more than it read.
+        e.rebalance_cost_msat = total * 1000;
+        e.rebalance_cost_30d_msat = windowed * 1000;
     }
     Ok(out)
 }

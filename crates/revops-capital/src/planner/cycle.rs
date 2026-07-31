@@ -214,11 +214,18 @@ pub struct CycleEvidence {
 
     pub winner_channels: Vec<WinnerCandidateEvidence>,
     pub loser_channels: Vec<LoserChannelEvidence>,
-    /// Winners' open-EV, precomputed per winner (py's inline
-    /// `self._calculate_open_ev(winner["peer_id"], loser_capacity, cfg)`
-    /// call inside `_calculate_redeployment_ev` — hoisted the same way
-    /// [`super::ev::RedeploymentCandidate`] already documents).
-    pub redeployment_winner_evs: Vec<(String, f64)>,
+    /// Per-winner open-EV TEMPLATES. Each carries every `OpenEvInputs`
+    /// field except `channel_size_sats`; the loser's capacity is
+    /// substituted when that loser is priced.
+    ///
+    /// F71-R10: this was `Vec<(String, f64)>` — one EV per winner, computed
+    /// once and reused for every loser. Python recomputes
+    /// `_calculate_open_ev(winner["peer_id"], loser_capacity, cfg)` inside
+    /// each per-loser call (py 2957), and `calculate_open_ev` scales with
+    /// `channel_size_sats`, so the scalar shape could not reproduce
+    /// unequal-capacity losers: winner EV, chosen peer, and
+    /// close-vs-defibrillate could all diverge.
+    pub redeployment_winner_evs: Vec<(String, super::ev::OpenEvInputs)>,
 
     pub defibrillation_limit: i64,
     pub defib_gates: BTreeMap<String, DefibGate>,
@@ -531,9 +538,9 @@ pub fn plan_cycle(evidence: &CycleEvidence) -> CyclePlan {
     let redeployment_winners: Vec<RedeploymentCandidate> = evidence
         .redeployment_winner_evs
         .iter()
-        .map(|(peer_id, ev)| RedeploymentCandidate {
+        .map(|(peer_id, template)| RedeploymentCandidate {
             peer_id: peer_id.as_str(),
-            open_ev: *ev,
+            open_ev_template: *template,
         })
         .collect();
     apply_redeployment_ev_demotion(&mut losers, &redeployment_winners);

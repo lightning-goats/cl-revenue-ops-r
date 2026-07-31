@@ -22,6 +22,7 @@ fn deps() -> FinancialDeps {
             total_rebalance_cost_sats: 4_321,
         }),
         now: NOW,
+        boot_id: "boot-test".to_string(),
     }
 }
 

@@ -157,32 +157,29 @@ fn calculate_redeployment_ev_matches_python() {
         let closure_cost_sats = close_cost_sats;
 
         let winners: Vec<Value> = input["winners"].as_array().unwrap().clone();
-        let winner_evs: Vec<f64> = winners
+        // F71-R10: the template's `channel_size_sats` is a placeholder --
+        // `calculate_redeployment_ev` substitutes the loser's capacity, which
+        // is what Python does inside its per-loser loop. These fixtures are
+        // generated from real Python, so they pin that substitution.
+        let candidates: Vec<RedeploymentCandidate> = winners
             .iter()
-            .map(|_w| {
-                let ev_inputs = OpenEvInputs {
-                    channel_size_sats: loser_capacity,
+            .map(|w| RedeploymentCandidate {
+                peer_id: w["peer_id"].as_str().unwrap(),
+                open_ev_template: OpenEvInputs {
+                    channel_size_sats: 0,
                     closed_channel_daily_net_est_sats: None,
                     observed_node_daily_ppm: observed_ppm,
                     open_cost_sats,
                     close_cost_sats,
                     inbound_median_fee_ppm: None,
                     min_annual_roi_pct: 1.0,
-                };
-                calculate_open_ev(&ev_inputs)
-            })
-            .collect();
-        let candidates: Vec<RedeploymentCandidate> = winners
-            .iter()
-            .zip(winner_evs.iter())
-            .map(|(w, ev)| RedeploymentCandidate {
-                peer_id: w["peer_id"].as_str().unwrap(),
-                open_ev: *ev,
+                },
             })
             .collect();
 
         let (redeployment_ev, best_peer, best_ev) = calculate_redeployment_ev(
             loser_marginal_profit_30d_sats,
+            loser_capacity,
             closure_cost_sats,
             &candidates,
         );
@@ -212,17 +209,28 @@ fn calculate_redeployment_ev_matches_python() {
 /// plausible.
 #[test]
 fn best_ev_floor_is_zero_not_negative_infinity() {
+    // Templates whose open EV is negative: a tiny channel whose forecast
+    // cannot cover its chain costs.
+    let losing_template = |open_cost_sats: i64| OpenEvInputs {
+        channel_size_sats: 0,
+        closed_channel_daily_net_est_sats: None,
+        observed_node_daily_ppm: Some(0.0),
+        open_cost_sats,
+        close_cost_sats: 100_000,
+        inbound_median_fee_ppm: None,
+        min_annual_roi_pct: 1.0,
+    };
     let candidates = [
         RedeploymentCandidate {
             peer_id: "peerA",
-            open_ev: -500.0,
+            open_ev_template: losing_template(500_000),
         },
         RedeploymentCandidate {
             peer_id: "peerB",
-            open_ev: -100.0,
+            open_ev_template: losing_template(100_000),
         },
     ];
-    let (_ev, best_peer, best_ev) = calculate_redeployment_ev(0, 200, &candidates);
+    let (_ev, best_peer, best_ev) = calculate_redeployment_ev(0, 1_000, 200, &candidates);
     assert_eq!(best_peer, None);
     assert_eq!(best_ev, 0.0);
 }

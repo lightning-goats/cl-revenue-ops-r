@@ -117,6 +117,31 @@ pub fn insert_forward_ignore_dup(conn: &Connection, f: &ForwardRow) -> Result<bo
     Ok(changed == 1)
 }
 
+/// Every peer with a connection event at or after `since`.
+///
+/// Task 71 / F71-R16: the batched form of py
+/// `has_recent_connection_history(peer_id, 3600)`
+/// (cl-revenue-ops.py:422-457). The one-shot startup snapshot needs the
+/// whole set to decide which connected peers still need an event, and
+/// asking per-peer would be one store round-trip per peer on every boot.
+///
+/// An EMPTY set is a measured "nobody has recent history" -- the normal
+/// case on a fresh boot -- and is deliberately distinct from a failed
+/// read, which propagates as `Err`.
+pub fn peers_with_recent_connection_history(
+    conn: &Connection,
+    since: i64,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT peer_id FROM peer_connection_events WHERE ts >= ?1")
+        .context("prepare recent connection history query")?;
+    let peers = stmt
+        .query_map([since], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::BTreeSet<String>>>()
+        .context("read recent connection history")?;
+    Ok(peers)
+}
+
 /// `SELECT MAX(timestamp) FROM ingested_forwards` -- `None` on an empty
 /// table (drives the "empty table -> full warm start" branch of
 /// [`compute_forward_hydration_start`]).

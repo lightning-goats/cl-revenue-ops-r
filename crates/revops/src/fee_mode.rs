@@ -136,6 +136,18 @@ impl ObserverMode {
     pub fn autonomous_shadow(&self) -> bool {
         self.autonomous_shadow
     }
+
+    /// In-crate test constructor for the runtime composition tests.
+    ///
+    /// `#[cfg(test)]` on purpose: it does not exist in a production build,
+    /// so the "no public constructor" guarantee the `compile_fail` doctest
+    /// above pins is unchanged. The alternative -- standing up a full
+    /// `validate_fee_mode` fixture just to compose an OBSERVER runtime --
+    /// would test the mode validator, not the composition under test.
+    #[cfg(test)]
+    pub(crate) fn for_tests(autonomous_shadow: bool) -> Self {
+        Self { autonomous_shadow }
+    }
 }
 
 /// Type-directed authority split. Observer variants carry only the

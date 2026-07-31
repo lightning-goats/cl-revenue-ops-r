@@ -12,10 +12,14 @@
 //! takes them as already-fetched inputs, same convention as
 //! `rpc_dashboard::build_dashboard` taking a `&PnlSummary`.
 //!
-//! `fee_multiplier` (`profitability_analyzer.get_fee_multiplier`,
-//! cl-revenue-ops.py:4968) reads the fee controller's live in-memory DTS
-//! posterior state, which has no Rust-side equivalent wired to this
-//! read-only batch -- always `null`, gap-listed.
+//! C71-29: `fee_multiplier` (`profitability_analyzer.get_fee_multiplier`,
+//! cl-revenue-ops.py:4963) is now served. The note that used to sit here
+//! said it "reads the fee controller's live in-memory DTS posterior
+//! state" -- that was wrong. Python derives it from MARGINAL ROI plus the
+//! F8 reliability gate and the ZOMBIE classification, all of which are
+//! already fields of the `ChannelProfitability` this builder receives. The
+//! `null` was never a missing input, only an unwritten branch, and the
+//! `_gaps` entry that advertised it is gone with it.
 
 use revops_analytics::profitability::{ChannelProfitability, ProfitabilityClass};
 use serde_json::{json, Value};
@@ -98,7 +102,7 @@ pub fn build_profitability_channel(
             "roi_percentage": revops_econ::pyfloat::py_round(r.roi_percent, 2),
             "profitability_class": r.classification.as_value(),
             "days_active": r.days_open,
-            "fee_multiplier": Value::Null,
+            "fee_multiplier": crate::profitability_assembler::fee_multiplier(r),
             "outbound_flow": {
                 "payment_count": outbound_count,
                 "volume_sats": r.revenue.volume_routed_sats(),
@@ -115,7 +119,6 @@ pub fn build_profitability_channel(
             "volume_routed_sats": r.revenue.volume_routed_sats(),
             "forward_count": outbound_count,
         },
-        "_gaps": ["profitability.fee_multiplier"],
     })
 }
 
@@ -212,6 +215,58 @@ pub fn build_profitability_summary(results: &[ChannelProfitability]) -> Value {
         },
         "channels_by_class": by_class,
     })
+}
+
+/// C71-27: a channel the fleet pass SKIPPED is not a channel that does not
+/// exist.
+///
+/// [`build_profitability_channel`]'s `None` branch emits
+/// `{"error": "No data available"}`, byte-identical to Python's
+/// unknown-channel answer (cl-revenue-ops.py:4985-4986). Reusing it for a
+/// skip would tell the operator their channel is unknown when what
+/// actually happened is that one of its evidence sources was unreadable --
+/// and the natural next action ("close it, it's not real") is the wrong
+/// one. This shape names the source instead.
+pub fn build_profitability_channel_unavailable(channel_id: &str, reason: &str) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "error": "evidence_unavailable",
+        "detail": reason,
+    })
+}
+
+/// A store-level failure: no channel was evaluated, so there is no partial
+/// answer to report. Deliberately does NOT reuse the `summary` /
+/// `channels_by_class` keys -- a caller keying off those must never see a
+/// zeroed fleet that looks like a real one.
+pub fn build_profitability_unavailable(code: &str, detail: &str) -> Value {
+    json!({
+        "error": code,
+        "detail": detail,
+    })
+}
+
+/// The fleet summary, plus the channels this pass could NOT evaluate.
+///
+/// Python has no skip concept -- it evaluates whatever it read and says
+/// nothing about the rest. Dropping skips silently here would make an
+/// unreadable source look like a smaller fleet, so they are reported under
+/// an underscore-prefixed port annotation alongside the existing `_gaps`
+/// convention rather than folded into Python's counts.
+pub fn build_profitability_summary_with_skips(
+    results: &[ChannelProfitability],
+    skipped: &[(String, String)],
+) -> Value {
+    let mut out = build_profitability_summary(results);
+    if !skipped.is_empty() {
+        out["_skipped"] = Value::Array(
+            skipped
+                .iter()
+                .map(|(scid, reason)| json!({"channel_id": scid, "reason": reason}))
+                .collect(),
+        );
+    }
+    out
 }
 
 /// Task 50 correction round, F4: until the `ChannelProfitability` assembly
@@ -337,9 +392,14 @@ mod tests {
         assert_eq!(p["forward_count"], 10);
         assert_eq!(p["outbound_flow"]["payment_count"], 10);
         assert_eq!(p["inbound_flow"]["payment_count"], 5);
-        // fee_multiplier is an honest, always-declared gap.
-        assert_eq!(p["fee_multiplier"], Value::Null);
-        assert_eq!(v["_gaps"][0], "profitability.fee_multiplier");
+        // C71-29: served, not gap-marked. This channel has no 30d
+        // rebalance spend, so py's F8 gate makes it neutral -- Python's own
+        // answer, reached by evaluating the rule rather than skipping it.
+        assert_eq!(p["fee_multiplier"], json!(1.0));
+        assert!(
+            v.get("_gaps").is_none(),
+            "no gaps remain on the single-channel shape: {v:?}"
+        );
     }
 
     #[test]

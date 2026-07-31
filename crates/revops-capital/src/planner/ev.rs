@@ -103,7 +103,15 @@ pub fn calculate_open_ev(inputs: &OpenEvInputs) -> f64 {
 #[derive(Debug, Clone, Copy)]
 pub struct RedeploymentCandidate<'a> {
     pub peer_id: &'a str,
-    pub open_ev: f64,
+    /// Every `OpenEvInputs` field EXCEPT `channel_size_sats` resolved; the
+    /// LOSER's capacity is substituted per pricing call.
+    ///
+    /// F71-R10: this was a precomputed `open_ev: f64`, hoisted once for all
+    /// losers. Python recomputes `_calculate_open_ev(winner, loser_capacity,
+    /// cfg)` inside every per-loser call (py 2957) and `calculate_open_ev`
+    /// scales with `channel_size_sats`, so one scalar could not reproduce
+    /// unequal-capacity losers. Mirrors what `RecycleCandidate` already did.
+    pub open_ev_template: OpenEvInputs,
 }
 
 /// Port of `_calculate_redeployment_ev` (py capacity_planner.py 2930-2966):
@@ -122,6 +130,7 @@ pub struct RedeploymentCandidate<'a> {
 /// subtracting it ADDS the avoided ongoing loss (favors closure).
 pub fn calculate_redeployment_ev<'a>(
     loser_marginal_profit_30d_sats: i64,
+    loser_capacity_sats: i64,
     closure_cost_sats: i64,
     winners: &[RedeploymentCandidate<'a>],
 ) -> (f64, Option<&'a str>, f64) {
@@ -130,8 +139,13 @@ pub fn calculate_redeployment_ev<'a>(
     let mut best_ev = 0.0f64;
     let mut best_peer: Option<&'a str> = None;
     for winner in winners {
-        if winner.open_ev > best_ev {
-            best_ev = winner.open_ev;
+        // F71-R10: repriced against THIS loser's capacity, exactly as py
+        // 2957 does inside the loop.
+        let mut inputs = winner.open_ev_template;
+        inputs.channel_size_sats = loser_capacity_sats;
+        let open_ev = calculate_open_ev(&inputs);
+        if open_ev > best_ev {
+            best_ev = open_ev;
             best_peer = Some(winner.peer_id);
         }
     }

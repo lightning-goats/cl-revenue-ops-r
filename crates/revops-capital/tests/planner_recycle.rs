@@ -42,7 +42,15 @@ fn positive_redeployment_ev_keeps_close() {
     let mut losers = vec![base_loser(LoserAction::Close, false, false)];
     let winners = vec![RedeploymentCandidate {
         peer_id: "winner1",
-        open_ev: 100_000.0,
+        open_ev_template: OpenEvInputs {
+            channel_size_sats: 0,
+            closed_channel_daily_net_est_sats: Some(1_000.0),
+            observed_node_daily_ppm: Some(50.0),
+            open_cost_sats: 1_000,
+            close_cost_sats: 1_000,
+            inbound_median_fee_ppm: None,
+            min_annual_roi_pct: 1.0,
+        },
     }];
     apply_redeployment_ev_demotion(&mut losers, &winners);
     assert_eq!(losers[0].action, LoserAction::Close);
@@ -176,4 +184,74 @@ fn only_top_5_candidates_by_score_are_considered() {
     if let Some(plan) = result {
         assert_ne!(plan.candidate_peer_id, "excluded_by_rank");
     }
+}
+
+/// Review finding F71-R10: each winner's open EV must be recomputed
+/// against THE LOSER BEING PRICED, not once for all losers.
+///
+/// Python's `_calculate_redeployment_ev` (py 2930-2966) calls
+/// `_calculate_open_ev(winner["peer_id"], loser_capacity, cfg)` INSIDE the
+/// per-loser call, and `calculate_open_ev` scales its forecast with
+/// `channel_size_sats`. A single precomputed scalar per winner is therefore
+/// structurally incapable of parity: with unequal loser capacities the
+/// winner EV, the selected peer, and the close-vs-defibrillate verdict can
+/// all differ.
+///
+/// Here the same winner is priced against a tiny loser and a large one. The
+/// tiny loser's redeployment cannot cover its closure cost, so it demotes;
+/// the large one's can, so it stays CLOSE. Under the old shape both losers
+/// saw one identical EV and reached the SAME verdict, whichever it was.
+#[test]
+fn winner_ev_is_repriced_per_loser_capacity() {
+    // forecast = min(90 * NEW_PEER_DISCOUNT, CEILING) = 45 ppm/day, so
+    // EV(size) = size*0.002358 - 2000: negative for a 100k channel, about
+    // +115_900 for a 50M one. That spread is the whole point -- it exists
+    // ONLY because capacity is substituted per loser.
+    let template = OpenEvInputs {
+        // Substituted per loser -- the value here must not survive.
+        channel_size_sats: 0,
+        closed_channel_daily_net_est_sats: None,
+        observed_node_daily_ppm: Some(90.0),
+        open_cost_sats: 1_000,
+        close_cost_sats: 1_000,
+        inbound_median_fee_ppm: None,
+        min_annual_roi_pct: 1.0,
+    };
+    let winners = vec![RedeploymentCandidate {
+        peer_id: "winner1",
+        open_ev_template: template,
+    }];
+
+    let mut tiny = base_loser(LoserAction::Close, false, false);
+    tiny.scid = "700000x1x0".to_string();
+    tiny.capacity = 100_000;
+    tiny.estimated_closure_cost_sats = 50_000;
+    tiny.marginal_profit_30d_sats = 0;
+
+    let mut large = base_loser(LoserAction::Close, false, false);
+    large.scid = "700000x2x0".to_string();
+    large.capacity = 50_000_000;
+    large.estimated_closure_cost_sats = 50_000;
+    large.marginal_profit_30d_sats = 0;
+
+    let mut losers = vec![tiny, large];
+    apply_redeployment_ev_demotion(&mut losers, &winners);
+
+    assert_eq!(
+        losers[0].action,
+        LoserAction::Defibrillate,
+        "the tiny loser redeploys too little to cover closure: {}",
+        losers[0].reason
+    );
+    assert_eq!(
+        losers[1].action,
+        LoserAction::Close,
+        "the large loser redeploys enough to stay CLOSE: {}",
+        losers[1].reason
+    );
+    assert_ne!(
+        losers[0].action, losers[1].action,
+        "unequal capacities MUST be able to reach different verdicts -- \
+         identical verdicts here means the EV was not repriced"
+    );
 }

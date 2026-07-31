@@ -966,10 +966,13 @@ fn init_cutover_arm_path_without_journal_dir_refuses_before_touching_arm() {
 // THAT query rather than returning a parallel hand-built shape -- proven
 // by seeding a distinctive row directly into a copy of the production
 // schema and asserting it round-trips through the live RPC call. Handlers
-// that intentionally have no wired evidence source yet (profitability,
-// analyze, capacity-report, econ-snapshot, and most of health) are
-// instead pinned to their honest null/`_gaps` contract, so a future
-// change that fabricates data to "complete" the response reds here too.
+// that intentionally have no wired evidence source yet (capacity-report,
+// econ-snapshot, and most of health) are instead pinned to their honest
+// null/`_gaps` contract, so a future change that fabricates data to
+// "complete" the response reds here too. C71-27: profitability and analyze
+// have LEFT that list -- both are served from real evidence now, and their
+// unavailable branches are pinned to refusal shapes that cannot be
+// mistaken for Python's own answers.
 // ---------------------------------------------------------------------------
 
 /// Batch A's ten methods, shadow-mode names (the `revops-r-*` /
@@ -2287,10 +2290,11 @@ fn revenue_r_batch_a_methods_empty_array_and_empty_object_params_are_semanticall
     }
 }
 
-/// Task 50 correction round (F1-F5): the four builders with no wired
-/// live-evidence pipeline yet (profitability, analyze, capacity-report,
+/// Task 50 correction round (F1-F5), updated by C71-27: the builders that
+/// still have no wired live-evidence pipeline (capacity-report,
 /// econ-snapshot) must come back through their real registered handler in
-/// an UNMISTAKABLY-MARKED not-wired shape -- never a shape that collides
+/// an UNMISTAKABLY-MARKED not-wired shape, and the two that ARE now wired
+/// (profitability, analyze) must return refusal shapes -- never a shape that collides
 /// with one of Python's own legitimate answers (a real empty fleet, a real
 /// unknown channel/SCID, a real disabled-by-config answer) and never a
 /// success-shaped stub. These need no DB at all (none of the four handlers
@@ -2304,15 +2308,27 @@ fn revenue_r_batch_a_methods_empty_array_and_empty_object_params_are_semanticall
 fn revenue_r_gap_only_batch_a_methods_stay_honest() {
     let home = tempfile::tempdir().expect("tempdir");
 
-    // F3/F4: no `ChannelProfitability` pipeline exists -- both branches
-    // must carry an in-band `not_yet_ported` marker, never Python's real
-    // vocabulary ("No data available" for a genuinely unknown channel, or a
-    // real empty-fleet summary shape with `summary`/`channels_by_class`).
+    // C71-27: the `ChannelProfitability` pipeline now EXISTS, so this is no
+    // longer a `not_yet_ported` surface. With no stores configured the
+    // handler must say the stores are unavailable -- and, critically, must
+    // still not collide with Python's own vocabulary: not a real empty-fleet
+    // summary, and not "No data available", which is Python's answer for a
+    // channel that does not exist. Telling an operator their channel is
+    // unknown because a database was unreachable points at the wrong action.
     let profitability = call_after_init(false, None, home.path(), &[], "revenue-r-profitability");
-    assert_eq!(profitability["error"], serde_json::json!("not_yet_ported"));
+    assert_eq!(
+        profitability["error"],
+        serde_json::json!("profitability_store_not_configured"),
+        "{profitability:?}"
+    );
     assert!(
         profitability.get("summary").is_none(),
         "must not reuse Python's real fleet-summary shape: {profitability:?}"
+    );
+    assert_ne!(
+        profitability["error"],
+        serde_json::json!("not_yet_ported"),
+        "the pipeline is wired; an unwired marker here would hide a real outage"
     );
 
     let profitability_single = call_after_init_with_params(
@@ -2325,7 +2341,8 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
     );
     assert_eq!(
         profitability_single["error"],
-        serde_json::json!("not_yet_ported")
+        serde_json::json!("evidence_unavailable"),
+        "{profitability_single:?}"
     );
     assert_eq!(
         profitability_single["channel_id"],
@@ -2344,10 +2361,16 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
     let analyze_no_id = call_after_init(false, None, home.path(), &[], "revenue-r-analyze");
     assert_eq!(analyze_no_id["error"], serde_json::json!("not_yet_ported"));
 
-    // F5: with a channel_id, `metrics` is unwired (main.rs always passes
-    // `None`) -- the response must carry a `not_yet_ported` marker so it
-    // cannot collide with Python's real unknown-channel answer, which is
-    // the SAME `{"channel": ..., "analysis": null}` shape with NO error key.
+    // F71-R23: with a channel_id, analyze is no longer a declared gap --
+    // it is served from the flow pass's persisted state. This harness
+    // calls immediately after init, so the flow loop is registered but its
+    // first pass (30s, F71-R26) has not completed, and the honest answer
+    // is a LIVE refusal naming that state.
+    //
+    // The original F5 intent still holds and is now stronger: Python's
+    // real unknown-channel answer is `{"channel": ..., "analysis": null}`
+    // with no error key, and this response cannot be mistaken for it
+    // because it carries no `analysis` key at all.
     let analyze_with_id = call_after_init_with_params(
         false,
         None,
@@ -2357,11 +2380,23 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         serde_json::json!({"channel_id": "123x456x789"}),
     );
     assert_eq!(analyze_with_id["channel"], serde_json::json!("123x456x789"));
-    assert_eq!(analyze_with_id["analysis"], serde_json::Value::Null);
     assert_eq!(
         analyze_with_id["error"],
+        serde_json::json!("flow_evidence_no_pass_this_boot"),
+        "a live not-ready state must not be reported as an unported gap: {analyze_with_id:?}"
+    );
+    assert_eq!(
+        analyze_with_id["boot_status"],
+        serde_json::json!("never_run_this_boot")
+    );
+    assert!(
+        analyze_with_id.get("analysis").is_none(),
+        "must not collide with Python's real unknown-channel null: {analyze_with_id:?}"
+    );
+    assert_ne!(
+        analyze_with_id["error"],
         serde_json::json!("not_yet_ported"),
-        "must be marked, not collide with Python's real unknown-channel null: {analyze_with_id:?}"
+        "analyze is wired now; claiming otherwise is a false statement about this port"
     );
 
     // F2: no capacity planner exists -- must be Python's EXACT error shape
@@ -2424,19 +2459,28 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
     assert_eq!(auto_cycle["boltz_enabled"], serde_json::json!(false));
     assert!(auto_cycle.get("error").is_none(), "{auto_cycle:?}");
 
-    // F1: no EconShadow config surface exists in Rust -- must NOT claim
-    // `enabled: false` (a hardcoded lie on any node where Python's real
-    // config has econ_shadow_enabled=true). Must be an in-band error that
-    // cannot be read as either a true or false `enabled` answer.
+    // F1, updated by C71-30/C71-34: the `econ_shadow_enabled` surface IS
+    // wired now -- it is a PUBLIC_RUNTIME_KEYS override with no registered
+    // CLN option, so it resolves from `config_overrides`. With no
+    // production database configured here it cannot be READ, and the
+    // original F1 invariant still holds and still matters: the response
+    // must not claim any enabled state, because `enabled: false` is a
+    // hardcoded lie on any node whose operator turned the shadow on. Only
+    // the error code changes -- from "not ported" to "could not read".
     let econ_snapshot = call_after_init(false, None, home.path(), &[], "revenue-r-econ-snapshot");
     assert!(
         econ_snapshot.get("enabled").is_none(),
         "must not claim any enabled state (true or false) when the config \
-         surface isn't wired: {econ_snapshot:?}"
+         surface cannot be read: {econ_snapshot:?}"
     );
     assert_eq!(
         econ_snapshot["error"],
-        serde_json::json!("econ shadow not_yet_ported")
+        serde_json::json!("econ_shadow_config_unavailable")
+    );
+    assert_ne!(
+        econ_snapshot["error"],
+        serde_json::json!("econ shadow not_yet_ported"),
+        "the surface is wired; an unported marker would hide a real outage"
     );
 }
 
@@ -2620,4 +2664,172 @@ fn planner_read_rpcs_refuse_nonempty_positional_params() {
             "{method}: {result:?}"
         );
     }
+}
+
+/// C71-27: an unreachable node is not an empty fleet.
+///
+/// With BOTH stores configured, the profitability pass still needs one
+/// fresh bounded `listpeerchannels`. There is no lightning socket in this
+/// harness, so that call fails -- and the handler must SAY so. Treating
+/// the failure as an empty channel list would skip every channel for "no
+/// opener", which reads as a fleet of unevaluable channels rather than as
+/// a node this plugin could not reach; and treating it as a real fleet
+/// would report `total_channels: 0` for a node that has channels.
+#[test]
+fn revenue_r_profitability_refuses_when_the_channel_snapshot_cannot_be_fetched() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let observer_db_path = home.path().join("observer.db");
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[(
+            "revops-r-observer-db-path",
+            serde_json::json!(observer_db_path.to_str().unwrap()),
+        )],
+        "revenue-r-profitability",
+    );
+
+    assert_eq!(
+        result["error"],
+        serde_json::json!("profitability_channels_unavailable"),
+        "an unreachable node must be named, not reported as an empty or \
+         unevaluable fleet: {result:?}"
+    );
+    assert!(
+        result.get("summary").is_none(),
+        "must not produce a zeroed fleet summary: {result:?}"
+    );
+}
+
+/// C71-28: the dashboard's four formerly-gapped fields need a live node.
+///
+/// With the production DB configured but no lightning socket, `listfunds`
+/// cannot be reached -- and the handler must say so rather than emit the
+/// shape it used to. `tlv_sats: 0` is a node worth nothing and
+/// `warnings: []` is a node with nothing wrong; both are answers Python
+/// emits for real, so neither can stand in for "we could not look".
+#[test]
+fn revenue_r_dashboard_refuses_when_the_node_cannot_be_reached() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-dashboard",
+    );
+
+    assert_eq!(
+        result["error"],
+        serde_json::json!("dashboard_funds_unavailable"),
+        "{result:?}"
+    );
+    assert!(
+        result.get("financial_health").is_none(),
+        "must not emit a zeroed net worth: {result:?}"
+    );
+    assert!(
+        result.get("warnings").is_none(),
+        "an empty warnings list would read as a healthy node: {result:?}"
+    );
+    assert!(
+        result.get("_phase1b_gaps").is_none(),
+        "the gap marker is retired; a refusal is not a gap: {result:?}"
+    );
+}
+
+/// C71-34: `revenue-r-econ-snapshot` is served, not marked unported.
+///
+/// With no stores configured, the gate itself is unreadable -- and an
+/// unreadable config surface is NOT a disabled shadow. Reporting
+/// `enabled: false` here would be a false statement about node state on any
+/// node whose operator turned the shadow on, which is exactly what the old
+/// `not_yet_ported` marker existed to prevent.
+#[test]
+fn revenue_r_econ_snapshot_refuses_when_the_config_surface_is_unreadable() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init(false, None, home.path(), &[], "revenue-r-econ-snapshot");
+
+    assert_eq!(
+        result["error"],
+        serde_json::json!("econ_shadow_config_unavailable"),
+        "{result:?}"
+    );
+    assert!(
+        result.get("enabled").is_none(),
+        "neither a true nor a false enabled claim may be made: {result:?}"
+    );
+    assert_ne!(
+        result["error"],
+        serde_json::json!("econ shadow not_yet_ported"),
+        "the surface is wired now; an unported marker would hide a real outage"
+    );
+}
+
+/// The shadow is genuinely OFF (no override row, Python's dataclass
+/// default), so Python's exact two-key disabled shape is returned -- not a
+/// refusal, and not an assembled snapshot.
+#[test]
+fn revenue_r_econ_snapshot_reports_pythons_disabled_shape_when_genuinely_off() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-snapshot",
+    );
+
+    assert_eq!(result["enabled"], serde_json::json!(false), "{result:?}");
+    assert_eq!(
+        result["hint"],
+        serde_json::json!("revenue-config set econ_shadow_enabled true")
+    );
+    assert!(
+        result.get("snapshot").is_none(),
+        "the disabled shape is exactly two keys: {result:?}"
+    );
+}
+
+/// Enabled, but there is no lightning socket in this harness, so the ONE
+/// channel fetch fails. Python reports that as a channel-read failure with
+/// a null snapshot rather than fabricating one, and so must this.
+#[test]
+fn revenue_r_econ_snapshot_reports_a_channel_read_failure_without_fabricating() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('econ_shadow_enabled', 'true', 1, 1800000000)",
+            [],
+        )
+        .expect("enable the shadow");
+    }
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-snapshot",
+    );
+
+    assert_eq!(result["enabled"], serde_json::json!(true), "{result:?}");
+    assert_eq!(result["snapshot"], serde_json::Value::Null);
+    let approximations = result["approximations"].as_array().expect("declared");
+    assert!(
+        approximations
+            .iter()
+            .any(|a| a.as_str().unwrap_or("").starts_with("channel read failed")),
+        "the failure must be named: {approximations:?}"
+    );
 }

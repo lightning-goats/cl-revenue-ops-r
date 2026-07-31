@@ -164,9 +164,18 @@ pub fn build_analyze_from_persisted(
         "peer_id": row.peer_id,
         "state": row.flow_state,
         "balance_position": row.balance_position,
+        // F71-R20 split these apart: `flow_ratio`/`confidence` are the
+        // EMA-side quantities, the `kalman_*` set is the filter's own
+        // estimate. F71-R22: they are persisted now, so they are reported
+        // now -- leaving them out would keep the surface claiming the
+        // filter's output is unavailable when the row carries it.
         "flow_ratio": row.flow_ratio,
         "velocity": row.velocity,
         "confidence": row.confidence,
+        "kalman_flow_ratio": row.kalman_flow_ratio,
+        "kalman_velocity": row.kalman_velocity,
+        "kalman_uncertainty": row.kalman_uncertainty,
+        "kalman_regime_change": row.kalman_regime_change,
         "forward_count": row.forward_count,
         "updated_at": row.updated_at,
         "boot_id": row.boot_id,
@@ -179,6 +188,73 @@ pub fn build_analyze_from_persisted(
         "_gaps": ["sats_in", "sats_out", "capacity", "daily_volume"],
     });
     out
+}
+
+/// F71-R23: the normalized SCID this request should look up, or `None`
+/// when there is nothing to look up (absent, non-string, empty, or
+/// malformed `channel_id`).
+///
+/// Callers gate the store read on this so a caller passing garbage never
+/// reaches the database — the parameter verdict is a pure function of the
+/// parameter, and `build_analyze_from_evidence` re-derives it anyway.
+pub fn analyze_target_scid(channel_id_raw: Option<&Value>) -> Option<String> {
+    let id = match channel_id_raw {
+        Some(Value::String(s)) => s.as_str(),
+        _ => return None,
+    };
+    // Python truthiness: an empty string behaves the same as absent.
+    if id.is_empty() || !matches_scid_format(id) {
+        return None;
+    }
+    Some(normalize_scid(id))
+}
+
+/// F71-R23: serve the channel from CURRENT-BOOT flow evidence, or say why
+/// there is none.
+///
+/// The parameter verdict comes first and is independent of loop health: a
+/// caller passing a non-SCID gets Python's own format error whether or not
+/// the flow loop has run.
+///
+/// A refusal deliberately carries NO `analysis` key. Python's real
+/// unknown-channel answer is `{"channel": ..., "analysis": null}`, so a
+/// refusal that also presented `analysis: null` would be read as a genuine
+/// "no data" by any caller that looks at the field the answer lives in --
+/// and `error` is exactly what such a caller is not checking. Omitting the
+/// key makes that read fail loudly instead of quietly wrong. (Same
+/// reasoning as `rpc_profitability`'s not-wired shapes declining to reuse
+/// `summary`/`channels_by_class`.)
+pub fn build_analyze_from_evidence(
+    channel_id_raw: Option<&Value>,
+    evidence: Result<
+        &crate::flow_evidence::FlowEvidence,
+        &crate::flow_evidence::FlowEvidenceRefusal,
+    >,
+) -> Value {
+    use crate::flow_evidence::FlowEvidence;
+
+    match evidence {
+        Ok(FlowEvidence::Current(row)) => build_analyze_from_persisted(channel_id_raw, Some(row)),
+        Ok(FlowEvidence::NoSuchChannel) => build_analyze_from_persisted(channel_id_raw, None),
+        Err(refusal) => {
+            // Run the parameter gate through the same path every other
+            // branch uses, so a malformed SCID cannot be masked by the
+            // refusal.
+            let shell = build_analyze(channel_id_raw, MetricsLookup::Ready(None));
+            let Some(channel) = shell.get("channel").cloned() else {
+                return shell;
+            };
+            let mut out = json!({
+                "channel": channel,
+                "error": refusal.code(),
+                "detail": refusal.detail(),
+            });
+            if let Some(status) = refusal.boot_status() {
+                out["boot_status"] = json!(status.as_str());
+            }
+            out
+        }
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +283,55 @@ mod tests {
             kalman_uncertainty: 0.0,
             kalman_regime_change: false,
         }
+    }
+
+    /// F71-R22: the Kalman fields are persisted by the flow owner now, so
+    /// the analyze surface must REPORT them. Omitting them left the
+    /// response implicitly claiming the filter's output was unavailable
+    /// while the row carried it -- and left Task 66 with nothing to wire.
+    ///
+    /// The EMA and Kalman quantities must also stay DISTINCT here: F71-R20
+    /// found `kalman_uncertainty` being written into `confidence`, its
+    /// inverse, so this pins that the response does not re-merge them.
+    #[test]
+    fn persisted_kalman_fields_are_reported_and_stay_distinct_from_ema() {
+        let row = revops_db::analytics::ChannelFlowStateRow {
+            scid: "1x1x1".to_string(),
+            peer_id: "02".to_string() + &"c".repeat(64),
+            flow_state: "balanced".to_string(),
+            balance_position: "balanced".to_string(),
+            flow_ratio: 0.4,
+            velocity: 0.02,
+            confidence: 0.9,
+            kalman_flow_ratio: -0.25,
+            kalman_velocity: -0.01,
+            kalman_uncertainty: 0.11,
+            kalman_regime_change: true,
+            forward_count: 7,
+            updated_at: 1_800_000_000,
+            boot_id: "boot-x".to_string(),
+        };
+        let v = build_analyze_from_persisted(Some(&json!("1x1x1")), Some(&row));
+        let a = &v["analysis"];
+        assert_eq!(a["kalman_flow_ratio"], json!(-0.25));
+        assert_eq!(a["kalman_velocity"], json!(-0.01));
+        assert_eq!(a["kalman_uncertainty"], json!(0.11));
+        assert_eq!(a["kalman_regime_change"], json!(true));
+        // The EMA-side pair is untouched and NOT equal to the Kalman pair.
+        assert_eq!(a["flow_ratio"], json!(0.4));
+        assert_eq!(a["confidence"], json!(0.9));
+        assert_ne!(
+            a["confidence"], a["kalman_uncertainty"],
+            "confidence and uncertainty are inverses; reporting one as the \
+             other inverts what the operator reads"
+        );
+        // The four genuinely-unpersisted fields stay declared gaps.
+        assert_eq!(
+            a["_gaps"],
+            json!(["sats_in", "sats_out", "capacity", "daily_volume"]),
+            "the kalman fields must NOT be listed as gaps now that they are \
+             persisted and reported"
+        );
     }
 
     #[test]

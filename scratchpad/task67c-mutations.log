@@ -1,0 +1,12 @@
+
+=== TASK 67C MUTATION MATRIX ===
+C1  KILLED                        discovery groups edges by DESTINATION instead of source
+C2  SURVIVED                      channel_to_peer maps a scid to the WRONG endpoint
+C3  KILLED                        cold-start uptime becomes 0.0 instead of 100.0
+C4  KILLED                        inbound fee accepts a single sample
+C5  KILLED                        observed node daily ppm returns Some(0.0) instead of None
+C6  KILLED                        close cost falls back to the OPENING feerate (undoes py audit E-4.6)
+C7  KILLED                        failed policy source becomes an EMPTY set (undoes py audit F1)
+C8  KILLED                        a wired gap field silently reverts to empty
+
+killed=7 survived=1 invalid=0

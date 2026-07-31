@@ -1397,6 +1397,10 @@ async fn analytics_stores_round_trip_and_upsert_replaces() {
             flow_ratio: 0.82,
             velocity: 1.5,
             confidence: 0.61,
+            kalman_flow_ratio: 0.0,
+            kalman_velocity: 0.0,
+            kalman_uncertainty: 0.0,
+            kalman_regime_change: false,
             forward_count: 12,
             updated_at: 1_800_000_000,
             boot_id: "boot-a".into(),
@@ -1412,6 +1416,10 @@ async fn analytics_stores_round_trip_and_upsert_replaces() {
             flow_ratio: 0.11,
             velocity: -0.4,
             confidence: 0.90,
+            kalman_flow_ratio: 0.0,
+            kalman_velocity: 0.0,
+            kalman_uncertainty: 0.0,
+            kalman_regime_change: false,
             forward_count: 30,
             updated_at: 1_800_000_100,
             boot_id: "boot-b".into(),
@@ -1470,6 +1478,7 @@ async fn analytics_stores_round_trip_and_upsert_replaces() {
                 revenue_accumulated_sats: revenue,
                 rebalance_cost_accumulated_sats: 200,
                 channel_count: 21,
+                boot_id: "boot-test".to_string(),
             })
             .await
             .unwrap();
