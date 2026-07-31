@@ -71,13 +71,23 @@ impl std::fmt::Display for StateWriterOpenError {
 impl std::error::Error for StateWriterOpenError {}
 
 /// One peer-policy upsert row (py `peer_policies`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PeerPolicyWrite {
     pub peer_id: String,
     pub strategy: String,
     pub rebalance_mode: String,
     pub fee_ppm_target: Option<i64>,
     pub tags: Option<String>,
+    pub fee_multiplier_min: Option<f64>,
+    pub fee_multiplier_max: Option<f64>,
+    pub expires_at: Option<i64>,
+}
+
+/// Peer-policy delete outcome (durable either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyDelete {
+    Deleted,
+    AlreadyAbsent,
 }
 
 /// Config delete outcome (durable either way).
@@ -123,6 +133,10 @@ enum Command {
         write: PeerPolicyWrite,
         now: i64,
         reply: oneshot::Sender<Result<()>>,
+    },
+    DeletePeerPolicy {
+        peer_id: String,
+        reply: oneshot::Sender<Result<PolicyDelete>>,
     },
     ApplyPolicyBatch {
         writes: Vec<PeerPolicyWrite>,
@@ -223,6 +237,13 @@ impl StateWriterHandle {
             now,
             reply
         })
+    }
+
+    pub fn try_delete_peer_policy(
+        &self,
+        peer_id: String,
+    ) -> std::result::Result<StoreReceipt<PolicyDelete>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::DeletePeerPolicy { peer_id, reply })
     }
 
     pub fn try_apply_policy_batch(
@@ -329,6 +350,10 @@ impl StateWriterHandle {
         })
     }
 
+    pub async fn delete_peer_policy(&self, peer_id: String) -> Result<PolicyDelete> {
+        roundtrip!(self, |reply| Command::DeletePeerPolicy { peer_id, reply })
+    }
+
     pub async fn apply_policy_batch(
         &self,
         writes: Vec<PeerPolicyWrite>,
@@ -418,6 +443,9 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
             "fee_ppm_target",
             "tags",
             "updated_at",
+            "fee_multiplier_min",
+            "fee_multiplier_max",
+            "expires_at",
         ],
     ),
     (
@@ -494,6 +522,9 @@ pub async fn spawn_state_writer(
                 }
                 Command::UpsertPeerPolicy { write, now, reply } => {
                     let _ = reply.send(upsert_peer_policy(&conn, &write, now));
+                }
+                Command::DeletePeerPolicy { peer_id, reply } => {
+                    let _ = reply.send(delete_peer_policy(&conn, &peer_id));
                 }
                 Command::ApplyPolicyBatch { writes, now, reply } => {
                     let _ = reply.send(apply_policy_batch(&conn, &writes, now));
@@ -617,19 +648,37 @@ fn delete_config_override(conn: &Connection, key: &str) -> Result<ConfigDelete> 
 fn upsert_peer_policy(conn: &Connection, write: &PeerPolicyWrite, now: i64) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO peer_policies
-             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at,
+              fee_multiplier_min, fee_multiplier_max, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             write.peer_id,
             write.strategy,
             write.rebalance_mode,
             write.fee_ppm_target,
             write.tags,
-            now
+            now,
+            write.fee_multiplier_min,
+            write.fee_multiplier_max,
+            write.expires_at,
         ],
     )
     .context("upsert peer policy")?;
     Ok(())
+}
+
+fn delete_peer_policy(conn: &Connection, peer_id: &str) -> Result<PolicyDelete> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM peer_policies WHERE peer_id = ?1",
+            params![peer_id],
+        )
+        .context("delete peer policy")?;
+    Ok(if deleted > 0 {
+        PolicyDelete::Deleted
+    } else {
+        PolicyDelete::AlreadyAbsent
+    })
 }
 
 fn apply_policy_batch(conn: &Connection, writes: &[PeerPolicyWrite], now: i64) -> Result<BatchAck> {
@@ -640,15 +689,19 @@ fn apply_policy_batch(conn: &Connection, writes: &[PeerPolicyWrite], now: i64) -
         for write in writes {
             tx.execute(
                 "INSERT OR REPLACE INTO peer_policies
-                     (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (peer_id, strategy, rebalance_mode, fee_ppm_target, tags, updated_at,
+                      fee_multiplier_min, fee_multiplier_max, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     write.peer_id,
                     write.strategy,
                     write.rebalance_mode,
                     write.fee_ppm_target,
                     write.tags,
-                    now
+                    now,
+                    write.fee_multiplier_min,
+                    write.fee_multiplier_max,
+                    write.expires_at,
                 ],
             )
             .with_context(|| format!("policy batch write for {}", write.peer_id))?;

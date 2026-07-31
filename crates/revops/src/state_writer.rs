@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use revops_db::owner::{StoreAdmissionRefused, StoreReceipt, StoreReceiptWait};
 use revops_db::state_writer::{
-    BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, StateWriterHandle,
+    BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete, StateWriterHandle,
 };
 
 /// Receipt budget default: the Task 59 floor (one legitimate SQLite lock
@@ -166,6 +166,14 @@ impl ProductionStateWriter {
     pub async fn upsert_peer_policy(&self, write: PeerPolicyWrite, now: i64) -> StateWriteAck<()> {
         resolve(
             self.handle.try_upsert_peer_policy(write, now),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
+        resolve(
+            self.handle.try_delete_peer_policy(peer_id),
             self.receipt_budget,
         )
         .await

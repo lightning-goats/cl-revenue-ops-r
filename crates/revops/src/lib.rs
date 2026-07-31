@@ -67,6 +67,7 @@ pub mod rpc_rebalance_debug;
 pub mod rpc_rebalance_ops;
 pub mod rpc_report;
 pub mod rpc_spend_ledger;
+pub mod rpc_state_mutators;
 pub mod rpc_status;
 pub mod rpc_total_cost_budget;
 pub mod runtime;

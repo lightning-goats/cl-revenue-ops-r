@@ -4,7 +4,7 @@
 //! involved anywhere in this workspace.
 
 use revops_db::state_writer::{
-    spawn_state_writer, BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite,
+    spawn_state_writer, BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete,
     StateWriterOpenError,
 };
 use rusqlite::Connection;
@@ -22,7 +22,10 @@ fn python_schema(path: &PathBuf) {
             rebalance_mode TEXT NOT NULL DEFAULT 'enabled',
             fee_ppm_target INTEGER,
             tags TEXT,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            fee_multiplier_min REAL,
+            fee_multiplier_max REAL,
+            expires_at INTEGER
         );
         CREATE TABLE hot_channel_protection_overrides (
             peer_id TEXT PRIMARY KEY,
@@ -272,7 +275,73 @@ fn policy(peer: &str) -> PeerPolicyWrite {
         rebalance_mode: "enabled".to_string(),
         fee_ppm_target: Some(150),
         tags: None,
+        fee_multiplier_min: None,
+        fee_multiplier_max: None,
+        expires_at: None,
     }
+}
+
+type StoredPolicyRow = (
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+);
+
+#[tokio::test]
+async fn policy_upsert_preserves_all_python_policy_columns_and_delete_is_explicit() {
+    let (_d, path) = fixture();
+    let writer = spawn_state_writer(&path).await.unwrap();
+    let write = PeerPolicyWrite {
+        peer_id: "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        strategy: "passive".into(),
+        rebalance_mode: "disabled".into(),
+        fee_ppm_target: Some(321),
+        tags: Some(r#"["no_close","banned"]"#.into()),
+        fee_multiplier_min: Some(0.75),
+        fee_multiplier_max: Some(2.25),
+        expires_at: Some(1_900_000_000),
+    };
+
+    writer
+        .upsert_peer_policy(write.clone(), 1_800_000_000)
+        .await
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let stored: StoredPolicyRow = conn.query_row(
+            "SELECT strategy, rebalance_mode, fee_ppm_target, tags, fee_multiplier_min, fee_multiplier_max, expires_at FROM peer_policies WHERE peer_id = ?1",
+            [&write.peer_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (
+            "passive".into(),
+            "disabled".into(),
+            Some(321),
+            Some(r#"["no_close","banned"]"#.into()),
+            Some(0.75),
+            Some(2.25),
+            Some(1_900_000_000),
+        )
+    );
+    drop(conn);
+
+    assert_eq!(
+        writer
+            .delete_peer_policy(write.peer_id.clone())
+            .await
+            .unwrap(),
+        PolicyDelete::Deleted
+    );
+    assert_eq!(
+        writer.delete_peer_policy(write.peer_id).await.unwrap(),
+        PolicyDelete::AlreadyAbsent
+    );
 }
 
 #[tokio::test]
