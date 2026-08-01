@@ -343,6 +343,41 @@ transport-proven locally; watcher compiled/reachable/partial; soak and live
 promotion remain pending; no deployment, authority transition, or live external
 call was performed.**
 
+#### Self-review follow-ups, 2026-08-01
+
+**Positional CLI binding (FIXED).** Python's documented operator form is
+positional (`lightning-cli revenue-policy get <peer_id>`), and the
+generated contract marks these params positional under
+`positional_or_named`. Five Batch-A/write methods refused any non-empty
+array, so an operator following Python's own documentation got an error:
+`revenue-policy`, `revenue-hot-channel-protection-peers`,
+`revenue-analyze`, `revenue-profitability`, `revenue-spend-ledger` now
+bind positionally through the contract. The five ZERO-param Batch-A
+methods (health, list-banned, list-ignored, capacity-report,
+econ-snapshot) keep refusing, and that IS parity — py's
+`def revenue_health(plugin)` raises `TypeError` on an extra positional.
+The Task-50 refusal rule is superseded for param-bearing methods: its
+concern was a SILENT fallback to defaults, and contract binding answers
+that better than refusal (the value binds instead of being dropped) —
+pinned by asserting `revenue-r-spend-ledger [48]` yields
+`window_hours: 48`, the audit's own example.
+
+Noted while fixing: py's `revenue-policy` docstring advertises
+`find <tag>`, but positionally the second slot is `peer_id` (tag is
+sixth). This port follows the SIGNATURE (the generated contract), not
+the prose — a Python documentation quirk, recorded rather than copied.
+
+**JSON key ordering (DECLARED NON-ISSUE, no change).** The workspace
+builds `serde_json` without `preserve_order`, so response objects
+serialize with alphabetical keys where Python emits insertion order.
+This is NOT a parity defect for any consumer: `tools/diff-harness/
+parity_matrix.py` parses both sides (`json.loads`) and diffs by PATH,
+and every real consumer (lightning-cli, MCP) parses too. Enabling
+`preserve_order` would change every response's serialization for zero
+consumer benefit; `revops_core::canonical::canonical_json` sorts keys
+explicitly and is unaffected either way. Recorded so the next reviewer
+does not re-litigate it.
+
 #### Task 66 — Python canonical RPC set closure, 2026-07-31, `c4ba670`
 
 The registration gap is CLOSED: `manifest.rs::canonical_mode_registers_

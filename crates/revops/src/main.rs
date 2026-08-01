@@ -3347,9 +3347,23 @@ async fn main() -> Result<()> {
              served from one production-DB snapshot, one observer read, and one fresh \
              bounded listpeerchannels snapshot (see revops::profitability_assembler)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
+                // py binds this method's params POSITIONALLY as well as by
+                // name; the generated contract marks them positional.
+                // Refusing arrays broke py's documented CLI form
+                // (self-review follow-up 2026-08-01).
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-profitability",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let v = serde_json::Value::Object(decoded);
                 // C71-25/C71-27. This used to return `not_yet_ported`
                 // because the assembly pipeline did not exist. It exists
                 // now, and every input it feeds the frozen classifier was
@@ -3454,9 +3468,23 @@ async fn main() -> Result<()> {
              persisted state; no channel_id triggers one bounded flow-loop pass \
              over the Rust-owned observer store (Task 66 slice 8e)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
+                // py binds this method's params POSITIONALLY as well as by
+                // name; the generated contract marks them positional.
+                // Refusing arrays broke py's documented CLI form
+                // (self-review follow-up 2026-08-01).
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-analyze",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let v = serde_json::Value::Object(decoded);
                 // py 4536-4542 fleet arm: absent, null, and "" channel_id
                 // are all falsy -> trigger one pass. The Rust pass writes
                 // ONLY the Rust-owned observer store (never production),
@@ -3524,9 +3552,25 @@ async fn main() -> Result<()> {
              batch behind py's internal/admin override through the sealed mutation \
              owner (Task 66 slice 8f; execution staged until Task 69)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
+                // py's documented CLI form is POSITIONAL
+                // (`revenue-policy get <peer_id>`), and the generated
+                // contract marks every param positional under
+                // `positional_or_named`. Refusing arrays here broke
+                // Python's own documented operator form (self-review
+                // follow-up 2026-08-01).
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-policy",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let v = serde_json::Value::Object(decoded);
                 let s = p.state();
                 // Task 50 correction round, F9: pass the raw `Value` (not
                 // `.and_then(as_str)`) so an ABSENT `action` key (Python's
@@ -3683,9 +3727,23 @@ async fn main() -> Result<()> {
              clear through the sealed mutation owner (Task 66 slice 8f; execution \
              staged until Task 69)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
+                // py's documented CLI form is POSITIONAL
+                // (`... add <peer_id> [note] [pct]`); the contract marks
+                // every param positional (self-review follow-up
+                // 2026-08-01).
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-hot-channel-protection-peers",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let v = serde_json::Value::Object(decoded);
                 // py's guard order: `database is None` fires FIRST, for
                 // every action (cl-revenue-ops.py handler top).
                 let s = p.state();
@@ -3800,9 +3858,23 @@ async fn main() -> Result<()> {
             &spend_ledger_name,
             "summary of generic spend-ledger events/reservations (opens/closes/etc.)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
+                // py binds this method's params POSITIONALLY as well as by
+                // name; the generated contract marks them positional.
+                // Refusing arrays broke py's documented CLI form
+                // (self-review follow-up 2026-08-01).
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-spend-ledger",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let v = serde_json::Value::Object(decoded);
                 let s = p.state();
                 let Some(handle) = &s.db else {
                     return Ok(serde_json::json!({"error": "Database not initialized"}));

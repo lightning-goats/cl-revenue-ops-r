@@ -2344,6 +2344,125 @@ fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
     );
 }
 
+/// SELF-REVIEW follow-up 2026-08-01: py's DOCUMENTED CLI form for both
+/// of these is POSITIONAL (`lightning-cli revenue-policy get <peer_id>`,
+/// `... revenue-hot-channel-protection-peers add <peer_id>`), and the
+/// generated contract marks every param `positional` with
+/// `python_binding: positional_or_named`. Rust refused ANY non-empty
+/// positional array on these two methods, so an operator following
+/// Python's own documentation got an error where Python answers. Every
+/// other Task-66 RPC already binds positionally through the contract.
+#[test]
+fn revenue_r_policy_and_hot_channel_accept_pythons_positional_form() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, tags, updated_at) VALUES \
+             (?1, 'static', 'disabled', '[\"vip\"]', ?2)",
+            rusqlite::params!["02".repeat(33), now_unix()],
+        )
+        .expect("seed policy");
+    }
+
+    // `revenue-policy get <peer_id>` -- positional.
+    let got = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!(["get", "02".repeat(33)]),
+    );
+    assert_eq!(got["policy"]["strategy"], "static", "{got:?}");
+    assert_eq!(got["policy"]["rebalance_mode"], "disabled");
+
+    // `find` positionally: py's signature is
+    // (action, peer_id, strategy, rebalance, fee_ppm, tag, ...), so the
+    // tag is the SIXTH slot. Note py's own docstring shows
+    // `revenue-policy find <tag>`, which positionally would bind the tag
+    // into peer_id -- a Python documentation quirk this port reproduces
+    // by following the SIGNATURE (the generated contract), not the prose.
+    let found = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!([
+            "find",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            "vip"
+        ]),
+    );
+    assert_eq!(found["tag"], "vip", "{found:?}");
+
+    // Hot-channel list is the positional default action.
+    let listed = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-hot-channel-protection-peers",
+        serde_json::json!(["list"]),
+    );
+    assert_eq!(listed["status"], "success", "{listed:?}");
+
+    // The three other param-bearing Batch-A methods bind positionally too.
+    let analyzed = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-analyze",
+        serde_json::json!(["123x456x789"]),
+    );
+    assert_eq!(analyzed["channel"], "123x456x789", "{analyzed:?}");
+
+    let ledger = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-spend-ledger",
+        serde_json::json!([48]),
+    );
+    assert_eq!(
+        ledger["window_hours"], 48,
+        "positional window_hours must BIND, not fall back to the 24h default: {ledger:?}"
+    );
+
+    let prof = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-profitability",
+        serde_json::json!(["123x456x789"]),
+    );
+    assert!(
+        prof["channel_id"] == "123x456x789" || prof["error"].is_string(),
+        "positional channel_id must reach the handler: {prof:?}"
+    );
+
+    // An EMPTY array is lightning-cli's no-argument shape and must still
+    // mean "no params" (the default action).
+    let bare = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!([]),
+    );
+    assert!(bare["policies"].is_array(), "{bare:?}");
+}
+
 /// `revenue-r-report` through the spawned binary (Task 66 slice 8c: all
 /// four types real). Guard parity: py gates database/policy_manager FIRST
 /// for EVERY type (cl-revenue-ops.py:5596-5597) — a no-DB summary is
@@ -3036,7 +3155,25 @@ fn revenue_r_batch_a_methods_reject_nonempty_positional_params_empty_array_still
     let home = tempfile::tempdir().expect("tempdir");
     let prod_db_path = copy_fixture_db(home.path());
 
-    for method in BATCH_A_SHADOW_METHODS {
+    // SELF-REVIEW follow-up 2026-08-01: the original concern was a SILENT
+    // fallback to named defaults (pyln binds positionally, the handler
+    // ignores it). Proper CONTRACT binding answers that concern better
+    // than refusal does -- the value is bound, not dropped. So the five
+    // methods that TAKE positional params (analyze, profitability,
+    // spend-ledger, policy, hot-channel-protection-peers) now bind them
+    // like Python.
+    //
+    // The five ZERO-param methods keep refusing, and that IS the parity
+    // answer: py's `def revenue_health(plugin)` raises TypeError on an
+    // extra positional argument, so a refusal is what Python does too.
+    const ZERO_PARAM_BATCH_A: &[&str] = &[
+        "revenue-r-health",
+        "revenue-r-list-banned",
+        "revenue-r-list-ignored",
+        "revenue-r-capacity-report",
+        "revenue-r-econ-snapshot",
+    ];
+    for method in ZERO_PARAM_BATCH_A {
         // Non-empty positional array -> explicit in-band refusal, never a
         // silent fallback to named-param defaults.
         let rejected = call_after_init_with_params(
