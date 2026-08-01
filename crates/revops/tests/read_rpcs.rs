@@ -778,3 +778,37 @@ fn channel_profitability_to_dict_matches_python_fields() {
     assert_eq!(d["outbound_flow"]["payment_count"], 10);
     assert_eq!(d["outbound_flow"]["revenue_earned_sats"], 2500);
 }
+
+/// SELF-REVIEW 2026-07-31: `revenue-health`'s annualized_roc_pct
+/// denominator must be py `calculate_roc`'s capacity set
+/// (profitability_analyzer.py:1840-1846 via `_get_all_channels`,
+/// 1921-1945): CHANNELD_NORMAL with a named scid. The health handler
+/// summed the RAW listpeerchannels snapshot, so a pending or closing
+/// channel inflated the denominator and understated ROC. This pins the
+/// helper both surfaces now share.
+#[test]
+fn roc_capacity_set_excludes_non_normal_and_unnamed_channels() {
+    let channels = vec![
+        json!({
+            "state": "CHANNELD_NORMAL",
+            "short_channel_id": "100x1x0",
+            "total_msat": 5_000_000_000i64,
+        }),
+        json!({
+            "state": "CHANNELD_AWAITING_LOCKIN",
+            "short_channel_id": "200x1x0",
+            "total_msat": 2_000_000_000i64,
+        }),
+        json!({"state": "CHANNELD_NORMAL", "total_msat": 9_000_000_000i64}),
+        json!({
+            "state": "CHANNELD_NORMAL",
+            "short_channel_id": "   ",
+            "total_msat": 9_000_000_000i64,
+        }),
+    ];
+    assert_eq!(
+        revops::dashboard_evidence::total_capacity_sats(&channels),
+        5_000_000,
+        "only the named CHANNELD_NORMAL channel counts"
+    );
+}

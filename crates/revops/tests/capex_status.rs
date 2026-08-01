@@ -332,6 +332,87 @@ fn listfunds_failure_zeroes_onchain_and_flips_priority() {
     assert_eq!(v["priority_class"], "operational");
 }
 
+/// SELF-REVIEW 2026-07-31 (mutation-verified): the runtime's cache
+/// read/write-back decision. A HIT must NOT ask for a write-back --
+/// re-stamping the timestamp on every read slides the TTL forward
+/// forever, so under sub-300s polling the verdicts never refresh and a
+/// recovered channel stays "hard" permanently.
+#[test]
+fn bleeder_cache_hit_does_not_request_a_write_back() {
+    use revops::capex_evidence::bleeder_cache_decision;
+    let mut map = BTreeMap::new();
+    map.insert("aaa".to_string(), "hard".to_string());
+
+    // Fresh (age 250 <= 300): serve from cache, NO write-back.
+    let (cached, prev, write_back) = bleeder_cache_decision(Some(&(NOW - 250, map.clone())), NOW);
+    assert_eq!(cached, Some(map.clone()));
+    assert_eq!(prev, map);
+    assert!(!write_back, "a hit must not re-stamp the TTL");
+
+    // Boundary: exactly 300 is still fresh (py `> 300` refreshes).
+    let (cached, _, write_back) = bleeder_cache_decision(Some(&(NOW - 300, map.clone())), NOW);
+    assert!(cached.is_some());
+    assert!(!write_back);
+
+    // Stale (301): rescan, write back, and the STALE map still feeds
+    // hysteresis.
+    let (cached, prev, write_back) = bleeder_cache_decision(Some(&(NOW - 301, map.clone())), NOW);
+    assert!(cached.is_none(), "stale must rescan");
+    assert_eq!(prev, map, "a stale map still feeds the F4a hold");
+    assert!(write_back);
+
+    // Empty cache: rescan, write back, no prior verdicts.
+    let (cached, prev, write_back) = bleeder_cache_decision(None, NOW);
+    assert!(cached.is_none());
+    assert!(prev.is_empty());
+    assert!(write_back);
+}
+
+/// SELF-REVIEW: a FAILED success-rate read must not produce verdicts at
+/// all -- py falls back to per-channel queries and drops the channel
+/// when those fail too (profitability_analyzer.py:1680-1687, 1768-1771).
+/// Scanning with the adjustment silently omitted invents verdicts from
+/// partial evidence.
+#[test]
+fn failed_success_rate_read_yields_no_verdicts() {
+    let mut s = healthy_and_bleeder_sources();
+    s.success_rates = Err("success-rate read failed".to_string());
+    let (v, verdicts) = capex_status_response(s);
+    assert!(
+        verdicts.is_empty(),
+        "no verdicts may be invented without the adjustment evidence: {verdicts:?}"
+    );
+    assert_ne!(
+        v["channels"]["bbb"]["tier"], "blocked",
+        "the bleeder must not be blocked on partial evidence: {v:?}"
+    );
+}
+
+/// SELF-REVIEW 2026-07-31: py re-stamps the bleeder cache timestamp ONLY
+/// on a recompute (profitability_analyzer.py:1806-1813). The caller must
+/// therefore be able to tell a cache HIT from a rescan; this test pins
+/// the contract `capex_status_response` gives it -- a hit returns the
+/// SAME map it was handed (so the caller can skip the write-back and let
+/// the TTL keep measuring time since the last recompute), while a rescan
+/// returns freshly-computed verdicts.
+#[test]
+fn cache_hit_returns_the_cached_map_unchanged_so_the_ttl_can_stay_fixed() {
+    let mut s = healthy_and_bleeder_sources();
+    let mut cached = BTreeMap::new();
+    cached.insert("aaa".to_string(), "hard".to_string());
+    cached.insert("bbb".to_string(), "none".to_string());
+    s.cached_bleeder = Some(cached.clone());
+    let (_, returned) = capex_status_response(s);
+    assert_eq!(returned, cached, "a hit must round-trip the cached map");
+
+    // A rescan over the same sources computes DIFFERENT verdicts (bbb is
+    // the real hard bleeder here) -- so the two paths are distinguishable
+    // and the caller's write-back decision is observable.
+    let (_, rescanned) = capex_status_response(healthy_and_bleeder_sources());
+    assert_ne!(rescanned, cached);
+    assert_eq!(rescanned.get("bbb").map(String::as_str), Some("hard"));
+}
+
 /// Layered config resolution: no DB, no live option values -> the
 /// py config.py defaults, byte-for-byte the kernel's Default.
 #[tokio::test]

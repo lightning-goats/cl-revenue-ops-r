@@ -148,7 +148,11 @@ pub fn set_fee_response(s: SetFeeSources<'_>) -> Value {
     let hard_min = s.min_fee_ppm;
     let hard_max = s.max_fee_ppm.min(ABS_MAX_FEE_PPM);
     let requested_fee_ppm = fee_ppm;
-    let fee_ppm = fee_ppm.clamp(hard_min, hard_max);
+    // py `max(hard_min, min(hard_max, fee_ppm))` (cl-revenue-ops.py:4794)
+    // -- TOTAL, even when an out-of-range config override inverts the
+    // rail. `Ord::clamp` PANICS when min > max, which would take the
+    // whole plugin down on a mis-set config (self-review 2026-07-31).
+    let fee_ppm = hard_min.max(hard_max.min(fee_ppm));
     let fee_rail_clamped = fee_ppm != requested_fee_ppm;
 
     // py: `enforce_limits=(not force)`; exceptions from the controller

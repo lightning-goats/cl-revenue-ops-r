@@ -112,10 +112,16 @@ pub fn build_health(
         "fees": Value::Null,
         "rebalancer": Value::Null,
         "budget": Value::Null,
-        // Task 50 correction round ("should NOT stay gaps"): no Boltz
-        // manager is wired here, but that IS Python's own truthful answer
-        // for this exact condition (cl-revenue-ops.py:6312-6313) -- not a
-        // gap, a real (if minimal) computed value.
+        // py 6301-6315: `{"enabled": false}` is py's answer when no
+        // Boltz manager is wired OR its `enabled` flag is false.
+        //
+        // SELF-REVIEW 2026-07-31: the Task-50 justification ("no Boltz
+        // manager is wired here") went STALE when Task 63 landed a Boltz
+        // runtime in this same binary -- with Boltz enabled, this section
+        // would claim disabled while `revenue-boltz-auto-cycle-status`
+        // says enabled. The caller now supplies the real answer through
+        // `HealthExtras::boltz`; this literal is only the no-runtime
+        // default, which IS py's arm for that condition.
         "boltz": json!({"enabled": false}),
         "planner": Value::Null,
         "top_routes": Value::Null,
@@ -201,6 +207,11 @@ pub struct HealthExtras {
     /// subset projection happens here.
     pub budget: Option<Result<Value, String>>,
     pub top_routes: Option<Vec<revops_db::queries::TopRoutePair>>,
+    /// py 6301-6315: `Some(value)` replaces the no-runtime default with
+    /// the live auto-cycle snapshot (or py's `{"enabled": false}` when
+    /// the manager exists but its flag is off). `None` leaves the
+    /// default -- correct only when no Boltz runtime exists at all.
+    pub boltz: Option<Value>,
 }
 
 /// Fill the census-closed sections into a [`build_health_with_loops`]
@@ -262,6 +273,10 @@ pub fn apply_health_extras(value: &mut Value, extras: HealthExtras) {
             Err(error) => json!({"error": error}),
         };
         filled.push("budget");
+    }
+
+    if let Some(boltz) = extras.boltz {
+        value["boltz"] = boltz;
     }
 
     if let Some(routes) = extras.top_routes {
@@ -331,6 +346,7 @@ mod extras_tests {
                     "remaining_sats": 3980,
                     "actual_spent_by_category": {"rebalance": 811},
                 }))),
+                boltz: None,
                 top_routes: Some(vec![revops_db::queries::TopRoutePair {
                     in_channel: "1:1:0".to_string(),
                     out_channel: "2x2x0".to_string(),
@@ -373,6 +389,7 @@ mod extras_tests {
                 channels: Some(Err("listpeerchannels failed".to_string())),
                 fees: None,
                 budget: Some(Err("budget provider raised".to_string())),
+                boltz: Some(json!({"enabled": true})),
                 top_routes: Some(vec![]),
             },
         );
@@ -380,6 +397,11 @@ mod extras_tests {
         assert_eq!(v["fees"], Value::Null);
         assert_eq!(v["budget"]["error"], "budget provider raised");
         assert_eq!(v["top_routes"], json!([]), "py except -> []");
+        assert_eq!(
+            v["boltz"],
+            json!({"enabled": true}),
+            "a live Boltz runtime's real state replaces the no-runtime default"
+        );
         let gaps = remaining_gaps(&v);
         assert!(gaps.contains(&"fees".to_string()), "unwired keeps its gap");
         assert!(
@@ -402,6 +424,7 @@ mod extras_tests {
                 channels: None,
                 fees: None,
                 budget: Some(Ok(json!({"error": "Plugin not initialized"}))),
+                boltz: None,
                 top_routes: None,
             },
         );

@@ -214,7 +214,7 @@ pub struct SpendSettleParams {
     pub record_event: bool,
 }
 
-fn python_str(value: &Value) -> String {
+pub fn python_str(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Null => "None".to_string(),
@@ -694,15 +694,91 @@ enum PolicyErrStyle {
 /// update with py's exact validation chain and error strings. Inputs
 /// are the RAW param Values (strategy/rebalance/fee_ppm) plus
 /// already-parsed multipliers/expiry; `tags` replaces when `Some`.
+/// py `set`-arm field semantics after `_parse_optional_float/int`:
+/// absent/null/''/'none' -> KEEP; a parsed value -> SET. Errors are the
+/// set-arm "Invalid {field}: expected float/integer" texts.
+fn set_arm_float(raw: Option<&Value>, field: &str) -> Result<FieldInput<f64>, Value> {
+    Ok(match parse_optional_float(raw, field)? {
+        None => FieldInput::Keep,
+        Some(v) => FieldInput::Set(v),
+    })
+}
+
+/// py `batch`-entry field semantics: `update.get(k, existing)` RAW.
+/// Absent -> KEEP; present null -> CLEAR (py stores None); a JSON number
+/// -> SET; anything else fails py's `isinstance((int, float))` /
+/// `isinstance(int)` check with the batch-suffixed message.
+fn batch_float(entry: &Value, key: &str, peer12: &str) -> Result<FieldInput<f64>, Value> {
+    match entry.get(key) {
+        None => Ok(FieldInput::Keep),
+        Some(Value::Null) => Ok(FieldInput::Clear),
+        // py: bool IS an int subclass, so True passes isinstance and
+        // becomes 1.0 -- and then trips the >= 0.1 bound check as 1.0.
+        Some(Value::Bool(b)) => Ok(FieldInput::Set(if *b { 1.0 } else { 0.0 })),
+        Some(Value::Number(n)) => Ok(FieldInput::Set(n.as_f64().unwrap_or_default())),
+        Some(_) => Err(json!({
+            "status": "error",
+            "error": format!("{key} must be >= 0.1 for peer {peer12}..."),
+        })),
+    }
+}
+
+fn batch_fee_ppm(entry: &Value, peer12: &str) -> Result<FieldInput<i64>, Value> {
+    match entry.get("fee_ppm_target") {
+        None => Ok(FieldInput::Keep),
+        Some(Value::Null) => Ok(FieldInput::Clear),
+        Some(Value::Bool(b)) => Ok(FieldInput::Set(if *b { 1 } else { 0 })),
+        Some(Value::Number(n)) if n.is_i64() => Ok(FieldInput::Set(n.as_i64().unwrap_or_default())),
+        Some(_) => Err(json!({
+            "status": "error",
+            "error": format!(
+                "fee_ppm_target must be a non-negative integer for peer {peer12}..."
+            ),
+        })),
+    }
+}
+
+/// The tags field's three sources: KEEP (py set arm passes tags=None),
+/// an already-built list (tag/untag), or the RAW batch value validated
+/// inside `merge_policy` at py's position in the chain.
+pub(crate) enum TagsInput<'a> {
+    Keep,
+    Set(Vec<String>),
+    Raw(Option<&'a Value>),
+}
+
+/// A partial-update field's three states. py's two write surfaces
+/// differ: `set` pre-parses through `_parse_optional_float/int`, where a
+/// null/''/'none' means KEEP (cl-revenue-ops.py set arm's
+/// `X if X is not None else existing`); `batch` reads `update.get(k,
+/// existing)` RAW, where a PRESENT null means CLEAR and a non-numeric
+/// type is a validation error (policy_manager.py:1208, 1228, 1235).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FieldInput<T> {
+    Keep,
+    Clear,
+    Set(T),
+}
+
+impl<T> FieldInput<T> {
+    fn resolve(self, existing: Option<T>) -> Option<T> {
+        match self {
+            FieldInput::Keep => existing,
+            FieldInput::Clear => None,
+            FieldInput::Set(value) => Some(value),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn merge_policy(
     existing: &PeerPolicy,
     strategy_raw: Option<&Value>,
     rebalance_raw: Option<&Value>,
-    fee_ppm_raw: Option<&Value>,
-    tags: Option<Vec<String>>,
-    mult_min_in: Option<f64>,
-    mult_max_in: Option<f64>,
+    fee_ppm_in: FieldInput<i64>,
+    tags_in: TagsInput<'_>,
+    mult_min_in: FieldInput<f64>,
+    mult_max_in: FieldInput<f64>,
     expires_in_hours: Option<i64>,
     now: i64,
     style: PolicyErrStyle,
@@ -717,7 +793,10 @@ fn merge_policy(
 
     let mut strategy = existing.strategy;
     if let Some(raw) = strategy_raw.filter(|v| !v.is_null()) {
-        let text = python_str(raw).to_lowercase();
+        // py renders the ORIGINAL value in the error
+        // (f"Invalid strategy '{strategy}'"), matching only on .lower().
+        let original = python_str(raw);
+        let text = original.to_lowercase();
         strategy = match text.as_str() {
             "dynamic" => FeeStrategy::Dynamic,
             "static" => FeeStrategy::Static,
@@ -725,9 +804,9 @@ fn merge_policy(
             _ => {
                 return Err(verr(match style {
                     PolicyErrStyle::Single => format!(
-                        "Invalid strategy '{text}'. Valid: ['dynamic', 'static', 'passive']"
+                        "Invalid strategy '{original}'. Valid: ['dynamic', 'static', 'passive']"
                     ),
-                    PolicyErrStyle::Batch => format!("Invalid strategy '{text}'{suffix}"),
+                    PolicyErrStyle::Batch => format!("Invalid strategy '{original}'{suffix}"),
                 }))
             }
         };
@@ -735,7 +814,8 @@ fn merge_policy(
 
     let mut rebalance_mode = existing.rebalance_mode;
     if let Some(raw) = rebalance_raw.filter(|v| !v.is_null()) {
-        let text = python_str(raw).to_lowercase();
+        let original = python_str(raw);
+        let text = original.to_lowercase();
         rebalance_mode = match text.as_str() {
             "enabled" => RebalanceMode::Enabled,
             "disabled" => RebalanceMode::Disabled,
@@ -744,10 +824,10 @@ fn merge_policy(
             _ => {
                 return Err(verr(match style {
                     PolicyErrStyle::Single => format!(
-                        "Invalid rebalance_mode '{text}'. Valid: ['enabled', 'disabled', \
+                        "Invalid rebalance_mode '{original}'. Valid: ['enabled', 'disabled', \
                          'source_only', 'sink_only']"
                     ),
-                    PolicyErrStyle::Batch => format!("Invalid rebalance_mode '{text}'{suffix}"),
+                    PolicyErrStyle::Batch => format!("Invalid rebalance_mode '{original}'{suffix}"),
                 }))
             }
         };
@@ -755,22 +835,7 @@ fn merge_policy(
 
     // py: fee_ppm_target if provided else existing; isinstance(int)
     // (bool IS an int in py) and the 0..=100000 rails.
-    let fee_ppm_target = match fee_ppm_raw.filter(|v| !v.is_null()) {
-        None => existing.fee_ppm_target,
-        Some(Value::Number(n)) if n.is_i64() || n.is_u64() => n.as_i64(),
-        Some(Value::Bool(b)) => Some(if *b { 1 } else { 0 }),
-        Some(other) => {
-            return Err(verr(match style {
-                PolicyErrStyle::Single => format!(
-                    "fee_ppm_target must be a non-negative integer, got {}",
-                    python_str(other)
-                ),
-                PolicyErrStyle::Batch => {
-                    format!("fee_ppm_target must be a non-negative integer{suffix}")
-                }
-            }))
-        }
-    };
+    let fee_ppm_target = fee_ppm_in.resolve(existing.fee_ppm_target);
     if let Some(fee) = fee_ppm_target {
         if fee < 0 {
             return Err(verr(match style {
@@ -795,10 +860,22 @@ fn merge_policy(
         )));
     }
 
-    let tags = tags.unwrap_or_else(|| existing.tags.clone());
+    // py validates tags HERE -- after strategy/rebalance/fee_ppm/static,
+    // before the multipliers (set_policy:631-635, batch:1223-1226).
+    let tags = match tags_in {
+        TagsInput::Keep => existing.tags.clone(),
+        TagsInput::Set(tags) => tags,
+        TagsInput::Raw(None) => existing.tags.clone(),
+        TagsInput::Raw(Some(Value::Array(items))) => items.iter().map(python_str).collect(),
+        // py `isinstance(tags, list)` -- an explicit null or any
+        // non-list is an error, never keep-existing.
+        TagsInput::Raw(Some(_)) => {
+            return Err(verr(format!("tags must be a list of strings{suffix}")))
+        }
+    };
 
-    let mult_min = mult_min_in.or(existing.fee_multiplier_min);
-    let mult_max = mult_max_in.or(existing.fee_multiplier_max);
+    let mult_min = mult_min_in.resolve(existing.fee_multiplier_min);
+    let mult_max = mult_max_in.resolve(existing.fee_multiplier_max);
     // py GLOBAL_MIN/MAX_FEE_MULTIPLIER = 0.1 / 5.0 (policy_manager.py:38-39).
     for (value, name) in [
         (mult_min, "fee_multiplier_min"),
@@ -863,6 +940,43 @@ fn merge_policy(
         expires_at,
     };
     Ok((write, policy))
+}
+
+impl CoreStateMutationAction {
+    /// The exact string Python answers when this RPC's own prerequisite
+    /// is missing. NOT uniform: the policy-backed mutators gate on
+    /// `policy_manager` ("Plugin not initialized", cl-revenue-ops.py
+    /// ignore/unignore/ban/unban), while every generic-ledger mutator
+    /// gates on `database` ("Database not initialized", py
+    /// clear-reservations/spend-release/spend-settle/spend-reserve/
+    /// spend-release-stale). Self-review 2026-07-31: the shared
+    /// registration answered "Plugin not initialized" for ALL nine, so
+    /// five RPCs returned the wrong string in production.
+    pub fn uninitialized_error(&self) -> &'static str {
+        match self {
+            CoreStateMutationAction::Ignore
+            | CoreStateMutationAction::Unignore
+            | CoreStateMutationAction::Ban
+            | CoreStateMutationAction::Unban => "Plugin not initialized",
+            CoreStateMutationAction::ClearReservations
+            | CoreStateMutationAction::SpendRelease
+            | CoreStateMutationAction::SpendReleaseStale
+            | CoreStateMutationAction::SpendReserve
+            | CoreStateMutationAction::SpendSettle => "Database not initialized",
+            // The policy/hot-channel writes are dispatched from their own
+            // handlers, which apply their own py guard order before ever
+            // reaching the owner; this arm is unreachable from those
+            // registrations.
+            CoreStateMutationAction::PolicySet
+            | CoreStateMutationAction::PolicyDelete
+            | CoreStateMutationAction::PolicyTag
+            | CoreStateMutationAction::PolicyUntag
+            | CoreStateMutationAction::PolicyBatch => "Plugin not initialized",
+            CoreStateMutationAction::HotChannelAdd
+            | CoreStateMutationAction::HotChannelRemove
+            | CoreStateMutationAction::HotChannelClear => "Plugin not initialized",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1442,19 +1556,34 @@ impl CoreStateMutationOwner {
             Ok(peer) => peer,
             Err(error) => return error,
         };
-        let mult_min =
-            match parse_optional_float(params.get("fee_multiplier_min"), "fee_multiplier_min") {
-                Ok(v) => v,
-                Err(error) => return error,
-            };
-        let mult_max =
-            match parse_optional_float(params.get("fee_multiplier_max"), "fee_multiplier_max") {
-                Ok(v) => v,
-                Err(error) => return error,
-            };
+        let mult_min = match set_arm_float(params.get("fee_multiplier_min"), "fee_multiplier_min") {
+            Ok(v) => v,
+            Err(error) => return error,
+        };
+        let mult_max = match set_arm_float(params.get("fee_multiplier_max"), "fee_multiplier_max") {
+            Ok(v) => v,
+            Err(error) => return error,
+        };
         let expires = match parse_optional_int(params.get("expires_in_hours"), "expires_in_hours") {
             Ok(v) => v,
             Err(error) => return error,
+        };
+        // py's `set` signature takes `fee_ppm: int = None`: absent/null
+        // KEEP the stored target; a non-int value fails set_policy's
+        // isinstance check with the `got {value}` rendering.
+        let fee_ppm_in = match params.get("fee_ppm").filter(|v| !v.is_null()) {
+            None => FieldInput::Keep,
+            Some(Value::Number(n)) if n.is_i64() => FieldInput::Set(n.as_i64().unwrap_or_default()),
+            Some(Value::Bool(b)) => FieldInput::Set(if *b { 1 } else { 0 }),
+            Some(other) => {
+                return json!({
+                    "status": "error",
+                    "error": format!(
+                        "fee_ppm_target must be a non-negative integer, got {}",
+                        python_str(other)
+                    ),
+                })
+            }
         };
         let now = (self.clock)();
         let existing = match self.existing_policy(&peer_id, now).await {
@@ -1465,8 +1594,8 @@ impl CoreStateMutationOwner {
             &existing,
             params.get("strategy"),
             params.get("rebalance"),
-            params.get("fee_ppm"),
-            None,
+            fee_ppm_in,
+            TagsInput::Keep,
             mult_min,
             mult_max,
             expires,
@@ -1524,10 +1653,17 @@ impl CoreStateMutationOwner {
     pub async fn policy_tag(&self, params: &Map<String, Value>, add: bool) -> Value {
         let action = if add { "tag" } else { "untag" };
         let usage = format!("Usage: revenue-policy {action} <peer_id> <tag>");
-        let tag = params
+        // py `add_tag`/`remove_tag` compare the tag RAW against stored
+        // strings: a non-string tag can never equal one, so untag is a
+        // no-op and tag stores the stringified form (set_policy's
+        // `[str(t) for t in tags]`). Keep both the raw shape (for the
+        // membership test) and the stored form.
+        let tag_raw = params
             .get("tag")
             .filter(|v| crate::rpc_params::is_truthy_py(v))
-            .map(python_str);
+            .cloned();
+        let tag = tag_raw.as_ref().map(python_str);
+        let tag_is_string = matches!(tag_raw, Some(Value::String(_)));
         let peer = params
             .get("peer_id")
             .and_then(Value::as_str)
@@ -1553,10 +1689,13 @@ impl CoreStateMutationOwner {
                 new_tags.push(tag);
                 true
             }
-        } else {
+        } else if tag_is_string {
             let before = new_tags.len();
             new_tags.retain(|t| *t != tag);
             new_tags.len() != before
+        } else {
+            // py: a non-string tag never equals a stored string -> no-op.
+            false
         };
         if !changed {
             return json!({
@@ -1569,10 +1708,10 @@ impl CoreStateMutationOwner {
             &existing,
             None,
             None,
-            None,
-            Some(new_tags),
-            None,
-            None,
+            FieldInput::Keep,
+            TagsInput::Set(new_tags),
+            FieldInput::Keep,
+            FieldInput::Keep,
             None,
             now,
             PolicyErrStyle::Single,
@@ -1641,40 +1780,52 @@ impl CoreStateMutationOwner {
                 Ok(existing) => existing,
                 Err(error) => return error,
             };
-            let tags = match entry.get("tags") {
+            let peer12 = &peer_id[..12];
+            // py batch reads every field RAW off the update dict
+            // (policy_manager.py:1208-1259): a PRESENT null CLEARS, and a
+            // non-numeric type is a validation error -- it does NOT go
+            // through the set arm's ''/'null'/'none'-tolerant parses.
+            // py's `tags` check is `isinstance(tags, list)`, so an
+            // explicit null is an ERROR here (not keep-existing).
+            let fee_ppm_in = match batch_fee_ppm(entry, peer12) {
+                Ok(v) => v,
+                Err(error) => return error,
+            };
+            let mult_min = match batch_float(entry, "fee_multiplier_min", peer12) {
+                Ok(v) => v,
+                Err(error) => return error,
+            };
+            let mult_max = match batch_float(entry, "fee_multiplier_max", peer12) {
+                Ok(v) => v,
+                Err(error) => return error,
+            };
+            // py compares `expires_in_hours` raw against ints, so a
+            // string is a TypeError inside the handler's except.
+            let expires = match entry.get("expires_in_hours") {
                 None | Some(Value::Null) => None,
-                Some(Value::Array(items)) => Some(items.iter().map(python_str).collect::<Vec<_>>()),
-                Some(_) => {
+                Some(Value::Number(n)) if n.is_i64() => n.as_i64(),
+                Some(other) => {
                     return json!({
                         "status": "error",
                         "error": format!(
-                            "tags must be a list of strings for peer {}...",
-                            &peer_id[..12]
+                            "Unexpected error: '<=' not supported between instances of                              '{}' and 'int'",
+                            match other {
+                                Value::String(_) => "str",
+                                Value::Bool(_) => "bool",
+                                Value::Array(_) => "list",
+                                Value::Object(_) => "dict",
+                                _ => "float",
+                            }
                         ),
                     })
                 }
             };
-            let mult_min =
-                match parse_optional_float(entry.get("fee_multiplier_min"), "fee_multiplier_min") {
-                    Ok(v) => v,
-                    Err(error) => return error,
-                };
-            let mult_max =
-                match parse_optional_float(entry.get("fee_multiplier_max"), "fee_multiplier_max") {
-                    Ok(v) => v,
-                    Err(error) => return error,
-                };
-            let expires =
-                match parse_optional_int(entry.get("expires_in_hours"), "expires_in_hours") {
-                    Ok(v) => v,
-                    Err(error) => return error,
-                };
             match merge_policy(
                 &existing,
                 entry.get("strategy"),
                 entry.get("rebalance_mode"),
-                entry.get("fee_ppm_target"),
-                tags,
+                fee_ppm_in,
+                TagsInput::Raw(entry.get("tags")),
                 mult_min,
                 mult_max,
                 expires,
@@ -1689,6 +1840,17 @@ impl CoreStateMutationOwner {
             }
         }
         let peer_ids: Vec<String> = policies.iter().map(|p| p.peer_id.clone()).collect();
+        // py set_policies_batch:1268-1280 -- a READ-ONLY limit check over
+        // every validated peer, AFTER validation and BEFORE the write, so
+        // a later failure never pollutes another peer's counter. The
+        // batch is NOT exempt from the limit (self-review 2026-07-31:
+        // this check and the post-commit record were both missing, so
+        // `batch` was an unlimited bypass of the per-peer rate limit).
+        for peer_id in &peer_ids {
+            if !self.rate_limit_allows(peer_id, now) {
+                return Self::policy_rate_limit_error(peer_id);
+            }
+        }
         let ack = self.core.apply_policy_batch(writes, now).await;
         let applied = matches!(&ack, StateWriteAck::Applied(_));
         let response = completed_write_response(ack, |_| {
@@ -1703,7 +1865,10 @@ impl CoreStateMutationOwner {
             })
         });
         if applied {
+            // py:1292-1298 -- timestamps recorded only after the commit
+            // succeeds, so a failed batch leaves no phantom throttle.
             for peer_id in &peer_ids {
+                self.record_completed_change(peer_id, now);
                 self.wake_after_commit(peer_id).await;
             }
         }
@@ -1723,6 +1888,8 @@ impl CoreStateMutationOwner {
         };
         let pct = match params.get("min_depletion_trigger_pct") {
             None | Some(Value::Null) => None,
+            // py `float(x)`: bools are ints in py, so True -> 1.0.
+            Some(Value::Bool(b)) => Some(if *b { 1.0 } else { 0.0 }),
             Some(raw) => match raw
                 .as_f64()
                 .or_else(|| raw.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
@@ -1738,9 +1905,11 @@ impl CoreStateMutationOwner {
                 });
             }
         }
+        // py passes `note or ''`: every FALSY note (null, false, 0, "")
+        // stores the empty string.
         let note = params
             .get("note")
-            .filter(|v| !v.is_null())
+            .filter(|v| crate::rpc_params::is_truthy_py(v))
             .map(python_str)
             .unwrap_or_default();
         let now = (self.clock)();
@@ -1767,11 +1936,12 @@ impl CoreStateMutationOwner {
     /// py `remove` arm: NO peer format gate (py only checks falsy), the
     /// removed flag, and the refreshed list.
     pub async fn hot_channel_remove(&self, params: &Map<String, Value>) -> Value {
-        let peer_id = params
-            .get("peer_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        // py's remove arm has NO format gate and `str(peer_id)`s the
+        // value, so a non-string peer attempts (and reports) a removal.
+        let peer_id = match params.get("peer_id") {
+            None | Some(Value::Null) => String::new(),
+            Some(raw) => python_str(raw),
+        };
         if peer_id.is_empty() {
             return json!({
                 "error": "Usage: revenue-hot-channel-protection-peers remove <peer_id>"
@@ -3145,5 +3315,193 @@ mod core_mutation_owner_tests {
         );
         let clear = owner.handle(A::HotChannelClear, &params(&[])).await;
         assert_eq!(clear["action"], "clear");
+    }
+
+    /// SELF-REVIEW 2026-07-31 (write-parity finding 2.1): py's batch path
+    /// checks the per-peer limit for EVERY validated peer before writing
+    /// and records timestamps after the commit
+    /// (policy_manager.py:1268-1298). Rust had neither, so `batch` was an
+    /// unlimited bypass of the 10-changes/minute limit, and batch writes
+    /// were invisible to later `set` calls.
+    #[tokio::test]
+    async fn policy_batch_is_rate_limited_and_records_against_later_sets() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        for i in 0..10 {
+            let ok = owner
+                .policy_batch(&params(&[(
+                    "updates",
+                    json!([{"peer_id": PEER, "fee_ppm_target": 100 + i}]),
+                )]))
+                .await;
+            assert_eq!(ok["status"], "success", "batch {i}: {ok:?}");
+        }
+        let refused = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([{"peer_id": PEER, "fee_ppm_target": 999}]),
+            )]))
+            .await;
+        assert_eq!(
+            refused["error"],
+            format!(
+                "Unexpected error: Rate limited: max 10 changes/minute for {}...",
+                &PEER[..12]
+            ),
+            "the 11th batch change must be limited: {refused:?}"
+        );
+        // Batch writes count against a subsequent single set, too.
+        let set_refused = owner
+            .policy_set(&params(&[("peer_id", json!(PEER)), ("fee_ppm", json!(7))]))
+            .await;
+        assert!(
+            set_refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Rate limited"),
+            "{set_refused:?}"
+        );
+
+        // A peer that has NOT been touched is unaffected by the other
+        // peer's exhausted budget (py checks per-peer).
+        let other = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([{"peer_id": PEER2, "fee_ppm_target": 1}]),
+            )]))
+            .await;
+        assert_eq!(other["status"], "success", "{other:?}");
+    }
+
+    /// SELF-REVIEW (findings 2.2/2.3/2.6): batch reads fields RAW --
+    /// a PRESENT null CLEARS, a stringy multiplier is a validation error
+    /// (not a tolerant parse), and validation runs in py's order
+    /// (strategy before tags).
+    #[tokio::test]
+    async fn policy_batch_uses_pythons_raw_field_semantics_and_order() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        // Seed a policy with a target and both multipliers.
+        let seeded = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("fee_ppm", json!(400)),
+                ("fee_multiplier_min", json!(0.5)),
+                ("fee_multiplier_max", json!(2.0)),
+            ]))
+            .await;
+        assert_eq!(seeded["status"], "success", "{seeded:?}");
+
+        // Explicit nulls CLEAR (py `update.get(k, existing)` -> None).
+        let cleared = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([{
+                    "peer_id": PEER,
+                    "fee_ppm_target": null,
+                    "fee_multiplier_min": null,
+                    "fee_multiplier_max": null,
+                }]),
+            )]))
+            .await;
+        assert_eq!(cleared["status"], "success", "{cleared:?}");
+        let reader = revops_db::actor::spawn_read_only(&_path).await.unwrap();
+        let read_back = revops_db::queries::policy_for_peer(&reader, PEER, NOW)
+            .await
+            .unwrap();
+        assert_eq!(read_back.fee_ppm_target, None, "present null clears");
+        assert_eq!(read_back.fee_multiplier_min, None);
+        assert_eq!(read_back.fee_multiplier_max, None);
+
+        // A stringy multiplier fails py's isinstance((int,float)) check
+        // with the BATCH text -- never the set arm's "Invalid ...".
+        let stringy = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([{"peer_id": PEER, "fee_multiplier_min": "2.0"}]),
+            )]))
+            .await;
+        assert_eq!(
+            stringy["error"],
+            format!(
+                "fee_multiplier_min must be >= 0.1 for peer {}...",
+                &PEER[..12]
+            )
+        );
+
+        // Order: strategy is validated BEFORE tags (py 1190-1259).
+        let ordered = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([{"peer_id": PEER, "strategy": "bogus", "tags": "not-a-list"}]),
+            )]))
+            .await;
+        assert_eq!(
+            ordered["error"],
+            format!("Invalid strategy 'bogus' for peer {}...", &PEER[..12]),
+            "strategy must be reported before tags: {ordered:?}"
+        );
+
+        // py `isinstance(None, list)` is False -> an explicit null tags
+        // key is an ERROR, not keep-existing.
+        let null_tags = owner
+            .policy_batch(&params(&[(
+                "updates",
+                json!([{"peer_id": PEER, "tags": null}]),
+            )]))
+            .await;
+        assert_eq!(
+            null_tags["error"],
+            format!("tags must be a list of strings for peer {}...", &PEER[..12])
+        );
+    }
+
+    /// SELF-REVIEW (finding 2.7): py renders the ORIGINAL value in enum
+    /// errors (`f"Invalid strategy '{strategy}'"`), not the lowercased
+    /// match key.
+    #[tokio::test]
+    async fn enum_errors_render_the_original_input_casing() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        let v = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("strategy", json!("Dynamic2")),
+            ]))
+            .await;
+        assert_eq!(
+            v["error"],
+            "Invalid strategy 'Dynamic2'. Valid: ['dynamic', 'static', 'passive']"
+        );
+        let m = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("rebalance", json!("Enabled2")),
+            ]))
+            .await;
+        assert_eq!(
+            m["error"],
+            "Invalid rebalance_mode 'Enabled2'. Valid: ['enabled', 'disabled', \
+             'source_only', 'sink_only']"
+        );
+    }
+
+    /// SELF-REVIEW (finding 2.10): a u64 fee target beyond i64 must not
+    /// slip past the 100000 rail by decoding to None and silently
+    /// CLEARING the stored target.
+    #[tokio::test]
+    async fn out_of_range_fee_target_is_refused_not_silently_cleared() {
+        let (_d, _path, owner, _wake) = fixture().await;
+        let v = owner
+            .policy_set(&params(&[
+                ("peer_id", json!(PEER)),
+                ("fee_ppm", json!(18_446_744_073_709_551_615u64)),
+            ]))
+            .await;
+        assert_eq!(v["status"], "error", "{v:?}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("fee_ppm_target must be a non-negative integer"),
+            "{v:?}"
+        );
     }
 }

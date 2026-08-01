@@ -522,3 +522,91 @@ fn core_state_mutators_require_the_sealed_live_capability() {
         assert!(!observer_surface.contains("ProductionStateWriter"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-review 2026-07-31: source-scan tripwires for two blind spots the
+// adversarial review panel found. main.rs is a binary no test can import,
+// so these scan its text -- the same technique the existing capability
+// scans in this file use.
+// ---------------------------------------------------------------------------
+
+/// The production econ-ledger filename must never be reachable from a
+/// runtime path. `revops_econ::shadow::default_ledger_path` computes
+/// Python's `econ_ledger.db` faithfully (it is a parity port with its own
+/// tests) but has NO production caller -- wiring one in would silently
+/// point this port at Python's live ledger. This pins that it stays
+/// caller-free outside its own crate's tests.
+#[test]
+fn the_production_econ_ledger_path_helper_has_no_callers() {
+    let mut offenders = Vec::new();
+    for dir in ["crates/revops/src", "crates/revops-fees/src"] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(dir);
+        let mut files = Vec::new();
+        walk_rs_files(&root, &mut files);
+        for entry in files {
+            let text = std::fs::read_to_string(&entry).unwrap();
+            if text.contains("default_ledger_path") {
+                offenders.push(entry.display().to_string());
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the production econ_ledger.db path helper gained callers: {offenders:?}"
+    );
+}
+
+/// Every `register_core_mutator` call must bind the action whose name
+/// matches its RPC. The bindings are dead code until Task 69 assembles
+/// the owner, so a cross-wired pair (e.g. revenue-ban -> Unignore) would
+/// otherwise survive the whole suite and only surface at cutover, on a
+/// money-moving surface.
+#[test]
+fn every_core_mutator_registration_binds_its_own_action() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("read main.rs");
+    for (name_binding, action) in [
+        ("ignore_name", "Ignore"),
+        ("unignore_name", "Unignore"),
+        ("ban_name", "Ban"),
+        ("unban_name", "Unban"),
+        ("clear_reservations_name", "ClearReservations"),
+        ("spend_release_name", "SpendRelease"),
+        ("spend_release_stale_name", "SpendReleaseStale"),
+        ("spend_reserve_name", "SpendReserve"),
+        ("spend_settle_name", "SpendSettle"),
+    ] {
+        let needle = format!(
+            "register_core_mutator(\n        builder,\n        &{name_binding},\n        {}_spec,\n        revops::rpc_state_mutators::CoreStateMutationAction::{action},",
+            name_binding.trim_end_matches("_name")
+        );
+        assert!(
+            source.contains(&needle),
+            "registration for {name_binding} must bind CoreStateMutationAction::{action}"
+        );
+    }
+}
+
+/// `revenue-health`'s ROC denominator must be py `calculate_roc`'s
+/// capacity set (CHANNELD_NORMAL + named scid), not a raw sum over the
+/// listpeerchannels snapshot. The helper is unit-tested; this pins that
+/// the handler actually CALLS it — main.rs is a binary no test can
+/// import, and the inline sum it replaced was invisible to every e2e
+/// (self-review 2026-07-31, mutation-verified).
+#[test]
+fn health_roc_capacity_uses_the_python_parity_helper() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("read main.rs");
+    assert!(
+        source
+            .contains("Ok(channels) => revops::dashboard_evidence::total_capacity_sats(channels)"),
+        "the health handler must derive ROC capacity from the py-parity helper"
+    );
+    assert!(
+        !source
+            .contains(".filter_map(|c| c.get(\"total_msat\").and_then(serde_json::Value::as_i64))"),
+        "no inline raw-snapshot capacity sum may return"
+    );
+}

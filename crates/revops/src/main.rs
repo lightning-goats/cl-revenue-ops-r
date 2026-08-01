@@ -747,13 +747,10 @@ fn register_econ_reconcile(
                     Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
                 };
                 let apply = revops::rpc_econ_reconcile::parse_apply(decoded.get("apply"));
-                let stale_after_seconds =
-                    match revops::rpc_econ_reconcile::parse_stale_after_seconds(
-                        decoded.get("stale_after_seconds"),
-                    ) {
-                        Ok(seconds) => seconds,
-                        Err(error) => return Ok(error),
-                    };
+                // py coerces stale_after_seconds INSIDE the outer try,
+                // after the enabled/ledger gates -- the assembly owns
+                // that ordering now (self-review 2026-07-31).
+                let stale_after_seconds_raw = decoded.get("stale_after_seconds").cloned();
                 let state = p.state();
                 Ok(revops::rpc_econ_reconcile::econ_reconcile_response(
                     revops::rpc_econ_reconcile::EconReconcileSources {
@@ -767,7 +764,7 @@ fn register_econ_reconcile(
                             .as_ref()
                             .map(|dir| dir.join(revops::fee_governor::LEDGER_DRYRUN_FILENAME)),
                         apply,
-                        stale_after_seconds,
+                        stale_after_seconds_raw,
                         now: now_unix(),
                     },
                 )
@@ -919,14 +916,13 @@ fn register_capex_status(
                     &state.python_options.snapshot(),
                 )
                 .await;
-                let (cached_bleeder, prev_bleeder) = {
+                // The read/write-back decision is one extracted, TESTED
+                // function -- main.rs is a binary no test can import, so
+                // inlining it left the TTL semantics unpinned
+                // (self-review 2026-07-31).
+                let (cached_bleeder, prev_bleeder, needs_write_back) = {
                     let cache = state.bleeder_cache.lock().expect("bleeder cache lock");
-                    match cache.as_ref() {
-                        // py 1808-1809: refresh only when older than 300s.
-                        Some((at, map)) if now - at <= 300 => (Some(map.clone()), map.clone()),
-                        Some((_, map)) => (None, map.clone()),
-                        None => (None, std::collections::BTreeMap::new()),
-                    }
+                    revops::capex_evidence::bleeder_cache_decision(cache.as_ref(), now)
                 };
 
                 let day30 = now - 30 * 86400;
@@ -968,9 +964,18 @@ fn register_capex_status(
                         now,
                     },
                 );
-                // py refresh assigns the new cache unconditionally
-                // (profitability_analyzer.py:1810-1813).
-                *state.bleeder_cache.lock().expect("bleeder cache lock") = Some((now, verdicts));
+                // py re-stamps `_bleeder_cache_time` ONLY inside the
+                // stale branch (profitability_analyzer.py:1806-1813), so
+                // the TTL measures time since the last RECOMPUTE. Writing
+                // it back on a cache HIT would slide the deadline forward
+                // on every call, and under sub-300s polling the verdicts
+                // would never refresh -- a recovered channel would stay
+                // "hard" (blocked tier, defensive priority) forever
+                // (self-review 2026-07-31).
+                if needs_write_back {
+                    *state.bleeder_cache.lock().expect("bleeder cache lock") =
+                        Some((now, verdicts));
+                }
                 Ok(response)
             }
         },
@@ -1108,7 +1113,10 @@ fn register_core_mutator(
                     Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
                 };
                 let Some(owner) = p.state().core_mutations.get() else {
-                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    // Per-ACTION text: py gates the policy mutators on
+                    // policy_manager and the ledger mutators on database
+                    // (see CoreStateMutationAction::uninitialized_error).
+                    return Ok(serde_json::json!({"error": action.uninitialized_error()}));
                 };
                 Ok(owner.handle(action, &params).await)
             }
@@ -2253,11 +2261,15 @@ async fn main() -> Result<()> {
                     Ok(decoded) => decoded,
                     Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
                 };
-                let report_type = decoded
-                    .get("report_type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("summary")
-                    .to_string();
+                // py's signature default is "summary" for an ABSENT
+                // param only; a present non-string (5, true, null) never
+                // equals any known type and falls to the unknown-type
+                // arm (self-review 2026-07-31).
+                let report_type = match decoded.get("report_type") {
+                    None => "summary".to_string(),
+                    Some(serde_json::Value::String(text)) => text.clone(),
+                    Some(other) => revops::rpc_state_mutators::python_str(other),
+                };
                 let s = p.state();
                 // py 5596-5597: database/policy_manager gate FIRST, for
                 // EVERY report type (the old wiring let non-costs types
@@ -3197,12 +3209,15 @@ async fn main() -> Result<()> {
                 let snapshot =
                     revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
                         .await;
+                // py calculate_roc sums capacity via `_get_all_channels()`
+                // (profitability_analyzer.py:1840-1846, 1921-1945):
+                // CHANNELD_NORMAL only, named scid required. Summing the
+                // RAW snapshot instead inflates the denominator with
+                // pending/closing channels and understates ROC
+                // (self-review 2026-07-31). `total_capacity_sats` is the
+                // already-ported helper `revenue-dashboard` uses.
                 let total_capacity_sats: i64 = match &snapshot {
-                    Ok(channels) => channels
-                        .iter()
-                        .filter_map(|c| c.get("total_msat").and_then(serde_json::Value::as_i64))
-                        .map(|msat| msat.div_euclid(1000))
-                        .sum(),
+                    Ok(channels) => revops::dashboard_evidence::total_capacity_sats(channels),
                     Err(_) => 0,
                 };
                 // channels section (py 6216-6229): classification counts
@@ -3263,11 +3278,22 @@ async fn main() -> Result<()> {
                         .await
                         .unwrap_or_default(),
                 );
+                // py 6301-6315: the boltz section reports the live
+                // auto-cycle state when a manager exists AND is enabled;
+                // otherwise `{"enabled": false}`. This port has a Boltz
+                // runtime since Task 63, so the section must reflect ITS
+                // config rather than a hardcoded false (self-review
+                // 2026-07-31). The action capability stays unassembled,
+                // but `enabled` is a real config answer.
+                let boltz = Some(serde_json::json!({
+                    "enabled": s.boltz_owner.is_some() && s.boltz_cfg.enabled,
+                }));
                 let extras = revops::rpc_health::HealthExtras {
                     channels: channels_section,
                     fees: fees_section,
                     budget: budget_section,
                     top_routes,
+                    boltz,
                 };
                 let mut out = match pnl {
                     Ok((pnl_1d, pnl_7d)) => revops::rpc_health::build_health_with_loops(

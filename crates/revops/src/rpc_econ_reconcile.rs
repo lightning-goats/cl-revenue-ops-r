@@ -32,7 +32,12 @@ pub fn parse_apply(raw: Option<&Value>) -> bool {
 /// (`max(60, int(stale_after_seconds))`, cl-revenue-ops.py:6114).
 pub fn parse_stale_after_seconds(raw: Option<&Value>) -> Result<i64, Value> {
     let default = Value::Number(3600.into());
-    let parsed = python_int(raw.unwrap_or(&default)).map_err(|error| json!({"error": error}))?;
+    // py evaluates `max(60, int(stale_after_seconds))` INSIDE the outer
+    // try, at the reconcile() call -- so a garbage value surfaces
+    // through the `{enabled: true, error}` arm, and never runs at all
+    // when the shadow flag is disabled (cl-revenue-ops.py:6100-6114).
+    let parsed =
+        python_int(raw.unwrap_or(&default)).map_err(|error| build_econ_reconcile_error(&error))?;
     Ok(parsed.max(60))
 }
 
@@ -49,8 +54,10 @@ pub struct EconReconcileSources<'a> {
     pub db: Option<&'a DbHandle>,
     pub ledger_path: Option<PathBuf>,
     pub apply: bool,
-    /// Already [`parse_stale_after_seconds`]-floored.
-    pub stale_after_seconds: i64,
+    /// RAW `stale_after_seconds` param: py coerces it inside the outer
+    /// try, AFTER the enabled/ledger gates, so the coercion error can
+    /// only be observed on an enabled, available runtime.
+    pub stale_after_seconds_raw: Option<Value>,
     pub now: i64,
 }
 
@@ -67,6 +74,11 @@ pub async fn econ_reconcile_response(s: EconReconcileSources<'_>) -> Value {
     }
     let (Some(handle), Some(ledger_path)) = (s.db, s.ledger_path.as_ref()) else {
         return build_econ_reconcile_unavailable();
+    };
+    // py order: the coercion happens here, after both gates.
+    let stale_after_seconds = match parse_stale_after_seconds(s.stale_after_seconds_raw.as_ref()) {
+        Ok(seconds) => seconds,
+        Err(error) => return error,
     };
     // py `ledger_for_reconciliation()` returns None on an open failure ->
     // the same unavailable arm.
@@ -91,15 +103,11 @@ pub async fn econ_reconcile_response(s: EconReconcileSources<'_>) -> Value {
             Err(error) => return build_econ_reconcile_error(&error.to_string()),
         };
 
-    let report = match revops_econ::reconcile::reconcile(
-        &ledger,
-        &db_states,
-        s.now,
-        s.stale_after_seconds,
-    ) {
-        Ok(report) => report,
-        Err(error) => return build_econ_reconcile_error(&error.to_string()),
-    };
+    let report =
+        match revops_econ::reconcile::reconcile(&ledger, &db_states, s.now, stale_after_seconds) {
+            Ok(report) => report,
+            Err(error) => return build_econ_reconcile_error(&error.to_string()),
+        };
 
     // py wraps BOTH the fee-changes read and the completeness math in one
     // inner try/except -> the {"status": "error"} blob, never a whole-RPC

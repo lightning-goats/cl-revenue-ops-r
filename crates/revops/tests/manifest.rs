@@ -656,39 +656,59 @@ fn core_state_mutators_are_reachable_in_both_naming_modes() {
 
 #[test]
 fn core_state_mutators_refuse_when_live_capability_is_unassembled() {
-    for (method, params) in [
+    // Self-review 2026-07-31: the refusal text is PER-RPC, matching the
+    // prerequisite py itself gates on -- policy_manager for the policy
+    // mutators, database for the generic-ledger ones (py
+    // cl-revenue-ops.py: ignore/unignore/ban/unban vs clear-reservations/
+    // spend-release/spend-settle/spend-reserve/spend-release-stale). A
+    // shared "Plugin not initialized" was wrong for five of the nine.
+    // This ALSO makes each registration's action binding observable: a
+    // cross-wired binding across the two families changes this string.
+    for (method, params, expected) in [
         (
             "revenue-ignore",
             serde_json::json!({"peer_id": fake_peer_id("02", 'a'), "internal": true}),
+            "Plugin not initialized",
         ),
         (
             "revenue-unignore",
             serde_json::json!({"peer_id": fake_peer_id("02", 'b'), "internal": true}),
+            "Plugin not initialized",
         ),
         (
             "revenue-ban",
             serde_json::json!({"peer_id": fake_peer_id("02", 'c')}),
+            "Plugin not initialized",
         ),
         (
             "revenue-unban",
             serde_json::json!({"peer_id": fake_peer_id("02", 'd')}),
+            "Plugin not initialized",
         ),
-        ("revenue-clear-reservations", serde_json::json!({})),
+        (
+            "revenue-clear-reservations",
+            serde_json::json!({}),
+            "Database not initialized",
+        ),
         (
             "revenue-spend-release",
             serde_json::json!({"reservation_id": "r"}),
+            "Database not initialized",
         ),
         (
             "revenue-spend-release-stale",
             serde_json::json!({"max_age_seconds": 3600}),
+            "Database not initialized",
         ),
         (
             "revenue-spend-reserve",
             serde_json::json!({"reservation_id": "r", "category": "misc", "amount_sats": 10}),
+            "Database not initialized",
         ),
         (
             "revenue-spend-settle",
             serde_json::json!({"reservation_id": "r"}),
+            "Database not initialized",
         ),
     ] {
         assert_eq!(
@@ -700,7 +720,7 @@ fn core_state_mutators_refuse_when_live_capability_is_unassembled() {
                 method,
                 params
             ),
-            serde_json::json!({"error": "Plugin not initialized"}),
+            serde_json::json!({"error": expected}),
             "{method}"
         );
     }
@@ -2166,6 +2186,11 @@ fn revenue_r_econ_reconcile_disabled_by_default_with_real_config_path() {
         })
     );
 
+    // SELF-REVIEW 2026-07-31: py coerces stale_after_seconds INSIDE the
+    // outer try, AFTER the enabled gate (cl-revenue-ops.py:6100-6114),
+    // so on a DISABLED runtime the int() never runs and the caller still
+    // gets the disabled hint -- not a coercion error. (The error arm is
+    // pinned on an ENABLED runtime by the dry-run ledger test below.)
     let bad = call_after_init_with_params(
         false,
         Some(prod_db_path.to_str().unwrap()),
@@ -2174,10 +2199,12 @@ fn revenue_r_econ_reconcile_disabled_by_default_with_real_config_path() {
         "revenue-r-econ-reconcile",
         serde_json::json!({"stale_after_seconds": "junk"}),
     );
-    assert!(
-        bad["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("invalid literal for int()")),
+    assert_eq!(
+        bad,
+        serde_json::json!({
+            "enabled": false,
+            "hint": "revenue-config set econ_shadow_enabled true",
+        }),
         "{bad:?}"
     );
 }
@@ -2226,6 +2253,28 @@ fn revenue_r_econ_reconcile_touches_only_the_rust_dryrun_ledger() {
     assert!(
         !journal_dir.join("econ_ledger.db").exists(),
         "the production ledger name must never be created"
+    );
+
+    // The coercion error is observable ONLY here, on an ENABLED,
+    // available runtime -- and py's arm carries `enabled: true`
+    // (cl-revenue-ops.py:6147-6148), which the pre-gate parse dropped.
+    let bad = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[(
+            "revops-r-journal-dir",
+            serde_json::json!(journal_dir.to_str().unwrap()),
+        )],
+        "revenue-r-econ-reconcile",
+        serde_json::json!({"stale_after_seconds": "junk"}),
+    );
+    assert_eq!(bad["enabled"], true, "{bad:?}");
+    assert!(
+        bad["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("invalid literal for int()")),
+        "{bad:?}"
     );
 }
 

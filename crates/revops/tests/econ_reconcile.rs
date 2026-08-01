@@ -42,7 +42,7 @@ fn sources<'a>(
         db,
         ledger_path,
         apply,
-        stale_after_seconds: 3600,
+        stale_after_seconds_raw: None,
         now: NOW,
     }
 }

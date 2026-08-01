@@ -180,6 +180,32 @@ pub fn channel_profile(prof: &ChannelProfitability) -> ChannelProfile {
     }
 }
 
+/// The bleeder-cache read decision, extracted so the runtime's cache
+/// handling is TESTABLE (main.rs is a binary no test can import).
+/// Returns `(cached_verdicts, prev_verdicts, needs_write_back)`.
+///
+/// py `get_bleeder_status` (profitability_analyzer.py:1806-1813)
+/// recomputes only when the entry is older than 300s and re-stamps the
+/// timestamp only on that recompute. Re-stamping on a HIT would slide the
+/// deadline forward on every call, so under sub-300s polling the verdicts
+/// would never refresh (self-review 2026-07-31).
+pub fn bleeder_cache_decision(
+    cache: Option<&(i64, BTreeMap<String, String>)>,
+    now: i64,
+) -> (
+    Option<BTreeMap<String, String>>,
+    BTreeMap<String, String>,
+    bool,
+) {
+    match cache {
+        Some((at, map)) if now - at <= 300 => (Some(map.clone()), map.clone(), false),
+        // A STALE map still feeds the F4a hysteresis hold (py 1634:
+        // `prev_verdicts = self._bleeder_cache or {}`).
+        Some((_, map)) => (None, map.clone(), true),
+        None => (None, BTreeMap::new(), true),
+    }
+}
+
 /// Every prefetched input `capex_status_response` shapes into a
 /// [`CapexEvidence`]. Each `Result` carries its source's failure so the
 /// response function applies Python's arm for THAT source (module doc).
@@ -217,15 +243,26 @@ pub fn capex_status_response(s: CapexStatusSources) -> (Value, BTreeMap<String, 
     let verdicts = match s.cached_bleeder {
         Some(cached) => cached,
         None => match (&s.revenue_30d, &s.costs_30d, &s.revenue_7d, &s.costs_7d) {
-            (Ok(revenue_30d), Ok(costs_30d), Ok(revenue_7d), Ok(costs_7d)) => bleeder_verdicts(
-                &s.active_scids,
-                revenue_30d,
-                costs_30d,
-                revenue_7d,
-                costs_7d,
-                s.success_rates.as_ref().unwrap_or(&BTreeMap::new()),
-                &s.prev_bleeder,
-            ),
+            // py's scan needs the success-rate evidence too: a failed
+            // batch read falls back to per-channel queries, and a failure
+            // THERE drops the channel from the classification entirely
+            // (profitability_analyzer.py:1680-1687, 1768-1771). Scanning
+            // with the adjustment silently omitted would invent verdicts
+            // from partial evidence -- the same class of fabrication the
+            // CB-4 arms exist to prevent (self-review 2026-07-31).
+            (Ok(revenue_30d), Ok(costs_30d), Ok(revenue_7d), Ok(costs_7d))
+                if s.success_rates.is_ok() =>
+            {
+                bleeder_verdicts(
+                    &s.active_scids,
+                    revenue_30d,
+                    costs_30d,
+                    revenue_7d,
+                    costs_7d,
+                    s.success_rates.as_ref().expect("guarded by is_ok"),
+                    &s.prev_bleeder,
+                )
+            }
             // py: any exception inside identify_bleeders_v2's outer try
             // returns [] classifications (1786-1789) -> every
             // get_bleeder_status lookup misses -> "none" everywhere.
@@ -287,7 +324,17 @@ pub fn capex_status_response(s: CapexStatusSources) -> (Value, BTreeMap<String, 
                     flow_forward_count: flow.get(scid).map(|row| row.forward_count),
                 })
                 .collect();
-            Some(capex_fleet_efficiency(&inputs, s.cfg.capex_grace_days))
+            // py `int(getattr(cfg, "capex_grace_days", 14) or 14)`
+            // (capital_efficiency.py:161): a configured 0 is FALSY and
+            // becomes 14 -- it does not mean "no grace period".
+            Some(capex_fleet_efficiency(
+                &inputs,
+                if s.cfg.capex_grace_days == 0 {
+                    14
+                } else {
+                    s.cfg.capex_grace_days
+                },
+            ))
         }
         _ => None,
     };

@@ -385,6 +385,42 @@ fn range_gate_without_force_and_hard_rails_under_force() {
     assert_eq!(v["clamped_to_rail"], json!([10, 100_000]));
 }
 
+/// REVIEW FIX (self-review 2026-07-31, write-parity finding 1.2): an
+/// inverted rail (min > max, reachable from out-of-range DB overrides)
+/// must NOT panic. py uses `max(hard_min, min(hard_max, fee_ppm))`
+/// (cl-revenue-ops.py:4794), which is total; Rust's `Ord::clamp` panics
+/// when min > max, taking the whole plugin down on an operator's
+/// mis-set config.
+#[test]
+fn inverted_rail_does_not_panic_and_matches_pythons_max_min() {
+    let gate = enabled_gate();
+    let limiter = ForceRateLimiter::production();
+    let channel = json!("100x1x0");
+    let fee = json!(500);
+    let setter = |_: &str, fee_ppm: i64, _: bool| json!({"success": true, "fee_ppm": fee_ppm});
+
+    let mut inverted = sources(
+        &gate,
+        Some(&channel),
+        Some(&fee),
+        true,
+        Some(&setter),
+        &limiter,
+    );
+    // hard_min = 150000; hard_max = min(200000, ABS_MAX 100000) = 100000.
+    inverted.min_fee_ppm = 150_000;
+    inverted.max_fee_ppm = 200_000;
+    let v = set_fee_response(inverted);
+    // py: max(150000, min(100000, 500)) = 150000.
+    assert_eq!(v["status"], "success", "{v:?}");
+    assert_eq!(
+        v["new_fee_ppm"], 150_000,
+        "py max(hard_min, min(hard_max, fee))"
+    );
+    assert_eq!(v["requested_fee_ppm"], 500);
+    assert_eq!(v["clamped_to_rail"], json!([150_000, 100_000]));
+}
+
 /// py 4803-4815: the controller result dict merges Python-style. Failure:
 /// `{"status": "error", "error": message or "Fee update failed",
 /// **result}`; success: resolved channel/fee from the result, extras
