@@ -485,15 +485,28 @@ pub async fn resolve_fee_cfg_observed(
         .await,
     };
 
-    // Python load_overrides post-load repairs (config.py:946-951, 975-980)
-    // for the two crossed pairs that are fee-cycle inputs. Warn-log like
-    // Python; repair identically.
+    // Python load_overrides post-load repairs (config.py:946-961 and
+    // 975-980 at origin/main fc4c76b) for the two crossed pairs that are
+    // fee-cycle inputs. Warn-log like Python; repair identically.
+    //
+    // The fee pair is repaired UPWARD (task 75's `rust_contract`):
+    // lowering `min_fee_ppm` to a persisted `max_fee_ppm` of 1-4 is
+    // individually in range but drags the floor under its OWN
+    // CONFIG_FIELD_RANGES minimum of 5 (CRITICAL-02). The two bounds have
+    // different lower limits (5 vs 1), so no downward repair can hold
+    // both invariants; raising the ceiling honors the operator's stated
+    // floor and only widens a cap. Mirrors py
+    // `_enforce_fee_bound_invariant` (cl-revenue-ops.py:501-518) too.
+    //
+    // The receivable pair below is NOT affected: floor and target share
+    // the same (0.0, 1.0) band, so repairing downward is safe there --
+    // only the fee pair has asymmetric lower limits.
     if cfg.min_fee_ppm > cfg.max_fee_ppm {
         eprintln!(
-            "revops: contradictory min_fee_ppm ({}) > max_fee_ppm ({}); repaired min to max",
-            cfg.min_fee_ppm, cfg.max_fee_ppm
+            "revops: contradictory min_fee_ppm ({}) > max_fee_ppm ({}); repaired max_fee_ppm to {}",
+            cfg.min_fee_ppm, cfg.max_fee_ppm, cfg.min_fee_ppm
         );
-        cfg.min_fee_ppm = cfg.max_fee_ppm;
+        cfg.max_fee_ppm = cfg.min_fee_ppm;
     }
     if cfg.receivable_ratio_floor > cfg.receivable_ratio_target {
         eprintln!(
