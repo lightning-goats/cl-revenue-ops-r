@@ -207,6 +207,63 @@ pub fn validate_override(field: &str, raw: &str) -> Option<String> {
     }
 }
 
+/// Task 74 `rust_contract`: Python's STARTUP contract for numeric
+/// plugin options — CLAMP into `CONFIG_FIELD_RANGES`, warn, and keep
+/// going (`_validate_numeric_config_options`, cl-revenue-ops.py:483-498,
+/// whose table is `dict(CONFIG_FIELD_RANGES)` so every governed numeric
+/// field is covered).
+///
+/// This is the OPPOSITE of the persisted-override contract in
+/// [`validate_override`], which SKIPS an out-of-range value and keeps the
+/// prior one (`_apply_override`, config.py:1043-1048). The asymmetry is
+/// deliberate in Python and must be reproduced exactly: a startup option
+/// has no "prior value" to fall back to, so it is pulled into range; a
+/// persisted override does, so a bad row is ignored rather than applied
+/// in mangled form.
+///
+/// Returns the clamped value plus whether clamping occurred (callers warn
+/// like Python). A non-numeric or unranged field passes through
+/// unchanged — Python leaves those to the upstream `_safe_int`/
+/// `_safe_float` type enforcement.
+pub fn clamp_startup_numeric(field: &str, value: &options::Value) -> (options::Value, bool) {
+    let Some((lo, hi)) = config_types::field_range(field) else {
+        return (value.clone(), false);
+    };
+    match value {
+        options::Value::Integer(raw) => {
+            let clamped = (*raw as f64).clamp(lo, hi);
+            if clamped == *raw as f64 {
+                (value.clone(), false)
+            } else {
+                // py `max(lo, min(num, hi))` on an int-ranged field keeps
+                // an integer field integral.
+                (options::Value::Integer(clamped as i64), true)
+            }
+        }
+        options::Value::String(raw) => {
+            let trimmed = raw.trim();
+            // py converts with float() when either bound is a float, else
+            // int(); a value that will not convert is left alone
+            // (cl-revenue-ops.py:489-493).
+            let Ok(parsed) = trimmed.parse::<f64>() else {
+                return (value.clone(), false);
+            };
+            let clamped = parsed.clamp(lo, hi);
+            if clamped == parsed {
+                return (value.clone(), false);
+            }
+            let rendered = if lo.fract() == 0.0 && hi.fract() == 0.0 && parsed.fract() == 0.0 {
+                format!("{}", clamped as i64)
+            } else {
+                format!("{clamped}")
+            };
+            (options::Value::String(rendered), true)
+        }
+        // Bools and non-numeric shapes carry no range.
+        other => (other.clone(), false),
+    }
+}
+
 fn in_range(field: &str, value: f64) -> bool {
     match config_types::field_range(field) {
         Some((min, max)) => value >= min && value <= max,

@@ -480,3 +480,87 @@ async fn auto_cycle_status_reports_pythons_config_block() {
     assert_eq!(c["expansion_treasury_min_deficit_sats"], json!(250_000));
     assert!(v.get("error").is_none(), "this RPC never errors: {v:?}");
 }
+
+/// Task 66 `revenue-total-cost-budget`: the Boltz liquidity-cost component
+/// (py `_boltz_liquidity_cost_components`, cl-revenue-ops.py:8136-8176).
+/// With no Boltz manager constructed, Python answers a zeros dict with
+/// `available: false` — NOT an error, and NOT a fabricated live reading.
+#[tokio::test]
+async fn total_cost_boltz_component_without_owner_is_pythons_unavailable_dict() {
+    let deps = BoltzRpcDeps {
+        owner: None,
+        query: Arc::new(DeadCli),
+        now: NOW,
+        cfg: Default::default(),
+    };
+    assert_eq!(
+        ops::total_cost_boltz_component(&deps, 24, Some(5_000)).await,
+        json!({
+            "source": "boltz",
+            "spent_24h_sats": 0,
+            "reserved_24h_sats": 0,
+            "available": false,
+        })
+    );
+}
+
+/// Live path: completed swaps inside the window count as spend, pending
+/// (non-terminal) swaps as reserved, and the dict carries Python's
+/// available-path keys (source/available/spent/reserved/counted_swaps).
+#[tokio::test]
+async fn total_cost_boltz_component_counts_live_swaps() {
+    let (owner, _dir) = unassembled_owner().await;
+    let cli = FakeBoltzCli::new();
+    cli.push_ok(
+        json!({"swaps": [
+            {"id": "s1", "status": "swap.claimed", "updatedAt": NOW - 3600,
+             "serviceFee": 120, "networkFee": 30},
+            {"id": "s2", "status": "swap.created", "createdAt": NOW - 600,
+             "networkFee": 40},
+            {"id": "s3", "status": "swap.claimed", "updatedAt": NOW - 200 * 3600,
+             "serviceFee": 999},
+        ]})
+        .to_string(),
+    );
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(SyncFake(cli)),
+        now: NOW,
+        cfg: Default::default(),
+    };
+    assert_eq!(
+        ops::total_cost_boltz_component(&deps, 24, Some(5_000)).await,
+        json!({
+            "source": "boltz",
+            "available": true,
+            "spent_24h_sats": 150,
+            "reserved_24h_sats": 40,
+            "counted_swaps": 1,
+        })
+    );
+}
+
+/// A failed listswaps read is Python's exception arm: available:false with
+/// the error text and honest zeros — never a silent zero-spend that looks
+/// like a live reading.
+#[tokio::test]
+async fn total_cost_boltz_component_cli_failure_is_unavailable_with_error() {
+    let (owner, _dir) = unassembled_owner().await;
+    let cli = FakeBoltzCli::new();
+    cli.push_err(CliError::Disabled);
+    let deps = BoltzRpcDeps {
+        owner: Some(owner),
+        query: Arc::new(SyncFake(cli)),
+        now: NOW,
+        cfg: Default::default(),
+    };
+    let v = ops::total_cost_boltz_component(&deps, 24, None).await;
+    assert_eq!(v["source"], "boltz");
+    assert_eq!(v["available"], json!(false));
+    assert_eq!(v["spent_24h_sats"], 0);
+    assert_eq!(v["reserved_24h_sats"], 0);
+    assert!(
+        v["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "error text must be carried: {v:?}"
+    );
+}

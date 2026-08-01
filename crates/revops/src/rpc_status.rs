@@ -67,12 +67,12 @@ pub fn option_value_to_json(value: Option<&options::Value>) -> Value {
 /// key, which only applies to non-public keys and isn't reproduced here (a
 /// documented, not silent, gap — see the plan's Task 3 gap note).
 ///
-/// `version` is always a Phase 1b placeholder: Python's live per-key
-/// `version` is the DB-persisted `config._version`, incremented on writes
-/// through `revenue-config set`, and Phase 1b has no DB-backed
-/// override-write path yet. Every known-key response therefore lists
-/// `"version"` in a `_phase1b_gaps` array so the diff harness's `--strict`
-/// mode skips that one key instead of flagging a false mismatch.
+/// `version` is REAL as of Task 66 slice 8b: the caller reads Python's
+/// exact `get_config_version` (`MAX(version)` over `config_overrides`,
+/// `queries::config_version`) and passes it here; a no-DB runtime passes
+/// 0, which is Python's own dataclass default before any DB is attached
+/// (config.py:841). The former `_phase1b_gaps: ["version"]` entry is
+/// retired — the list stays, empty, per the project honesty convention.
 pub fn build_config_response(
     key: &str,
     known: bool,
@@ -95,7 +95,7 @@ pub fn build_config_response(
         // what Python classifies on.
         "classification":
             config_types::classify_runtime_key(&crate::config_resolve::db_override_key(key)),
-        "_phase1b_gaps": ["version"],
+        "_phase1b_gaps": [],
     })
 }
 

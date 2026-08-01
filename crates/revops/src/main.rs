@@ -52,6 +52,34 @@ struct State {
     /// producer uses the scheduler's bounded ingress; full-cycle cadence also
     /// routes through `AuthorityRuntime::Observer`'s bounded `LoopHandle`.
     scheduler: std::sync::OnceLock<revops::fee_scheduler::SchedulerHandle>,
+    /// Async prefetch half retained for the immediate fee-cycle RPC. The
+    /// pass owns no broadcaster; all state evolution remains serialized by
+    /// the scheduler owner. Live construction is completed by Task69.
+    fee_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>>,
+    /// Empty until Task69 consumes the whole-plugin live capability and
+    /// assembles the sealed core-state mutator owner.
+    core_mutations: std::sync::OnceLock<revops::rpc_state_mutators::CoreStateMutationOwner>,
+    /// The resolved dry-run journal directory (`resolve_journal_dir`),
+    /// where every Rust-owned evidence file lives — including the
+    /// GOVERNOR'S `econ_ledger_dryrun.db`, which `revenue-econ-reconcile`
+    /// reconciles. `None` = journaling disabled.
+    journal_dir: Option<PathBuf>,
+    /// Port of Python's `_econ_cycle_seq` module global (cl-revenue-ops.py:
+    /// 6147): the shadow-cycle sequence counter, consumed only after the
+    /// enabled + engine gates pass (see `rpc_econ_cycle`).
+    econ_cycle_seq: std::sync::atomic::AtomicI64,
+    /// Task 66 slice 8e: the flow loop's bounded trigger handle, set
+    /// when the flow cadence is wired. `revenue-analyze`'s whole-fleet
+    /// arm enqueues one tick on it (py `run_flow_analysis()`'s trigger,
+    /// coalescing with any pending periodic tick); unset = the flow
+    /// pipeline is unwired -> py's "Plugin not fully initialized".
+    flow_trigger: std::sync::OnceLock<revops::loop_health::LoopHandle>,
+    /// Port of the profitability analyzer's bleeder verdict cache
+    /// (`_bleeder_cache`/`_bleeder_cache_time`, profitability_analyzer.py:
+    /// 1808-1813): `(refreshed_at, scid -> classification)`. Fresh
+    /// (<= 300s) verdicts are reused without a rescan; a STALE map still
+    /// feeds the F4a hysteresis hold on the next rescan (py 1634).
+    bleeder_cache: std::sync::Mutex<Option<(i64, std::collections::BTreeMap<String, String>)>>,
     /// suffix (as accepted by `revenue-r-config`'s `key` param) -> the full
     /// registered option name (shadow- or canonical-mapped).
     config_names: HashMap<String, String>,
@@ -65,12 +93,17 @@ struct State {
     /// `revops::config_resolve` for the (a) DB override > (b) this cache >
     /// (c) fixture-default precedence `revenue-r-config` resolves through.
     python_options: revops::config_resolve::PythonOptionCache,
+    // Validated startup risk profile. Frozen because Python applies profile bundles only at restart.
+    active_profile: Result<String, String>,
     /// Task 10: the stable label for the [`ValidatedFeeMode`] this process
     /// resolved at startup (`resolve_startup_mode`) -- one of
     /// `"passive_observer"`, `"autonomous_shadow"`, `"live_authority"`.
     /// Surfaced by the runway status RPC; never changes for the process's
     /// whole lifetime (the mode-matrix options are not `.dynamic()`).
     mode_label: &'static str,
+    /// Python-equivalent fee-authority gate state, fixed at startup just
+    /// like `mode_label`; only the response's observation time changes.
+    fee_authority_status: revops::rpc_fee_authority_status::FeeAuthorityStatusSnapshot,
     /// Whole-plugin authority split. Observer variants hold only observer loop handles; the guarded action adapter exists only inside `LiveRuntime`.
     #[allow(dead_code)]
     authority_runtime: revops::runtime::AuthorityRuntime,
@@ -432,6 +465,725 @@ where
 /// of double-registering with conflicting defaults. This does not change the
 /// total registered-option count (`fixture_len + 1`): the skip here is
 /// offset by `main`'s own registration of the same name.
+fn resolved_profile_config_json(
+    p: &Plugin<SharedState>,
+    key: &str,
+    overrides: &std::collections::BTreeMap<String, String>,
+    python_options: &HashMap<String, cln_plugin::options::Value>,
+) -> Result<Option<serde_json::Value>> {
+    let state = p.state();
+    let Some(full_name) = state.config_names.get(key) else {
+        return Ok(None);
+    };
+    let fixture_value = p.option_str(full_name)?;
+    let db_key = revops::config_resolve::db_override_key(key);
+    let field_type = config_types::field_type_for(&db_key);
+    let db_override = if revops::config_resolve::is_immutable_key(key) {
+        None
+    } else {
+        overrides
+            .get(&db_key)
+            .and_then(|raw| revops::config_resolve::validate_override(&db_key, raw))
+            .map(cln_plugin::options::Value::String)
+    };
+    let python_value = revops::config_resolve::python_option_name(key)
+        .and_then(|python_name| python_options.get(&python_name).cloned())
+        .map(|value| match value {
+            cln_plugin::options::Value::String(raw)
+                if field_type == Some(config_types::FieldType::Bool) =>
+            {
+                cln_plugin::options::Value::Boolean(config_types::python_startup_bool(
+                    &db_key, &raw,
+                ))
+            }
+            other => other,
+        });
+    Ok(
+        revops::config_resolve::resolve_option_value(db_override, python_value, fixture_value)
+            .as_ref()
+            .map(|raw| config_types::convert_value(field_type, raw)),
+    )
+}
+
+fn register_profile_preview(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "preview risk-profile bundle changes without mutating configuration",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let state = p.state();
+                let Some(handle) = state.db.as_ref() else {
+                    return Ok(serde_json::json!({"error": "Plugin not fully initialized"}));
+                };
+                let overrides = match queries::all_config_overrides(handle).await {
+                    Ok(overrides) => overrides,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let mut current = serde_json::Map::new();
+                let python_options = state.python_options.snapshot();
+                let bundle_keys = revops::rpc_profile_preview::profile_bundles()
+                    .values()
+                    .flat_map(|bundle| bundle.keys().cloned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for key in bundle_keys {
+                    let suffix = key.replace("_", "-");
+                    match resolved_profile_config_json(&p, &suffix, &overrides, &python_options) {
+                        Ok(Some(value)) => {
+                            current.insert(key, value);
+                        }
+                        Ok(None) => {
+                            return Ok(serde_json::json!({
+                                "error": format!("config value unavailable: {key}")
+                            }));
+                        }
+                        Err(error) => {
+                            return Ok(serde_json::json!({"error": format!("{error:#}")}));
+                        }
+                    }
+                }
+                let active_profile = match &state.active_profile {
+                    Ok(profile) => profile,
+                    Err(error) => return Ok(serde_json::json!({"error": error})),
+                };
+                let explicit_keys = overrides.keys().cloned().collect();
+                revops::rpc_profile_preview::apply_active_profile(
+                    &mut current,
+                    active_profile,
+                    &explicit_keys,
+                );
+                let override_values = overrides
+                    .into_iter()
+                    .map(|(key, value)| (key, serde_json::Value::String(value)))
+                    .collect::<serde_json::Map<_, _>>();
+                Ok(revops::rpc_profile_preview::build_profile_preview(
+                    &current,
+                    active_profile,
+                    &override_values,
+                    decoded.get("profile"),
+                ))
+            }
+        },
+    )
+}
+
+fn register_fee_authority_status(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "report the fixed-at-startup fee-authority gate state",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                Ok(p.state().fee_authority_status.response(now_unix()))
+            }
+        },
+    )
+}
+
+fn register_fee_cycle(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "run one complete fee adjustment cycle immediately",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                let state = p.state();
+                if let Some(denial) = state.fee_authority_status.fee_cycle_denial_response() {
+                    return Ok(denial);
+                }
+                let Some(pass) = state.fee_pass.as_ref() else {
+                    return Ok(serde_json::json!({"error": "Plugin not fully initialized"}));
+                };
+                match pass.run_with_completion().await {
+                    Ok(completed) => {
+                        Ok(revops::fee_scheduler::build_fee_cycle_response(&completed))
+                    }
+                    Err(error) => Ok(serde_json::json!({"error": format!("{error:#}")})),
+                }
+            }
+        },
+    )
+}
+
+fn register_total_cost_budget(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "unified budget status across rebalances, Boltz, and on-chain liquidity costs",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                // Python's guard ORDER (cl-revenue-ops.py:8306-8309): the
+                // db/config presence check fires BEFORE window_hours is
+                // parsed, so bad window + no DB answers the init error.
+                if p.state().db.is_none() {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                }
+                let window_hours = match revops::rpc_total_cost_budget::parse_window_hours(
+                    decoded.get("window_hours"),
+                ) {
+                    Ok(window_hours) => window_hours,
+                    Err(error) => return Ok(error),
+                };
+                Ok(total_cost_budget_status(&p, window_hours).await)
+            }
+        },
+    )
+}
+
+/// The post-guard half of `_total_cost_budget_status`
+/// (cl-revenue-ops.py:8296-8430), shared by `revenue-total-cost-budget`
+/// and `revenue-health`'s budget section (py 6279-6293 calls the same
+/// provider). Config-read failures return the in-band error dict.
+async fn total_cost_budget_status(p: &Plugin<SharedState>, window_hours: i64) -> serde_json::Value {
+    // Config scalars, Python's cfg-getattr defaults on absence
+    // (cl-revenue-ops.py:8407-8419). A failed config read is in-band,
+    // like every read RPC here.
+    macro_rules! cfg_value {
+        ($key:expr, $as:ident, $default:expr) => {
+            match resolved_config_json(p, $key).await {
+                Ok(value) => value.and_then(|v| v.$as()).unwrap_or($default),
+                Err(error) => return serde_json::json!({"error": format!("{error:#}")}),
+            }
+        };
+    }
+    let daily_budget_sats = cfg_value!("daily-budget-sats", as_i64, 0);
+    let growth_enabled = cfg_value!("growth-budget-enabled", as_bool, false);
+    let growth_earned_fraction = cfg_value!("growth-budget-earned-fraction", as_f64, 0.25);
+    let growth_experiment_fraction = cfg_value!("growth-budget-experiment-fraction", as_f64, 0.10);
+    let growth_max_extra_sats = cfg_value!("growth-budget-max-extra-sats", as_i64, 0);
+    let growth_hard_ceiling_sats =
+        cfg_value!("growth-budget-hard-ceiling-sats", as_i64, daily_budget_sats);
+    // Python passes the unified daily budget as the explicit global cap
+    // so the Boltz side never recurses into the budget provider
+    // (cl-revenue-ops.py:8147-8158).
+    let boltz_component = revops::rpc_boltz_ops::total_cost_boltz_component(
+        &boltz_rpc_deps(p),
+        window_hours,
+        Some(daily_budget_sats.max(0)),
+    )
+    .await;
+    let state = p.state();
+    revops::rpc_total_cost_budget::total_cost_budget_response(
+        window_hours,
+        revops::rpc_total_cost_budget::TotalCostBudgetSources {
+            db: state.db.as_ref(),
+            boltz_component,
+            daily_budget_sats,
+            growth_enabled,
+            growth_earned_fraction,
+            growth_experiment_fraction,
+            growth_max_extra_sats,
+            growth_hard_ceiling_sats,
+            now: now_unix(),
+        },
+    )
+    .await
+}
+
+fn register_econ_reconcile(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "reconcile the Rust-owned econ ledger against spend_reservations truth (dry-run \
+         by default; apply=true appends corrections to the RUST dry-run ledger only)",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let apply = revops::rpc_econ_reconcile::parse_apply(decoded.get("apply"));
+                // py coerces stale_after_seconds INSIDE the outer try,
+                // after the enabled/ledger gates -- the assembly owns
+                // that ordering now (self-review 2026-07-31).
+                let stale_after_seconds_raw = decoded.get("stale_after_seconds").cloned();
+                let state = p.state();
+                Ok(revops::rpc_econ_reconcile::econ_reconcile_response(
+                    revops::rpc_econ_reconcile::EconReconcileSources {
+                        enabled: revops::config_resolve::econ_shadow_enabled(state.db.as_ref())
+                            .await,
+                        db: state.db.as_ref(),
+                        // The RUST-owned dry-run ledger (GovernorWiring's
+                        // file) — never Python's production econ_ledger.db.
+                        ledger_path: state
+                            .journal_dir
+                            .as_ref()
+                            .map(|dir| dir.join(revops::fee_governor::LEDGER_DRYRUN_FILENAME)),
+                        apply,
+                        stale_after_seconds_raw,
+                        now: now_unix(),
+                    },
+                )
+                .await)
+            }
+        },
+    )
+}
+
+fn register_set_fee(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "manually set a channel fee while holding the shared authority lease (denied in \
+         every non-live mode; the manual execution seam stays unassembled until Task 69)",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let state = p.state();
+                let fee_cfg = revops::fee_config::resolve_fee_cfg(
+                    state.db.as_ref(),
+                    &state.python_options.snapshot(),
+                )
+                .await;
+                Ok(revops::rpc_set_fee::set_fee_response(
+                    revops::rpc_set_fee::SetFeeSources {
+                        gate: &state.fee_authority_status,
+                        channel_id: decoded.get("channel_id"),
+                        fee_ppm: decoded.get("fee_ppm"),
+                        force: decoded
+                            .get("force")
+                            .map(revops::rpc_params::is_truthy_py)
+                            .unwrap_or(false),
+                        // NO manual fee execution capability exists until
+                        // Task 69's authority-gated assembly; with the
+                        // gate enabled this arm answers Python's exact
+                        // "Plugin not fully initialized".
+                        setter: None,
+                        // py's ONE global ForceRateLimiter, keyed per
+                        // command -- shared with revenue-rebalance.
+                        rate_limiter: &state.rebalance_rate_limiter,
+                        min_fee_ppm: fee_cfg.min_fee_ppm,
+                        max_fee_ppm: fee_cfg.max_fee_ppm,
+                        now_seconds: now_unix() as f64,
+                    },
+                ))
+            }
+        },
+    )
+}
+
+fn register_capex_status(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "unified capex budget allocations (per-channel budgets, fleet exploration, \
+         tactical, priority class, global envelope); READ-ONLY -- Python's datastore \
+         push is a declared delta (see revops::capex_evidence)",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                // py `**kwargs` swallows extras -- the contract entry
+                // carries allow_extra_named=true, so this only rejects
+                // shapes pyln itself would reject.
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                let state = p.state();
+                // py: `capex_engine` stays None until init constructed it
+                // over the database (cl-revenue-ops.py:3078); no DB, no
+                // engine.
+                let Some(db) = state.db.as_ref() else {
+                    return Ok(serde_json::json!({"error": "Capex engine not initialized"}));
+                };
+                let now = now_unix();
+
+                let channels =
+                    revops::profitability_assembler::fetch_channel_snapshot(&state.socket_path)
+                        .await;
+                let (profitability, active_scids) = match &channels {
+                    Ok(list) => {
+                        // py `_get_all_channels` (profitability_analyzer.
+                        // py:1921-1935): CHANNELD_NORMAL only, normalized.
+                        let active: Vec<String> = list
+                            .iter()
+                            .filter(|c| {
+                                c.get("state").and_then(serde_json::Value::as_str)
+                                    == Some("CHANNELD_NORMAL")
+                            })
+                            .filter_map(|c| {
+                                c.get("short_channel_id")
+                                    .and_then(serde_json::Value::as_str)
+                            })
+                            .filter(|scid| !scid.is_empty())
+                            .map(|scid| scid.replace(':', "x"))
+                            .collect();
+                        let profitability = match state.observer_db.as_ref() {
+                            Some(observer) => {
+                                revops::profitability_assembler::gather_profitability(
+                                    revops::profitability_assembler::ProfitabilitySources {
+                                        production_db: db,
+                                        observer,
+                                        channels: list,
+                                        now,
+                                    },
+                                )
+                                .await
+                                .map(|fleet| fleet.profitability)
+                                .map_err(|refusal| refusal.detail().to_string())
+                            }
+                            None => Err("observer store not configured".to_string()),
+                        };
+                        (profitability, active)
+                    }
+                    Err(error) => (Err(error.clone()), Vec::new()),
+                };
+                let flow_states = match state.observer_db.as_ref() {
+                    Some(observer) => observer
+                        .channel_flow_states()
+                        .await
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(|row| (row.scid.clone(), row))
+                                .collect::<HashMap<_, _>>()
+                        })
+                        .map_err(|error| error.to_string()),
+                    None => Err("observer store not configured".to_string()),
+                };
+                let cfg = revops::capex_evidence::resolve_capex_config(
+                    Some(db),
+                    &state.python_options.snapshot(),
+                )
+                .await;
+                // The read/write-back decision is one extracted, TESTED
+                // function -- main.rs is a binary no test can import, so
+                // inlining it left the TTL semantics unpinned
+                // (self-review 2026-07-31).
+                let (cached_bleeder, prev_bleeder, needs_write_back) = {
+                    let cache = state.bleeder_cache.lock().expect("bleeder cache lock");
+                    revops::capex_evidence::bleeder_cache_decision(cache.as_ref(), now)
+                };
+
+                let day30 = now - 30 * 86400;
+                let day7 = now - 7 * 86400;
+                let (response, verdicts) = revops::capex_evidence::capex_status_response(
+                    revops::capex_evidence::CapexStatusSources {
+                        profitability,
+                        active_scids,
+                        revenue_30d: queries::per_channel_revenue(db, day30)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        costs_30d: queries::per_channel_costs(db, day30)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        revenue_7d: queries::per_channel_revenue(db, day7)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        costs_7d: queries::per_channel_costs(db, day7)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        success_rates: queries::rebalance_success_rates(db, 30, now)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        capex_by_channel: queries::total_capex_by_channel(db, 30, now)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        spend_aggregates: queries::spend_ledger_aggregates(db, 30 * 24, now)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        listfunds: revops::profitability_assembler::fetch_read_rpc(
+                            &state.socket_path,
+                            "listfunds",
+                        )
+                        .await,
+                        flow_states,
+                        cached_bleeder,
+                        prev_bleeder,
+                        cfg,
+                        now,
+                    },
+                );
+                // py re-stamps `_bleeder_cache_time` ONLY inside the
+                // stale branch (profitability_analyzer.py:1806-1813), so
+                // the TTL measures time since the last RECOMPUTE. Writing
+                // it back on a cache HIT would slide the deadline forward
+                // on every call, and under sub-300s polling the verdicts
+                // would never refresh -- a recovered channel would stay
+                // "hard" (blocked tier, defensive priority) forever
+                // (self-review 2026-07-31).
+                if needs_write_back {
+                    *state.bleeder_cache.lock().expect("bleeder cache lock") =
+                        Some((now, verdicts));
+                }
+                Ok(response)
+            }
+        },
+    )
+}
+
+fn register_econ_cycle(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "READ-ONLY Workstream H shadow cycle: pure intent generation and batch arbitration; \
+         ledgers to the Rust-owned dry-run ledger only",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                // Zero-param contract: decoding still rejects stray
+                // arguments, matching pyln's TypeError on extras.
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                let state = p.state();
+                Ok(revops::rpc_econ_cycle::econ_cycle_response(
+                    revops::rpc_econ_cycle::EconCycleSources {
+                        enabled: revops::config_resolve::econ_shadow_enabled(state.db.as_ref())
+                            .await,
+                        // The rebalance engine is unassembled until Task
+                        // 69's authority-gated construction (see
+                        // `RebalanceOwnerDeps::engine`), so this is
+                        // Python's `engine is None` arm — honest, not a
+                        // stub: there is no candidate source yet.
+                        candidates: None,
+                        // The RUST-owned dry-run ledger (GovernorWiring's
+                        // file) — never Python's production econ_ledger.db.
+                        ledger_path: state
+                            .journal_dir
+                            .as_ref()
+                            .map(|dir| dir.join(revops::fee_governor::LEDGER_DRYRUN_FILENAME)),
+                        now: now_unix(),
+                    },
+                    &state.econ_cycle_seq,
+                ))
+            }
+        },
+    )
+}
+
+fn register_cleanup_closed(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "archive tracked channels that are no longer open, then purge their tracking rows",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                if let Err(error) = revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    return Ok(serde_json::json!({"error": error.to_string()}));
+                }
+                // Python's guard order (cl-revenue-ops.py:6383-6386):
+                // database first, then the plugin runtime (here: the sealed
+                // mutation owner, unassembled until Task 69).
+                let state = p.state();
+                if state.db.is_none() {
+                    return Ok(serde_json::json!({"error": "Database not initialized"}));
+                }
+                let Some(owner) = state.core_mutations.get() else {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                };
+                let peer_channels = revops::profitability_assembler::fetch_read_rpc(
+                    &state.socket_path,
+                    "listpeerchannels",
+                )
+                .await;
+                // Both best-effort in Python: a missing listclosedchannels
+                // degrades to unknown close metadata (py 6434-6435), a
+                // failed getinfo to no opened_at repair (py 7597-7600).
+                let closed_list = revops::profitability_assembler::fetch_read_rpc(
+                    &state.socket_path,
+                    "listclosedchannels",
+                )
+                .await
+                .ok();
+                let block_height =
+                    revops::profitability_assembler::fetch_read_rpc(&state.socket_path, "getinfo")
+                        .await
+                        .ok()
+                        .and_then(|info| {
+                            info.get("blockheight").and_then(serde_json::Value::as_i64)
+                        })
+                        .unwrap_or(0);
+                Ok(owner
+                    .cleanup_closed(revops::rpc_cleanup_closed::CleanupClosedEvidence {
+                        peer_channels,
+                        closed_list,
+                        block_height,
+                        now: now_unix(),
+                    })
+                    .await)
+            }
+        },
+    )
+}
+
+fn register_core_mutator(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+    action: revops::rpc_state_mutators::CoreStateMutationAction,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "apply a completed core-state mutation through the sealed live state writer",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let params = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(params) => params,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let Some(owner) = p.state().core_mutations.get() else {
+                    // Per-ACTION text: py gates the policy mutators on
+                    // policy_manager and the ledger mutators on database
+                    // (see CoreStateMutationAction::uninitialized_error).
+                    return Ok(serde_json::json!({"error": action.uninitialized_error()}));
+                };
+                Ok(owner.handle(action, &params).await)
+            }
+        },
+    )
+}
+
+fn register_rust_diagnostics(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    ping_name: &str,
+    rebalance_plan_name: &str,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    if canonical_names() {
+        return builder;
+    }
+    builder
+        .rpcmethod(
+            ping_name,
+            "liveness probe for the Rust port",
+            |_p, _v| async move { Ok(serde_json::json!({"pong": true, "version": VERSION})) },
+        )
+        .rpcmethod(
+            rebalance_plan_name,
+            "read-only rebalance plan: what the ported planner WOULD pair (sends nothing)",
+            |p: Plugin<SharedState>, _v: serde_json::Value| async move {
+                let cfg = p.configuration();
+                let socket = PathBuf::from(&cfg.lightning_dir).join(&cfg.rpc_file);
+                let mut rpc = match cln_rpc::ClnRpc::new(&socket).await {
+                    Ok(rpc) => rpc,
+                    Err(error) => {
+                        return Ok(serde_json::json!({
+                            "error": format!("connect {}: {error}", socket.display())
+                        }));
+                    }
+                };
+                let response: serde_json::Value = match rpc
+                    .call_raw("listpeerchannels", &serde_json::json!({}))
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(serde_json::json!({
+                            "error": format!("listpeerchannels: {error}")
+                        }));
+                    }
+                };
+                let channels = response
+                    .get("channels")
+                    .and_then(|value| value.as_array())
+                    .map(|values| values.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|channel| {
+                        revops::rpc_rebalance::planner_channel_from_rpc(
+                            channel,
+                            revops::rpc_rebalance::DEFAULT_BAND_LOW,
+                            revops::rpc_rebalance::DEFAULT_BAND_HIGH,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Ok(revops::rpc_rebalance::build_rebalance_plan(
+                    &channels, 200_000, 8, 1_000,
+                ))
+            },
+        )
+}
+
 fn register_python_options<S, I, O>(
     mut builder: Builder<S, I, O>,
     canonical: bool,
@@ -894,6 +1646,93 @@ async fn main() -> Result<()> {
     let ping_name = rpc_name("ping");
     let status_name = rpc_name("status");
     let config_name = rpc_name("config");
+    let profile_preview_name = rpc_name("profile-preview");
+    let profile_preview_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-profile-preview",
+    );
+    let fee_authority_status_name = rpc_name("fee-authority-status");
+    let fee_authority_status_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-fee-authority-status",
+    );
+    let fee_cycle_name = rpc_name("fee-cycle");
+    let fee_cycle_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-fee-cycle",
+    );
+    let ignore_name = rpc_name("ignore");
+    let ignore_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-ignore");
+    let unignore_name = rpc_name("unignore");
+    let unignore_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-unignore",
+    );
+    let ban_name = rpc_name("ban");
+    let ban_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-ban");
+    let unban_name = rpc_name("unban");
+    let unban_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-unban");
+    let clear_reservations_name = rpc_name("clear-reservations");
+    let clear_reservations_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-clear-reservations",
+    );
+    let spend_release_name = rpc_name("spend-release");
+    let spend_release_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-release",
+    );
+    let spend_settle_name = rpc_name("spend-settle");
+    let spend_settle_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-settle",
+    );
+    // Task 66 slice 2: reserve + stale-release through the same sealed
+    // owner (uninitialized arm until Task 69's authority assembly).
+    let spend_reserve_name = rpc_name("spend-reserve");
+    let spend_reserve_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-reserve",
+    );
+    let spend_release_stale_name = rpc_name("spend-release-stale");
+    let spend_release_stale_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-spend-release-stale",
+    );
+    // Task 66 slice 3: the closed-channel archival backfill.
+    let cleanup_closed_name = rpc_name("cleanup-closed");
+    let cleanup_closed_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-cleanup-closed",
+    );
+    // Task 66 slice 4: the econ-ledger reconciliation sweep.
+    let econ_reconcile_name = rpc_name("econ-reconcile");
+    let econ_reconcile_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-econ-reconcile",
+    );
+    // Task 66 slice 5: the read-only shadow-cycle diagnostic.
+    let econ_cycle_name = rpc_name("econ-cycle");
+    let econ_cycle_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-econ-cycle",
+    );
+    // Task 66 slice 6: the unified capex allocations read.
+    let capex_status_name = rpc_name("capex-status");
+    let capex_status_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-capex-status",
+    );
+    // Task 66 slice 7: the authority-gated manual fee write -- the final
+    // RPC closing the Python canonical set.
+    let set_fee_name = rpc_name("set-fee");
+    let set_fee_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-set-fee",
+    );
     let rebalance_plan_name = rpc_name("rebalance-plan");
     let rebalance_cycle_name = rpc_name("rebalance-cycle");
     let rebalance_debug_name = rpc_name("rebalance-debug");
@@ -930,6 +1769,12 @@ async fn main() -> Result<()> {
     let capacity_report_name = rpc_name("capacity-report");
     let econ_snapshot_name = rpc_name("econ-snapshot");
     let spend_ledger_name = rpc_name("spend-ledger");
+    // Task 66 slice 1: the unified total-cost budget read.
+    let total_cost_budget_name = rpc_name("total-cost-budget");
+    let total_cost_budget_spec = revops::rpc_params::method_spec(
+        &revops::rpc_params::load_rpc_contract(),
+        "revenue-total-cost-budget",
+    );
 
     // Task 56: the read-only planner quartet. These builders were already
     // ported, but were unreachable until their production DB/config seams
@@ -1127,11 +1972,6 @@ async fn main() -> Result<()> {
             },
         )
         .rpcmethod(
-            &ping_name,
-            "liveness probe for the Rust port",
-            |_p, _v| async move { Ok(serde_json::json!({"pong": true, "version": VERSION})) },
-        )
-        .rpcmethod(
             &status_name,
             "status snapshot for the Rust port",
             |p: Plugin<SharedState>, _v| async move {
@@ -1209,48 +2049,6 @@ async fn main() -> Result<()> {
                     db_tables,
                     fee_runway,
                 }))
-            },
-        )
-        .rpcmethod(
-            &rebalance_plan_name,
-            "read-only rebalance plan: what the ported planner WOULD pair (sends nothing)",
-            |p: Plugin<SharedState>, _v: serde_json::Value| async move {
-                // First production caller of the revops-rebalance crate,
-                // which until 2026-07-27 was not even linked into this
-                // binary. READ-ONLY: one listpeerchannels call, then the
-                // pure planner. No sendpay, no reservation, no spend.
-                let cfg = p.configuration();
-                let socket = PathBuf::from(&cfg.lightning_dir).join(&cfg.rpc_file);
-                let mut rpc = match cln_rpc::ClnRpc::new(&socket).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return Ok(serde_json::json!({"error": format!("connect {}: {e}", socket.display())}))
-                    }
-                };
-                let resp: serde_json::Value = match rpc
-                    .call_raw("listpeerchannels", &serde_json::json!({}))
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => return Ok(serde_json::json!({"error": format!("listpeerchannels: {e}")})),
-                };
-                let channels: Vec<_> = resp
-                    .get("channels")
-                    .and_then(|c| c.as_array())
-                    .map(|a| a.as_slice())
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter_map(|c| {
-                        revops::rpc_rebalance::planner_channel_from_rpc(
-                            c,
-                            revops::rpc_rebalance::DEFAULT_BAND_LOW,
-                            revops::rpc_rebalance::DEFAULT_BAND_HIGH,
-                        )
-                    })
-                    .collect();
-                Ok(revops::rpc_rebalance::build_rebalance_plan(
-                    &channels, 200_000, 8, 1_000,
-                ))
             },
         )
         .rpcmethod(
@@ -1392,6 +2190,22 @@ async fn main() -> Result<()> {
                                                 )
                                             }
                                             other => other,
+                                        })
+                                        // Task 74 `rust_contract`: the
+                                        // startup layer is CLAMPED into
+                                        // CONFIG_FIELD_RANGES exactly as
+                                        // py's
+                                        // `_validate_numeric_config_options`
+                                        // does before Config exists, so
+                                        // the operator payload reports
+                                        // the value the plugin would
+                                        // actually run with -- not an
+                                        // out-of-band option verbatim.
+                                        .map(|v| {
+                                            revops::config_resolve::clamp_startup_numeric(
+                                                &db_key, &v,
+                                            )
+                                            .0
                                         });
                                     (db_override, python_value)
                                 }
@@ -1403,16 +2217,32 @@ async fn main() -> Result<()> {
                             python_value,
                             fixture_value,
                         );
-                        // Phase 1b has no DB-backed config-override-write
-                        // path yet, so there is no live per-key version to
-                        // report; build_config_response documents this
-                        // placeholder in its `_phase1b_gaps` array.
+                        // Task 66 slice 8b: the REAL config version --
+                        // Python's MAX(version) over config_overrides
+                        // (config.py:919 seeds _version from the same
+                        // read). No DB = py's pre-attach default of 0;
+                        // a FAILED read surfaces as an error, never a
+                        // silent 0 that could masquerade as "no writes
+                        // yet".
+                        let version = match s.db.as_ref() {
+                            Some(handle) => match queries::config_version(handle).await {
+                                Ok(version) => version,
+                                Err(e) => {
+                                    return Ok(serde_json::json!({
+                                        "error": format!(
+                                            "config_overrides version read failed: {e:#}"
+                                        ),
+                                    }))
+                                }
+                            },
+                            None => 0,
+                        };
                         Ok(build_config_response(
                             key,
                             true,
                             effective.as_ref(),
                             field_type,
-                            0,
+                            version,
                         ))
                     }
                     None => Ok(build_config_response(key, false, None, None, 0)),
@@ -1435,23 +2265,143 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &report_name,
-            "financial/policy reports (Phase 1b: 'costs' is DB-backed; \
-             'summary'/'policies'/'peer' are gap-marked, see _phase1b_gaps)",
+            "financial/policy reports: summary and policies from real peer_policies rows, \
+             peer from policy + by-peer profitability + channel_states, costs from \
+             channel_closure_costs (Task 66 slice 8c: all four types real)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
+                let spec = revops::rpc_params::method_spec(
+                    &revops::rpc_params::load_rpc_contract(),
+                    "revenue-report",
+                );
+                let decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &v,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                // py's signature default is "summary" for an ABSENT
+                // param only; a present non-string (5, true, null) never
+                // equals any known type and falls to the unknown-type
+                // arm (self-review 2026-07-31).
+                let report_type = match decoded.get("report_type") {
+                    None => "summary".to_string(),
+                    Some(serde_json::Value::String(text)) => text.clone(),
+                    Some(other) => revops::rpc_state_mutators::python_str(other),
+                };
                 let s = p.state();
-                let report_type = v
-                    .get("report_type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("summary");
-                if report_type != "costs" {
-                    return Ok(build_report(report_type, None, 0));
-                }
+                // py 5596-5597: database/policy_manager gate FIRST, for
+                // EVERY report type (the old wiring let non-costs types
+                // bypass it into the retired not_yet_ported arm).
                 let Some(handle) = &s.db else {
                     return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 let now = now_unix();
-                let costs = queries::closure_costs_windows(handle, now).await?;
-                Ok(build_report(report_type, Some(&costs), now))
+                let failed =
+                    |e: String| Ok(revops::rpc_report::report_generation_failed(&e));
+                match report_type.as_str() {
+                    "summary" => match queries::all_policies(handle, now).await {
+                        Ok(policies) => {
+                            Ok(revops::rpc_report::build_report_summary(&policies, now))
+                        }
+                        Err(e) => failed(e.to_string()),
+                    },
+                    "policies" => match queries::all_policies(handle, now).await {
+                        Ok(policies) => {
+                            Ok(revops::rpc_report::build_report_policies(&policies))
+                        }
+                        Err(e) => failed(e.to_string()),
+                    },
+                    "peer" => {
+                        // py 5625-5626: `if not peer_id` — absent, null,
+                        // and "" all take the usage arm.
+                        let peer_id = decoded
+                            .get("peer_id")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if peer_id.is_empty() {
+                            return Ok(serde_json::json!({
+                                "error": "Usage: revenue-report peer <peer_id>"
+                            }));
+                        }
+                        let policy = match queries::policy_for_peer(handle, &peer_id, now).await
+                        {
+                            Ok(policy) => revops::rpc_policy::peer_policy_to_json(&policy, now),
+                            Err(e) => return failed(e.to_string()),
+                        };
+                        // py 5631-5633: `prof_data = None` unless the
+                        // analyzer exists; an analyzer EXCEPTION rides the
+                        // outer except. Observer missing = analyzer
+                        // missing; a failed gather = the exception.
+                        let profitability = match s.observer_db.as_ref() {
+                            None => serde_json::Value::Null,
+                            Some(observer) => {
+                                let channels =
+                                    match revops::profitability_assembler::fetch_channel_snapshot(
+                                        &s.socket_path,
+                                    )
+                                    .await
+                                    {
+                                        Ok(channels) => channels,
+                                        Err(e) => return failed(e),
+                                    };
+                                match revops::profitability_assembler::gather_profitability(
+                                    revops::profitability_assembler::ProfitabilitySources {
+                                        production_db: handle,
+                                        observer,
+                                        channels: &channels,
+                                        now,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(fleet) => revops::rpc_profitability::profitability_by_peer(
+                                        &fleet.profitability,
+                                        &peer_id,
+                                    )
+                                    .unwrap_or(serde_json::Value::Null),
+                                    Err(refusal) => {
+                                        return failed(refusal.detail().to_string())
+                                    }
+                                }
+                            }
+                        };
+                        // py 5636-5641: all rows, filtered to this peer,
+                        // sorted by channel_id (the schema has no
+                        // short_channel_id column; py's fallback chain
+                        // ends at "").
+                        let mut flow_states =
+                            match queries::all_channel_state_rows(handle).await {
+                                Ok(rows) => rows
+                                    .into_iter()
+                                    .filter(|row| {
+                                        row.get("peer_id").and_then(|p| p.as_str())
+                                            == Some(peer_id.as_str())
+                                    })
+                                    .collect::<Vec<_>>(),
+                                Err(e) => return failed(e.to_string()),
+                            };
+                        flow_states.sort_by_key(|row| {
+                            row.get("channel_id")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string()
+                        });
+                        Ok(revops::rpc_report::build_report_peer(
+                            &peer_id,
+                            policy,
+                            profitability,
+                            flow_states,
+                        ))
+                    }
+                    "costs" => match queries::closure_costs_windows(handle, now).await {
+                        Ok(costs) => Ok(build_report("costs", Some(&costs), now)),
+                        Err(e) => failed(e.to_string()),
+                    },
+                    other => Ok(revops::rpc_report::unknown_report_type(other)),
+                }
             },
         )
         .rpcmethod(
@@ -2224,8 +3174,9 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &health_name,
-            "consolidated operator health check (Phase: financials.today/.week are \
-             DB-backed; annualized_roc_pct and sections 2-9 are gap-marked, see _gaps)",
+            "consolidated operator health check: financials/roc/channels/fees/budget/\
+             top_routes/boltz/loops served from real evidence (Task 66 slice 8d); \
+             rebalancer/planner stay gap-marked until Task 69's engine assembly",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
@@ -2270,16 +3221,109 @@ async fn main() -> Result<()> {
                     Ok::<_, anyhow::Error>((pnl_1d, pnl_7d))
                 }
                 .await;
-                // total_capacity_sats: a live `listpeerchannels` sum -- omit
-                // (pass `None`) until that RPC call is wired; annualized_roc_pct
-                // will then show as `null` + gap-listed, per the builder's
-                // contract.
-                match pnl {
-                    Ok((pnl_1d, pnl_7d)) => Ok(revops::rpc_health::build_health_with_loops(
-                        now, Some(&pnl_1d), Some(&pnl_7d), None,
+                // Task 66 slice 8d: the live listpeerchannels snapshot
+                // feeds BOTH annualized_roc_pct's capacity sum (py
+                // calculate_roc; a fetch failure is py's own except -> 0
+                // capacity -> 0.0, profitability_analyzer.py:1837-1841)
+                // and the channels section's classification gather.
+                let snapshot =
+                    revops::profitability_assembler::fetch_channel_snapshot(&s.socket_path)
+                        .await;
+                // py calculate_roc sums capacity via `_get_all_channels()`
+                // (profitability_analyzer.py:1840-1846, 1921-1945):
+                // CHANNELD_NORMAL only, named scid required. Summing the
+                // RAW snapshot instead inflates the denominator with
+                // pending/closing channels and understates ROC
+                // (self-review 2026-07-31). `total_capacity_sats` is the
+                // already-ported helper `revenue-dashboard` uses.
+                let total_capacity_sats: i64 = match &snapshot {
+                    Ok(channels) => revops::dashboard_evidence::total_capacity_sats(channels),
+                    Err(_) => 0,
+                };
+                // channels section (py 6216-6229): classification counts
+                // over the SAME gather revenue-profitability serves. No
+                // observer store = the pipeline is unwired here (gap);
+                // a failed snapshot/gather = py's except arm.
+                let channels_section = match (&s.observer_db, &snapshot) {
+                    (None, _) => None,
+                    (Some(_), Err(error)) => Some(Err(error.clone())),
+                    (Some(observer), Ok(channels)) => Some(
+                        match revops::profitability_assembler::gather_profitability(
+                            revops::profitability_assembler::ProfitabilitySources {
+                                production_db: handle,
+                                observer,
+                                channels,
+                                now,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(fleet) => {
+                                let mut classifications =
+                                    std::collections::BTreeMap::new();
+                                for prof in fleet.profitability.values() {
+                                    *classifications
+                                        .entry(
+                                            prof.classification.as_value().to_string(),
+                                        )
+                                        .or_insert(0i64) += 1;
+                                }
+                                Ok((fleet.profitability.len(), classifications))
+                            }
+                            Err(refusal) => Err(refusal.detail().to_string()),
+                        },
+                    ),
+                };
+                // fees section (py 6232-6259): the owner's live counts;
+                // no running scheduler = unwired (gap). A bridge failure
+                // Value doubles as py's except arm.
+                let fees_section = match s.scheduler.get() {
+                    Some(handle) => Some(
+                        revops::fee_scheduler::query_owner_bounded(
+                            &handle.tx,
+                            revops::fee_scheduler::FeeDebugQuery::HealthCounts,
+                            revops::fee_scheduler::RPC_BRIDGE_RECV_TIMEOUT,
+                        )
+                        .await,
+                    ),
+                    None => None,
+                };
+                // budget section (py 6279-6293): the same provider the
+                // total-cost-budget RPC serves, 24h window (py default).
+                let budget_section = Some(Ok(total_cost_budget_status(&p, 24).await));
+                // top_routes (py 6326-6339): fetch failure is py's own
+                // except -> [].
+                let top_routes = Some(
+                    queries::top_route_pairs(handle, 7, 2, 5, now)
+                        .await
+                        .unwrap_or_default(),
+                );
+                // py 6301-6315: the boltz section reports the live
+                // auto-cycle state when a manager exists AND is enabled;
+                // otherwise `{"enabled": false}`. This port has a Boltz
+                // runtime since Task 63, so the section must reflect ITS
+                // config rather than a hardcoded false (self-review
+                // 2026-07-31). The action capability stays unassembled,
+                // but `enabled` is a real config answer.
+                let boltz = Some(serde_json::json!({
+                    "enabled": s.boltz_owner.is_some() && s.boltz_cfg.enabled,
+                }));
+                let extras = revops::rpc_health::HealthExtras {
+                    channels: channels_section,
+                    fees: fees_section,
+                    budget: budget_section,
+                    top_routes,
+                    boltz,
+                };
+                let mut out = match pnl {
+                    Ok((pnl_1d, pnl_7d)) => revops::rpc_health::build_health_with_loops(
+                        now,
+                        Some(&pnl_1d),
+                        Some(&pnl_7d),
+                        Some(total_capacity_sats),
                         loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()),
                         &p.state().boot_id,
-                    )),
+                    ),
                     Err(e) => {
                         let mut out = revops::rpc_health::build_health_with_loops(now, None, None, None, loop_rows.as_ref().map(|rows| rows.as_slice()).map_err(|error| error.clone()), &p.state().boot_id);
                         out["financials"] = serde_json::json!({"error": e.to_string()});
@@ -2290,9 +3334,11 @@ async fn main() -> Result<()> {
                         if let Some(gaps) = out["_gaps"].as_array_mut() {
                             gaps.retain(|g| g != "financials");
                         }
-                        Ok(out)
+                        out
                     }
-                }
+                };
+                revops::rpc_health::apply_health_extras(&mut out, extras);
+                Ok(out)
             },
         )
         .rpcmethod(
@@ -2404,11 +3450,44 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &analyze_name,
-            "read-only flow analysis for a single channel_id (SCID); the whole-fleet \
-             sweep (no channel_id) is a mutating background job and is NOT ported here",
+            "flow analysis: single channel_id (SCID) served from the flow pass's \
+             persisted state; no channel_id triggers one bounded flow-loop pass \
+             over the Rust-owned observer store (Task 66 slice 8e)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
+                }
+                // py 4536-4542 fleet arm: absent, null, and "" channel_id
+                // are all falsy -> trigger one pass. The Rust pass writes
+                // ONLY the Rust-owned observer store (never production),
+                // so the trigger is safe pre-cutover.
+                let fleet = match v.get("channel_id") {
+                    None | Some(serde_json::Value::Null) => true,
+                    Some(serde_json::Value::String(s)) if s.is_empty() => true,
+                    _ => false,
+                };
+                if fleet {
+                    let state = p.state();
+                    return Ok(match state.flow_trigger.get() {
+                        Some(handle) => revops::rpc_analyze::fleet_trigger_response(
+                            handle
+                                .request(revops::loop_health::RequestKey::from(
+                                    "fixed_interval",
+                                ))
+                                .await
+                                .map_err(|e| format!("{e:#}")),
+                        ),
+                        // py's flow_analyzer-None guard: the flow loop is
+                        // unwired in this runtime. The builder's fleet arm
+                        // ignores the lookup argument entirely (no store
+                        // read happens on this path), so Ready(None) keeps
+                        // the F71-R23 tripwire's no-NotWired-in-main
+                        // invariant intact.
+                        None => revops::rpc_analyze::build_analyze(
+                            v.get("channel_id"),
+                            revops::rpc_analyze::MetricsLookup::Ready(None),
+                        ),
+                    });
                 }
                 // F71-R23: served from the flow pass's own persisted
                 // state, gated on THIS boot having completed a pass. The
@@ -2441,8 +3520,9 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &policy_name,
-            "peer policy diagnostics (READ-ONLY in this port: list/get/find/changes; \
-             set/delete/tag/untag/batch are refused -- see revops::rpc_policy)",
+            "peer policy management: list/get/find/changes reads; set/delete/tag/untag/\
+             batch behind py's internal/admin override through the sealed mutation \
+             owner (Task 66 slice 8f; execution staged until Task 69)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
@@ -2455,6 +3535,41 @@ async fn main() -> Result<()> {
                 // `str(x or "")` -> `""` -> unknown-action error) -- the
                 // OLD wiring collapsed both to `None` -> "list".
                 let action = revops::rpc_policy::normalize_action(v.get("action"));
+                // Task 66 slice 8f: py's arm order for the write actions
+                // (cl-revenue-ops.py:5385-5397): policy_manager gate,
+                // then the no-override deprecation refusal, then the
+                // write. Pre-Task-69 the write capability is the
+                // UNASSEMBLED mutation owner -> "Plugin not initialized",
+                // the same string py answers when the manager is absent.
+                if revops::rpc_policy::is_tactical_action(&action) {
+                    if s.db.is_none() {
+                        return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    }
+                    let params = v.as_object().cloned().unwrap_or_default();
+                    if let Some(denial) =
+                        revops::rpc_state_mutators::deprecated_policy_write_gate(
+                            &format!("revenue-policy {action}"),
+                            &params,
+                        )
+                    {
+                        return Ok(denial);
+                    }
+                    let Some(owner) = s.core_mutations.get() else {
+                        return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    };
+                    let mutation = match action.as_str() {
+                        "set" => revops::rpc_state_mutators::CoreStateMutationAction::PolicySet,
+                        "delete" => {
+                            revops::rpc_state_mutators::CoreStateMutationAction::PolicyDelete
+                        }
+                        "tag" => revops::rpc_state_mutators::CoreStateMutationAction::PolicyTag,
+                        "untag" => {
+                            revops::rpc_state_mutators::CoreStateMutationAction::PolicyUntag
+                        }
+                        _ => revops::rpc_state_mutators::CoreStateMutationAction::PolicyBatch,
+                    };
+                    return Ok(owner.handle(mutation, &params).await);
+                }
                 if let Some(err) = revops::rpc_policy::policy_action_gate(&action) {
                     return Ok(err);
                 }
@@ -2564,11 +3679,18 @@ async fn main() -> Result<()> {
         )
         .rpcmethod(
             &hot_channel_protection_peers_name,
-            "list persistent hot-channel-protection peer overrides (READ-ONLY in \
-             this port: add/remove/clear are DB writes and are refused)",
+            "persistent hot-channel-protection peer overrides: list reads; add/remove/\
+             clear through the sealed mutation owner (Task 66 slice 8f; execution \
+             staged until Task 69)",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
+                }
+                // py's guard order: `database is None` fires FIRST, for
+                // every action (cl-revenue-ops.py handler top).
+                let s = p.state();
+                if s.db.is_none() {
+                    return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 }
                 // Task 50 correction round, F8: `str(action or
                 // "list").lower()`, NO `.strip()` -- the OLD wiring
@@ -2580,20 +3702,29 @@ async fn main() -> Result<()> {
                     revops::rpc_hot_channel_protection_peers::normalize_action(v.get("action"));
                 if revops::rpc_hot_channel_protection_peers::WRITE_ACTIONS.contains(&action.as_str())
                 {
-                    // H6: a REAL write action (a genuine scope boundary),
-                    // distinct from the unknown-action message below.
-                    return Ok(
-                        revops::rpc_hot_channel_protection_peers::write_action_refused_error(
-                            &action,
-                        ),
-                    );
+                    // Task 66 slice 8f: real writes, through the sealed
+                    // owner -- unassembled until Task 69, answering py's
+                    // "Plugin not initialized" exactly like the other
+                    // staged mutators.
+                    let Some(owner) = s.core_mutations.get() else {
+                        return Ok(serde_json::json!({"error": "Plugin not initialized"}));
+                    };
+                    let params = v.as_object().cloned().unwrap_or_default();
+                    let mutation = match action.as_str() {
+                        "add" => revops::rpc_state_mutators::CoreStateMutationAction::HotChannelAdd,
+                        "remove" => {
+                            revops::rpc_state_mutators::CoreStateMutationAction::HotChannelRemove
+                        }
+                        _ => revops::rpc_state_mutators::CoreStateMutationAction::HotChannelClear,
+                    };
+                    return Ok(owner.handle(mutation, &params).await);
                 }
                 if action != "list" {
                     return Ok(
                         revops::rpc_hot_channel_protection_peers::unknown_action_error(&action),
                     );
                 }
-                let Some(handle) = &p.state().db else {
+                let Some(handle) = &s.db else {
                     return Ok(serde_json::json!({"error": "Plugin not initialized"}));
                 };
                 match queries::hot_channel_protection_override_peers(handle).await {
@@ -2732,6 +3863,75 @@ async fn main() -> Result<()> {
                 Ok(result.unwrap_or_else(|e| serde_json::json!({"error": e.to_string()})))
             },
         );
+    let builder =
+        register_total_cost_budget(builder, &total_cost_budget_name, total_cost_budget_spec);
+    let builder = register_profile_preview(builder, &profile_preview_name, profile_preview_spec);
+    let builder = register_fee_authority_status(
+        builder,
+        &fee_authority_status_name,
+        fee_authority_status_spec,
+    );
+    let builder = register_fee_cycle(builder, &fee_cycle_name, fee_cycle_spec);
+    let builder = register_core_mutator(
+        builder,
+        &ignore_name,
+        ignore_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::Ignore,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &unignore_name,
+        unignore_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::Unignore,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &ban_name,
+        ban_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::Ban,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &unban_name,
+        unban_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::Unban,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &clear_reservations_name,
+        clear_reservations_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::ClearReservations,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_release_name,
+        spend_release_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendRelease,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_settle_name,
+        spend_settle_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendSettle,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_reserve_name,
+        spend_reserve_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendReserve,
+    );
+    let builder = register_core_mutator(
+        builder,
+        &spend_release_stale_name,
+        spend_release_stale_spec,
+        revops::rpc_state_mutators::CoreStateMutationAction::SpendReleaseStale,
+    );
+    let builder = register_cleanup_closed(builder, &cleanup_closed_name, cleanup_closed_spec);
+    let builder = register_econ_reconcile(builder, &econ_reconcile_name, econ_reconcile_spec);
+    let builder = register_econ_cycle(builder, &econ_cycle_name, econ_cycle_spec);
+    let builder = register_capex_status(builder, &capex_status_name, capex_status_spec);
+    let builder = register_set_fee(builder, &set_fee_name, set_fee_spec);
+    let builder = register_rust_diagnostics(builder, &ping_name, &rebalance_plan_name);
     let builder = register_python_options(builder, canonical_names());
 
     let Some(configured) = builder.configure().await? else {
@@ -3066,6 +4266,7 @@ async fn main() -> Result<()> {
 
     let resolved_mode_label = mode_label(&mode);
     let scheduler = std::sync::OnceLock::new();
+    let core_mutations = std::sync::OnceLock::new();
     let authority_plan = mode.into_authority_plan(|live_mode| {
         let store = observer_db
             .clone()
@@ -3078,10 +4279,12 @@ async fn main() -> Result<()> {
         )
     });
     let mut fee_cadence = None;
+    let mut fee_rpc_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>> = None;
     let mut lnplus_cadence = None;
     // Task 71 / R26: the three analytics cadences. Built during
     // composition, started only after `configured.start()` returns.
     let mut flow_cadence = None;
+    let flow_trigger_cell = std::sync::OnceLock::new();
     let mut startup_snapshot_cadence = None;
     let mut financial_cadence = None;
     let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
@@ -3222,6 +4425,7 @@ async fn main() -> Result<()> {
                                 let initial_interval = revops::fee_config::resolve_fee_cfg(db.as_ref(), &python_options.snapshot()).await.fee_interval.max(1) as u64;
                                 let pass = Arc::new(revops::fee_scheduler::FeeObserverPass::new(init_socket_path.clone(), db.clone(), python_options.clone(), handle.tx.clone(), initial_interval));
                                 passes = passes.with_fee(pass.clone());
+                                fee_rpc_pass = Some(pass.clone());
                                 fee_pass = Some(pass);
                                 let _ = scheduler.set(handle);
                             }
@@ -3276,6 +4480,7 @@ async fn main() -> Result<()> {
                     if let Some(handle) =
                         runtime.handle(revops_db::loop_health::LoopId::FlowAnalysis)
                     {
+                        let _ = flow_trigger_cell.set(handle.clone());
                         flow_cadence = Some(revops::analytics_cadence::FlowCadenceActivation::new(
                             handle, flow_pass,
                         ));
@@ -3431,6 +4636,21 @@ async fn main() -> Result<()> {
         });
     }
 
+    let active_profile = match db.as_ref() {
+        Some(handle) => revops::rpc_profile_preview::startup_active_profile(
+            queries::config_override(handle, "risk_profile")
+                .await
+                .map_err(|error| format!("{error:#}")),
+        ),
+        None => revops::rpc_profile_preview::startup_active_profile(Ok(None)),
+    };
+
+    let fee_authority_status =
+        revops::rpc_fee_authority_status::FeeAuthorityStatusSnapshot::from_startup_mode(
+            resolved_mode_label == "live_authority",
+            boot_identity.started_at,
+        );
+
     let state: SharedState = Arc::new(State {
         version: VERSION.to_string(),
         observer,
@@ -3439,8 +4659,16 @@ async fn main() -> Result<()> {
         observer_db,
         config_names: config_name_map(),
         python_options,
+        active_profile,
         scheduler,
+        fee_pass: fee_rpc_pass,
+        core_mutations,
+        journal_dir: journal_dir.clone(),
+        econ_cycle_seq: std::sync::atomic::AtomicI64::new(0),
+        bleeder_cache: std::sync::Mutex::new(None),
+        flow_trigger: flow_trigger_cell,
         mode_label: resolved_mode_label,
+        fee_authority_status,
         authority_runtime,
         socket_path: init_socket_path.clone(),
         production_db_path: production_db_path_expanded.clone(),

@@ -28,9 +28,11 @@
 
 use std::time::Duration;
 
+use revops_db::budget::{ClearStats, ReserveRequest};
 use revops_db::owner::{StoreAdmissionRefused, StoreReceipt, StoreReceiptWait};
 use revops_db::state_writer::{
-    BatchAck, BudgetTransition, ConfigDelete, PeerPolicyWrite, PolicyDelete, StateWriterHandle,
+    BatchAck, BudgetTransition, ClosedChannelArchive, ConfigDelete, PeerPolicyWrite, PolicyDelete,
+    SpendReleaseBatch, StateWriterHandle,
 };
 
 /// Receipt budget default: the Task 59 floor (one legitimate SQLite lock
@@ -110,6 +112,123 @@ pub struct ProductionStateWriter {
     receipt_budget: Duration,
 }
 
+/// Sealed proof that the whole-plugin live handoff authorized core state
+/// mutations. No production constructor exists before Task69 composes the
+/// single WholePluginLiveCapability; unit tests receive a cfg(test) token.
+pub struct CoreStateLiveCapability {
+    _seal: (),
+}
+
+impl CoreStateLiveCapability {
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self { _seal: () }
+    }
+}
+
+/// Non-cloneable live core-state mutation bundle. RPC handlers can hold this
+/// bundle only after consuming the sealed live capability above.
+pub struct CoreMutators {
+    writer: ProductionStateWriter,
+    _live: CoreStateLiveCapability,
+}
+
+impl CoreMutators {
+    pub fn assemble(writer: ProductionStateWriter, live: CoreStateLiveCapability) -> Self {
+        Self {
+            writer,
+            _live: live,
+        }
+    }
+
+    pub(crate) async fn upsert_peer_policy(
+        &self,
+        write: PeerPolicyWrite,
+        now: i64,
+    ) -> StateWriteAck<()> {
+        self.writer.upsert_peer_policy(write, now).await
+    }
+
+    pub(crate) async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
+        self.writer.delete_peer_policy(peer_id).await
+    }
+
+    pub(crate) async fn apply_policy_batch(
+        &self,
+        writes: Vec<PeerPolicyWrite>,
+        now: i64,
+    ) -> StateWriteAck<usize> {
+        self.writer.apply_policy_batch(writes, now).await
+    }
+
+    pub(crate) async fn set_hot_channel_override(
+        &self,
+        peer_id: String,
+        note: Option<String>,
+        min_depletion_trigger_pct: Option<f64>,
+        now: i64,
+    ) -> StateWriteAck<()> {
+        self.writer
+            .set_hot_channel_override(peer_id, note, min_depletion_trigger_pct, now)
+            .await
+    }
+
+    pub(crate) async fn remove_hot_channel_override(&self, peer_id: String) -> StateWriteAck<bool> {
+        self.writer.remove_hot_channel_override(peer_id).await
+    }
+
+    pub(crate) async fn clear_all_budget_reservations(&self) -> StateWriteAck<ClearStats> {
+        self.writer.clear_all_budget_reservations().await
+    }
+
+    pub(crate) async fn release_spend_reservation(
+        &self,
+        reservation_id: String,
+    ) -> StateWriteAck<bool> {
+        self.writer.release_spend_reservation(reservation_id).await
+    }
+
+    pub(crate) async fn reserve_spend(
+        &self,
+        request: ReserveRequest,
+        now: i64,
+    ) -> StateWriteAck<(bool, i64)> {
+        self.writer.reserve_spend(request, now).await
+    }
+
+    pub(crate) async fn archive_closed_channel(
+        &self,
+        archive: ClosedChannelArchive,
+    ) -> StateWriteAck<()> {
+        self.writer.archive_closed_channel(archive).await
+    }
+
+    pub(crate) async fn release_stale_spend_reservations(
+        &self,
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+    ) -> StateWriteAck<SpendReleaseBatch> {
+        self.writer
+            .release_stale_spend_reservations(category, older_than_seconds, limit, now)
+            .await
+    }
+
+    pub(crate) async fn settle_spend_reservation(
+        &self,
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+    ) -> StateWriteAck<bool> {
+        self.writer
+            .settle_spend_reservation(reservation_id, actual_spent_sats, source, record_event, now)
+            .await
+    }
+}
+
 impl ProductionStateWriter {
     /// Build the capability over a spawned writer actor. ZERO production
     /// call sites exist (source-scan pinned) until Task 69's
@@ -174,6 +293,78 @@ impl ProductionStateWriter {
     pub async fn delete_peer_policy(&self, peer_id: String) -> StateWriteAck<PolicyDelete> {
         resolve(
             self.handle.try_delete_peer_policy(peer_id),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn clear_all_budget_reservations(&self) -> StateWriteAck<ClearStats> {
+        resolve(
+            self.handle.try_clear_all_budget_reservations(),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn release_spend_reservation(&self, reservation_id: String) -> StateWriteAck<bool> {
+        resolve(
+            self.handle.try_release_spend_reservation(reservation_id),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn reserve_spend(
+        &self,
+        request: ReserveRequest,
+        now: i64,
+    ) -> StateWriteAck<(bool, i64)> {
+        resolve(
+            self.handle.try_reserve_spend(request, now),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn archive_closed_channel(&self, archive: ClosedChannelArchive) -> StateWriteAck<()> {
+        resolve(
+            self.handle.try_archive_closed_channel(archive),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn release_stale_spend_reservations(
+        &self,
+        category: Option<String>,
+        older_than_seconds: i64,
+        limit: i64,
+        now: i64,
+    ) -> StateWriteAck<SpendReleaseBatch> {
+        resolve(
+            self.handle
+                .try_release_spend_reservations(category, older_than_seconds, limit, now),
+            self.receipt_budget,
+        )
+        .await
+    }
+
+    pub async fn settle_spend_reservation(
+        &self,
+        reservation_id: String,
+        actual_spent_sats: Option<i64>,
+        source: Option<String>,
+        record_event: bool,
+        now: i64,
+    ) -> StateWriteAck<bool> {
+        resolve(
+            self.handle.try_settle_spend_reservation(
+                reservation_id,
+                actual_spent_sats,
+                source,
+                record_event,
+                now,
+            ),
             self.receipt_budget,
         )
         .await

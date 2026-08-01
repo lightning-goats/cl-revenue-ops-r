@@ -22,7 +22,7 @@ from typing import Any
 
 
 DEFAULT_PYTHON_COMMIT = "e579de8df523f174283fc2aa21f395c8ef006ac6"
-GENERATOR_VERSION = 3
+GENERATOR_VERSION = 4
 
 RPC_BOUNDARY_BY_METHOD = {
     "askrene-age": "askrene_age",
@@ -148,14 +148,42 @@ EXPECTED_LOOPS = {
     "lnplus-watcher",
 }
 
-PLACEHOLDER_RPCS = {
-    "revenue-analyze",
-    "revenue-capacity-report",
-    "revenue-econ-snapshot",
-    "revenue-profitability",
-}
+# Emptied in Task 66 slice 8: all four former members (analyze,
+# capacity-report, econ-snapshot, profitability) have shipped real
+# evidence-backed handlers since Tasks 49/50/67b-c and now classify
+# "partial". revenue-analyze still answers `not_yet_ported` on its
+# whole-fleet arm (rpc_analyze.rs — the single-channel path is real);
+# that residue is a declared partial, not a whole-handler placeholder.
+PLACEHOLDER_RPCS: set[str] = set()
 
 FULL_EFFECTIVE_RPCS = {
+    "revenue-history",
+    "revenue-lnplus-abandon",
+    "revenue-lnplus-backfill",
+    "revenue-lnplus-breaker-clear",
+    "revenue-lnplus-status",
+    "revenue-list-banned",
+    "revenue-list-ignored",
+    "revenue-planner-candidate-sources",
+    "revenue-planner-candidates",
+    "revenue-planner-history",
+    "revenue-planner-status",
+    "revenue-spend-ledger",
+    # Task 66: exact-contract reads serving REAL evidence through the
+    # registered runtime path (e2e-pinned through the spawned binary).
+    # Deliberately NOT in REVIEWED_FULL_RPCS below: full describes the
+    # response contract, review describes independent verification, and
+    # these await the tier-1 Python review of the task-66 commit queue.
+    "revenue-capex-status",
+    "revenue-econ-reconcile",
+    "revenue-total-cost-budget",
+}
+
+# Independently reviewed subset of FULL_EFFECTIVE_RPCS. Split from the
+# effective classification (Task 66 slice 8): FULL means the exact
+# response contract is implemented and tested; it must never IMPLY a
+# review that has not happened.
+REVIEWED_FULL_RPCS = {
     "revenue-history",
     "revenue-lnplus-abandon",
     "revenue-lnplus-backfill",
@@ -200,6 +228,63 @@ CLASSIFIED_REACHABLE_RPCS = {
     "revenue-report",
     "revenue-spend-ledger",
     "revenue-status",
+    # Task 66 (RPC-set closure): every remaining Python-equivalent name is
+    # now registered through the main.rs chain. Reads that serve complete
+    # real evidence at runtime are additionally in FULL_EFFECTIVE_RPCS;
+    # everything below classifies "partial" — either a success-shaped
+    # subset, or a COMPLETE contract whose result-bearing execution path
+    # is sealed until Task 69's authority-gated assembly (the core-state
+    # mutators, cleanup-closed, set-fee, fee-cycle, wake-all, and
+    # econ-cycle's candidate source), answering Python's exact
+    # uninitialized/denial arms until then.
+    "revenue-ban",
+    "revenue-capex-status",
+    "revenue-cleanup-closed",
+    "revenue-clear-reservations",
+    "revenue-econ-cycle",
+    "revenue-econ-reconcile",
+    "revenue-fee-authority-status",
+    "revenue-fee-cycle",
+    "revenue-ignore",
+    "revenue-profile-preview",
+    "revenue-set-fee",
+    "revenue-spend-release",
+    "revenue-spend-release-stale",
+    "revenue-spend-reserve",
+    "revenue-spend-settle",
+    "revenue-total-cost-budget",
+    "revenue-unban",
+    "revenue-unignore",
+    "revenue-wake-all",
+    # Owner-backed surfaces the WIDENED scan (helper-fn call sites) now
+    # sees: registered with complete contracts, action capabilities
+    # sealed until Task 69 (Tasks 60/62/63 staging) — "partial".
+    "revenue-boltz-auto-cycle-run-now",
+    "revenue-boltz-auto-cycle-status",
+    "revenue-boltz-backup",
+    "revenue-boltz-backup-verify",
+    "revenue-boltz-balance-cycle",
+    "revenue-boltz-balance-recommendations",
+    "revenue-boltz-budget",
+    "revenue-boltz-chainswap",
+    "revenue-boltz-claim",
+    "revenue-boltz-deposit",
+    "revenue-boltz-expansion-treasury-cycle",
+    "revenue-boltz-expansion-treasury-recommendations",
+    "revenue-boltz-expansion-treasury-status",
+    "revenue-boltz-external-pay-ignores",
+    "revenue-boltz-history",
+    "revenue-boltz-loop-in",
+    "revenue-boltz-loop-out",
+    "revenue-boltz-quote",
+    "revenue-boltz-refund",
+    "revenue-boltz-status",
+    "revenue-boltz-wallet",
+    "revenue-boltz-withdraw",
+    "revenue-planner-execute",
+    "revenue-rebalance",
+    "revenue-rebalance-cycle",
+    "revenue-rebalance-debug",
 }
 
 CLASSIFIED_RUST_ONLY_METHODS = {
@@ -211,13 +296,13 @@ CLASSIFIED_RUST_ONLY_METHODS = {
 
 REVIEW_EVIDENCE = {
     name: "task-8-core-parity-audit"
-    for name in FULL_EFFECTIVE_RPCS
+    for name in REVIEWED_FULL_RPCS
     if not name.startswith("revenue-lnplus-")
 }
 REVIEW_EVIDENCE.update(
     {
         name: "hexmem-task-61@9c99d7c"
-        for name in FULL_EFFECTIVE_RPCS
+        for name in REVIEWED_FULL_RPCS
         if name.startswith("revenue-lnplus-")
     }
 )
@@ -519,6 +604,20 @@ def derive_rust_methods(repo_root: Path) -> set[str]:
             r'let\s+([a-zA-Z0-9_]+)\s*=\s*rpc_name\("([a-z0-9-]+)"\);', source
         )
     }
+    # Mode-conditional bindings (`let x = if canonical_names() {
+    # rpc_name("wake-all") } else { rpc_name("fee-wake") };`): the
+    # inventory tracks the CANONICAL surface, so the canonical branch's
+    # suffix names the binding.
+    bindings.update(
+        {
+            variable: f"revenue-{suffix}"
+            for variable, suffix in re.findall(
+                r'let\s+([a-zA-Z0-9_]+)\s*=\s*if\s+canonical_names\(\)\s*\{\s*'
+                r'rpc_name\("([a-z0-9-]+)"\)',
+                source,
+            )
+        }
+    )
     bindings.update(
         {
             variable: value
@@ -528,9 +627,28 @@ def derive_rust_methods(repo_root: Path) -> set[str]:
             if "status" in variable or "rpc" in variable
         }
     )
-    registered_vars = re.findall(
-        r'\.rpcmethod\(\s*&?([a-zA-Z0-9_]+)\s*,', source
+    # Direct registrations. `name` is every register_* helper's parameter
+    # (each helper contains exactly one `.rpcmethod(name, ...)` body); the
+    # real name arrives at the helper's CALL SITE, captured below.
+    registered_vars = [
+        variable
+        for variable in re.findall(r'\.rpcmethod\(\s*&?([a-zA-Z0-9_]+)\s*,', source)
+        if variable != "name"
+    ]
+    # Helper-fn registrations (Task 66 pattern):
+    # `let builder = register_x(builder, &y_name, ...)`. Requiring the
+    # `_name` suffix keeps non-RPC helpers (register_option's `&name`
+    # loop variable) out of the registration set.
+    registered_vars += re.findall(
+        r'register_[a-z0-9_]+\(\s*builder,\s*&([a-zA-Z0-9_]+_name)\s*,', source
     )
+    # One real registration can be seen by BOTH scans when a helper's
+    # parameter shadows the caller's binding name (register_rust_
+    # diagnostics' ping_name). Dedupe variables; the name-level
+    # uniqueness check below still catches two bindings mapping onto one
+    # method name, and the runtime manifest count test catches genuine
+    # double registration.
+    registered_vars = list(dict.fromkeys(registered_vars))
     missing = sorted(set(registered_vars) - bindings.keys())
     if missing:
         raise ValueError(f"unresolved Rust rpcmethod name bindings: {missing}")

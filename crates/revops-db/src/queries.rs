@@ -457,6 +457,18 @@ fn spend_coverage(
         .flatten()
         .filter(|timestamp| *timestamp > 0)
         .min();
+    coverage_from_earliest(earliest, now, window_hours, window_seconds)
+}
+
+/// Port of `Database._coverage_from_earliest` (database.py:4447-4463): the
+/// shared honest-coverage math — unknown without a measurement basis, never
+/// a fabricated "complete" echo of the requested window.
+fn coverage_from_earliest(
+    earliest: Option<i64>,
+    now: i64,
+    window_hours: i64,
+    window_seconds: i64,
+) -> (Option<f64>, String) {
     let Some(earliest) = earliest else {
         return (None, "unknown".to_string());
     };
@@ -561,6 +573,59 @@ pub async fn spend_ledger_aggregates(
         reserved_by_category,
         event_count_by_category,
         active_reservation_count_by_category,
+        covered_hours,
+        coverage_status,
+    })
+}
+
+/// Measured coverage of the unified total-cost budget window, port of
+/// `Database.get_cost_evidence_coverage` (database.py:4465-4481).
+pub struct CostEvidenceCoverage {
+    pub covered_hours: Option<f64>,
+    pub coverage_status: String,
+}
+
+/// `_TOTAL_COST_EVIDENCE_SOURCES` (database.py:4410-4420): the spend-ledger
+/// pair plus every other cost-evidence table. `query_row` takes `&'static
+/// str`, so each (table, column) pair is spelled as its full MIN query.
+const TOTAL_COST_EVIDENCE_SOURCES: [&str; 7] = [
+    "SELECT MIN(timestamp) FROM spend_events",
+    "SELECT MIN(reserved_at) FROM spend_reservations",
+    "SELECT MIN(timestamp) FROM rebalance_history",
+    "SELECT MIN(timestamp) FROM rebalance_costs",
+    "SELECT MIN(reserved_at) FROM budget_reservations",
+    "SELECT MIN(opened_at) FROM channel_costs",
+    "SELECT MIN(closed_at) FROM channel_closure_costs",
+];
+
+/// Oldest cost-evidence timestamp across all seven sources, then the shared
+/// coverage math. A source whose query errors is skipped (Python `except
+/// sqlite3.Error: continue` — partial/minimal schemas must degrade to the
+/// remaining sources, not fail the read); non-positive and unparseable
+/// timestamps are ignored per source.
+pub async fn cost_evidence_coverage(
+    handle: &DbHandle,
+    window_hours: i64,
+    now: i64,
+) -> Result<CostEvidenceCoverage> {
+    let window_hours = window_hours.max(1);
+    let window_seconds = window_hours * 3600;
+    let mut earliest: Option<i64> = None;
+    for sql in TOTAL_COST_EVIDENCE_SOURCES {
+        let Ok(candidate) = handle
+            .query_row(sql, vec![], python_int_timestamp_cell)
+            .await
+        else {
+            continue;
+        };
+        let Some(timestamp) = candidate.filter(|timestamp| *timestamp > 0) else {
+            continue;
+        };
+        earliest = Some(earliest.map_or(timestamp, |current: i64| current.min(timestamp)));
+    }
+    let (covered_hours, coverage_status) =
+        coverage_from_earliest(earliest, now, window_hours, window_seconds);
+    Ok(CostEvidenceCoverage {
         covered_hours,
         coverage_status,
     })
@@ -939,6 +1004,515 @@ pub async fn closed_channels_summary(handle: &DbHandle) -> Result<ClosedChannels
                 avg_days_open: r.get(8)?,
             })
         })
+        .await
+}
+
+/// The budget-component subset of `Database.get_daily_rebalance_spend`
+/// (database.py:4590-4678) — exactly the four values
+/// `_rebalance_liquidity_cost_components` (cl-revenue-ops.py:8111-8134)
+/// consumes. The full Python method also reports failed_count/success_rate/
+/// stale_reservations; no Rust caller needs those yet, and inventing an
+/// unconsumed surface would be untestable-by-construction.
+pub struct RebalanceSpendComponent {
+    pub total_spent_sats: i64,
+    pub total_reserved_sats: i64,
+    pub job_count: i64,
+    pub success_count: i64,
+}
+
+/// Windowed rebalance spend/reservation totals. Reserved is the sum of BOTH
+/// hold tables: legacy `budget_reservations` plus Phase 2J's unified
+/// `spend_reservations` rows under `category='rebalance'`. Python tolerates
+/// a missing `spend_reservations` table (`except sqlite3.OperationalError`,
+/// for pre-2J partial schemas); this port's fixture schema always carries
+/// it, so an error here is a real fault and propagates.
+pub async fn rebalance_spend_component(
+    handle: &DbHandle,
+    window_hours: i64,
+    now: i64,
+) -> Result<RebalanceSpendComponent> {
+    let cutoff = now - window_hours * 3600;
+    let (job_count, success_count) = handle
+        .query_row(
+            "SELECT COUNT(*), \
+             COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) \
+             FROM rebalance_history WHERE timestamp >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .await?;
+    let total_spent_sats = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(cost_sats), 0) FROM rebalance_costs WHERE timestamp >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    let legacy_reserved = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(reserved_sats), 0) FROM budget_reservations \
+             WHERE status = 'active' AND reserved_at >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    let unified_reserved = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(reserved_sats), 0) FROM spend_reservations \
+             WHERE status = 'active' AND category = 'rebalance' AND reserved_at >= ?1",
+            vec![SqlValue::Integer(cutoff)],
+        )
+        .await?;
+    Ok(RebalanceSpendComponent {
+        total_spent_sats,
+        total_reserved_sats: legacy_reserved + unified_reserved,
+        job_count,
+        success_count,
+    })
+}
+
+/// py `Database.get_all_channel_states` (database.py:1803-1807) as FULL
+/// row dicts — `SELECT *` with `dict(row)`, ordered `state, flow_ratio
+/// DESC`. The column list is written out (the schema's 17 columns) so a
+/// schema change surfaces as a loud query error, not silently reshaped
+/// rows; NULLs pass through as JSON null exactly like `dict(row)`.
+/// (`all_channel_states` above stays: it is the two-column identity
+/// subset `revenue-cleanup-closed` uses.)
+pub async fn all_channel_state_rows(handle: &DbHandle) -> Result<Vec<serde_json::Value>> {
+    handle
+        .query_rows(
+            "SELECT channel_id, peer_id, state, flow_ratio, sats_in, sats_out, capacity, \
+             updated_at, confidence, velocity, flow_multiplier, ema_decay, forward_count, \
+             kalman_flow_ratio, kalman_velocity, kalman_uncertainty, temporal_profile_json \
+             FROM channel_states ORDER BY state, flow_ratio DESC",
+            vec![],
+            |row| {
+                Ok(serde_json::json!({
+                    "channel_id": row.get::<_, Option<String>>(0)?,
+                    "peer_id": row.get::<_, Option<String>>(1)?,
+                    "state": row.get::<_, Option<String>>(2)?,
+                    "flow_ratio": row.get::<_, Option<f64>>(3)?,
+                    "sats_in": row.get::<_, Option<i64>>(4)?,
+                    "sats_out": row.get::<_, Option<i64>>(5)?,
+                    "capacity": row.get::<_, Option<i64>>(6)?,
+                    "updated_at": row.get::<_, Option<i64>>(7)?,
+                    "confidence": row.get::<_, Option<f64>>(8)?,
+                    "velocity": row.get::<_, Option<f64>>(9)?,
+                    "flow_multiplier": row.get::<_, Option<f64>>(10)?,
+                    "ema_decay": row.get::<_, Option<f64>>(11)?,
+                    "forward_count": row.get::<_, Option<i64>>(12)?,
+                    "kalman_flow_ratio": row.get::<_, Option<f64>>(13)?,
+                    "kalman_velocity": row.get::<_, Option<f64>>(14)?,
+                    "kalman_uncertainty": row.get::<_, Option<f64>>(15)?,
+                    "temporal_profile_json": row.get::<_, Option<String>>(16)?,
+                }))
+            },
+        )
+        .await
+}
+
+/// One `get_top_route_pairs` row (database.py:5629-5650) — the fields
+/// `revenue-health`'s top_routes section consumes. `avg_fee_msat` is in
+/// the Python row but unused by every current consumer; not ported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopRoutePair {
+    pub in_channel: String,
+    pub out_channel: String,
+    pub total_fee_msat: i64,
+    pub forward_count: i64,
+}
+
+/// py `get_top_route_pairs(days, min_forwards, limit)` (database.py:
+/// 5629-5650): top revenue (in, out) pairs over `forwards`, positive-fee
+/// rows only, HAVING the forward-count floor, ordered by total fee.
+pub async fn top_route_pairs(
+    handle: &DbHandle,
+    days: i64,
+    min_forwards: i64,
+    limit: i64,
+    now: i64,
+) -> Result<Vec<TopRoutePair>> {
+    let cutoff = now - days * 86400;
+    handle
+        .query_rows(
+            "SELECT in_channel, out_channel, \
+             SUM(fee_msat) as total_fee_msat, COUNT(*) as forward_count \
+             FROM forwards WHERE timestamp >= ?1 AND fee_msat > 0 \
+             GROUP BY in_channel, out_channel \
+             HAVING forward_count >= ?2 \
+             ORDER BY total_fee_msat DESC LIMIT ?3",
+            vec![
+                SqlValue::Integer(cutoff),
+                SqlValue::Integer(min_forwards),
+                SqlValue::Integer(limit),
+            ],
+            |row| {
+                Ok(TopRoutePair {
+                    in_channel: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    out_channel: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    total_fee_msat: row.get::<_, i64>(2)?,
+                    forward_count: row.get::<_, i64>(3)?,
+                })
+            },
+        )
+        .await
+}
+
+/// py `Database.get_config_version` (database.py:7374-7378): the live
+/// config version is `MAX(version)` over `config_overrides`, 0 when the
+/// table is empty (py `row['max_v'] or 0` — MAX over no rows is NULL).
+/// This is the value `revenue-config get` reports as `version`
+/// (cl-revenue-ops.py:5861 via `config._version`, seeded from this same
+/// read at startup, config.py:919).
+pub async fn config_version(handle: &DbHandle) -> Result<i64> {
+    handle
+        .query_i64(
+            "SELECT COALESCE(MAX(version), 0) FROM config_overrides",
+            vec![],
+        )
+        .await
+}
+
+/// py `get_total_capex_by_channel` (database.py:7886-7917): windowed capex
+/// per channel from `rebalance_costs` + `spend_events`, in SATS, keyed by
+/// RAW channel_id (Python does not normalize scid spellings here — two
+/// alias spellings stay two keys, exactly as Python's dict does). NULL and
+/// empty channel ids are skipped (py `if cid:`).
+///
+/// The capex engine treats a FAILED read as CB-4 fail-closed `None`
+/// ("deny all spend this cycle", capex_budget.py:744-757) — that mapping
+/// belongs to the caller; this function just surfaces `Err`.
+pub async fn total_capex_by_channel(
+    handle: &DbHandle,
+    window_days: i64,
+    now: i64,
+) -> Result<BTreeMap<String, i64>> {
+    let since = now - window_days * 86400;
+    let mut out: BTreeMap<String, i64> = BTreeMap::new();
+    for sql in [
+        "SELECT channel_id, COALESCE(SUM(cost_sats), 0) FROM rebalance_costs \
+         WHERE timestamp >= ?1 GROUP BY channel_id",
+        "SELECT channel_id, COALESCE(SUM(amount_sats), 0) FROM spend_events \
+         WHERE timestamp >= ?1 AND channel_id IS NOT NULL GROUP BY channel_id",
+    ] {
+        let rows = handle
+            .query_rows(sql, vec![SqlValue::Integer(since)], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, i64>(1)?,
+                ))
+            })
+            .await?;
+        for (channel_id, total) in rows {
+            if channel_id.is_empty() {
+                continue;
+            }
+            *out.entry(channel_id).or_insert(0) += total;
+        }
+    }
+    Ok(out)
+}
+
+/// One channel's windowed rebalance outcome counts — the
+/// `get_all_channel_rebalance_success_rates` fields the capex engine and
+/// the bleeder scan consume (py capex_budget.py:567-575,
+/// profitability_analyzer.py:1680-1687: `total` and `success_rate`;
+/// `successes` kept because the rate derives from it). Python's
+/// failures/avg_cost_ppm/avg_amount_sats have no Rust consumer and are
+/// not ported.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RebalanceSuccessRateRow {
+    pub total: i64,
+    pub successes: i64,
+    pub success_rate: f64,
+}
+
+/// py `get_all_channel_rebalance_success_rates` (database.py:5848-5887):
+/// one GROUP BY over `rebalance_history.to_channel`; only 'success' and
+/// 'failed' rows count toward `total` (a pending-only channel has total 0
+/// and is absent); keys are `normalize_scid`'d exactly like Python's
+/// result dict (later alias spellings overwrite earlier ones — ORDER BY
+/// makes that overwrite order deterministic where sqlite's GROUP BY
+/// ordering is not contractual).
+pub async fn rebalance_success_rates(
+    handle: &DbHandle,
+    window_days: i64,
+    now: i64,
+) -> Result<BTreeMap<String, RebalanceSuccessRateRow>> {
+    let cutoff = now - window_days * 86400;
+    let rows = handle
+        .query_rows(
+            "SELECT to_channel, \
+             SUM(CASE WHEN status IN ('success', 'failed') THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) \
+             FROM rebalance_history \
+             WHERE timestamp >= ?1 AND to_channel IS NOT NULL \
+             GROUP BY to_channel ORDER BY to_channel",
+            vec![SqlValue::Integer(cutoff)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .await?;
+    let mut out = BTreeMap::new();
+    for (to_channel, total, successes) in rows {
+        if total <= 0 {
+            continue;
+        }
+        out.insert(
+            to_channel.replace(':', "x"),
+            RebalanceSuccessRateRow {
+                total,
+                successes,
+                success_rate: successes as f64 / total as f64,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Actor-side port of `Database.get_spend_reservation_states`' no-filter
+/// form (the only form `revenue-econ-reconcile` uses): every reservation's
+/// (status, reserved_sats) keyed by id, ordered, capped at 10000 —
+/// identical to `BudgetDb::get_spend_reservation_states(None)`.
+pub async fn spend_reservation_states(
+    handle: &DbHandle,
+) -> Result<BTreeMap<String, crate::budget::ReservationState>> {
+    let rows = handle
+        .query_rows(
+            "SELECT reservation_id, status, reserved_sats FROM spend_reservations \
+             ORDER BY reservation_id LIMIT 10000",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    crate::budget::ReservationState {
+                        status: row.get(1)?,
+                        reserved_sats: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    },
+                ))
+            },
+        )
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// The consumed subset of `Database.get_recent_fee_changes`
+/// (database.py:2406-2425): `fee_intent_completeness` reads only each
+/// row's timestamp. SEC-10 limit clamp [1,10000] mirrored; newest first.
+pub async fn recent_fee_change_timestamps(handle: &DbHandle, limit: i64) -> Result<Vec<i64>> {
+    handle
+        .query_rows(
+            "SELECT timestamp FROM fee_changes ORDER BY timestamp DESC LIMIT ?1",
+            vec![SqlValue::Integer(limit.clamp(1, 10000))],
+            |row| row.get(0),
+        )
+        .await
+}
+
+/// The identity subset of one `channel_states` row that
+/// `revenue-cleanup-closed` consumes (Python's `get_all_channel_states`
+/// returns whole rows; only these two fields are read there).
+pub struct ChannelStateIdentity {
+    pub channel_id: String,
+    pub peer_id: String,
+}
+
+/// Port of `Database.get_all_channel_states` (database.py:1803-1807),
+/// identity columns only, preserving Python's ordering.
+pub async fn all_channel_states(handle: &DbHandle) -> Result<Vec<ChannelStateIdentity>> {
+    handle
+        .query_rows(
+            "SELECT channel_id, peer_id FROM channel_states ORDER BY state, flow_ratio DESC",
+            vec![],
+            |row| {
+                Ok(ChannelStateIdentity {
+                    channel_id: row.get(0)?,
+                    peer_id: row.get(1)?,
+                })
+            },
+        )
+        .await
+}
+
+/// Canonical + legacy SCID spellings for read-side lookups (Python
+/// `_scid_aliases`, database.py:40-51): the `x`-normalized form, the raw
+/// input if different, and the legacy `:` spelling.
+fn scid_aliases(channel_id: &str) -> Vec<String> {
+    let canonical = channel_id.replace(':', "x");
+    let mut aliases = Vec::new();
+    for candidate in [canonical.clone(), channel_id.to_string()] {
+        if !candidate.is_empty() && !aliases.contains(&candidate) {
+            aliases.push(candidate);
+        }
+    }
+    if canonical.matches('x').count() == 2 {
+        let legacy = canonical.replace('x', ":");
+        if !aliases.contains(&legacy) {
+            aliases.push(legacy);
+        }
+    }
+    if aliases.is_empty() {
+        aliases.push(String::new());
+    }
+    aliases
+}
+
+/// One `channel_costs` row for closure archival. The fixture schema
+/// carries no funding_txid column, so the field Python reads with a
+/// tolerant `.get` is honestly absent here rather than fabricated.
+pub struct ChannelCostRow {
+    pub peer_id: String,
+    pub open_cost_sats: i64,
+    pub capacity_sats: i64,
+    pub opened_at: i64,
+}
+
+/// Port of `Database.get_channel_cost` (database.py:5749-5776): the lookup
+/// spans alias spellings, prefers the row stored under the canonical
+/// spelling, else answers the first alias hit.
+pub async fn channel_cost_row(
+    handle: &DbHandle,
+    channel_id: &str,
+) -> Result<Option<ChannelCostRow>> {
+    let mut aliases = scid_aliases(channel_id);
+    let canonical = channel_id.replace(':', "x");
+    // Alias count is 1-3; pad to exactly three so one static SQL shape
+    // serves all cases (a padded empty string matches no stored id).
+    while aliases.len() < 3 {
+        aliases.push(String::new());
+    }
+    let sql: &'static str = "SELECT channel_id, peer_id, open_cost_sats, capacity_sats, opened_at \
+         FROM channel_costs WHERE channel_id IN (?1,?2,?3)";
+    let params = aliases.into_iter().map(SqlValue::Text).collect::<Vec<_>>();
+    let rows = handle
+        .query_rows(sql, params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                ChannelCostRow {
+                    peer_id: row.get(1)?,
+                    open_cost_sats: row.get(2)?,
+                    capacity_sats: row.get(3)?,
+                    opened_at: row.get(4)?,
+                },
+            ))
+        })
+        .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut rows = rows;
+    if let Some(exact) = rows.iter().position(|(stored, _)| *stored == canonical) {
+        return Ok(Some(rows.swap_remove(exact).1));
+    }
+    Ok(Some(rows.swap_remove(0).1))
+}
+
+/// Port of `Database.get_channel_closure_cost`'s consumed subset
+/// (database.py:6302-6318): the total for one channel, EXACT id match
+/// only — Python's own SQL there has no alias spellings.
+pub async fn channel_closure_cost_total(
+    handle: &DbHandle,
+    channel_id: &str,
+) -> Result<Option<i64>> {
+    handle
+        .query_row(
+            "SELECT SUM(total_closure_cost_sats) FROM channel_closure_costs WHERE channel_id = ?1",
+            vec![SqlValue::Text(channel_id.to_string())],
+            sql_opt_i64_cell,
+        )
+        .await
+}
+
+fn sql_opt_i64_cell(row: &Row) -> rusqlite::Result<Option<i64>> {
+    row.get::<_, Option<i64>>(0)
+}
+
+/// Windowed per-channel P&L, port of `Database.get_channel_pnl`'s consumed
+/// subset (database.py:3063-3147): revenue over live `forwards` (by
+/// out_channel, across alias spellings) plus completed-day rollups in
+/// `[since_day, today_start)`; rebalance cost from the unpruned
+/// `rebalance_costs` via `COALESCE(cost_msat, cost_sats*1000)`, ceil to
+/// sats. Python's `except sqlite3.OperationalError` fallback for schemas
+/// without cost_msat is not mirrored — the fixture schema carries it.
+pub struct ChannelPnl {
+    pub revenue_msat: i64,
+    pub rebalance_cost_sats: i64,
+    pub forward_count: i64,
+}
+
+pub async fn channel_pnl(
+    handle: &DbHandle,
+    channel_id: &str,
+    window_days: i64,
+    now: i64,
+) -> Result<ChannelPnl> {
+    let aliases = scid_aliases(channel_id);
+    let since = now - window_days * 86400;
+    let since_day = (since / 86400) * 86400;
+    let today_start = (now / 86400) * 86400;
+    // Alias count is 1-3; pad to exactly three so ONE static SQL shape
+    // serves all cases (a padded empty string matches no stored id).
+    let mut padded = aliases.clone();
+    while padded.len() < 3 {
+        padded.push(String::new());
+    }
+    let alias_params = |out: &mut Vec<SqlValue>| {
+        for alias in &padded {
+            out.push(SqlValue::Text(alias.clone()));
+        }
+    };
+
+    // Numbered placeholders bind once each: ?1-?3 aliases, ?4 since,
+    // ?5 since_day, ?6 today_start (each reused across the sub-selects).
+    let mut params = Vec::new();
+    alias_params(&mut params);
+    params.push(SqlValue::Integer(since));
+    params.push(SqlValue::Integer(since_day));
+    params.push(SqlValue::Integer(today_start));
+    let (revenue_msat, forward_count) = handle
+        .query_row(
+            "SELECT \
+             (SELECT COALESCE(SUM(fee_msat), 0) FROM forwards \
+              WHERE out_channel IN (?1,?2,?3) AND timestamp >= ?4) + \
+             (SELECT COALESCE(SUM(total_fee_msat), 0) FROM daily_forwarding_stats \
+              WHERE channel_id IN (?1,?2,?3) AND date >= ?5 AND date < ?6), \
+             (SELECT COUNT(*) FROM forwards \
+              WHERE out_channel IN (?1,?2,?3) AND timestamp >= ?4) + \
+             (SELECT COALESCE(SUM(forward_count), 0) FROM daily_forwarding_stats \
+              WHERE channel_id IN (?1,?2,?3) AND date >= ?5 AND date < ?6)",
+            params,
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .await?;
+
+    let mut cost_params = Vec::new();
+    alias_params(&mut cost_params);
+    cost_params.push(SqlValue::Integer(since));
+    let cost_msat = handle
+        .query_i64(
+            "SELECT COALESCE(SUM(COALESCE(cost_msat, cost_sats * 1000)), 0) FROM rebalance_costs \
+             WHERE channel_id IN (?1,?2,?3) AND timestamp >= ?4",
+            cost_params,
+        )
+        .await?;
+
+    Ok(ChannelPnl {
+        revenue_msat,
+        rebalance_cost_sats: base_to_sats_ceil(cost_msat.max(0) as u64) as i64,
+        forward_count,
+    })
+}
+
+/// Port of `Database.get_opening_costs_since` (database.py:6334-6350).
+pub async fn opening_costs_since(handle: &DbHandle, since_timestamp: i64) -> Result<i64> {
+    handle
+        .query_i64(
+            "SELECT COALESCE(SUM(open_cost_sats), 0) FROM channel_costs WHERE opened_at >= ?1",
+            vec![SqlValue::Integer(since_timestamp)],
+        )
         .await
 }
 

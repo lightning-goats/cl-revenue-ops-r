@@ -35,9 +35,10 @@ use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::budget;
 use crate::budget::{
-    mark_spent_in_tx, release_spend_reservation_on, reserve_spend_in_tx, MarkSpentTx,
-    ReserveRequest,
+    clear_all_reservations_on, mark_spent_in_tx, release_spend_reservation_on, reserve_spend_in_tx,
+    ClearStats, MarkSpentTx, ReserveRequest,
 };
 use crate::owner::{StoreAdmissionRefused, StoreReceipt};
 
@@ -180,6 +181,9 @@ enum Command {
         now: i64,
         reply: oneshot::Sender<Result<i64>>,
     },
+    ClearAllBudgetReservations {
+        reply: oneshot::Sender<Result<ClearStats>>,
+    },
     ReserveSpend {
         request: ReserveRequest,
         now: i64,
@@ -208,6 +212,32 @@ enum Command {
         channel_ids: Vec<String>,
         reply: oneshot::Sender<Result<BatchAck>>,
     },
+    ArchiveClosedChannel {
+        archive: Box<ClosedChannelArchive>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+/// Everything `record_closed_channel_history` (database.py:6371-6446)
+/// persists for one closed channel, already evidence-resolved by the
+/// caller. `funding_txid` stays for column parity even though the fixture
+/// `channel_costs` schema cannot supply one (callers pass `None`).
+#[derive(Debug, Clone)]
+pub struct ClosedChannelArchive {
+    pub channel_id: String,
+    pub peer_id: String,
+    pub capacity_sats: i64,
+    pub opened_at: Option<i64>,
+    pub closed_at: i64,
+    pub close_type: String,
+    pub open_cost_sats: i64,
+    pub closure_cost_sats: i64,
+    pub total_revenue_sats: i64,
+    pub total_rebalance_cost_sats: i64,
+    pub forward_count: i64,
+    pub funding_txid: Option<String>,
+    pub closing_txid: Option<String>,
+    pub closer: String,
 }
 
 /// Cheap cloneable handle to the writer actor.
@@ -354,6 +384,12 @@ impl StateWriterHandle {
         })
     }
 
+    pub fn try_clear_all_budget_reservations(
+        &self,
+    ) -> std::result::Result<StoreReceipt<ClearStats>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ClearAllBudgetReservations { reply })
+    }
+
     pub fn try_reserve_spend(
         &self,
         request: ReserveRequest,
@@ -372,6 +408,16 @@ impl StateWriterHandle {
     ) -> std::result::Result<StoreReceipt<bool>, StoreAdmissionRefused> {
         try_roundtrip!(self, |reply| Command::ReleaseSpendReservation {
             reservation_id,
+            reply
+        })
+    }
+
+    pub fn try_archive_closed_channel(
+        &self,
+        archive: ClosedChannelArchive,
+    ) -> std::result::Result<StoreReceipt<()>, StoreAdmissionRefused> {
+        try_roundtrip!(self, |reply| Command::ArchiveClosedChannel {
+            archive: Box::new(archive),
             reply
         })
     }
@@ -511,6 +557,10 @@ impl StateWriterHandle {
         })
     }
 
+    pub async fn clear_all_budget_reservations(&self) -> Result<ClearStats> {
+        roundtrip!(self, |reply| Command::ClearAllBudgetReservations { reply })
+    }
+
     pub async fn reserve_spend(&self, request: ReserveRequest, now: i64) -> Result<(bool, i64)> {
         roundtrip!(self, |reply| Command::ReserveSpend {
             request,
@@ -563,6 +613,13 @@ impl StateWriterHandle {
     pub async fn cleanup_closed_channels(&self, channel_ids: Vec<String>) -> Result<BatchAck> {
         roundtrip!(self, |reply| Command::CleanupClosedChannels {
             channel_ids,
+            reply
+        })
+    }
+
+    pub async fn archive_closed_channel(&self, archive: ClosedChannelArchive) -> Result<()> {
+        roundtrip!(self, |reply| Command::ArchiveClosedChannel {
+            archive: Box::new(archive),
             reply
         })
     }
@@ -632,6 +689,27 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
         ],
     ),
     ("rebalance_costs", &["cost_sats", "timestamp"]),
+    (
+        "closed_channels",
+        &[
+            "channel_id",
+            "peer_id",
+            "capacity_sats",
+            "opened_at",
+            "closed_at",
+            "close_type",
+            "open_cost_sats",
+            "closure_cost_sats",
+            "total_revenue_sats",
+            "total_rebalance_cost_sats",
+            "forward_count",
+            "net_pnl_sats",
+            "days_open",
+            "funding_txid",
+            "closing_txid",
+            "closer",
+        ],
+    ),
 ];
 
 fn verify_schema(conn: &Connection) -> std::result::Result<(), StateWriterOpenError> {
@@ -742,6 +820,10 @@ pub async fn spawn_state_writer(
                 } => {
                     let _ = reply.send(cleanup_stale_reservations(&conn, max_age_seconds, now));
                 }
+                Command::ClearAllBudgetReservations { reply } => {
+                    let _ =
+                        reply.send(clear_all_reservations_on(&conn).map_err(anyhow::Error::from));
+                }
                 Command::ReserveSpend {
                     request,
                     now,
@@ -792,6 +874,9 @@ pub async fn spawn_state_writer(
                 }
                 Command::CleanupClosedChannels { channel_ids, reply } => {
                     let _ = reply.send(cleanup_closed_channels(&conn, &channel_ids));
+                }
+                Command::ArchiveClosedChannel { archive, reply } => {
+                    let _ = reply.send(archive_closed_channel(&conn, &archive));
                 }
             }
         }
@@ -1139,33 +1224,116 @@ fn cleanup_closed_channels(conn: &Connection, channel_ids: &[String]) -> Result<
     }
     immediate_txn(conn, "closed-channel purge", |tx| {
         for channel_id in channel_ids {
-            for sql in [
-                "DELETE FROM channel_states WHERE channel_id = ?1",
-                "DELETE FROM channel_failures WHERE channel_id = ?1",
-                "DELETE FROM channel_probes WHERE channel_id = ?1",
-                "DELETE FROM kalman_state WHERE channel_id = ?1",
-            ] {
-                tx.execute(sql, params![channel_id])
-                    .with_context(|| format!("purge {channel_id}"))?;
-            }
-            for tolerated in [
-                "DELETE FROM pair_rebalance_failures
-                 WHERE source_channel_id = ?1 OR dest_channel_id = ?1",
-                "DELETE FROM fee_strategy_state WHERE channel_id = ?1",
-            ] {
-                match tx.execute(tolerated, params![channel_id]) {
-                    Ok(_) => {}
-                    // py: `except sqlite3.OperationalError: pass` --
-                    // older schemas may lack these tables.
-                    Err(e) if e.to_string().contains("no such table") => {}
-                    Err(e) => {
-                        return Err(e).with_context(|| format!("purge {channel_id}"));
-                    }
-                }
-            }
+            purge_channel_tracking(tx, channel_id)?;
         }
         Ok(BatchAck::Applied {
             count: channel_ids.len(),
         })
+    })
+}
+
+/// One channel's tracking-table purge, shared by the batch purge above and
+/// the per-channel archive below. Runs INSIDE the caller's transaction.
+fn purge_channel_tracking(tx: &Connection, channel_id: &str) -> Result<()> {
+    for sql in [
+        "DELETE FROM channel_states WHERE channel_id = ?1",
+        "DELETE FROM channel_failures WHERE channel_id = ?1",
+        "DELETE FROM channel_probes WHERE channel_id = ?1",
+        "DELETE FROM kalman_state WHERE channel_id = ?1",
+    ] {
+        tx.execute(sql, params![channel_id])
+            .with_context(|| format!("purge {channel_id}"))?;
+    }
+    for tolerated in [
+        "DELETE FROM pair_rebalance_failures
+         WHERE source_channel_id = ?1 OR dest_channel_id = ?1",
+        "DELETE FROM fee_strategy_state WHERE channel_id = ?1",
+    ] {
+        match tx.execute(tolerated, params![channel_id]) {
+            Ok(_) => {}
+            // py: `except sqlite3.OperationalError: pass` --
+            // older schemas may lack these tables.
+            Err(e) if e.to_string().contains("no such table") => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("purge {channel_id}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+const VALID_CLOSE_TYPES: [&str; 7] = [
+    "mutual",
+    "local_unilateral",
+    "remote_unilateral",
+    "unilateral",
+    "force",
+    "onchain",
+    "unknown",
+];
+const VALID_CLOSERS: [&str; 4] = ["local", "remote", "mutual", "unknown"];
+
+/// py `record_closed_channel_history` (database.py:6371-6446) followed by
+/// `remove_closed_channel_data`, fused into ONE immediate transaction.
+/// Python runs them as two separate calls per channel; the fusion is
+/// deliberate hardening — an archive row without its purge would count the
+/// channel as both open and closed, a partial state Python tolerates only
+/// because its per-channel try/except moves on.
+fn archive_closed_channel(conn: &Connection, archive: &ClosedChannelArchive) -> Result<()> {
+    let capacity_sats = budget::sanitize_amount(archive.capacity_sats);
+    let open_cost_sats = budget::sanitize_amount(archive.open_cost_sats);
+    let closure_cost_sats = budget::sanitize_amount(archive.closure_cost_sats);
+    let total_revenue_sats = budget::sanitize_amount(archive.total_revenue_sats);
+    let total_rebalance_cost_sats = budget::sanitize_amount(archive.total_rebalance_cost_sats);
+    let forward_count = archive.forward_count.max(0);
+    let close_type = if VALID_CLOSE_TYPES.contains(&archive.close_type.as_str()) {
+        archive.close_type.as_str()
+    } else {
+        "unknown"
+    };
+    let closer = if VALID_CLOSERS.contains(&archive.closer.as_str()) {
+        archive.closer.as_str()
+    } else {
+        "unknown"
+    };
+    // py: `max(0, ((closed_at - opened_at) // 86400)) if opened_at else 0`
+    // (M15 clock-skew clamp; floor division then clamp).
+    let days_open = archive
+        .opened_at
+        .filter(|opened_at| *opened_at != 0)
+        .map(|opened_at| (archive.closed_at - opened_at).div_euclid(86400).max(0))
+        .unwrap_or(0);
+    let net_pnl =
+        total_revenue_sats - (open_cost_sats + closure_cost_sats + total_rebalance_cost_sats);
+
+    immediate_txn(conn, "closed-channel archive", |tx| {
+        tx.execute(
+            "INSERT OR REPLACE INTO closed_channels
+             (channel_id, peer_id, capacity_sats, opened_at, closed_at, close_type,
+              open_cost_sats, closure_cost_sats, total_revenue_sats,
+              total_rebalance_cost_sats, forward_count, net_pnl_sats, days_open,
+              funding_txid, closing_txid, closer)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                archive.channel_id,
+                archive.peer_id,
+                capacity_sats,
+                archive.opened_at,
+                archive.closed_at,
+                close_type,
+                open_cost_sats,
+                closure_cost_sats,
+                total_revenue_sats,
+                total_rebalance_cost_sats,
+                forward_count,
+                net_pnl,
+                days_open,
+                archive.funding_txid,
+                archive.closing_txid,
+                closer,
+            ],
+        )
+        .with_context(|| format!("archive {}", archive.channel_id))?;
+        purge_channel_tracking(tx, &archive.channel_id)
     })
 }

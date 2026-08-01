@@ -110,7 +110,24 @@ fn python_layer(
         return None;
     }
     let name = config_resolve::python_option_name(suffix)?;
-    python_option_values.get(&name).cloned()
+    let raw = python_option_values.get(&name).cloned()?;
+    // Task 74 `rust_contract`: layer (b) IS Python's startup option
+    // value, and Python CLAMPS every numeric startup option into
+    // CONFIG_FIELD_RANGES before the Config object exists
+    // (`_validate_numeric_config_options`). Passing it through raw let an
+    // out-of-band CLN option reach the fee cycle unclamped -- and, with a
+    // crossed pair, could invert the fee rail. Layer (a) keeps its own
+    // SKIP contract in `config_resolve::validate_override`.
+    let field = config_resolve::db_override_key(suffix);
+    let (clamped, was_clamped) = config_resolve::clamp_startup_numeric(&field, &raw);
+    if was_clamped {
+        eprintln!(
+            "revops: config option {field}={} out of range; clamped to {}",
+            config_resolve::option_value_to_string(&raw).unwrap_or_default(),
+            config_resolve::option_value_to_string(&clamped).unwrap_or_default()
+        );
+    }
+    Some(clamped)
 }
 
 /// (a) or (b), whichever resolves first -- `None` means "fall through to
@@ -150,7 +167,7 @@ pub(crate) async fn resolve_int(
     }
 }
 
-async fn resolve_float(
+pub(crate) async fn resolve_float(
     db: Option<&DbHandle>,
     python_option_values: &HashMap<String, OptValue>,
     db_query_failures: &AtomicU64,
@@ -492,22 +509,31 @@ pub async fn resolve_fee_cfg_observed(
         .await,
     };
 
-    // Python load_overrides post-load repairs (config.py:955-961 after
-    // fc4c76b, and 975-980)
-    // for the two crossed pairs that are fee-cycle inputs. Warn-log like
-    // Python; repair identically.
-    // The fee pair repairs UPWARD (Tasks 74/75, python main fc4c76b): raise
-    // the ceiling to the floor, never lower the floor, never swap. A
-    // persisted max_fee_ppm of 1-4 is individually in range but would drag
-    // the floor under its own CONFIG_FIELD_RANGES minimum (CRITICAL-02),
-    // and the two bounds have DIFFERENT lower limits (5 vs 1), so no
-    // downward repair can hold both invariants.
+    // Python load_overrides post-load repairs (config.py:946-961 and
+    // 975-980 at origin/main fc4c76b) for the two crossed pairs that are
+    // fee-cycle inputs. Warn-log like Python; repair identically.
+    //
+    // The fee pair is repaired UPWARD (tasks 74/75 `rust_contract`):
+    // raise the ceiling to the floor, never lower the floor, never swap.
+    // A persisted `max_fee_ppm` of 1-4 is individually in range but would
+    // drag `min_fee_ppm` under its OWN CONFIG_FIELD_RANGES minimum of 5
+    // (CRITICAL-02), and the two bounds have DIFFERENT lower limits
+    // (5 vs 1), so no downward repair can hold both invariants. Raising
+    // the ceiling honors the operator's stated floor and only widens a
+    // cap. Mirrors py `_enforce_fee_bound_invariant`
+    // (cl-revenue-ops.py:501-518) too.
+    //
+    // The receivable pair below is NOT affected: floor and target share
+    // the same (0.0, 1.0) band, so repairing downward is safe there --
+    // only the fee pair has asymmetric lower limits.
     if cfg.min_fee_ppm > cfg.max_fee_ppm {
         eprintln!(
             "revops: contradictory min_fee_ppm ({}) > max_fee_ppm ({}); repaired max_fee_ppm to {}",
             cfg.min_fee_ppm, cfg.max_fee_ppm, cfg.min_fee_ppm
         );
     }
+    // The repair itself lives in ONE shared helper so the resolver and
+    // every other consumer cannot drift apart.
     (cfg.min_fee_ppm, cfg.max_fee_ppm) =
         config_resolve::repair_crossed_fee_bounds(cfg.min_fee_ppm, cfg.max_fee_ppm);
     if cfg.receivable_ratio_floor > cfg.receivable_ratio_target {

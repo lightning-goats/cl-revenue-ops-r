@@ -20,6 +20,36 @@ use std::collections::HashMap;
 /// `revenue_r_config_suffix` (via `db_override_key`), returning a live
 /// read-only `DbHandle` plus the `TempDir` guard (keep it alive for the
 /// handle's lifetime).
+/// Seed SEVERAL overrides at once (the crossed-pair cases need both
+/// bounds persisted).
+async fn fixture_db_with_overrides(
+    overrides: &[(&str, &str)],
+) -> (revops_db::actor::DbHandle, tempfile::TempDir) {
+    let fixture_db =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seeded.db");
+    std::fs::copy(&fixture_db, &path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (index, (suffix, raw_value)) in overrides.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO config_overrides (key, value, version, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    db_override_key(suffix),
+                    raw_value,
+                    index as i64 + 1,
+                    1_800_000_000i64
+                ],
+            )
+            .unwrap();
+        }
+    }
+    let handle = revops_db::actor::spawn_read_only(&path).await.unwrap();
+    (handle, dir)
+}
+
 async fn fixture_db_with_override(
     revenue_r_config_suffix: &str,
     raw_value: &str,
@@ -404,23 +434,110 @@ async fn resolve_fee_cfg_lowercases_profile_and_market_mode_from_listconfigs() {
     assert_eq!(cfg.market_fee_mode, "undercut");
 }
 
-/// Audit low #9b: Python's load_overrides repairs crossed pairs after
-/// applying overrides (config.py:946-951 min>max -> min=max;
-/// config.py:975-980 receivable floor>target -> floor=target).
-/// Reachable via manual DB edits/TOCTOU; Rust used the raw crossed
-/// values in the fee cycle.
+/// Task 75 `rust_contract` (hexmem): Python `main` repairs the crossed
+/// fee pair UPWARD -- `max_fee_ppm = min_fee_ppm` (config.py:946-961 at
+/// fc4c76b, mirroring `_enforce_fee_bound_invariant` at
+/// cl-revenue-ops.py:501-518). Rust repaired DOWNWARD, which inherits
+/// the exact defect task 75 fixed: a persisted `max_fee_ppm` of 1-4 is
+/// individually in range but drags `min_fee_ppm` under its own
+/// CONFIG_FIELD_RANGES floor of 5 (CRITICAL-02). The two bounds have
+/// DIFFERENT lower limits (5 vs 1), so no downward repair can hold both
+/// invariants -- raising the ceiling honors the operator's stated floor
+/// and only widens a cap.
+///
+/// The old assertion (`min == max`) passed under BOTH directions, which
+/// is why it never caught this.
 #[tokio::test]
-async fn resolve_fee_cfg_repairs_crossed_min_max() {
-    let (handle, _tmp) = fixture_db_with_override("min-fee-ppm", "3000").await;
-    // max stays default 2000 -> crossed -> min repaired to 2000.
-    let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
-    assert_eq!(cfg.min_fee_ppm, cfg.max_fee_ppm);
+async fn resolve_fee_cfg_repairs_crossed_min_max_upward_and_in_band() {
+    // Mirrors the Python parametrization: every crossed case must end
+    // ORDERED and with both bounds inside their own ranges
+    // (min_fee_ppm >= 5, max_fee_ppm >= 1).
+    for (min_raw, max_raw, expected) in [
+        ("5", "1", 5),
+        ("10", "4", 10),
+        ("900", "100", 900),
+        ("100000", "1", 100_000),
+    ] {
+        let (handle, _tmp) =
+            fixture_db_with_overrides(&[("min-fee-ppm", min_raw), ("max-fee-ppm", max_raw)]).await;
+        let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
+        assert_eq!(
+            (cfg.min_fee_ppm, cfg.max_fee_ppm),
+            (expected, expected),
+            "min={min_raw} max={max_raw}: the CEILING must rise to the floor"
+        );
+        assert!(
+            cfg.min_fee_ppm >= 5,
+            "min_fee_ppm must stay at or above its own floor of 5 (CRITICAL-02): {cfg:?}"
+        );
+        assert!(
+            cfg.max_fee_ppm >= 1,
+            "max_fee_ppm must stay in band: {cfg:?}"
+        );
+    }
+
+    // Already-ordered pairs are untouched (no repair, no widening).
+    for (min_raw, max_raw) in [("10", "2000"), ("50", "50")] {
+        let (handle, _tmp) =
+            fixture_db_with_overrides(&[("min-fee-ppm", min_raw), ("max-fee-ppm", max_raw)]).await;
+        let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
+        assert_eq!(cfg.min_fee_ppm.to_string(), min_raw);
+        assert_eq!(cfg.max_fee_ppm.to_string(), max_raw);
+    }
 }
 
+/// The receivable pair repairs DOWNWARD (`floor = target`,
+/// config.py:975-980) -- the OPPOSITE of the fee pair, and correctly so:
+/// floor and target share the same (0.0, 1.0) band, so lowering the
+/// floor cannot push either bound out of range. Asserting only
+/// `floor == target` passes under BOTH directions, which is exactly how
+/// the fee pair's inverted repair hid; this pins the direction by
+/// checking the target is UNCHANGED (self-review 2026-07-31).
 #[tokio::test]
 async fn resolve_fee_cfg_repairs_crossed_receivable_band() {
     let (handle, _tmp) = fixture_db_with_override("receivable-ratio-floor", "0.6").await;
-    // target stays default 0.30 -> floor repaired to target.
+    // target stays default 0.30 -> floor repaired DOWN to target.
     let cfg = revops::fee_config::resolve_fee_cfg(Some(&handle), &HashMap::new()).await;
+    let default_target = revops_fees::cycle::FeeCfgSnapshot::default().receivable_ratio_target;
+    assert_eq!(
+        cfg.receivable_ratio_target, default_target,
+        "the TARGET must be untouched -- only the floor moves"
+    );
     assert_eq!(cfg.receivable_ratio_floor, cfg.receivable_ratio_target);
+}
+
+/// Task 74 `rust_contract`, layer (b): a CLN startup option that is out
+/// of band must reach the fee cycle CLAMPED, exactly as py clamps it in
+/// `_validate_numeric_config_options` before Config is constructed.
+/// Without this the fee cycle ran on an out-of-band bound -- and a
+/// crossed pair could invert the fee rail.
+#[tokio::test]
+async fn startup_option_layer_is_clamped_before_reaching_the_fee_cycle() {
+    use cln_plugin::options::Value as OptValue;
+
+    let mut options = HashMap::new();
+    // min_fee_ppm range is (5, 100000).
+    options.insert("revenue-ops-min-fee-ppm".to_string(), OptValue::Integer(0));
+    options.insert(
+        "revenue-ops-max-fee-ppm".to_string(),
+        OptValue::Integer(500_000),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &options).await;
+    assert_eq!(
+        cfg.min_fee_ppm, 5,
+        "below-floor startup option must clamp UP"
+    );
+    assert_eq!(
+        cfg.max_fee_ppm, 100_000,
+        "above-ceiling startup option must clamp DOWN"
+    );
+
+    // Control: an in-band startup option is passed through untouched.
+    let mut options = HashMap::new();
+    options.insert(
+        "revenue-ops-min-fee-ppm".to_string(),
+        OptValue::Integer(250),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &options).await;
+    assert_eq!(cfg.min_fee_ppm, 250);
 }

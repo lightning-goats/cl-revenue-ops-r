@@ -317,14 +317,20 @@ fn dryrun_cycle_appends_decisions_to_journal_and_state_jsonl() {
     // every processed channel emits exactly one FeeDecision (adjusted or
     // skip) and marks itself dirty for the end-of-cycle state flush.
     let o1 = owner.run_cycle(prepared(json!(3), true), &mut clock);
-    assert!(matches!(o1, CycleOutcome::Ran { decisions: 1 }), "{o1:?}");
+    assert!(
+        matches!(o1, CycleOutcome::Ran { decisions: 1, .. }),
+        "{o1:?}"
+    );
     let journal_after_1 = line_count(&journal_path);
     let state_after_1 = line_count(&state_path);
     assert_eq!(journal_after_1, 1, "one decision line after cycle 1");
     assert_eq!(state_after_1, 1, "one state flush line after cycle 1");
 
     let o2 = owner.run_cycle(prepared(json!(3), true), &mut clock);
-    assert!(matches!(o2, CycleOutcome::Ran { decisions: 1 }), "{o2:?}");
+    assert!(
+        matches!(o2, CycleOutcome::Ran { decisions: 1, .. }),
+        "{o2:?}"
+    );
     assert_eq!(
         line_count(&journal_path),
         journal_after_1 + 1,
@@ -1111,10 +1117,11 @@ async fn run_prepared_acknowledges_only_after_real_owner_outcome() {
         .await
         .expect("owner completion deadline")
         .expect("owner reply");
-    assert!(
-        outcome.is_ok(),
-        "real owner outcome must be acknowledged: {outcome:?}"
-    );
+    let completed = outcome.expect("real owner outcome must be acknowledged");
+    assert_eq!(completed.adjusted_channels, 0);
+    assert_eq!(completed.generation, None);
+    assert!(completed.completed_at > 0);
+    assert_eq!(completed.fee_debug["channels"], json!({}));
     handle.tx.send(CycleMsg::Shutdown).await.ok();
 }
 
@@ -1299,6 +1306,24 @@ async fn wake_all_completion_waits_for_the_owner_result() {
     tokio::task::spawn_blocking(move || owner.join().unwrap())
         .await
         .unwrap();
+}
+
+#[test]
+fn fee_cycle_response_matches_python_without_leaking_internal_receipt_fields() {
+    let completed = revops::fee_scheduler::FeeCycleCompletion {
+        adjusted_channels: 2,
+        generation: Some(7),
+        completed_at: 1_700_000_000,
+        fee_debug: json!({"channels": {"100x1x0": {"adjusted": true}}}),
+    };
+    assert_eq!(
+        revops::fee_scheduler::build_fee_cycle_response(&completed),
+        json!({
+            "ok": true,
+            "adjusted_channels": 2,
+            "fee_debug": {"channels": {"100x1x0": {"adjusted": true}}},
+        })
+    );
 }
 
 #[tokio::test]
@@ -5677,10 +5702,12 @@ mod seedonce_restart {
 
         release_parked(&_fx.journal_dir.join("rust-owned.db"), &parked);
         pump_store_results(&mut owner, &rx);
-        assert_eq!(
-            new_rx.try_recv().expect("newest deferred ACK is terminal"),
-            Ok(())
-        );
+        let completed = new_rx
+            .try_recv()
+            .expect("newest deferred ACK is terminal")
+            .expect("deferred cycle completed successfully");
+        assert_eq!(completed.adjusted_channels, 0);
+        assert!(completed.completed_at > 0);
     }
 
     #[test]

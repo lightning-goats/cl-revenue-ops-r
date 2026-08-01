@@ -309,7 +309,36 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert!(methods.contains(&"revenue-ping"), "methods: {methods:?}");
+    assert!(
+        !methods.contains(&"revenue-ping"),
+        "Rust-only ping must not occupy the Python canonical namespace: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-profile-preview"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-fee-authority-status"),
+        "methods: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"revenue-fee-cycle"),
+        "methods: {methods:?}"
+    );
+    for policy_mutator in [
+        "revenue-ignore",
+        "revenue-unignore",
+        "revenue-ban",
+        "revenue-unban",
+        "revenue-clear-reservations",
+        "revenue-spend-release",
+        "revenue-spend-settle",
+    ] {
+        assert!(
+            methods.contains(&policy_mutator),
+            "missing {policy_mutator}: {methods:?}"
+        );
+    }
     assert!(methods.contains(&"revenue-status"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-config"), "methods: {methods:?}");
     assert!(methods.contains(&"revenue-history"), "methods: {methods:?}");
@@ -343,12 +372,9 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&lnplus), "missing {lnplus}: {methods:?}");
     }
-    // 2026-07-27: the first production surface over the revops-rebalance
-    // crate, which until then was not even linked into this binary.
-    // READ-ONLY -- it plans, it never sends.
     assert!(
-        methods.contains(&"revenue-rebalance-plan"),
-        "methods: {methods:?}"
+        !methods.contains(&"revenue-rebalance-plan"),
+        "Rust-only rebalance-plan must not occupy the Python canonical namespace: {methods:?}"
     );
     // Task 49 (Wave 2 / RPC Batch A): ten more read-only builders --
     // health, profitability, analyze, policy, list-banned, list-ignored,
@@ -406,16 +432,17 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     ] {
         assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
     }
-    // Exactly 54 rpc methods total (no leftover revenue-r-* names bleeding
-    // through from shadow mode) -- ping/status/config (Phase 1a), Phase 1b
+    // Exactly 63 rpc methods total (no leftover revenue-r-* names bleeding
+    // through from shadow mode) -- status/config (Phase 1a), Phase 1b
     // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
     // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
-    // rebalance planner, Task 49's ten Batch A builders, Task 56's four
+    // profile-preview, fixed-startup fee-authority-status, and completed fee-cycle, Task 49's ten Batch A builders, Task 56's four
     // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
     // (status/breaker-clear/abandon/backfill through the LN+ owner),
     // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
     // Task 62's planner-execute (capital owner), and Task 63's 22 Boltz
-    // RPCs (serialized Boltz owner).
+    // RPCs (serialized Boltz owner), Task 66's completed core-state
+    // mutators and total-cost-budget.
     //
     // This count is a GUARD, not bookkeeping: it is what forces a new RPC
     // to be named here deliberately rather than appearing unannounced.
@@ -423,9 +450,28 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
     // decision someone made on purpose.
     assert_eq!(
         result["rpcmethods"].as_array().unwrap().len(),
-        54,
+        70,
         "methods: {methods:?}"
     );
+
+    // Task 66 slice 1: the unified total-cost budget read; slice 2: the
+    // generic-ledger reserve and stale-release mutators; slice 3: the
+    // closed-channel archival backfill; slice 4: the econ-ledger
+    // reconciliation sweep; slice 5: the read-only shadow-cycle
+    // diagnostic; slice 6: the unified capex allocations read; slice 7:
+    // the authority-gated manual fee write, closing the Python RPC set.
+    for name in [
+        "revenue-total-cost-budget",
+        "revenue-spend-reserve",
+        "revenue-spend-release-stale",
+        "revenue-cleanup-closed",
+        "revenue-econ-reconcile",
+        "revenue-econ-cycle",
+        "revenue-capex-status",
+        "revenue-set-fee",
+    ] {
+        assert!(methods.contains(&name), "missing {name}: {methods:?}");
+    }
 
     // Per the design spec's db-path ruling (docs/superpowers/specs/
     // 2026-07-16-rust-port-design.md lines 78-87): in canonical mode (Python
@@ -483,6 +529,299 @@ fn canonical_mode_registers_exactly_the_python_rpc_set() {
         actual, expected,
         "canonical RPC set differs from Python; missing={missing:?}, unexpected={unexpected:?}"
     );
+}
+
+#[test]
+fn canonical_mode_keeps_rust_only_diagnostics_outside_python_namespace() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    for forbidden in [
+        "revenue-ping",
+        "revenue-rebalance-plan",
+        "revenue-r-ping",
+        "revenue-r-rebalance-plan",
+        "revops-ping",
+        "revops-rebalance-plan",
+    ] {
+        assert!(
+            !canonical.contains(&forbidden),
+            "{forbidden}: {canonical:?}"
+        );
+    }
+
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(shadow.contains(&"revenue-r-ping"), "methods: {shadow:?}");
+    assert!(
+        shadow.contains(&"revenue-r-rebalance-plan"),
+        "methods: {shadow:?}"
+    );
+}
+
+#[test]
+fn profile_preview_is_reachable_in_both_naming_modes() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        canonical.contains(&"revenue-profile-preview"),
+        "methods: {canonical:?}"
+    );
+
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        shadow.contains(&"revenue-r-profile-preview"),
+        "methods: {shadow:?}"
+    );
+}
+
+#[test]
+fn fee_authority_status_is_reachable_in_both_naming_modes() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        canonical.contains(&"revenue-fee-authority-status"),
+        "methods: {canonical:?}"
+    );
+
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("rpcmethods array")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        shadow.contains(&"revenue-r-fee-authority-status"),
+        "methods: {shadow:?}"
+    );
+}
+
+#[test]
+fn core_state_mutators_are_reachable_in_both_naming_modes() {
+    let canonical_manifest = manifest_with(true);
+    let canonical = canonical_manifest["rpcmethods"]
+        .as_array()
+        .expect("canonical rpcmethods")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    let shadow_manifest = manifest_with(false);
+    let shadow = shadow_manifest["rpcmethods"]
+        .as_array()
+        .expect("shadow rpcmethods")
+        .iter()
+        .filter_map(|method| method["name"].as_str())
+        .collect::<Vec<_>>();
+    for suffix in [
+        "ignore",
+        "unignore",
+        "ban",
+        "unban",
+        "clear-reservations",
+        "spend-release",
+        "spend-release-stale",
+        "spend-reserve",
+        "spend-settle",
+    ] {
+        assert!(canonical.contains(&format!("revenue-{suffix}").as_str()));
+        assert!(shadow.contains(&format!("revenue-r-{suffix}").as_str()));
+    }
+}
+
+#[test]
+fn core_state_mutators_refuse_when_live_capability_is_unassembled() {
+    // Self-review 2026-07-31: the refusal text is PER-RPC, matching the
+    // prerequisite py itself gates on -- policy_manager for the policy
+    // mutators, database for the generic-ledger ones (py
+    // cl-revenue-ops.py: ignore/unignore/ban/unban vs clear-reservations/
+    // spend-release/spend-settle/spend-reserve/spend-release-stale). A
+    // shared "Plugin not initialized" was wrong for five of the nine.
+    // This ALSO makes each registration's action binding observable: a
+    // cross-wired binding across the two families changes this string.
+    for (method, params, expected) in [
+        (
+            "revenue-ignore",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'a'), "internal": true}),
+            "Plugin not initialized",
+        ),
+        (
+            "revenue-unignore",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'b'), "internal": true}),
+            "Plugin not initialized",
+        ),
+        (
+            "revenue-ban",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'c')}),
+            "Plugin not initialized",
+        ),
+        (
+            "revenue-unban",
+            serde_json::json!({"peer_id": fake_peer_id("02", 'd')}),
+            "Plugin not initialized",
+        ),
+        (
+            "revenue-clear-reservations",
+            serde_json::json!({}),
+            "Database not initialized",
+        ),
+        (
+            "revenue-spend-release",
+            serde_json::json!({"reservation_id": "r"}),
+            "Database not initialized",
+        ),
+        (
+            "revenue-spend-release-stale",
+            serde_json::json!({"max_age_seconds": 3600}),
+            "Database not initialized",
+        ),
+        (
+            "revenue-spend-reserve",
+            serde_json::json!({"reservation_id": "r", "category": "misc", "amount_sats": 10}),
+            "Database not initialized",
+        ),
+        (
+            "revenue-spend-settle",
+            serde_json::json!({"reservation_id": "r"}),
+            "Database not initialized",
+        ),
+    ] {
+        assert_eq!(
+            call_after_init_with_params(
+                true,
+                None,
+                tempfile::tempdir().unwrap().path(),
+                &[],
+                method,
+                params
+            ),
+            serde_json::json!({"error": expected}),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn fee_cycle_is_reachable_and_blocked_after_passive_startup() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init_with_params(
+        true,
+        None,
+        home.path(),
+        &[],
+        "revenue-fee-cycle",
+        serde_json::json!({}),
+    );
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["adjusted_channels"], 0);
+    assert_eq!(result["fee_debug"], serde_json::json!({}));
+    assert_eq!(result["status"], "blocked");
+    assert_eq!(result["reason"], "fee_authority_disabled");
+    assert_eq!(result["operation"], "revenue-fee-cycle");
+    assert_eq!(result["generation"], 1);
+    assert!(result["transitioned_at"].as_i64().is_some());
+}
+
+#[test]
+fn fee_authority_status_rpc_reports_the_fixed_observer_startup_state() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let before = now_unix();
+    let result = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-fee-authority-status",
+        serde_json::json!({}),
+    );
+    let after = now_unix();
+
+    assert_eq!(result["schema"], "revenue_ops_fee_authority/v1");
+    assert_eq!(result["enabled"], false);
+    assert_eq!(result["generation"], 1);
+    assert_eq!(result["reason"], "init");
+    assert!(result["transitioned_at"]
+        .as_i64()
+        .is_some_and(|ts| ts >= before && ts <= after));
+    assert!(result["observed_at"]
+        .as_i64()
+        .is_some_and(|ts| ts >= before && ts <= after));
+}
+
+#[test]
+fn profile_preview_rpc_uses_startup_bundle_and_explicit_override_precedence() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        for (key, value, version) in [
+            ("risk_profile", "balanced", 1_i64),
+            ("daily_budget_sats", "7000", 2_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO config_overrides (key, value, version, updated_at) VALUES (?1, ?2, ?3, 1800000000)",
+                rusqlite::params![key, value, version],
+            )
+            .expect("seed config override");
+        }
+    }
+
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-profile-preview",
+        serde_json::json!(["growth"]),
+    );
+
+    assert_eq!(result["active_profile"], "balanced");
+    assert_eq!(result["persisted_profile"], "balanced");
+    assert_eq!(result["pending_restart"], false);
+    assert_eq!(
+        result["explicit_override_keys"],
+        serde_json::json!(["daily_budget_sats"])
+    );
+    let preview = &result["preview"];
+    assert_eq!(preview["profile"], "growth");
+    assert!(preview["blocked_by_explicit_override"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| {
+            entry["key"] == "daily_budget_sats" && entry["current"] == serde_json::json!(7000)
+        })));
+    assert!(preview["would_change"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| {
+            entry["key"] == "weekly_budget_sats"
+                && entry["current"] == serde_json::json!(56000)
+                && entry["profile_value"] == serde_json::json!(84000)
+        })));
 }
 
 /// Shadow mode (both plugins loaded) must keep the opt-in-empty default --
@@ -1226,14 +1565,17 @@ fn revenue_r_policy_list_reflects_real_peer_policies_rows() {
 }
 
 /// `revenue-r-policy` mutation actions must be refused BEFORE any DB
-/// access (task rule 3) -- no db-path override is supplied here, so a
-/// handler that checked `s.db` first would answer "Plugin not
-/// initialized" instead of the tactical-action refusal. Asserting the
-/// refusal text specifically pins the ordering, not just "some error".
+/// access -- SUPERSEDED ordering (Task 66 slice 8f): py checks
+/// `policy_manager is None` BEFORE the deprecation gate
+/// (cl-revenue-ops.py:5385-5397), so with no DB a tactical call answers
+/// "Plugin not initialized"; WITH a DB and no internal/admin override it
+/// answers py's own deprecation refusal verbatim; with the override it
+/// reaches the sealed owner -- unassembled until Task 69, the same
+/// "Plugin not initialized" string.
 #[test]
-fn revenue_r_policy_set_action_is_refused_before_any_db_access() {
+fn revenue_r_policy_write_arms_follow_pythons_guard_order() {
     let home = tempfile::tempdir().expect("tempdir");
-    let result = call_after_init_with_params(
+    let no_db = call_after_init_with_params(
         false,
         None,
         home.path(),
@@ -1242,15 +1584,42 @@ fn revenue_r_policy_set_action_is_refused_before_any_db_access() {
         serde_json::json!({"action": "set", "peer_id": "irrelevant"}),
     );
     assert_eq!(
-        result["error"]["code"], "state_writer_authority_absent",
-        "must be the stable authority refusal, not a DB-access error: {result:?}"
+        no_db,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "py's policy_manager gate fires first: {no_db:?}"
     );
-    assert!(
-        result["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("write authority"),
-        "{result:?}"
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    let refused = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "set", "peer_id": "irrelevant"}),
+    );
+    assert_eq!(
+        refused,
+        serde_json::json!({
+            "error": "revenue-policy set is deprecated for normal operator use. \
+                      Use revenue-policy list/get/find/changes for diagnostics."
+        }),
+        "{refused:?}"
+    );
+
+    let staged = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-policy",
+        serde_json::json!({"action": "set", "peer_id": "irrelevant", "internal": true}),
+    );
+    assert_eq!(
+        staged,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "override reaches the owner, unassembled until Task 69: {staged:?}"
     );
 }
 
@@ -1578,10 +1947,11 @@ fn revenue_r_hot_channel_protection_peers_list_reflects_a_real_row() {
     );
     assert_eq!(result["peers"][0]["min_depletion_trigger_pct"], 0.42);
 
-    // `action != "list"` must be refused, never treated as an implicit
-    // list -- add/remove/clear are DB writes and stay out of this
-    // read-only port's scope.
-    let refused = call_after_init_with_params(
+    // Task 66 slice 8f: the write actions route through the sealed
+    // mutation owner -- unassembled until Task 69, answering py's
+    // "Plugin not initialized" exactly like the other staged mutators
+    // (never an implicit list, never a fabricated success).
+    let staged = call_after_init_with_params(
         false,
         Some(prod_db_path.to_str().unwrap()),
         home.path(),
@@ -1589,12 +1959,10 @@ fn revenue_r_hot_channel_protection_peers_list_reflects_a_real_row() {
         "revenue-r-hot-channel-protection-peers",
         serde_json::json!({"action": "add"}),
     );
-    let err = refused["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected a refusal error, got: {refused:?}"));
-    assert!(
-        err.contains("not available in this read-only port"),
-        "{err}"
+    assert_eq!(
+        staged,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "{staged:?}"
     );
 }
 
@@ -1671,9 +2039,9 @@ fn revenue_r_hot_channel_protection_peers_action_normalization_matches_python() 
         "{leading_space_err}"
     );
 
-    // H6: the write-action refusal and the unknown-action refusal must be
-    // DIFFERENT messages.
-    let write_refused = call_after_init_with_params(
+    // H6 (updated for Task 66 slice 8f): a real write action's staged
+    // answer must still read differently from an unknown-action refusal.
+    let write_staged = call_after_init_with_params(
         false,
         Some(prod_db_path.to_str().unwrap()),
         home.path(),
@@ -1681,12 +2049,483 @@ fn revenue_r_hot_channel_protection_peers_action_normalization_matches_python() 
         "revenue-r-hot-channel-protection-peers",
         serde_json::json!({"action": "remove"}),
     );
-    let write_refused_err = write_refused["error"].as_str().unwrap();
-    assert!(write_refused_err.contains("not available in this read-only port"));
+    let write_staged_err = write_staged["error"].as_str().unwrap();
+    assert_eq!(write_staged_err, "Plugin not initialized");
     assert_ne!(
-        write_refused_err, leading_space_err,
-        "a real write action's refusal must read differently from an unknown-action refusal"
+        write_staged_err, leading_space_err,
+        "a real write action's staged arm must read differently from an unknown-action refusal"
     );
+}
+
+/// Task 66 slice 1: the registered total-cost-budget handler END-TO-END
+/// through the spawned binary — this is what pins the GLUE the
+/// assembly-level tests (`tests/total_cost_budget.rs`) cannot see: the
+/// window_hours param actually reaching the response, the config layer
+/// actually resolving `daily-budget-sats`' fixture default, and the seeded
+/// DB evidence actually flowing through the registered handler.
+#[test]
+fn revenue_r_total_cost_budget_serves_seeded_evidence_and_config_defaults() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let event_ts = now_unix() - 3600;
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO spend_events (event_id, category, amount_sats, timestamp) \
+             VALUES ('tcb-ev1', 'rebalance', 60, ?1)",
+            rusqlite::params![event_ts],
+        )
+        .expect("seed spend_events");
+        conn.execute(
+            "INSERT INTO rebalance_costs \
+             (channel_id, peer_id, cost_sats, cost_msat, amount_sats, timestamp) \
+             VALUES ('2x2x0', ?1, 200, 200000, 50000, ?2)",
+            rusqlite::params!["1".repeat(66), event_ts],
+        )
+        .expect("seed rebalance_costs");
+    }
+
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-total-cost-budget",
+        serde_json::json!({"window_hours": 48}),
+    );
+
+    // The requested window round-trips (not the 24 default).
+    assert_eq!(result["window_hours"], 48, "result: {result:?}");
+    // `daily-budget-sats`' fixture default (5000) resolved through the
+    // handler's own config path; growth disabled default -> fixed mode.
+    assert_eq!(result["daily_budget_sats"], 5_000);
+    assert_eq!(result["mode"], "fixed");
+    assert_eq!(result["effective_budget_sats"], 5_000);
+    // Seeded evidence: rebalance 200 + generic ledger 60, nothing else.
+    assert_eq!(
+        result["actual_spent_by_category"],
+        serde_json::json!({"rebalance": 200, "boltz": 0, "open": 0, "close": 0, "ledger": 60})
+    );
+    assert_eq!(result["actual_spent_sats"], 260);
+    assert_eq!(result["reserved_sats"], 0);
+    assert_eq!(result["remaining_sats"], 5_000 - 260);
+    assert_eq!(result["revenue_sats"], 0);
+    assert_eq!(result["net_profit_sats_after_costs"], -260);
+    // No Boltz transport in this environment: the component must say so,
+    // never fabricate a live zero reading.
+    assert_eq!(result["components"]["boltz"]["available"], false);
+    assert_eq!(result["components"]["boltz"]["spent_24h_sats"], 0);
+    // Evidence is 1h old: measured partial coverage, honest not an echo.
+    assert_eq!(result["coverage_status"], "partial");
+    // Every pipeline is wired: nothing left to declare.
+    assert_eq!(result["_phase1b_gaps"], serde_json::json!([]));
+}
+
+/// Python's guard order (cl-revenue-ops.py:8306-8309): no DB answers the
+/// EXACT "Plugin not initialized" 1-key arm — not the spend-ledger's
+/// "Database not initialized" string.
+#[test]
+fn revenue_r_total_cost_budget_without_db_is_plugin_not_initialized() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let result = call_after_init(false, None, home.path(), &[], "revenue-r-total-cost-budget");
+    assert_eq!(
+        result,
+        serde_json::json!({"error": "Plugin not initialized"})
+    );
+}
+
+/// `revenue-cleanup-closed`'s guard ORDER (cl-revenue-ops.py:6383-6386):
+/// no DB answers "Database not initialized"; with a DB but no assembled
+/// mutation owner (pre-Task-69), the safe_plugin-analog arm answers
+/// "Plugin not initialized" — two DIFFERENT strings, both distinct from
+/// the total-cost-budget guard above.
+#[test]
+fn revenue_r_cleanup_closed_guard_arms_and_order() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let no_db = call_after_init(false, None, home.path(), &[], "revenue-r-cleanup-closed");
+    assert_eq!(
+        no_db,
+        serde_json::json!({"error": "Database not initialized"})
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    let with_db = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-cleanup-closed",
+    );
+    assert_eq!(
+        with_db,
+        serde_json::json!({"error": "Plugin not initialized"}),
+        "owner unassembled until Task 69"
+    );
+}
+
+/// `revenue-r-econ-reconcile` through the spawned binary: the shadow flag
+/// defaults OFF, so the real config path answers Python's exact disabled
+/// hint; and a bad stale_after_seconds surfaces the int() error in-band.
+#[test]
+fn revenue_r_econ_reconcile_disabled_by_default_with_real_config_path() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-reconcile",
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "enabled": false,
+            "hint": "revenue-config set econ_shadow_enabled true",
+        })
+    );
+
+    // SELF-REVIEW 2026-07-31: py coerces stale_after_seconds INSIDE the
+    // outer try, AFTER the enabled gate (cl-revenue-ops.py:6100-6114),
+    // so on a DISABLED runtime the int() never runs and the caller still
+    // gets the disabled hint -- not a coercion error. (The error arm is
+    // pinned on an ENABLED runtime by the dry-run ledger test below.)
+    let bad = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-reconcile",
+        serde_json::json!({"stale_after_seconds": "junk"}),
+    );
+    assert_eq!(
+        bad,
+        serde_json::json!({
+            "enabled": false,
+            "hint": "revenue-config set econ_shadow_enabled true",
+        }),
+        "{bad:?}"
+    );
+}
+
+/// With the shadow flag enabled through the REAL config-override path and
+/// a journal dir configured, the handler must open the RUST-owned
+/// `econ_ledger_dryrun.db` — and must NEVER create a file named
+/// `econ_ledger.db`, which is Python's production ledger until cutover.
+#[test]
+fn revenue_r_econ_reconcile_touches_only_the_rust_dryrun_ledger() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('econ_shadow_enabled', 'true', 1, ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("enable econ shadow");
+    }
+    let journal_dir = home.path().join("journal");
+    std::fs::create_dir_all(&journal_dir).expect("mkdir journal");
+
+    let result = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[(
+            "revops-r-journal-dir",
+            serde_json::json!(journal_dir.to_str().unwrap()),
+        )],
+        "revenue-r-econ-reconcile",
+    );
+    assert_eq!(result["enabled"], true, "{result:?}");
+    assert_eq!(result["checked"], 0);
+    assert_eq!(result["divergences"], serde_json::json!([]));
+    assert_eq!(
+        result["fee_intent_completeness"]["status"],
+        "no_intent_data"
+    );
+    assert!(
+        journal_dir.join("econ_ledger_dryrun.db").exists(),
+        "the handler must open the Rust-owned dry-run ledger"
+    );
+    assert!(
+        !journal_dir.join("econ_ledger.db").exists(),
+        "the production ledger name must never be created"
+    );
+
+    // The coercion error is observable ONLY here, on an ENABLED,
+    // available runtime -- and py's arm carries `enabled: true`
+    // (cl-revenue-ops.py:6147-6148), which the pre-gate parse dropped.
+    let bad = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[(
+            "revops-r-journal-dir",
+            serde_json::json!(journal_dir.to_str().unwrap()),
+        )],
+        "revenue-r-econ-reconcile",
+        serde_json::json!({"stale_after_seconds": "junk"}),
+    );
+    assert_eq!(bad["enabled"], true, "{bad:?}");
+    assert!(
+        bad["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("invalid literal for int()")),
+        "{bad:?}"
+    );
+}
+
+/// `revenue-r-econ-cycle` through the spawned binary: disabled by default
+/// (Python's exact hint); with the shadow flag enabled through the REAL
+/// config-override path it answers Python's `engine is None` arm — the
+/// rebalance engine is unassembled until Task 69, and the handler must say
+/// so rather than fabricate a cycle. A stray argument is rejected by the
+/// zero-param contract.
+#[test]
+fn revenue_r_econ_cycle_disabled_then_engine_unavailable_when_enabled() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let disabled = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-cycle",
+    );
+    assert_eq!(
+        disabled,
+        serde_json::json!({
+            "enabled": false,
+            "hint": "revenue-config set econ_shadow_enabled true",
+        })
+    );
+
+    let stray = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-econ-cycle",
+        serde_json::json!({"apply": true}),
+    );
+    assert!(
+        stray["error"].as_str().is_some(),
+        "zero-param contract must reject extras: {stray:?}"
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path2 = copy_fixture_db(home2.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path2).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('econ_shadow_enabled', 'true', 1, ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("enable econ shadow");
+    }
+    let enabled = call_after_init(
+        false,
+        Some(prod_db_path2.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-econ-cycle",
+    );
+    assert_eq!(
+        enabled,
+        serde_json::json!({
+            "enabled": true,
+            "error": "rebalance engine unavailable",
+        }),
+        "the pre-Task-69 runtime has no candidate source and must say so"
+    );
+}
+
+/// `revenue-r-report` through the spawned binary (Task 66 slice 8c: all
+/// four types real). Guard parity: py gates database/policy_manager FIRST
+/// for EVERY type (cl-revenue-ops.py:5596-5597) — a no-DB summary is
+/// "Plugin not initialized", never the retired not_yet_ported marker.
+/// With a DB: summary/policies count REAL seeded peer_policies rows; the
+/// peer arm's usage guard and the verbatim unknown-type error hold.
+#[test]
+fn revenue_r_report_serves_all_four_types_with_python_guard_order() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let no_db = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "summary"}),
+    );
+    assert_eq!(
+        no_db,
+        serde_json::json!({"error": "Plugin not initialized"})
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO peer_policies \
+             (peer_id, strategy, rebalance_mode, tags, updated_at) VALUES \
+             ('02aa', 'dynamic', 'enabled', '[\"vip\"]', ?1), \
+             ('02bb', 'static', 'disabled', '[\"vip\",\"hot\"]', ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("seed policies");
+    }
+    let summary = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "summary"}),
+    );
+    assert_eq!(summary["type"], "summary", "{summary:?}");
+    assert_eq!(summary["policies"]["total"], 2);
+    assert_eq!(summary["policies"]["by_strategy"]["dynamic"], 1);
+    assert_eq!(summary["policies"]["by_strategy"]["static"], 1);
+    assert_eq!(summary["policies"]["by_rebalance_mode"]["enabled"], 1);
+
+    let policies = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "policies"}),
+    );
+    assert_eq!(policies["type"], "policies");
+    assert_eq!(policies["by_tag"]["vip"], 2);
+    assert_eq!(policies["by_tag"]["hot"], 1);
+
+    let usage = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "peer"}),
+    );
+    assert_eq!(
+        usage,
+        serde_json::json!({"error": "Usage: revenue-report peer <peer_id>"})
+    );
+
+    let unknown = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-report",
+        serde_json::json!({"report_type": "bogus"}),
+    );
+    assert_eq!(
+        unknown["error"],
+        "Unknown report type: bogus. Use 'summary', 'peer', 'policies', or 'costs'"
+    );
+}
+
+/// `revenue-r-config get` through the spawned binary must report the REAL
+/// config version — Python's `MAX(version)` over `config_overrides`
+/// (database.py:7374-7378) — with the retired `version` gap entry gone.
+/// The seeded override also proves the layer-(a) value path end-to-end.
+#[test]
+fn revenue_r_config_get_reports_the_real_db_config_version() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    {
+        let conn = rusqlite::Connection::open(&prod_db_path).expect("open prod db");
+        conn.execute(
+            "INSERT INTO config_overrides (key, value, version, updated_at) \
+             VALUES ('daily_budget_sats', '7777', 7, ?1), \
+                    ('weekly_budget_sats', '50000', 3, ?1)",
+            rusqlite::params![now_unix()],
+        )
+        .expect("seed overrides");
+    }
+    let result = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-config",
+        serde_json::json!({"action": "get", "key": "daily-budget-sats"}),
+    );
+    assert_eq!(result["value"], 7777, "{result:?}");
+    assert_eq!(result["version"], 7, "MAX(version) over config_overrides");
+    assert_eq!(result["_phase1b_gaps"], serde_json::json!([]));
+}
+
+/// `revenue-r-set-fee` through the spawned binary: every e2e mode is
+/// non-live, so the shared fee-authority lease DENIES with Python's exact
+/// merged dict (cl-revenue-ops.py:4721-4728) — before any validation, so
+/// even a garbage fee_ppm gets the denial, not a validation error. The
+/// manual fee write can never execute pre-Task-69.
+#[test]
+fn revenue_r_set_fee_is_denied_by_the_authority_lease() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home.path());
+    let denied = call_after_init_with_params(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home.path(),
+        &[],
+        "revenue-r-set-fee",
+        serde_json::json!({"channel_id": "100x1x0", "fee_ppm": "garbage", "force": true}),
+    );
+    assert_eq!(denied["error"], "Fee authority disabled", "{denied:?}");
+    assert_eq!(denied["status"], "blocked");
+    assert_eq!(denied["reason"], "fee_authority_disabled");
+    assert_eq!(denied["operation"], "revenue-set-fee");
+    assert!(denied["generation"].is_i64() || denied["generation"].is_u64());
+    assert!(denied["transitioned_at"].is_i64());
+}
+
+/// `revenue-r-capex-status` through the spawned binary: Python's engine
+/// gate without a DB ("Capex engine not initialized", cl-revenue-ops.py:
+/// 7718-7719); with a DB the full read path serves real allocations —
+/// this harness has no observer store, which is Python's
+/// `analyze_all_channels` fail-soft arm (all_prof = {}), so the shape is
+/// an EMPTY fleet with a real priority class, never an error. No
+/// datastore push happens (declared delta; the read RPC stays read-only
+/// pre-cutover).
+#[test]
+fn revenue_r_capex_status_guard_then_empty_fleet_allocations() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let no_db = call_after_init(false, None, home.path(), &[], "revenue-r-capex-status");
+    assert_eq!(
+        no_db,
+        serde_json::json!({"error": "Capex engine not initialized"})
+    );
+
+    let home2 = tempfile::tempdir().expect("tempdir");
+    let prod_db_path = copy_fixture_db(home2.path());
+    let with_db = call_after_init(
+        false,
+        Some(prod_db_path.to_str().unwrap()),
+        home2.path(),
+        &[],
+        "revenue-r-capex-status",
+    );
+    assert_eq!(with_db["status"], "ok", "{with_db:?}");
+    assert_eq!(with_db["ttl_seconds"], 1800);
+    assert_eq!(with_db["channel_count"], 0);
+    assert_eq!(with_db["channels"], serde_json::json!({}));
+    assert!(
+        ["defensive", "preservation", "operational", "growth"]
+            .contains(&with_db["priority_class"].as_str().unwrap_or("?")),
+        "{with_db:?}"
+    );
+    assert!(with_db["global_envelope_sats"].is_i64());
+    assert!(with_db["fleet_exploration_budget_sats"].is_i64());
+    assert!(with_db["allocated_by_priority_sats"].is_object());
 }
 
 /// `revenue-r-spend-ledger` must read the real `spend_events` table
@@ -2119,26 +2958,52 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
     );
     assert_eq!(result["financials"]["today"]["forward_count"], 1);
     assert_eq!(result["financials"]["week"]["forward_count"], 1);
+    // Task 66 slice 8d: annualized_roc_pct is REAL now -- the fake
+    // node's listpeerchannels has no channels, and py's calculate_roc
+    // over zero capacity is 0.0 (profitability_analyzer.py:1846-1855),
+    // never null.
     assert_eq!(
         result["financials"]["week"]["annualized_roc_pct"],
-        serde_json::Value::Null
+        serde_json::json!(0.0)
     );
+    // channels: the observer store is configured so the pipeline is
+    // WIRED -- and this harness variant serves no lightning-rpc socket,
+    // so the snapshot fetch fails. That is py's own except arm
+    // (analyze_all_channels raising -> {"error": ...}), a real answer,
+    // never a gap and never a fabricated empty fleet.
+    assert!(
+        result["channels"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("lightning-rpc")),
+        "result: {result:?}"
+    );
+    // budget: the same provider revenue-total-cost-budget serves, 24h
+    // window, projected to py 6281-6291's subset over the empty fixture.
+    assert_eq!(result["budget"]["effective_budget_sats"], 5000);
+    assert_eq!(result["budget"]["total_spent_sats"], 0);
+    assert_eq!(result["budget"]["remaining_sats"], 5000);
+    assert_eq!(result["budget"]["utilization_pct"], 0.0);
+    // top_routes: real -- the single seeded forward misses the
+    // min_forwards=2 floor, so py's answer is [].
+    assert_eq!(result["top_routes"], serde_json::json!([]));
     let gaps: Vec<&str> = result["_gaps"]
         .as_array()
         .unwrap()
         .iter()
         .map(|g| g.as_str().unwrap())
         .collect();
+    // fees stays a gap in THIS e2e (no fee-cycle scheduler running);
+    // rebalancer/planner stay gaps until Task 69's engine assembly.
+    for g in ["fees", "rebalancer", "planner"] {
+        assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
+    }
     for g in [
         "financials.week.annualized_roc_pct",
         "channels",
-        "fees",
-        "rebalancer",
         "budget",
-        "planner",
         "top_routes",
     ] {
-        assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
+        assert!(!gaps.contains(&g), "{g} must be closed: {gaps:?}");
     }
     assert!(!gaps.contains(&"financials"), "gaps: {gaps:?}");
     assert!(
@@ -2384,12 +3249,31 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         "must not collide with Python's real unknown-channel answer: {profitability_single:?}"
     );
 
-    // No channel_id: the whole-fleet sweep is a mutating background job
-    // and is deliberately NOT ported here (RPC_BATCH_A.md's contract) --
-    // the handler must say so honestly, not silently return an empty
-    // single-channel shape.
+    // Task 66 slice 8e: no channel_id is py's FLEET arm -- the flow loop
+    // is wired in this harness, so the bounded trigger admits one pass
+    // over the Rust-owned observer store and answers py's exact ack
+    // (cl-revenue-ops.py:4542). The retired not_yet_ported marker is gone.
     let analyze_no_id = call_after_init(false, None, home.path(), &[], "revenue-r-analyze");
-    assert_eq!(analyze_no_id["error"], serde_json::json!("not_yet_ported"));
+    assert_eq!(
+        analyze_no_id,
+        serde_json::json!({"status": "Flow analysis triggered"}),
+        "{analyze_no_id:?}"
+    );
+
+    // py `if channel_id and ...`: "" is falsy -> the SAME fleet arm.
+    let analyze_empty = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-analyze",
+        serde_json::json!({"channel_id": ""}),
+    );
+    assert_eq!(
+        analyze_empty,
+        serde_json::json!({"status": "Flow analysis triggered"}),
+        "{analyze_empty:?}"
+    );
 
     // F71-R23: with a channel_id, analyze is no longer a declared gap --
     // it is served from the flow pass's persisted state. This harness

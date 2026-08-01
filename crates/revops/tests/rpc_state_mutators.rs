@@ -1,20 +1,41 @@
 use revops::rpc_params::{decode_params, load_rpc_contract, method_spec, ParamBinding};
 use revops::rpc_state_mutators::{
-    ban_plan, ban_success, build_profile_preview, completed_spend_response,
-    completed_write_response, deprecated_policy_write_gate, ignore_plan, ignore_success,
-    invalid_peer_id_error, parse_spend_release_params, parse_spend_release_stale_params,
-    parse_spend_reserve_params, parse_spend_settle_params, policy_write_override, preview_all,
-    preview_profile, profile_bundles, spend_release_response, spend_release_stale_response,
-    spend_reserve_rejection, spend_reserve_response, spend_settle_response, unban_plan,
-    unban_success, unignore_success,
+    ban_plan, ban_success, build_profile_preview, clear_reservations_response,
+    completed_spend_response, completed_write_response, deprecated_policy_write_gate, ignore_plan,
+    ignore_success, invalid_peer_id_error, parse_spend_release_params,
+    parse_spend_release_stale_params, parse_spend_reserve_params, parse_spend_settle_params,
+    policy_write_override, preview_all, preview_profile, profile_bundles, spend_release_response,
+    spend_release_stale_response, spend_reserve_rejection, spend_reserve_response,
+    spend_settle_response, unban_plan, unban_success, unignore_success,
 };
 use revops::state_writer::StateWriteAck;
 use revops_analytics::policy::{FeeStrategy, PeerPolicy, RebalanceMode};
-use revops_db::state_writer::SpendReleaseBatch;
+use revops_db::{budget::ClearStats, state_writer::SpendReleaseBatch};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 
 const PEER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[test]
+fn clear_reservations_response_matches_python_and_floors_available_budget() {
+    let cleared = ClearStats {
+        cleared_count: 2,
+        released_sats: 75,
+    };
+    assert_eq!(
+        clear_reservations_response(&cleared, 125),
+        json!({
+            "status": "success",
+            "cleared_count": 2,
+            "released_sats": 75,
+            "budget_available": 125,
+        })
+    );
+    assert_eq!(
+        clear_reservations_response(&cleared, -9)["budget_available"],
+        0
+    );
+}
 
 fn configured_policy(tags: &[&str]) -> PeerPolicy {
     PeerPolicy {

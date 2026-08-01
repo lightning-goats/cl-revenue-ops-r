@@ -17,22 +17,26 @@
 //! math is also fully ported (`revops_analytics::growth::
 //! compute_growth_budget_status`).
 //!
-//! Everything else this RPC reports is sourced from six DB/subprocess reads
-//! that have NO Rust equivalent anywhere in this workspace (confirmed by
-//! grep across `crates/`): `database.get_total_routing_revenue`,
-//! `.get_opening_costs_since`, `.get_closure_costs_since`,
-//! `.get_daily_rebalance_spend` (backing `_rebalance_liquidity_cost_
-//! components`), `boltz_manager.get_boltz_cost_components` (backing
-//! `_boltz_liquidity_cost_components`), `.get_spend_ledger_summary`, and
-//! `.get_cost_evidence_coverage`. This builder therefore takes each of
-//! those as an `Option` and only computes the values that transitively
-//! depend on them when ALL of the needed pieces are present -- reporting a
-//! category subtotal from only SOME of its components would look complete
-//! while silently under-counting spend, which this project's honesty
-//! convention forbids. Every field left `null` is listed by name in
-//! `_phase1b_gaps`.
+//! The evidence reads all have live Rust equivalents as of Task 66 slice 1
+//! (they did not when this builder was first written):
+//! `queries::total_routing_revenue_msat`, `queries::opening_costs_since`,
+//! `queries::closure_costs_since`, `queries::rebalance_spend_component`
+//! (backing `_rebalance_liquidity_cost_components` via
+//! [`rebalance_component_value`]), `rpc_boltz_ops::
+//! total_cost_boltz_component` (backing `_boltz_liquidity_cost_
+//! components`), `queries::spend_ledger_aggregates` +
+//! `active_spend_reservations` (backing `get_spend_ledger_summary`), and
+//! `queries::cost_evidence_coverage`. [`total_cost_budget_response`] wires
+//! all of them, so in production every input is `Some` and `_phase1b_gaps`
+//! is empty. The builder keeps its `Option` inputs: a caller that has not
+//! fetched a pipeline passes `None` and every transitively dependent value
+//! stays `null` and gap-listed by name -- reporting a category subtotal
+//! from only SOME of its components would look complete while silently
+//! under-counting spend, which this project's honesty convention forbids.
 
 use revops_analytics::growth::{compute_growth_budget_status, GrowthBudgetInputs};
+use revops_db::actor::DbHandle;
+use revops_db::queries;
 use serde_json::{json, Map, Value};
 
 use crate::rpc_params::{is_truthy_py, python_int};
@@ -176,6 +180,36 @@ fn coverage_fields(coverage: Option<&Value>, window_hours: i64) -> (Value, &'sta
         }
     };
     (covered_json, status)
+}
+
+/// The rebalance component of the budget response, port of
+/// `_rebalance_liquidity_cost_components` (cl-revenue-ops.py:8111-8134):
+/// the windowed DB read's four values on the available path, Python's
+/// exception arm (`available: false`, error text, honest zeros) when the
+/// read failed. Python's zeros here COUNT toward the category totals, so
+/// the caller passes this dict as a present component, never `None`.
+pub fn rebalance_component_value(
+    outcome: Result<&revops_db::queries::RebalanceSpendComponent, String>,
+    window_hours: i64,
+) -> Value {
+    match outcome {
+        Ok(component) => json!({
+            "source": "rebalance",
+            "available": true,
+            "window_hours": window_hours,
+            "spent_24h_sats": component.total_spent_sats,
+            "reserved_24h_sats": component.total_reserved_sats,
+            "job_count": component.job_count,
+            "success_count": component.success_count,
+        }),
+        Err(error) => json!({
+            "source": "rebalance",
+            "available": false,
+            "error": error,
+            "spent_24h_sats": 0,
+            "reserved_24h_sats": 0,
+        }),
+    }
 }
 
 /// Already-fetched inputs to [`build_total_cost_budget`]. Every `Option`
@@ -370,7 +404,10 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     if i.closure_cost_sats.is_none() {
         gaps.push("components.closure_cost_sats");
     }
-    if covered_hours.is_null() {
+    // Gap only when the coverage pipeline was never FETCHED. A wired
+    // pipeline measuring "unknown" (no evidence rows) is Python's own
+    // honest null, not a Rust wiring gap.
+    if i.coverage_raw.is_none() {
         gaps.push("coverage_hours");
         gaps.push("covered_hours");
     }
@@ -408,6 +445,119 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
         },
         "_phase1b_gaps": gaps,
     })
+}
+
+/// Everything the assembled response needs beyond the DB itself. The
+/// Boltz component arrives pre-computed (`rpc_boltz_ops::
+/// total_cost_boltz_component` needs the Boltz deps, which live in
+/// `main.rs`); the config scalars arrive pre-resolved for the same reason.
+/// Python's equivalents come off the in-memory `config.snapshot()`.
+pub struct TotalCostBudgetSources<'a> {
+    pub db: Option<&'a DbHandle>,
+    pub boltz_component: Value,
+    pub daily_budget_sats: i64,
+    pub growth_enabled: bool,
+    pub growth_earned_fraction: f64,
+    pub growth_experiment_fraction: f64,
+    pub growth_max_extra_sats: i64,
+    pub growth_hard_ceiling_sats: i64,
+    pub now: i64,
+}
+
+/// Port of `_compute_total_cost_budget_status`'s evidence gathering
+/// (cl-revenue-ops.py:8347-8482), feeding [`build_total_cost_budget`].
+/// `window_hours` must already be [`parse_window_hours`]-clamped.
+///
+/// Error semantics mirror Python arm-for-arm:
+/// - no DB -> the exact `{"error": "Plugin not initialized"}` 1-key arm;
+/// - a rebalance-component read failure -> that component's
+///   `available: false` dict (caught inside the provider);
+/// - a coverage read failure -> measured-unknown nulls (caught);
+/// - ledger/revenue/open/close read failures -> the whole-response
+///   `{"error": ...}` arm (Python leaves these unguarded, so the RPC's
+///   outer `except` answers).
+///
+/// DELIBERATE DEFERRAL: Python starts with a best-effort
+/// `cleanup_stale_spend_reservations` write (cl-revenue-ops.py:8353-8360).
+/// This port's writes go through the sealed mutation owner only; the
+/// cleanup lands with the `revenue-spend-release-stale` slice (same
+/// operation) rather than as an inline write on a read path. Until then a
+/// stale reservation keeps counting as reserved — the conservative
+/// direction (budget under-spends, never over-spends).
+pub async fn total_cost_budget_response(window_hours: i64, s: TotalCostBudgetSources<'_>) -> Value {
+    let Some(handle) = s.db else {
+        return json!({"error": "Plugin not initialized"});
+    };
+    let since = s.now - window_hours * 3600;
+
+    let rebalance = queries::rebalance_spend_component(handle, window_hours, s.now)
+        .await
+        .map_err(|error| error.to_string());
+    let rebalance_component =
+        rebalance_component_value(rebalance.as_ref().map_err(Clone::clone), window_hours);
+
+    let aggregates = match queries::spend_ledger_aggregates(handle, window_hours, s.now).await {
+        Ok(aggregates) => aggregates,
+        Err(error) => return json!({"error": error.to_string()}),
+    };
+    // include_reservations=True with Python's default limit of 50
+    // (cl-revenue-ops.py:8367, database.py:4487).
+    let reservations =
+        match queries::active_spend_reservations(handle, window_hours, 50, s.now).await {
+            Ok(rows) => rows,
+            Err(error) => return json!({"error": error.to_string()}),
+        };
+    let generic_ledger_raw = crate::rpc_spend_ledger::build_spend_ledger(
+        window_hours,
+        s.now,
+        &aggregates,
+        Some(&reservations),
+    );
+
+    let revenue_msat = match queries::total_routing_revenue_msat(handle, since, s.now).await {
+        Ok(msat) => msat,
+        Err(error) => return json!({"error": error.to_string()}),
+    };
+    let open_cost_sats = match queries::opening_costs_since(handle, since).await {
+        Ok(sats) => sats,
+        Err(error) => return json!({"error": error.to_string()}),
+    };
+    let closure_cost_sats = match queries::closure_costs_since(handle, since).await {
+        Ok(sats) => sats,
+        Err(error) => return json!({"error": error.to_string()}),
+    };
+
+    // Python wraps this read in try/except -> unknown, never an error arm.
+    let coverage_raw = match queries::cost_evidence_coverage(handle, window_hours, s.now).await {
+        Ok(coverage) => json!({
+            "covered_hours": coverage.covered_hours,
+            "coverage_status": coverage.coverage_status,
+        }),
+        Err(_) => Value::Null,
+    };
+
+    build_total_cost_budget(
+        window_hours,
+        &TotalCostBudgetInputs {
+            now: s.now,
+            daily_budget_sats: s.daily_budget_sats,
+            growth_enabled: s.growth_enabled,
+            growth_earned_fraction: s.growth_earned_fraction,
+            growth_experiment_fraction: s.growth_experiment_fraction,
+            growth_max_extra_sats: s.growth_max_extra_sats,
+            growth_hard_ceiling_sats: s.growth_hard_ceiling_sats,
+            fleet_prior: None,
+            // Python: `revenue_msat // 1000` — floor division, ported
+            // exactly (i64 `/` truncates toward zero instead).
+            revenue_sats: Some(revenue_msat.div_euclid(1000)),
+            open_cost_sats: Some(open_cost_sats),
+            closure_cost_sats: Some(closure_cost_sats),
+            rebalance_component: Some(&rebalance_component),
+            boltz_component: Some(&s.boltz_component),
+            generic_ledger_raw: Some(&generic_ledger_raw),
+            coverage_raw: Some(&coverage_raw),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -515,6 +665,62 @@ mod tests {
             growth_hard_ceiling_sats: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn rebalance_component_value_matches_pythons_available_dict() {
+        let component = revops_db::queries::RebalanceSpendComponent {
+            total_spent_sats: 1000,
+            total_reserved_sats: 140,
+            job_count: 4,
+            success_count: 2,
+        };
+        assert_eq!(
+            rebalance_component_value(Ok(&component), 24),
+            json!({
+                "source": "rebalance",
+                "available": true,
+                "window_hours": 24,
+                "spent_24h_sats": 1000,
+                "reserved_24h_sats": 140,
+                "job_count": 4,
+                "success_count": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn rebalance_component_value_error_arm_is_unavailable_zeros() {
+        assert_eq!(
+            rebalance_component_value(Err("db actor gone".to_string()), 24),
+            json!({
+                "source": "rebalance",
+                "available": false,
+                "error": "db actor gone",
+                "spent_24h_sats": 0,
+                "reserved_24h_sats": 0,
+            })
+        );
+    }
+
+    /// A WIRED coverage pipeline that measures "unknown" (empty evidence)
+    /// is Python's own honest answer, not a Rust wiring gap — the gap
+    /// entries must fire only when `coverage_raw` was never fetched.
+    #[test]
+    fn measured_unknown_coverage_is_not_a_wiring_gap() {
+        let coverage = json!({"covered_hours": null, "coverage_status": "unknown"});
+        let mut inputs = base_inputs();
+        inputs.coverage_raw = Some(&coverage);
+        let v = build_total_cost_budget(24, &inputs);
+        assert_eq!(v["covered_hours"], Value::Null);
+        assert_eq!(v["coverage_status"], "unknown");
+        let gaps = v["_phase1b_gaps"].as_array().unwrap();
+        assert!(
+            !gaps
+                .iter()
+                .any(|g| g == "coverage_hours" || g == "covered_hours"),
+            "measured unknown must not be declared as an unwired pipeline: {gaps:?}"
+        );
     }
 
     #[test]
