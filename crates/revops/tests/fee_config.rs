@@ -505,3 +505,39 @@ async fn resolve_fee_cfg_repairs_crossed_receivable_band() {
     );
     assert_eq!(cfg.receivable_ratio_floor, cfg.receivable_ratio_target);
 }
+
+/// Task 74 `rust_contract`, layer (b): a CLN startup option that is out
+/// of band must reach the fee cycle CLAMPED, exactly as py clamps it in
+/// `_validate_numeric_config_options` before Config is constructed.
+/// Without this the fee cycle ran on an out-of-band bound -- and a
+/// crossed pair could invert the fee rail.
+#[tokio::test]
+async fn startup_option_layer_is_clamped_before_reaching_the_fee_cycle() {
+    use cln_plugin::options::Value as OptValue;
+
+    let mut options = HashMap::new();
+    // min_fee_ppm range is (5, 100000).
+    options.insert("revenue-ops-min-fee-ppm".to_string(), OptValue::Integer(0));
+    options.insert(
+        "revenue-ops-max-fee-ppm".to_string(),
+        OptValue::Integer(500_000),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &options).await;
+    assert_eq!(
+        cfg.min_fee_ppm, 5,
+        "below-floor startup option must clamp UP"
+    );
+    assert_eq!(
+        cfg.max_fee_ppm, 100_000,
+        "above-ceiling startup option must clamp DOWN"
+    );
+
+    // Control: an in-band startup option is passed through untouched.
+    let mut options = HashMap::new();
+    options.insert(
+        "revenue-ops-min-fee-ppm".to_string(),
+        OptValue::Integer(250),
+    );
+    let cfg = revops::fee_config::resolve_fee_cfg(None, &options).await;
+    assert_eq!(cfg.min_fee_ppm, 250);
+}

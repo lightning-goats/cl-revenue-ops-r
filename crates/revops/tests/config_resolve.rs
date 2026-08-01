@@ -495,3 +495,109 @@ async fn a_failed_config_overrides_read_refuses_rather_than_reporting_disabled()
         "the refusal must name the key: {refusal}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 74 `rust_contract`: the STARTUP CLAMP vs PERSISTED SKIP contract.
+// ---------------------------------------------------------------------------
+
+/// py `_validate_numeric_config_options` (cl-revenue-ops.py:483-498)
+/// CLAMPS a numeric startup option into CONFIG_FIELD_RANGES and warns;
+/// its table is `dict(CONFIG_FIELD_RANGES)`, so every governed numeric
+/// field is covered -- not just the fee bounds.
+#[test]
+fn startup_numeric_options_are_clamped_into_range() {
+    use cln_plugin::options::Value;
+    use revops::config_resolve::clamp_startup_numeric;
+    let shown = |v: &Value| format!("{v:?}");
+
+    // min_fee_ppm range is (5, 100000): below the floor rises to 5.
+    let (clamped, was) = clamp_startup_numeric("min_fee_ppm", &Value::Integer(0));
+    assert_eq!(shown(&clamped), shown(&Value::Integer(5)));
+    assert!(was);
+
+    // Above the ceiling falls to it.
+    let (clamped, was) = clamp_startup_numeric("min_fee_ppm", &Value::Integer(500_000));
+    assert_eq!(shown(&clamped), shown(&Value::Integer(100_000)));
+    assert!(was);
+
+    // A NEGATIVE startup value is pulled into band, never left negative
+    // (the defect class task 74 was opened for).
+    let (clamped, was) = clamp_startup_numeric("max_fee_ppm", &Value::Integer(-42));
+    assert!(was);
+    match clamped {
+        Value::Integer(v) => assert!(v >= 1, "max_fee_ppm must land in band, got {v}"),
+        other => panic!("expected an integer, got {other:?}"),
+    }
+
+    // In-range values are untouched and report no clamp.
+    let (clamped, was) = clamp_startup_numeric("min_fee_ppm", &Value::Integer(250));
+    assert_eq!(shown(&clamped), shown(&Value::Integer(250)));
+    assert!(!was);
+
+    // String-shaped option values clamp too (CLN hands some options as
+    // strings), and an integral field renders integrally.
+    let (clamped, was) = clamp_startup_numeric("min_fee_ppm", &Value::String("0".into()));
+    assert_eq!(shown(&clamped), shown(&Value::String("5".into())));
+    assert!(was);
+
+    // A non-numeric string is left alone (py leaves conversion failures
+    // to the upstream _safe_int/_safe_float).
+    let (clamped, was) = clamp_startup_numeric("min_fee_ppm", &Value::String("abc".into()));
+    assert_eq!(shown(&clamped), shown(&Value::String("abc".into())));
+    assert!(!was);
+
+    // An unranged field passes through.
+    let (clamped, was) = clamp_startup_numeric("db_path", &Value::String("/x".into()));
+    assert_eq!(shown(&clamped), shown(&Value::String("/x".into())));
+    assert!(!was);
+}
+
+/// The two contracts are OPPOSITE and must stay so: a persisted override
+/// out of range is SKIPPED (py `_apply_override`, config.py:1043-1048 --
+/// the prior value survives), while the same value arriving as a STARTUP
+/// option is CLAMPED. Collapsing them either way silently changes which
+/// value the plugin runs with.
+#[test]
+fn persisted_overrides_skip_where_startup_options_clamp() {
+    use cln_plugin::options::Value;
+    use revops::config_resolve::{clamp_startup_numeric, validate_override};
+    let shown = |v: &Value| format!("{v:?}");
+
+    for (field, out_of_range) in [("min_fee_ppm", "0"), ("max_fee_ppm", "999999999")] {
+        assert_eq!(
+            validate_override(field, out_of_range),
+            None,
+            "{field}={out_of_range} must be SKIPPED as a persisted override"
+        );
+        let (_, was_clamped) =
+            clamp_startup_numeric(field, &Value::String(out_of_range.to_string()));
+        assert!(
+            was_clamped,
+            "{field}={out_of_range} must be CLAMPED as a startup option"
+        );
+    }
+
+    // Control: an in-range value is accepted by BOTH paths unchanged.
+    assert_eq!(validate_override("min_fee_ppm", "250"), Some("250".into()));
+    let (clamped, was) = clamp_startup_numeric("min_fee_ppm", &Value::String("250".into()));
+    assert_eq!(shown(&clamped), shown(&Value::String("250".into())));
+    assert!(!was);
+}
+
+/// The ranges table must cover the whole governed numeric surface, not
+/// the fee pair alone -- that omission is what task 74 was opened for.
+#[test]
+fn the_ranges_table_covers_the_full_numeric_surface() {
+    let table = revops::config_types::load();
+    assert!(
+        table.ranges.len() >= 90,
+        "expected the full CONFIG_FIELD_RANGES surface, got {}",
+        table.ranges.len()
+    );
+    for field in ["min_fee_ppm", "max_fee_ppm", "daily_budget_sats"] {
+        assert!(
+            table.ranges.contains_key(field),
+            "missing range for {field}"
+        );
+    }
+}

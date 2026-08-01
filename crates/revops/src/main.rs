@@ -2187,6 +2187,22 @@ async fn main() -> Result<()> {
                                                 )
                                             }
                                             other => other,
+                                        })
+                                        // Task 74 `rust_contract`: the
+                                        // startup layer is CLAMPED into
+                                        // CONFIG_FIELD_RANGES exactly as
+                                        // py's
+                                        // `_validate_numeric_config_options`
+                                        // does before Config exists, so
+                                        // the operator payload reports
+                                        // the value the plugin would
+                                        // actually run with -- not an
+                                        // out-of-band option verbatim.
+                                        .map(|v| {
+                                            revops::config_resolve::clamp_startup_numeric(
+                                                &db_key, &v,
+                                            )
+                                            .0
                                         });
                                     (db_override, python_value)
                                 }

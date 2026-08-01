@@ -110,7 +110,24 @@ fn python_layer(
         return None;
     }
     let name = config_resolve::python_option_name(suffix)?;
-    python_option_values.get(&name).cloned()
+    let raw = python_option_values.get(&name).cloned()?;
+    // Task 74 `rust_contract`: layer (b) IS Python's startup option
+    // value, and Python CLAMPS every numeric startup option into
+    // CONFIG_FIELD_RANGES before the Config object exists
+    // (`_validate_numeric_config_options`). Passing it through raw let an
+    // out-of-band CLN option reach the fee cycle unclamped -- and, with a
+    // crossed pair, could invert the fee rail. Layer (a) keeps its own
+    // SKIP contract in `config_resolve::validate_override`.
+    let field = config_resolve::db_override_key(suffix);
+    let (clamped, was_clamped) = config_resolve::clamp_startup_numeric(&field, &raw);
+    if was_clamped {
+        eprintln!(
+            "revops: config option {field}={} out of range; clamped to {}",
+            config_resolve::option_value_to_string(&raw).unwrap_or_default(),
+            config_resolve::option_value_to_string(&clamped).unwrap_or_default()
+        );
+    }
+    Some(clamped)
 }
 
 /// (a) or (b), whichever resolves first -- `None` means "fall through to
