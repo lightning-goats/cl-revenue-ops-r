@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_PYTHON_COMMIT = "e579de8df523f174283fc2aa21f395c8ef006ac6"
-GENERATOR_VERSION = 4
+DEFAULT_PYTHON_COMMIT = "9ea7e85ed21c4001a686daf193dcf639a7076732"
+GENERATOR_VERSION = 5
 
 RPC_BOUNDARY_BY_METHOD = {
     "askrene-age": "askrene_age",
@@ -75,7 +75,7 @@ READ_ONLY_RPC_METHODS = {
 
 # The capture writer asks git for observational source identity. It neither
 # mutates CLN nor invokes an action adapter, so it is an explicit audited
-# subprocess exclusion rather than a boltzcli boundary.
+# subprocess exclusion rather than an execution boundary.
 OBSERVATIONAL_SUBPROCESS_EXCLUSIONS = {
     ("modules/fee_cycle_capture.py", 418): "git rev-parse source identity",
 }
@@ -105,12 +105,8 @@ EXPECTED_EXTERNAL_CALLS = {
     ("askrene_update_channel", "modules/data_service.py", 394),
     ("askrene_update_channel", "modules/rebalance_router_v3.py", 631),
     ("askrene_update_channel", "modules/rebalance_router_v3.py", 649),
-    ("boltzcli", "cl-revenue-ops.py", 2801),
-    ("boltzcli", "modules/boltz_manager.py", 449),
-    ("close", "modules/capacity_planner.py", 3977),
     ("close", "modules/data_service.py", 288),
     ("connect", "modules/data_service.py", 296),
-    ("connect", "modules/lnplus_swaps.py", 1604),
     ("datastore", "modules/data_service.py", 473),
     ("datastore", "modules/rebalance_engine_v2.py", 3186),
     ("delinvoice", "modules/data_service.py", 344),
@@ -119,13 +115,9 @@ EXPECTED_EXTERNAL_CALLS = {
     ("delpay", "modules/rebalance_engine_v2.py", 3109),
     ("delpay", "modules/rebalance_native_executor_v2.py", 386),
     ("dynamic_config", "cl-revenue-ops.py", 6723),
-    ("fundchannel", "modules/capacity_planner.py", 3060),
     ("fundchannel", "modules/data_service.py", 281),
-    ("fundchannel", "modules/lnplus_swaps.py", 1672),
     ("invoice", "modules/data_service.py", 328),
     ("invoice", "modules/rebalance_native_executor_v2.py", 431),
-    ("lnplus_https", "modules/lnplus_swaps.py", 93),
-    ("pay", "modules/boltz_manager.py", 844),
     ("pay", "modules/data_service.py", 349),
     ("sendpay_waitsendpay", "modules/data_service.py", 332),
     ("sendpay_waitsendpay", "modules/data_service.py", 336),
@@ -133,7 +125,6 @@ EXPECTED_EXTERNAL_CALLS = {
     ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 462),
     ("setchannel", "modules/data_service.py", 275),
     ("signmessage", "modules/data_service.py", 303),
-    ("signmessage", "modules/lnplus_swaps.py", 130),
 }
 
 
@@ -143,9 +134,6 @@ EXPECTED_LOOPS = {
     "rebalance-check",
     "startup-snapshot",
     "financial-snapshot",
-    "boltz-auto-cycle",
-    "capacity-planner",
-    "lnplus-watcher",
 }
 
 # Emptied in Task 66 slice 8: all four former members (analyze,
@@ -158,16 +146,8 @@ PLACEHOLDER_RPCS: set[str] = set()
 
 FULL_EFFECTIVE_RPCS = {
     "revenue-history",
-    "revenue-lnplus-abandon",
-    "revenue-lnplus-backfill",
-    "revenue-lnplus-breaker-clear",
-    "revenue-lnplus-status",
     "revenue-list-banned",
     "revenue-list-ignored",
-    "revenue-planner-candidate-sources",
-    "revenue-planner-candidates",
-    "revenue-planner-history",
-    "revenue-planner-status",
     "revenue-spend-ledger",
     # Task 66: exact-contract reads serving REAL evidence through the
     # registered runtime path (e2e-pinned through the spawned binary).
@@ -185,16 +165,8 @@ FULL_EFFECTIVE_RPCS = {
 # review that has not happened.
 REVIEWED_FULL_RPCS = {
     "revenue-history",
-    "revenue-lnplus-abandon",
-    "revenue-lnplus-backfill",
-    "revenue-lnplus-breaker-clear",
-    "revenue-lnplus-status",
     "revenue-list-banned",
     "revenue-list-ignored",
-    "revenue-planner-candidate-sources",
-    "revenue-planner-candidates",
-    "revenue-planner-history",
-    "revenue-planner-status",
     "revenue-spend-ledger",
 }
 
@@ -202,15 +174,9 @@ REVIEWED_FULL_RPCS = {
 # registrations must be classified here before inventory generation succeeds.
 CLASSIFIED_REACHABLE_RPCS = {
     "revenue-analyze",
-    # Task 61 4E: the four LN+ operator RPCs through the LN+ owner's
-    # serialization lock (completion acks), independently reviewed at
-    # the exact evidence revision below.
-    "revenue-lnplus-abandon",
-    "revenue-lnplus-backfill",
-    "revenue-lnplus-breaker-clear",
-    "revenue-lnplus-status",
-    "revenue-capacity-report",
+    "revenue-budget",
     "revenue-config",
+    "revenue-cycle",
     "revenue-dashboard",
     "revenue-econ-snapshot",
     "revenue-fee-debug",
@@ -219,10 +185,6 @@ CLASSIFIED_REACHABLE_RPCS = {
     "revenue-hot-channel-protection-peers",
     "revenue-list-banned",
     "revenue-list-ignored",
-    "revenue-planner-candidate-sources",
-    "revenue-planner-candidates",
-    "revenue-planner-history",
-    "revenue-planner-status",
     "revenue-policy",
     "revenue-profitability",
     "revenue-report",
@@ -256,32 +218,6 @@ CLASSIFIED_REACHABLE_RPCS = {
     "revenue-unban",
     "revenue-unignore",
     "revenue-wake-all",
-    # Owner-backed surfaces the WIDENED scan (helper-fn call sites) now
-    # sees: registered with complete contracts, action capabilities
-    # sealed until Task 69 (Tasks 60/62/63 staging) — "partial".
-    "revenue-boltz-auto-cycle-run-now",
-    "revenue-boltz-auto-cycle-status",
-    "revenue-boltz-backup",
-    "revenue-boltz-backup-verify",
-    "revenue-boltz-balance-cycle",
-    "revenue-boltz-balance-recommendations",
-    "revenue-boltz-budget",
-    "revenue-boltz-chainswap",
-    "revenue-boltz-claim",
-    "revenue-boltz-deposit",
-    "revenue-boltz-expansion-treasury-cycle",
-    "revenue-boltz-expansion-treasury-recommendations",
-    "revenue-boltz-expansion-treasury-status",
-    "revenue-boltz-external-pay-ignores",
-    "revenue-boltz-history",
-    "revenue-boltz-loop-in",
-    "revenue-boltz-loop-out",
-    "revenue-boltz-quote",
-    "revenue-boltz-refund",
-    "revenue-boltz-status",
-    "revenue-boltz-wallet",
-    "revenue-boltz-withdraw",
-    "revenue-planner-execute",
     "revenue-rebalance",
     "revenue-rebalance-cycle",
     "revenue-rebalance-debug",
@@ -297,22 +233,11 @@ CLASSIFIED_RUST_ONLY_METHODS = {
 REVIEW_EVIDENCE = {
     name: "task-8-core-parity-audit"
     for name in REVIEWED_FULL_RPCS
-    if not name.startswith("revenue-lnplus-")
 }
-REVIEW_EVIDENCE.update(
-    {
-        name: "hexmem-task-61@9c99d7c"
-        for name in REVIEWED_FULL_RPCS
-        if name.startswith("revenue-lnplus-")
-    }
-)
 
 # Compiled means an exact-contract response module/builder exists, not merely
 # that a subsystem kernel with a vaguely related purpose compiles.
 EXTRA_COMPILED_RPCS = {
-    "revenue-boltz-budget",
-    "revenue-boltz-history",
-    "revenue-boltz-status",
     "revenue-capex-status",
     "revenue-econ-reconcile",
     "revenue-rebalance-debug",
@@ -353,8 +278,8 @@ def production_python_files(repo: Path, commit: str) -> tuple[str, ...]:
             or (path.startswith("modules/") and path.endswith(".py"))
         )
     )
-    if len(files) != 51 or len(set(files)) != 51:
-        raise ValueError(f"expected 51 pinned production Python files, got {len(files)}")
+    if len(files) != 46 or len(set(files)) != 46:
+        raise ValueError(f"expected 46 pinned production Python files, got {len(files)}")
     return files
 
 
@@ -413,9 +338,9 @@ def extract_options(tree: ast.AST) -> list[dict[str, Any]]:
         )
     options.sort(key=lambda entry: entry["source_line"])
     names = [entry["name"] for entry in options]
-    if len(names) != 121 or len(set(names)) != 121:
+    if len(names) != 71 or len(set(names)) != 71:
         raise ValueError(
-            f"expected 121 unique Python options, got {len(names)}/{len(set(names))}"
+            f"expected 71 unique Python options, got {len(names)}/{len(set(names))}"
         )
     return options
 
@@ -501,9 +426,9 @@ def extract_rpcs(
     rpcs.sort(key=lambda entry: entry["name"])
     schemas.sort(key=lambda entry: entry["name"])
     names = [entry["name"] for entry in rpcs]
-    if len(names) != 69 or len(set(names)) != 69:
+    if len(names) != 39 or len(set(names)) != 39:
         raise ValueError(
-            f"expected 69 unique Python RPCs, got {len(names)}/{len(set(names))}"
+            f"expected 39 unique Python RPCs, got {len(names)}/{len(set(names))}"
         )
     return rpcs, schemas
 
@@ -544,8 +469,8 @@ def extract_loops(tree: ast.AST) -> list[dict[str, Any]]:
         )
     loops.sort(key=lambda entry: entry["source_line"])
     names = {entry["name"] for entry in loops}
-    if names != EXPECTED_LOOPS or len(loops) != 8:
-        raise ValueError(f"expected exact eight startup loops, got {sorted(names)}")
+    if names != EXPECTED_LOOPS or len(loops) != 5:
+        raise ValueError(f"expected exact five startup loops, got {sorted(names)}")
     return loops
 
 
@@ -559,37 +484,16 @@ def loop_state(name: str) -> dict[str, Any]:
             "soak": "passed",
             "owner_task": "fee-port-reviewed",
         }
-    if name == "lnplus-watcher":
-        # Task 61 4D/4E: the REAL LN+ observer pass is spawned behind
-        # LoopId::LnPlus (watcher-only; evaluator waits on the Task 62
-        # planner-evidence rail). The partial watcher path was independently
-        # reviewed in Task 61; soak remains pending.
-        return {
-            "compiled": True,
-            "reachable": True,
-            "effective": "partial",
-            "review": "passed",
-            "soak": "pending",
-            "owner_task": "hexmem-61",
-        }
     owners = {
         "rebalance-check": "hexmem-60",
-        "capacity-planner": "hexmem-62",
-        "boltz-auto-cycle": "hexmem-63",
         "flow-analysis": "task-8-core-parity",
         "startup-snapshot": "task-8-core-parity",
         "financial-snapshot": "task-8-core-parity",
     }
     return {
-        "compiled": name
-        in {
-            "rebalance-check",
-            "capacity-planner",
-            "boltz-auto-cycle",
-            "flow-analysis",
-        },
-        "reachable": False,
-        "effective": "absent",
+        "compiled": True,
+        "reachable": True,
+        "effective": "full",
         "review": "pending",
         "soak": "pending",
         "owner_task": owners[name],
@@ -666,16 +570,9 @@ def derive_rust_methods(repo_root: Path) -> set[str]:
 
 
 def owner_task(name: str) -> str:
-    if name.startswith("revenue-boltz-"):
-        return "hexmem-63"
-    if name.startswith("revenue-lnplus-"):
-        return "hexmem-61"
     if name.startswith("revenue-rebalance"):
         return "hexmem-60"
-    if name.startswith("revenue-planner-") or name in {
-        "revenue-capacity-report",
-        "revenue-capex-status",
-    }:
+    if name == "revenue-capex-status":
         return "hexmem-62"
     return "task-8-core-parity"
 
@@ -683,16 +580,11 @@ def owner_task(name: str) -> str:
 def transport_state(name: str) -> str:
     if name in {"revenue-set-fee", "revenue-fee-cycle"}:
         return "local_fake_proven"
-    if name.startswith("revenue-boltz-"):
-        return "local_fake_proven_unreachable"
     if name in {
         "revenue-rebalance",
         "revenue-rebalance-cycle",
-        "revenue-planner-execute",
     }:
         return "missing"
-    if name.startswith("revenue-lnplus-"):
-        return "local_fake_proven"
     return "not_required"
 
 
@@ -803,9 +695,9 @@ def scan_external_calls(sources: dict[str, bytes]) -> set[tuple[str, str, int]]:
             if function in {"subprocess.run", "subprocess.Popen"}:
                 if location in OBSERVATIONAL_SUBPROCESS_EXCLUSIONS:
                     continue
-                found.add(("boltzcli", path, node.lineno))
+                found.add(("subprocess_exec", path, node.lineno))
             elif function == "urllib.request.urlopen":
-                found.add(("lnplus_https", path, node.lineno))
+                found.add(("https_request", path, node.lineno))
 
     found.add(function_ref(sources, "cl-revenue-ops.py", "_refresh_dynamic_config"))
     missing = sorted(EXPECTED_EXTERNAL_CALLS - found)
@@ -826,29 +718,9 @@ def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
             {"source_file": path, "source_line": line}
         )
     metadata = {
-        "boltzcli": (
-            "hexmem-63",
-            "revops_boltz::ProcessBoltzCli",
-            "local_fake_proven_unreachable",
-        ),
         "dynamic_config": (
             "completed",
             "PythonOptionCache::refresh",
-            "local_fake_proven",
-        ),
-        "connect": (
-            "hexmem-61",
-            "revops::lnplus_adapters::ClnChainAdapter",
-            "local_fake_proven",
-        ),
-        "fundchannel": (
-            "hexmem-61-and-62",
-            "revops::lnplus_adapters::ClnChainAdapter",
-            "local_fake_proven",
-        ),
-        "lnplus_https": (
-            "hexmem-61",
-            "revops_lnplus::UreqTransport",
             "local_fake_proven",
         ),
         "setchannel": (
@@ -856,22 +728,18 @@ def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
             "fee_execution::ClnFeeBroadcaster",
             "local_fake_proven",
         ),
-        "signmessage": (
-            "hexmem-61",
-            "revops::lnplus_adapters::ClnSigner",
-            "local_fake_proven",
-        ),
     }
     owners = {
-        "close": "hexmem-62",
-        "connect": "hexmem-61",
+        "close": "python-data-service",
+        "connect": "python-data-service",
         "datastore": "task-8-core-parity",
         "delinvoice": "hexmem-60",
         "delpay": "hexmem-60",
-        "fundchannel": "hexmem-61-and-62",
+        "fundchannel": "python-data-service",
         "invoice": "hexmem-60",
-        "pay": "hexmem-60-and-63",
+        "pay": "hexmem-60",
         "sendpay_waitsendpay": "hexmem-60",
+        "signmessage": "python-data-service",
     }
     for boundary_id in grouped:
         if boundary_id.startswith("askrene_"):

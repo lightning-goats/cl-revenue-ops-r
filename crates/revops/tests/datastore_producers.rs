@@ -181,7 +181,7 @@ fn a_non_owner_is_refused_before_its_payload_is_even_encoded() {
     let mut big = PyDict::new();
     big.push("blob", PyVal::Str("x".repeat(DATASTORE_MAX_BYTES + 1)));
 
-    let refusal = publish(&store, Producer::Status, Owner::Boltz, big, NOW)
+    let refusal = publish(&store, Producer::Status, Owner::Rebalance, big, NOW)
         .expect_err("a non-owner with an oversized payload is still a non-owner");
 
     assert!(
@@ -411,7 +411,7 @@ fn every_refusal_carries_a_distinct_actionable_code() {
     let codes = [
         PublishRefusal::NotOwner {
             producer: Producer::Status,
-            attempted_by: Owner::Boltz,
+            attempted_by: Owner::Rebalance,
         }
         .code(),
         PublishRefusal::Envelope {
@@ -461,7 +461,7 @@ fn every_refusal_names_the_producer_it_belongs_to() {
         assert_eq!(
             PublishRefusal::NotOwner {
                 producer,
-                attempted_by: Owner::Boltz,
+                attempted_by: Owner::Rebalance,
             }
             .producer(),
             producer

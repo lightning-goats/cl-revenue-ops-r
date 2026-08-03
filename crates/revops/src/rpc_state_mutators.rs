@@ -411,10 +411,6 @@ pub fn profile_bundles() -> BTreeMap<String, Map<String, Value>> {
                 ("growth_budget_earned_fraction", json!(0.1)),
                 ("growth_budget_experiment_fraction", json!(0.05)),
                 ("growth_budget_max_extra_sats", json!(1000)),
-                ("planner_min_annual_roi_pct", json!(5.0)),
-                ("planner_max_opens_per_cycle", json!(0)),
-                ("planner_max_closes_per_cycle", json!(0)),
-                ("lnplus_swap_preference_margin", json!(0.5)),
             ]),
         ),
         (
@@ -427,10 +423,6 @@ pub fn profile_bundles() -> BTreeMap<String, Map<String, Value>> {
                 ("growth_budget_earned_fraction", json!(0.25)),
                 ("growth_budget_experiment_fraction", json!(0.1)),
                 ("growth_budget_max_extra_sats", json!(2000)),
-                ("planner_min_annual_roi_pct", json!(1.0)),
-                ("planner_max_opens_per_cycle", json!(1)),
-                ("planner_max_closes_per_cycle", json!(0)),
-                ("lnplus_swap_preference_margin", json!(0.2)),
             ]),
         ),
         (
@@ -443,10 +435,6 @@ pub fn profile_bundles() -> BTreeMap<String, Map<String, Value>> {
                 ("growth_budget_earned_fraction", json!(0.25)),
                 ("growth_budget_experiment_fraction", json!(0.1)),
                 ("growth_budget_max_extra_sats", json!(2000)),
-                ("planner_min_annual_roi_pct", json!(1.0)),
-                ("planner_max_opens_per_cycle", json!(1)),
-                ("planner_max_closes_per_cycle", json!(1)),
-                ("lnplus_swap_preference_margin", json!(0.2)),
             ]),
         ),
         (
@@ -459,10 +447,6 @@ pub fn profile_bundles() -> BTreeMap<String, Map<String, Value>> {
                 ("growth_budget_earned_fraction", json!(0.4)),
                 ("growth_budget_experiment_fraction", json!(0.2)),
                 ("growth_budget_max_extra_sats", json!(5000)),
-                ("planner_min_annual_roi_pct", json!(0.5)),
-                ("planner_max_opens_per_cycle", json!(2)),
-                ("planner_max_closes_per_cycle", json!(1)),
-                ("lnplus_swap_preference_margin", json!(0.1)),
             ]),
         ),
     ])

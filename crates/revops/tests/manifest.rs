@@ -141,15 +141,6 @@ fn manifest_advertises_shadow_names() {
         methods.contains(&"revops-fee-runway-status"),
         "methods: {methods:?}"
     );
-    // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs.
-    for lnplus in [
-        "revenue-r-lnplus-status",
-        "revenue-r-lnplus-breaker-clear",
-        "revenue-r-lnplus-abandon",
-        "revenue-r-lnplus-backfill",
-    ] {
-        assert!(methods.contains(&lnplus), "missing {lnplus}: {methods:?}");
-    }
 }
 
 #[test]
@@ -362,23 +353,13 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
         methods.contains(&"revops-fee-runway-status"),
         "methods: {methods:?}"
     );
-    // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs
-    // under their canonical Python names.
-    for lnplus in [
-        "revenue-lnplus-status",
-        "revenue-lnplus-breaker-clear",
-        "revenue-lnplus-abandon",
-        "revenue-lnplus-backfill",
-    ] {
-        assert!(methods.contains(&lnplus), "missing {lnplus}: {methods:?}");
-    }
     assert!(
         !methods.contains(&"revenue-rebalance-plan"),
         "Rust-only rebalance-plan must not occupy the Python canonical namespace: {methods:?}"
     );
-    // Task 49 (Wave 2 / RPC Batch A): ten more read-only builders --
+    // Task 49 (Wave 2 / RPC Batch A): retained read-only builders --
     // health, profitability, analyze, policy, list-banned, list-ignored,
-    // hot-channel-protection-peers, capacity-report, econ-snapshot,
+    // hot-channel-protection-peers, econ-snapshot,
     // spend-ledger -- registered as real `.rpcmethod()` handlers. See
     // `manifest_batch_a_methods_registered_canonical_mode` /
     // `_shadow_mode` below for the exact-name assertions.
@@ -397,62 +378,6 @@ fn manifest_canonical_mode_advertises_revenue_ops_names() {
             "missing {rebalance}: {methods:?}"
         );
     }
-    // Task 62: the write-shaped planner cycle RPC (capital owner;
-    // Python-parity uninitialized arm until Task 69 authority assembly).
-    assert!(
-        methods.contains(&"revenue-planner-execute"),
-        "missing revenue-planner-execute: {methods:?}"
-    );
-    // Task 63: the exact 22 Python-equivalent Boltz RPCs (owner-backed;
-    // Python-parity uninitialized arm until Task 69 assembles the action
-    // capability).
-    for boltz in [
-        "revenue-boltz-quote",
-        "revenue-boltz-loop-out",
-        "revenue-boltz-loop-in",
-        "revenue-boltz-status",
-        "revenue-boltz-history",
-        "revenue-boltz-external-pay-ignores",
-        "revenue-boltz-budget",
-        "revenue-boltz-wallet",
-        "revenue-boltz-refund",
-        "revenue-boltz-claim",
-        "revenue-boltz-chainswap",
-        "revenue-boltz-withdraw",
-        "revenue-boltz-deposit",
-        "revenue-boltz-backup",
-        "revenue-boltz-backup-verify",
-        "revenue-boltz-balance-recommendations",
-        "revenue-boltz-auto-cycle-status",
-        "revenue-boltz-auto-cycle-run-now",
-        "revenue-boltz-balance-cycle",
-        "revenue-boltz-expansion-treasury-status",
-        "revenue-boltz-expansion-treasury-recommendations",
-        "revenue-boltz-expansion-treasury-cycle",
-    ] {
-        assert!(methods.contains(&boltz), "missing {boltz}: {methods:?}");
-    }
-    // Exactly 63 rpc methods total (no leftover revenue-r-* names bleeding
-    // through from shadow mode) -- status/config (Phase 1a), Phase 1b
-    // Task 5's history/report/dashboard read-RPC subset, Phase 4b Task 7's
-    // fee-debug/fee-wake, Task 10's runway status RPC, the read-only
-    // profile-preview, fixed-startup fee-authority-status, and completed fee-cycle, Task 49's ten Batch A builders, Task 56's four
-    // DB-backed planner read RPCs, Task 61 4E's four LN+ operator RPCs
-    // (status/breaker-clear/abandon/backfill through the LN+ owner),
-    // Task 60's three rebalance operator RPCs (cycle/debug/manual), and
-    // Task 62's planner-execute (capital owner), and Task 63's 22 Boltz
-    // RPCs (serialized Boltz owner), Task 66's completed core-state
-    // mutators and total-cost-budget.
-    //
-    // This count is a GUARD, not bookkeeping: it is what forces a new RPC
-    // to be named here deliberately rather than appearing unannounced.
-    // Python exposes 69; every increment to this number should be a
-    // decision someone made on purpose.
-    assert_eq!(
-        result["rpcmethods"].as_array().unwrap().len(),
-        70,
-        "methods: {methods:?}"
-    );
 
     // Task 66 slice 1: the unified total-cost budget read; slice 2: the
     // generic-ledger reserve and stale-release mutators; slice 3: the
@@ -801,7 +726,7 @@ fn profile_preview_rpc_uses_startup_bundle_and_explicit_override_precedence() {
         serde_json::json!(["growth"]),
     );
 
-    assert_eq!(result["active_profile"], "balanced");
+    assert_eq!(result["active_profile"], "balanced", "result: {result:?}");
     assert_eq!(result["persisted_profile"], "balanced");
     assert_eq!(result["pending_restart"], false);
     assert_eq!(
@@ -822,6 +747,78 @@ fn profile_preview_rpc_uses_startup_bundle_and_explicit_override_precedence() {
                 && entry["current"] == serde_json::json!(56000)
                 && entry["profile_value"] == serde_json::json!(84000)
         })));
+}
+
+#[test]
+fn consolidated_cycle_dispatches_only_retained_subsystems() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fee = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-fee-cycle",
+        serde_json::json!({}),
+    );
+    let consolidated = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-cycle",
+        serde_json::json!({"subsystem": "  FeEs  "}),
+    );
+    let mut fee = fee;
+    let mut consolidated = consolidated;
+    fee.as_object_mut().unwrap().remove("transitioned_at");
+    consolidated
+        .as_object_mut()
+        .unwrap()
+        .remove("transitioned_at");
+    assert_eq!(consolidated, fee);
+
+    let unknown = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-cycle",
+        serde_json::json!({"subsystem": "planner"}),
+    );
+    assert_eq!(
+        unknown["valid_subsystems"],
+        serde_json::json!(["all", "fees", "flow", "rebalance"])
+    );
+    assert!(unknown["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Unknown subsystem 'planner'")));
+}
+
+#[test]
+fn consolidated_budget_keeps_reporting_and_ledger_without_executor_sections() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let all = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-budget",
+        serde_json::json!({}),
+    );
+    assert_eq!(all["total_cost"]["error"], "Plugin not initialized");
+    assert_eq!(all["capex"]["error"], "Capex engine not initialized");
+    assert!(all.get("boltz").is_none());
+    assert!(all.get("planner").is_none());
+
+    let ledger = call_after_init_with_params(
+        false,
+        None,
+        home.path(),
+        &[],
+        "revenue-r-budget",
+        serde_json::json!({"section": "ledger"}),
+    );
+    assert_eq!(ledger["error"], "Database not initialized");
 }
 
 /// Shadow mode (both plugins loaded) must keep the opt-in-empty default --
@@ -1322,7 +1319,7 @@ fn init_cutover_arm_path_without_journal_dir_refuses_before_touching_arm() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 49 (Wave 2 / RPC Batch A): register the ten read-only response
+// Task 49 (Wave 2 / RPC Batch A): retained read-only response
 // builders documented in `crates/revops/RPC_BATCH_A.md` as real
 // `.rpcmethod()` handlers. Before this change all ten `rpc_*` modules were
 // COMPILED (declared in `lib.rs`, see that module's doc comment) but
@@ -1335,8 +1332,8 @@ fn init_cutover_arm_path_without_journal_dir_refuses_before_touching_arm() {
 // THAT query rather than returning a parallel hand-built shape -- proven
 // by seeding a distinctive row directly into a copy of the production
 // schema and asserting it round-trips through the live RPC call. Handlers
-// that intentionally have no wired evidence source yet (capacity-report,
-// econ-snapshot, and most of health) are instead pinned to their honest
+// that intentionally have no wired evidence source yet (econ-snapshot and
+// most of health) are instead pinned to their honest
 // null/`_gaps` contract, so a future change that fabricates data to
 // "complete" the response reds here too. C71-27: profitability and analyze
 // have LEFT that list -- both are served from real evidence now, and their
@@ -1344,7 +1341,7 @@ fn init_cutover_arm_path_without_journal_dir_refuses_before_touching_arm() {
 // mistaken for Python's own answers.
 // ---------------------------------------------------------------------------
 
-/// Batch A's ten methods, shadow-mode names (the `revops-r-*` /
+/// Batch A's retained methods, shadow-mode names (the `revops-r-*` /
 /// `revenue-r-*` mapping `rpc_name()` produces when `REVOPS_CANONICAL_NAMES`
 /// is unset).
 const BATCH_A_SHADOW_METHODS: &[&str] = &[
@@ -1355,12 +1352,11 @@ const BATCH_A_SHADOW_METHODS: &[&str] = &[
     "revenue-r-list-banned",
     "revenue-r-list-ignored",
     "revenue-r-hot-channel-protection-peers",
-    "revenue-r-capacity-report",
     "revenue-r-econ-snapshot",
     "revenue-r-spend-ledger",
 ];
 
-/// Same ten, canonical-mode names.
+/// Same retained set, canonical-mode names.
 const BATCH_A_CANONICAL_METHODS: &[&str] = &[
     "revenue-health",
     "revenue-profitability",
@@ -1369,7 +1365,6 @@ const BATCH_A_CANONICAL_METHODS: &[&str] = &[
     "revenue-list-banned",
     "revenue-list-ignored",
     "revenue-hot-channel-protection-peers",
-    "revenue-capacity-report",
     "revenue-econ-snapshot",
     "revenue-spend-ledger",
 ];
@@ -2101,20 +2096,18 @@ fn revenue_r_total_cost_budget_serves_seeded_evidence_and_config_defaults() {
     assert_eq!(result["daily_budget_sats"], 5_000);
     assert_eq!(result["mode"], "fixed");
     assert_eq!(result["effective_budget_sats"], 5_000);
-    // Seeded evidence: rebalance 200 + generic ledger 60, nothing else.
+    // The generic rebalance event is canonical and already represented by
+    // the rebalance component, so it is excluded from the ledger bucket.
     assert_eq!(
         result["actual_spent_by_category"],
-        serde_json::json!({"rebalance": 200, "boltz": 0, "open": 0, "close": 0, "ledger": 60})
+        serde_json::json!({"rebalance": 200, "boltz": 0, "open": 0, "close": 0, "ledger": 0})
     );
-    assert_eq!(result["actual_spent_sats"], 260);
+    assert_eq!(result["actual_spent_sats"], 200);
     assert_eq!(result["reserved_sats"], 0);
-    assert_eq!(result["remaining_sats"], 5_000 - 260);
+    assert_eq!(result["remaining_sats"], 5_000 - 200);
     assert_eq!(result["revenue_sats"], 0);
-    assert_eq!(result["net_profit_sats_after_costs"], -260);
-    // No Boltz transport in this environment: the component must say so,
-    // never fabricate a live zero reading.
-    assert_eq!(result["components"]["boltz"]["available"], false);
-    assert_eq!(result["components"]["boltz"]["spent_24h_sats"], 0);
+    assert_eq!(result["net_profit_sats_after_costs"], -200);
+    assert!(result["components"].get("boltz").is_none());
     // Evidence is 1h old: measured partial coverage, honest not an echo.
     assert_eq!(result["coverage_status"], "partial");
     // Every pipeline is wired: nothing left to declare.
@@ -2928,17 +2921,9 @@ fn revenue_r_health_pnl_failure_is_an_in_band_financials_error_not_a_whole_call_
         result["financials"].get("error").is_some(),
         "financials must carry an in-band error key: {result:?}"
     );
-    // The other eight sections must still be present (not lost to a
+    // The other retained sections must still be present (not lost to a
     // whole-call JSON-RPC error).
-    for field in [
-        "channels",
-        "fees",
-        "rebalancer",
-        "budget",
-        "boltz",
-        "planner",
-        "top_routes",
-    ] {
+    for field in ["channels", "fees", "rebalancer", "budget", "top_routes"] {
         assert!(
             result.get(field).is_some(),
             "{field} must still be present when only financials failed: {result:?}"
@@ -2984,11 +2969,6 @@ fn revenue_r_health_with_no_db_returns_honest_shape_not_a_top_level_error() {
         "financials must be the honest null+gap shape with no DB, not \
          fabricated: {result:?}"
     );
-    assert_eq!(
-        result["boltz"],
-        serde_json::json!({"enabled": false}),
-        "boltz's honest computed answer must survive a no-DB call too: {result:?}"
-    );
     let gaps: Vec<&str> = result["_gaps"]
         .as_array()
         .unwrap_or_else(|| panic!("_gaps must be present: {result:?}"))
@@ -3004,7 +2984,6 @@ fn revenue_r_health_with_no_db_returns_honest_shape_not_a_top_level_error() {
         "fees",
         "rebalancer",
         "budget",
-        "planner",
         "top_routes",
         "loops",
     ] {
@@ -3112,8 +3091,8 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
         .map(|g| g.as_str().unwrap())
         .collect();
     // fees stays a gap in THIS e2e (no fee-cycle scheduler running);
-    // rebalancer/planner stay gaps until Task 69's engine assembly.
-    for g in ["fees", "rebalancer", "planner"] {
+    // Rebalancer stays a gap until its retained engine state is exposed.
+    for g in ["fees", "rebalancer"] {
         assert!(gaps.contains(&g), "gaps missing {g}: {gaps:?}");
     }
     for g in [
@@ -3129,18 +3108,11 @@ fn revenue_r_health_financials_reflect_a_real_forwards_row_rest_stays_gapped() {
         !gaps.contains(&"loops"),
         "durable loop inventory is wired: {gaps:?}"
     );
-    // Task 67: the eight Python business/startup loops, live through the
-    // full plugin, in REQUIRED_LOOPS order.
-    assert_eq!(result["loops"].as_array().unwrap().len(), 8);
+    // Retained operational loops, live through the full plugin.
+    assert_eq!(result["loops"].as_array().unwrap().len(), 5);
     assert_eq!(result["loops"][0]["loop_name"], "flow-analysis");
     assert_eq!(result["loops"][1]["loop_name"], "fee-adjustment");
-    assert_eq!(result["loops"][7]["loop_name"], "lnplus-watcher");
-    assert_eq!(result["loops"][7]["wiring_status"], "not_wired");
-    // Task 50 correction round ("should NOT stay gaps"): boltz is no
-    // longer a null+gap -- it's Python's own honest `{"enabled": false}`
-    // answer with no Boltz manager wired.
-    assert!(!gaps.contains(&"boltz"), "gaps: {gaps:?}");
-    assert_eq!(result["boltz"], serde_json::json!({"enabled": false}));
+    assert_eq!(result["loops"][4]["loop_name"], "financial-snapshot");
 }
 
 /// Task 50 correction round, supervisor scope update #2: EVERY Batch-A
@@ -3170,7 +3142,6 @@ fn revenue_r_batch_a_methods_reject_nonempty_positional_params_empty_array_still
         "revenue-r-health",
         "revenue-r-list-banned",
         "revenue-r-list-ignored",
-        "revenue-r-capacity-report",
         "revenue-r-econ-snapshot",
     ];
     for method in ZERO_PARAM_BATCH_A {
@@ -3450,66 +3421,6 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
         "analyze is wired now; claiming otherwise is a false statement about this port"
     );
 
-    // F2: no capacity planner exists -- must be Python's EXACT error shape
-    // (cl-revenue-ops.py:4586-4587), 1 key, no timestamp, not a
-    // success-shaped stub.
-    let capacity_report =
-        call_after_init(false, None, home.path(), &[], "revenue-r-capacity-report");
-    assert_eq!(
-        capacity_report,
-        serde_json::json!({"error": "Capacity planner not initialized"}),
-        "must be Python's exact 1-key error shape: {capacity_report:?}"
-    );
-
-    // Task 62: planner-execute pre-cutover -- the capital adapters are
-    // never assembled in production, so the arm is Python's EXACT 1-key
-    // error shape (cl-revenue-ops.py:4699-4700), same as capacity-report
-    // above. NOT a success-shaped stub, NOT a typed Rust refusal.
-    let planner_execute =
-        call_after_init(false, None, home.path(), &[], "revenue-r-planner-execute");
-    assert_eq!(
-        planner_execute,
-        serde_json::json!({"error": "Capacity planner not initialized"}),
-        "must be Python's exact 1-key error shape: {planner_execute:?}"
-    );
-
-    // Task 63: the Boltz action capability is never assembled in
-    // production, so every fund-moving Boltz RPC returns Python's EXACT
-    // 1-key arm (cl-revenue-ops.py:7690-7692). The usage short-circuits
-    // fire FIRST for status/refund/claim, exactly like Python.
-    let boltz_loop_out = call_after_init_with_params(
-        false,
-        None,
-        home.path(),
-        &[],
-        "revenue-r-boltz-loop-out",
-        serde_json::json!({"amount_sats": 500_000}),
-    );
-    assert_eq!(
-        boltz_loop_out,
-        serde_json::json!({"error": "Boltz CLI integration not initialized"}),
-        "must be Python's exact 1-key error shape: {boltz_loop_out:?}"
-    );
-    let boltz_status = call_after_init(false, None, home.path(), &[], "revenue-r-boltz-status");
-    assert_eq!(
-        boltz_status["error"],
-        serde_json::json!(
-            "usage: revenue-boltz-status swap_id (per-swap status; see \
-             revenue-boltz-wallet/-budget/-history for global state)"
-        ),
-        "the usage short-circuit precedes the init guard: {boltz_status:?}"
-    );
-    // auto-cycle-status never errors (py parity) and reports disabled.
-    let auto_cycle = call_after_init(
-        false,
-        None,
-        home.path(),
-        &[],
-        "revenue-r-boltz-auto-cycle-status",
-    );
-    assert_eq!(auto_cycle["boltz_enabled"], serde_json::json!(false));
-    assert!(auto_cycle.get("error").is_none(), "{auto_cycle:?}");
-
     // F1, updated by C71-30/C71-34: the `econ_shadow_enabled` surface IS
     // wired now -- it is a PUBLIC_RUNTIME_KEYS override with no registered
     // CLN option, so it resolves from `config_overrides`. With no
@@ -3536,196 +3447,6 @@ fn revenue_r_gap_only_batch_a_methods_stay_honest() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 56: the four planner read RPCs. The pure builders existed before this
-// task, but none was registered and none could reach production evidence.
-// These tests pin the public names, the real read-only DB round-trip, and the
-// deliberate named-parameter-only boundary.
-// ---------------------------------------------------------------------------
-
-const PLANNER_READ_SHADOW_METHODS: &[&str] = &[
-    "revenue-r-planner-candidate-sources",
-    "revenue-r-planner-candidates",
-    "revenue-r-planner-history",
-    "revenue-r-planner-status",
-];
-
-const PLANNER_READ_CANONICAL_METHODS: &[&str] = &[
-    "revenue-planner-candidate-sources",
-    "revenue-planner-candidates",
-    "revenue-planner-history",
-    "revenue-planner-status",
-];
-
-#[test]
-fn manifest_registers_planner_read_quartet_in_both_naming_modes() {
-    for (canonical, expected) in [
-        (false, PLANNER_READ_SHADOW_METHODS),
-        (true, PLANNER_READ_CANONICAL_METHODS),
-    ] {
-        let result = manifest_with(canonical);
-        let methods: Vec<&str> = result["rpcmethods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["name"].as_str().unwrap())
-            .collect();
-        for name in expected {
-            assert!(
-                methods.contains(name),
-                "planner read method {name} not registered (canonical={canonical}): {methods:?}"
-            );
-        }
-    }
-}
-
-fn seed_planner_read_tripwires(path: &std::path::Path) {
-    let conn = rusqlite::Connection::open(path).expect("open planner tripwire db");
-    conn.execute(
-        "INSERT INTO planner_candidates
-         (peer_id, score, source, last_evaluated, capacity_recommendation_sats,
-          connect_successes, connect_failures, metadata_json)
-         VALUES ('peer-low', 1.25, 'manual', 100, NULL, 2, 3, NULL)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO planner_candidates
-         (peer_id, score, source, last_evaluated, capacity_recommendation_sats,
-          connect_successes, connect_failures, metadata_json)
-         VALUES ('peer-high', 9.87654, 'gossip', 200, 3000000, 7, 1, '{\"tripwire\":true}')",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO planner_actions
-         (action_type, peer_id, channel_id, amount_sats, estimated_cost_sats,
-          actual_cost_sats, status, created_at, completed_at, reason, metadata_json)
-         VALUES ('open', 'peer-old', NULL, 1000000, 5000, NULL,
-                 'planned', 100, NULL, NULL, NULL)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO planner_actions
-         (action_type, peer_id, channel_id, amount_sats, estimated_cost_sats,
-          actual_cost_sats, status, created_at, completed_at, reason, metadata_json)
-         VALUES ('close', 'peer-new', '123x1x0', NULL, 321, 299,
-                 'completed', 200, 210, 'tripwire-reason', '{\"source\":\"task56\"}')",
-        [],
-    )
-    .unwrap();
-}
-
-#[test]
-fn planner_read_rpcs_round_trip_distinctive_database_rows() {
-    let home = tempfile::tempdir().expect("tempdir");
-    let prod_db_path = copy_fixture_db(home.path());
-    seed_planner_read_tripwires(&prod_db_path);
-    let db_path = Some(prod_db_path.to_str().unwrap());
-
-    let sources = call_after_init_with_params(
-        false,
-        db_path,
-        home.path(),
-        &[],
-        "revenue-r-planner-candidate-sources",
-        serde_json::json!({}),
-    );
-    assert_eq!(sources["total"], 2, "sources: {sources:?}");
-    assert_eq!(sources["by_source"]["gossip"], 1);
-    assert_eq!(sources["by_source"]["manual"], 1);
-    assert_eq!(sources["candidates"][0]["peer_id"], "peer-high");
-    assert_eq!(sources["candidates"][0]["score"], 9.8765);
-
-    let candidates = call_after_init_with_params(
-        false,
-        db_path,
-        home.path(),
-        &[],
-        "revenue-r-planner-candidates",
-        serde_json::json!({"limit": 1}),
-    );
-    assert_eq!(candidates["count"], 1, "candidates: {candidates:?}");
-    assert_eq!(candidates["candidates"][0]["peer_id"], "peer-high");
-    assert_eq!(
-        candidates["candidates"][0]["metadata_json"],
-        "{\"tripwire\":true}"
-    );
-
-    let history = call_after_init_with_params(
-        false,
-        db_path,
-        home.path(),
-        &[],
-        "revenue-r-planner-history",
-        serde_json::json!({"limit": 1}),
-    );
-    assert_eq!(history["count"], 1, "history: {history:?}");
-    assert_eq!(history["actions"][0]["peer_id"], "peer-new");
-    assert_eq!(history["actions"][0]["completed_at"], 210);
-    assert_eq!(history["actions"][0]["reason"], "tripwire-reason");
-    assert_eq!(
-        history["actions"][0]["metadata_json"],
-        "{\"source\":\"task56\"}"
-    );
-
-    let status = call_after_init_with_params(
-        false,
-        db_path,
-        home.path(),
-        &[
-            ("revops-r-planner-enabled", serde_json::json!(true)),
-            ("revops-r-planner-dry-run", serde_json::json!(true)),
-            ("revops-r-planner-execute-closes", serde_json::json!(true)),
-            (
-                "revops-r-planner-max-closes-per-cycle",
-                serde_json::json!(2),
-            ),
-        ],
-        "revenue-r-planner-status",
-        serde_json::json!({}),
-    );
-    assert_eq!(status["enabled"], true, "status: {status:?}");
-    assert_eq!(status["dry_run"], true);
-    assert_eq!(status["execute_closes"], true);
-    assert_eq!(status["max_closes_per_cycle"], 2);
-    assert_eq!(status["close_execution_effective"], true);
-    assert_eq!(status["candidate_pool_size"], 2);
-    assert_eq!(status["recent_actions"].as_array().unwrap().len(), 2);
-    assert_eq!(status["recent_actions"][0]["peer_id"], "peer-new");
-}
-
-#[test]
-fn planner_read_rpcs_refuse_nonempty_positional_params() {
-    let home = tempfile::tempdir().expect("tempdir");
-    let prod_db_path = copy_fixture_db(home.path());
-    for method in PLANNER_READ_SHADOW_METHODS {
-        let result = call_after_init_with_params(
-            false,
-            Some(prod_db_path.to_str().unwrap()),
-            home.path(),
-            &[],
-            method,
-            serde_json::json!([1]),
-        );
-        assert_eq!(
-            result["error"],
-            "positional parameters are not supported by this port; use named parameters (a JSON object), e.g. {\"window_hours\": 48}",
-            "{method}: {result:?}"
-        );
-    }
-}
-
-/// C71-27: an unreachable node is not an empty fleet.
-///
-/// With BOTH stores configured, the profitability pass still needs one
-/// fresh bounded `listpeerchannels`. There is no lightning socket in this
-/// harness, so that call fails -- and the handler must SAY so. Treating
-/// the failure as an empty channel list would skip every channel for "no
-/// opener", which reads as a fleet of unevaluable channels rather than as
-/// a node this plugin could not reach; and treating it as a real fleet
-/// would report `total_channels: 0` for a node that has channels.
 #[test]
 fn revenue_r_profitability_refuses_when_the_channel_snapshot_cannot_be_fetched() {
     let home = tempfile::tempdir().expect("tempdir");

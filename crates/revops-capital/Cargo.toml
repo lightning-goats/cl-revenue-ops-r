@@ -7,11 +7,6 @@ license.workspace = true
 
 [dependencies]
 revops-core = { path = "../revops-core" }
-# boltz_reservation.rs orchestrates the P4-014/P4-019 Boltz swap-budget
-# reservation lifecycle (reserve -> settle -> release) over the EXISTING,
-# already-audited unified budget rail rather than reinventing money-safety
-# code (see revops-db/src/budget.rs doc comment).
-revops-db = { path = "../revops-db" }
 serde.workspace = true
 serde_json.workspace = true
 

@@ -589,10 +589,10 @@ fn persisted_overrides_skip_where_startup_options_clamp() {
 #[test]
 fn the_ranges_table_covers_the_full_numeric_surface() {
     let table = revops::config_types::load();
-    assert!(
-        table.ranges.len() >= 90,
-        "expected the full CONFIG_FIELD_RANGES surface, got {}",
-        table.ranges.len()
+    assert_eq!(
+        table.ranges.len(),
+        68,
+        "expected the Python v3 CONFIG_FIELD_RANGES surface"
     );
     for field in ["min_fee_ppm", "max_fee_ppm", "daily_budget_sats"] {
         assert!(

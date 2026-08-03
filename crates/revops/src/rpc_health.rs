@@ -21,13 +21,10 @@
 //! per-section try/except: a section whose fetch FAILED renders
 //! `{"error": ...}` (a real py arm, not a gap); a section whose pipeline
 //! is genuinely unwired in this runtime (no observer store, no running
-//! scheduler) stays `null` + gap-listed. `rebalancer` and `planner`
-//! remain gap-listed deliberately: their owners exist but the engine /
-//! capacity-planner capabilities are unassembled until Task 69's
-//! authority-gated construction, and their Python sections read live
-//! engine internals this port cannot honestly synthesize yet. `boltz` is
-//! answered honestly (`{"enabled": false}`, Python's own no-manager
-//! answer); `loops` is the Rust-owned durable inventory
+//! scheduler) stays `null` + gap-listed. `rebalancer` remains
+//! gap-listed until its retained engine state is exposed. Retired
+//! channel-lifecycle sections are absent, matching Python v3. `loops`
+//! is the Rust-owned durable inventory
 //! ([`build_health_with_loops`]).
 
 use revops_db::queries::PnlSummary;
@@ -98,7 +95,6 @@ pub fn build_health(
         "fees",
         "rebalancer",
         "budget",
-        "planner",
         "top_routes",
         "loops",
     ] {
@@ -112,18 +108,6 @@ pub fn build_health(
         "fees": Value::Null,
         "rebalancer": Value::Null,
         "budget": Value::Null,
-        // py 6301-6315: `{"enabled": false}` is py's answer when no
-        // Boltz manager is wired OR its `enabled` flag is false.
-        //
-        // SELF-REVIEW 2026-07-31: the Task-50 justification ("no Boltz
-        // manager is wired here") went STALE when Task 63 landed a Boltz
-        // runtime in this same binary -- with Boltz enabled, this section
-        // would claim disabled while `revenue-boltz-auto-cycle-status`
-        // says enabled. The caller now supplies the real answer through
-        // `HealthExtras::boltz`; this literal is only the no-runtime
-        // default, which IS py's arm for that condition.
-        "boltz": json!({"enabled": false}),
-        "planner": Value::Null,
         "top_routes": Value::Null,
         "loops": Value::Null,
         "_gaps": gaps,
@@ -207,11 +191,6 @@ pub struct HealthExtras {
     /// subset projection happens here.
     pub budget: Option<Result<Value, String>>,
     pub top_routes: Option<Vec<revops_db::queries::TopRoutePair>>,
-    /// py 6301-6315: `Some(value)` replaces the no-runtime default with
-    /// the live auto-cycle snapshot (or py's `{"enabled": false}` when
-    /// the manager exists but its flag is off). `None` leaves the
-    /// default -- correct only when no Boltz runtime exists at all.
-    pub boltz: Option<Value>,
 }
 
 /// Fill the census-closed sections into a [`build_health_with_loops`]
@@ -275,10 +254,6 @@ pub fn apply_health_extras(value: &mut Value, extras: HealthExtras) {
         filled.push("budget");
     }
 
-    if let Some(boltz) = extras.boltz {
-        value["boltz"] = boltz;
-    }
-
     if let Some(routes) = extras.top_routes {
         // py 6329-6337: normalized scids, floor msat->sats, count.
         value["top_routes"] = Value::Array(
@@ -324,8 +299,8 @@ mod extras_tests {
             .collect()
     }
 
-    /// Every wired section fills and prunes its gap; rebalancer/planner
-    /// stay gap-listed (Task-69 staging).
+    /// Every wired section fills and prunes its gap; rebalancer stays
+    /// gap-listed until its retained engine state is exposed.
     #[test]
     fn filled_sections_prune_their_gaps_only() {
         let mut v = base();
@@ -346,7 +321,6 @@ mod extras_tests {
                     "remaining_sats": 3980,
                     "actual_spent_by_category": {"rebalance": 811},
                 }))),
-                boltz: None,
                 top_routes: Some(vec![revops_db::queries::TopRoutePair {
                     in_channel: "1:1:0".to_string(),
                     out_channel: "2x2x0".to_string(),
@@ -371,7 +345,6 @@ mod extras_tests {
         assert_eq!(v["top_routes"][0]["fee_sats_7d"], 6, "floor(6999 msat)");
         let gaps = remaining_gaps(&v);
         assert!(gaps.contains(&"rebalancer".to_string()), "{gaps:?}");
-        assert!(gaps.contains(&"planner".to_string()));
         assert!(!gaps.contains(&"channels".to_string()));
         assert!(!gaps.contains(&"fees".to_string()));
         assert!(!gaps.contains(&"budget".to_string()));
@@ -389,7 +362,6 @@ mod extras_tests {
                 channels: Some(Err("listpeerchannels failed".to_string())),
                 fees: None,
                 budget: Some(Err("budget provider raised".to_string())),
-                boltz: Some(json!({"enabled": true})),
                 top_routes: Some(vec![]),
             },
         );
@@ -397,11 +369,6 @@ mod extras_tests {
         assert_eq!(v["fees"], Value::Null);
         assert_eq!(v["budget"]["error"], "budget provider raised");
         assert_eq!(v["top_routes"], json!([]), "py except -> []");
-        assert_eq!(
-            v["boltz"],
-            json!({"enabled": true}),
-            "a live Boltz runtime's real state replaces the no-runtime default"
-        );
         let gaps = remaining_gaps(&v);
         assert!(gaps.contains(&"fees".to_string()), "unwired keeps its gap");
         assert!(
@@ -424,7 +391,6 @@ mod extras_tests {
                 channels: None,
                 fees: None,
                 budget: Some(Ok(json!({"error": "Plugin not initialized"}))),
-                boltz: None,
                 top_routes: None,
             },
         );
@@ -527,7 +493,6 @@ mod tests {
             "fees",
             "rebalancer",
             "budget",
-            "planner",
             "top_routes",
             "loops",
         ] {
@@ -548,7 +513,6 @@ mod tests {
             "fees",
             "rebalancer",
             "budget",
-            "planner",
             "top_routes",
             "loops",
         ] {
@@ -556,26 +520,6 @@ mod tests {
         }
     }
 
-    /// Task 50 correction round ("should NOT stay gaps" item): with no
-    /// Boltz manager wired in this port, Python's OWN answer for `boltz`
-    /// is the definite `{"enabled": false}` (cl-revenue-ops.py:6312-6313)
-    /// -- cheap, true, and shape-faithful. `null` + a `_gaps` entry is
-    /// strictly worse (it hides a field that IS computable today).
-    #[test]
-    fn boltz_section_is_the_honest_enabled_false_shape_not_a_null_gap() {
-        let v = build_health(0, None, None, None);
-        assert_eq!(v["boltz"], json!({"enabled": false}));
-        let gaps: Vec<&str> = v["_gaps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|g| g.as_str().unwrap())
-            .collect();
-        assert!(
-            !gaps.contains(&"boltz"),
-            "boltz is no longer a gap once populated: {gaps:?}"
-        );
-    }
     #[test]
     fn durable_loop_rows_replace_only_the_loops_gap() {
         let rows: Vec<revops_db::loop_health::LoopHealthRow> =
@@ -599,13 +543,13 @@ mod tests {
                 })
                 .collect();
         let value = build_health_with_loops(200, None, None, None, Ok(&rows), "boot-test");
-        // Task 67: eight loops, Python's label vocabulary, in
-        // REQUIRED_LOOPS order (flow-analysis first).
-        assert_eq!(value["loops"].as_array().unwrap().len(), 8);
+        // Only retained reporting, fee, and ordinary-rebalance loops are
+        // operationally required.
+        assert_eq!(value["loops"].as_array().unwrap().len(), 5);
         assert_eq!(value["loops"][0]["loop_name"], "flow-analysis");
         assert_eq!(value["loops"][1]["loop_name"], "fee-adjustment");
         assert_eq!(value["loops"][0]["wiring_status"], "not_wired");
-        assert_eq!(value["loops"][7]["dropped_total"], 27);
+        assert_eq!(value["loops"][4]["dropped_total"], 24);
         assert!(!value["_gaps"]
             .as_array()
             .unwrap()

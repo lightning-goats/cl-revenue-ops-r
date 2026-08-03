@@ -16,17 +16,14 @@ pub enum LoopId {
     LnPlus,
 }
 
-/// Python's exact eight business/startup loops, in its own thread-label
-/// order (cl-revenue-ops.py:3588-3600).
-pub const REQUIRED_LOOPS: [LoopId; 8] = [
+/// The five retained business/startup loops. Retired loop identities remain
+/// parseable solely so historical health rows stay readable.
+pub const REQUIRED_LOOPS: [LoopId; 5] = [
     LoopId::FlowAnalysis,
     LoopId::Fee,
     LoopId::Rebalance,
     LoopId::StartupSnapshot,
     LoopId::FinancialSnapshot,
-    LoopId::Boltz,
-    LoopId::Planner,
-    LoopId::LnPlus,
 ];
 
 impl LoopId {

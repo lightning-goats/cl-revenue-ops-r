@@ -603,7 +603,7 @@ async fn an_owner_that_was_already_gone_is_not_a_drained_one() {
 #[tokio::test]
 async fn an_owner_that_timed_out_joining_is_not_a_clean_shutdown() {
     let steps = Arc::new(FakeSteps::default().joins_as(
-        Owner::Boltz,
+        Owner::Rebalance,
         JoinAck::Timeout {
             waited: Duration::from_secs(10),
         },
@@ -615,7 +615,7 @@ async fn an_owner_that_timed_out_joining_is_not_a_clean_shutdown() {
         outcome
             .failures
             .iter()
-            .any(|f| f.contains("join_owner_timeout") && f.contains("boltz")),
+            .any(|f| f.contains("join_owner_timeout") && f.contains("rebalance")),
         "{outcome:?}"
     );
 }
@@ -625,7 +625,7 @@ async fn an_owner_that_timed_out_joining_is_not_a_clean_shutdown() {
 #[tokio::test]
 async fn a_panicking_owner_is_not_a_joined_one() {
     let steps = Arc::new(FakeSteps::default().joins_as(
-        Owner::LnPlus,
+        Owner::ObserverStore,
         JoinAck::Panicked {
             detail: "index out of bounds".to_string(),
         },
@@ -637,7 +637,7 @@ async fn a_panicking_owner_is_not_a_joined_one() {
         outcome
             .failures
             .iter()
-            .any(|f| f.contains("join_owner_panicked") && f.contains("lnplus")),
+            .any(|f| f.contains("join_owner_panicked") && f.contains("observer_store")),
         "{outcome:?}"
     );
 }
@@ -649,8 +649,8 @@ async fn a_panicking_owner_is_not_a_joined_one() {
 async fn an_owner_joined_without_draining_fails_the_cross_check() {
     let steps = Arc::new(
         FakeSteps::default()
-            .drains_as(Owner::Capital, DrainAck::NotSpawned)
-            .joins_as(Owner::Capital, JoinAck::Joined),
+            .drains_as(Owner::FeeScheduler, DrainAck::NotSpawned)
+            .joins_as(Owner::FeeScheduler, JoinAck::Joined),
     );
     let outcome = shutdown(steps, ledger(), SHUTDOWN_JOIN_TIMEOUT).await;
 
@@ -659,7 +659,7 @@ async fn an_owner_joined_without_draining_fails_the_cross_check() {
         outcome
             .failures
             .iter()
-            .any(|f| f.contains("join_without_drain") && f.contains("capital")),
+            .any(|f| f.contains("join_without_drain") && f.contains("fee_scheduler")),
         "{outcome:?}"
     );
 }

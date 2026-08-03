@@ -84,22 +84,13 @@ pub fn python_option_name(key: &str) -> Option<String> {
 /// `cl-revenue-ops.py`:
 ///   - `vegas-reflex` -> `enable_vegas_reflex` (line 2545)
 ///   - `vegas-decay` -> `vegas_decay_rate` (line 2546)
-///   - `planner-max-fee-rate` -> `planner_max_fee_rate_sat_vb` (line 2560)
-///   - `boltz-structural-budget-sats` -> `boltz_structural_budget_sats_per_day`
-///     (line 2431)
-///
 /// `fixtures/config_types.json` (AST-extracted straight from the `Config`
 /// dataclass) carries only field-name -> type, not this suffix -> field-name
 /// mapping, so it can't be derived from the fixture; this is the "small
 /// cited map" fallback.
-const FIELD_NAME_OVERRIDES: [(&str, &str); 4] = [
+const FIELD_NAME_OVERRIDES: [(&str, &str); 2] = [
     ("vegas-reflex", "enable_vegas_reflex"),
     ("vegas-decay", "vegas_decay_rate"),
-    ("planner-max-fee-rate", "planner_max_fee_rate_sat_vb"),
-    (
-        "boltz-structural-budget-sats",
-        "boltz_structural_budget_sats_per_day",
-    ),
 ];
 
 /// The `config_overrides.key` value for `key` (a `revenue-r-config`
@@ -852,14 +843,6 @@ mod tests {
     fn db_override_key_applies_field_name_overrides() {
         assert_eq!(db_override_key("vegas-reflex"), "enable_vegas_reflex");
         assert_eq!(db_override_key("vegas-decay"), "vegas_decay_rate");
-        assert_eq!(
-            db_override_key("planner-max-fee-rate"),
-            "planner_max_fee_rate_sat_vb"
-        );
-        assert_eq!(
-            db_override_key("boltz-structural-budget-sats"),
-            "boltz_structural_budget_sats_per_day"
-        );
     }
 
     /// IMPORTANT 4 / `IMMUTABLE_CONFIG_KEYS` (modules/config.py:22-25):

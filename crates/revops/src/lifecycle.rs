@@ -597,27 +597,21 @@ where
 // =====================================================================
 
 /// The serialized owners that hold their own task or thread, derived from
-/// `main.rs`' `State`.
+/// `main.rs`' retained reporting, fee, and ordinary-rebalance state.
 ///
 /// The roster is fixed rather than "whatever handles happened to be
-/// `Some`". Four of these are `Option` in `State` -- a passive-observer
-/// boot legitimately runs none of the action owners -- and a shutdown
-/// that iterated only over the handles it held would report clean over an
-/// owner it never asked about. Absence has to be DECLARED
-/// ([`DrainAck::NotSpawned`]), never inferred from silence.
+/// `Some`". Optional action owners must declare absence with
+/// [`DrainAck::NotSpawned`] rather than disappearing from shutdown
+/// accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Owner {
     /// `State.db` -- the read-only production-DB actor.
     ProductionDb,
     /// `State.observer_db` -- the read-write observer store owner.
     ObserverStore,
-    /// `State.lnplus` -- Task 61's LN+ observer pass.
-    LnPlus,
     /// `State.scheduler` -- the fee-cycle owner thread.
     FeeScheduler,
     Rebalance,
-    Capital,
-    Boltz,
 }
 
 /// Which half of R68-1's shutdown order an owner belongs to.
@@ -631,22 +625,17 @@ pub enum OwnerClass {
 }
 
 impl Owner {
-    pub const ALL: [Owner; 7] = [
+    pub const ALL: [Owner; 4] = [
         Owner::ProductionDb,
         Owner::ObserverStore,
-        Owner::LnPlus,
         Owner::FeeScheduler,
         Owner::Rebalance,
-        Owner::Capital,
-        Owner::Boltz,
     ];
 
     pub fn class(self) -> OwnerClass {
         match self {
-            Self::ProductionDb | Self::ObserverStore | Self::LnPlus => OwnerClass::Observer,
-            Self::FeeScheduler | Self::Rebalance | Self::Capital | Self::Boltz => {
-                OwnerClass::Action
-            }
+            Self::ProductionDb | Self::ObserverStore => OwnerClass::Observer,
+            Self::FeeScheduler | Self::Rebalance => OwnerClass::Action,
         }
     }
 
@@ -654,11 +643,8 @@ impl Owner {
         match self {
             Self::ProductionDb => "production_db",
             Self::ObserverStore => "observer_store",
-            Self::LnPlus => "lnplus",
             Self::FeeScheduler => "fee_scheduler",
             Self::Rebalance => "rebalance",
-            Self::Capital => "capital",
-            Self::Boltz => "boltz",
         }
     }
 }
@@ -706,19 +692,16 @@ pub enum JoinAck {
 /// ledgers.
 #[derive(Debug, Default)]
 pub struct DrainLedger {
-    drain: Mutex<[Option<DrainAck>; 7]>,
-    join: Mutex<[Option<JoinAck>; 7]>,
+    drain: Mutex<[Option<DrainAck>; 4]>,
+    join: Mutex<[Option<JoinAck>; 4]>,
 }
 
 fn owner_slot(owner: Owner) -> usize {
     match owner {
         Owner::ProductionDb => 0,
         Owner::ObserverStore => 1,
-        Owner::LnPlus => 2,
-        Owner::FeeScheduler => 3,
-        Owner::Rebalance => 4,
-        Owner::Capital => 5,
-        Owner::Boltz => 6,
+        Owner::FeeScheduler => 2,
+        Owner::Rebalance => 3,
     }
 }
 

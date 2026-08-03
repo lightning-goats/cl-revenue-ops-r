@@ -26,7 +26,7 @@ fn optional(name: &str, default: Value, coercion: ParamCoercion) -> ParamSpec {
 }
 
 #[test]
-fn checked_in_contract_has_exactly_69_unique_methods() {
+fn checked_in_contract_has_exactly_39_unique_methods() {
     let contract = load_rpc_contract();
     let mut names = contract
         .methods
@@ -35,10 +35,10 @@ fn checked_in_contract_has_exactly_69_unique_methods() {
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 69);
+    assert_eq!(names.len(), 39);
     assert_eq!(
         contract.python_source_commit,
-        "e579de8df523f174283fc2aa21f395c8ef006ac6"
+        "9ea7e85ed21c4001a686daf193dcf639a7076732"
     );
 }
 

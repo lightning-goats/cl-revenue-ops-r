@@ -42,8 +42,8 @@ struct RawTable {
     fields: HashMap<String, String>,
     public_keys: Vec<String>,
     deprecated_keys: Vec<String>,
-    /// `CONFIG_FIELD_RANGES` (modules/config.py:354-480, 96 entries as of
-    /// this writing): field name -> `[min, max]`, both numbers (int or
+    /// `CONFIG_FIELD_RANGES` (68 retained entries in the Python v3 boundary
+    /// as of this writing): field name -> `[min, max]`, both numbers (int or
     /// float in Python; `f64` here covers both without loss for the
     /// comparison this table exists for).
     #[serde(default)]

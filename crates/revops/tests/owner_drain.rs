@@ -50,9 +50,8 @@ fn all_joined() -> DrainLedger {
 // =====================================================================
 
 /// Derived from `main.rs`' `State`: the serialized owners that hold their
-/// own task or thread. A missing entry is an owner shutdown never asks
-/// about -- the same silent-absence failure R68-2 closed for the four
-/// subscriptions.
+/// own retained task or thread. A missing retained entry is an owner
+/// shutdown never asks about.
 #[test]
 fn the_roster_is_exactly_the_owners_the_plugin_spawns() {
     assert_eq!(
@@ -60,11 +59,8 @@ fn the_roster_is_exactly_the_owners_the_plugin_spawns() {
         [
             Owner::ProductionDb,
             Owner::ObserverStore,
-            Owner::LnPlus,
             Owner::FeeScheduler,
             Owner::Rebalance,
-            Owner::Capital,
-            Owner::Boltz,
         ]
     );
     for owner in Owner::ALL {
@@ -79,11 +75,8 @@ fn the_roster_is_exactly_the_owners_the_plugin_spawns() {
 fn every_owner_is_classified_as_action_or_observer() {
     assert_eq!(Owner::ProductionDb.class(), OwnerClass::Observer);
     assert_eq!(Owner::ObserverStore.class(), OwnerClass::Observer);
-    assert_eq!(Owner::LnPlus.class(), OwnerClass::Observer);
     assert_eq!(Owner::FeeScheduler.class(), OwnerClass::Action);
     assert_eq!(Owner::Rebalance.class(), OwnerClass::Action);
-    assert_eq!(Owner::Capital.class(), OwnerClass::Action);
-    assert_eq!(Owner::Boltz.class(), OwnerClass::Action);
 }
 
 #[test]
@@ -137,9 +130,9 @@ fn an_owner_that_reported_nothing_refuses() {
 
     // ...and one MISSING entry among six good ones refuses just the same.
     let ledger = all_drained();
-    ledger.clear_for_tests(Owner::Boltz);
+    ledger.clear_for_tests(Owner::Rebalance);
     match drain_is_clean(&ledger).expect_err("one unreported owner is enough") {
-        DrainRefusal::Unreported { owner } => assert_eq!(owner, Owner::Boltz),
+        DrainRefusal::Unreported { owner } => assert_eq!(owner, Owner::Rebalance),
         other => panic!("expected Unreported, got {other:?}"),
     }
 }
@@ -183,14 +176,14 @@ fn an_unreachable_owner_is_not_a_drained_one() {
 fn an_owner_that_took_the_stop_and_never_answered_refuses() {
     let ledger = all_drained();
     ledger.record(
-        Owner::Capital,
+        Owner::FeeScheduler,
         DrainAck::NoAck {
             waited: Duration::from_secs(3),
         },
     );
     match drain_is_clean(&ledger).expect_err("no answer is not an answer") {
         DrainRefusal::NoAck { owner, waited } => {
-            assert_eq!(owner, Owner::Capital);
+            assert_eq!(owner, Owner::FeeScheduler);
             assert_eq!(waited, Duration::from_secs(3));
         }
         other => panic!("expected NoAck, got {other:?}"),
@@ -257,14 +250,14 @@ fn an_owner_that_never_reported_a_join_refuses() {
 fn an_owner_that_timed_out_joining_refuses() {
     let ledger = all_joined();
     ledger.record_join(
-        Owner::Boltz,
+        Owner::Rebalance,
         JoinAck::Timeout {
             waited: Duration::from_secs(10),
         },
     );
     match join_is_clean(&ledger).expect_err("a wedged owner is not a joined one") {
         JoinRefusal::Timeout { owner, waited } => {
-            assert_eq!(owner, Owner::Boltz);
+            assert_eq!(owner, Owner::Rebalance);
             assert_eq!(waited, Duration::from_secs(10));
         }
         other => panic!("expected Timeout, got {other:?}"),
@@ -278,14 +271,14 @@ fn an_owner_that_timed_out_joining_refuses() {
 fn a_panicking_owner_is_not_a_joined_one() {
     let ledger = all_joined();
     ledger.record_join(
-        Owner::Capital,
+        Owner::FeeScheduler,
         JoinAck::Panicked {
             detail: "panicked at 'unwrap on None'".to_string(),
         },
     );
     match join_is_clean(&ledger).expect_err("a panic is a lost owner") {
         JoinRefusal::Panicked { owner, detail } => {
-            assert_eq!(owner, Owner::Capital);
+            assert_eq!(owner, Owner::FeeScheduler);
             assert!(detail.contains("unwrap"), "{detail}");
         }
         other => panic!("expected Panicked, got {other:?}"),
@@ -316,7 +309,7 @@ fn an_owner_joined_without_draining_refuses() {
     }
     assert!(shutdown_acks_are_consistent(&ledger).is_ok());
 
-    ledger.clear_for_tests(Owner::LnPlus);
+    ledger.clear_for_tests(Owner::ObserverStore);
     assert!(
         shutdown_acks_are_consistent(&ledger).is_err(),
         "an owner cannot be joined it never drained"
@@ -348,11 +341,11 @@ fn an_owner_declared_absent_cannot_then_report_a_join() {
     }
     assert!(shutdown_acks_are_consistent(&ledger).is_ok());
 
-    ledger.record_join(Owner::Boltz, JoinAck::Joined);
+    ledger.record_join(Owner::Rebalance, JoinAck::Joined);
     match shutdown_acks_are_consistent(&ledger)
         .expect_err("an owner declared absent cannot have been joined")
     {
-        JoinRefusal::JoinedWithoutDraining { owner } => assert_eq!(owner, Owner::Boltz),
+        JoinRefusal::JoinedWithoutDraining { owner } => assert_eq!(owner, Owner::Rebalance),
         other => panic!("expected JoinedWithoutDraining, got {other:?}"),
     }
 }
@@ -376,42 +369,42 @@ fn an_owner_that_drained_cannot_be_absent_at_join_time() {
 fn every_refusal_carries_a_distinct_actionable_code() {
     let drain_codes = [
         DrainRefusal::Unreported {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
         }
         .code(),
         DrainRefusal::Unreachable {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
             detail: String::new(),
         }
         .code(),
         DrainRefusal::NoAck {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
             waited: Duration::ZERO,
         }
         .code(),
         DrainRefusal::LeftWork {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
             pending: 1,
         }
         .code(),
     ];
     let join_codes = [
         JoinRefusal::Unreported {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
         }
         .code(),
         JoinRefusal::Timeout {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
             waited: Duration::ZERO,
         }
         .code(),
         JoinRefusal::Panicked {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
             detail: String::new(),
         }
         .code(),
         JoinRefusal::JoinedWithoutDraining {
-            owner: Owner::Boltz,
+            owner: Owner::Rebalance,
         }
         .code(),
     ];
