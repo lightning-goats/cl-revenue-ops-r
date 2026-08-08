@@ -302,7 +302,7 @@ async fn publish_and_wake_fire_only_after_commit() {
 #[test]
 fn capability_is_unreachable_from_observer_surfaces() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for file in ["src/runtime.rs", "src/lnplus_runtime.rs", "src/main.rs"] {
+    for file in ["src/runtime.rs", "src/main.rs"] {
         let source = std::fs::read_to_string(root.join(file)).unwrap();
         let production = source.split("#[cfg(test)]").next().unwrap();
         assert!(

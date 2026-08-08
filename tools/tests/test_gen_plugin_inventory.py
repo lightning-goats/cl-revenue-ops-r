@@ -22,9 +22,9 @@ PYTHON_REPO = (
         if candidate.is_dir()
     )
 )
-PYTHON_COMMIT = "e579de8df523f174283fc2aa21f395c8ef006ac6"
-RPC_SET_SHA256 = "8413e4ab99af64e5617ef074730e6e3747deca437634cf5f35a63b41a005db68"
-OPTION_SET_SHA256 = "44d54e01db31943734489e5d5913930fa9ea9399424f68cbb29fa302d20db295"
+PYTHON_COMMIT = "a5c2e2f65019df5cefe4e1261b7de2823a03e448"
+RPC_SET_SHA256 = "ccb4011905c3c45764cec989ec67791b03bc73be084ce5a2ba77bb2a2ab42eed"
+OPTION_SET_SHA256 = "3507fe3322b2550fc58f34bd8e55c8253afeac6ca87fa1c33353d1eb851bff29"
 
 
 def load_generator():
@@ -50,9 +50,9 @@ def test_pinned_python_rpc_and_option_sets_are_exact_not_count_only():
     rpc_names = [entry["name"] for entry in inventory["python_rpcs"]]
     option_names = [entry["name"] for entry in inventory["python_options"]]
 
-    assert len(rpc_names) == len(set(rpc_names)) == 69
+    assert len(rpc_names) == len(set(rpc_names)) == 39
     assert names_digest(rpc_names) == RPC_SET_SHA256
-    assert len(option_names) == len(set(option_names)) == 121
+    assert len(option_names) == len(set(option_names)) == 71
     assert names_digest(option_names) == OPTION_SET_SHA256
 
 
@@ -66,7 +66,7 @@ def test_two_fee_authority_and_capture_options_are_restored_with_exact_definitio
         "dynamic": True,
         "name": "revenue-ops-fee-authority-enabled",
         "opt_type": "bool",
-        "source_line": 1170,
+        "source_line": 1111,
     }
     assert by_name["revenue-ops-fee-replay-capture-enabled"] == {
         "default": "false",
@@ -78,11 +78,11 @@ def test_two_fee_authority_and_capture_options_are_restored_with_exact_definitio
         "dynamic": True,
         "name": "revenue-ops-fee-replay-capture-enabled",
         "opt_type": "string",
-        "source_line": 1179,
+        "source_line": 1120,
     }
 
 
-def test_eight_startup_loops_and_shutdown_are_separate_exact_registries():
+def test_five_retained_startup_loops_and_shutdown_are_separate_exact_registries():
     inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
     assert {entry["name"] for entry in inventory["loops"]} == {
         "flow-analysis",
@@ -90,27 +90,15 @@ def test_eight_startup_loops_and_shutdown_are_separate_exact_registries():
         "rebalance-check",
         "startup-snapshot",
         "financial-snapshot",
-        "boltz-auto-cycle",
-        "capacity-planner",
-        "lnplus-watcher",
     }
-    assert len(inventory["loops"]) == 8
-    loops_by_name = {entry["name"]: entry for entry in inventory["loops"]}
-    assert loops_by_name["lnplus-watcher"]["rust_state"] == {
-        "compiled": True,
-        "reachable": True,
-        "effective": "partial",
-        "review": "passed",
-        "soak": "pending",
-        "owner_task": "hexmem-61",
-    }
+    assert len(inventory["loops"]) == 5
     assert inventory["shutdown"] == {
         "bounded": True,
         "join_timeout_seconds": 10.0,
         "name": "rpc-shutdown",
         "semantics": "daemon drain thread; bounded wait; process exit proceeds on timeout",
         "source_file": "cl-revenue-ops.py",
-        "source_line": 599,
+        "source_line": 583,
     }
 
 
@@ -128,41 +116,25 @@ def test_external_adapter_registry_has_exact_classes_and_never_claims_missing_tr
         "askrene_reserve",
         "askrene_unreserve",
         "askrene_update_channel",
-        "boltzcli",
-        "close",
-        "connect",
         "datastore",
         "delinvoice",
         "delpay",
         "dynamic_config",
-        "fundchannel",
         "invoice",
-        "lnplus_https",
-        "pay",
         "sendpay_waitsendpay",
         "setchannel",
-        "signmessage",
     }
-    assert by_id["lnplus_https"]["rust_adapter"] == "revops_lnplus::UreqTransport"
-    assert by_id["lnplus_https"]["rust_transport"] == "local_fake_proven"
-    assert by_id["signmessage"]["rust_adapter"] == "revops::lnplus_adapters::ClnSigner"
-    assert by_id["signmessage"]["rust_transport"] == "local_fake_proven"
-    assert by_id["connect"]["rust_adapter"] == "revops::lnplus_adapters::ClnChainAdapter"
-    assert by_id["connect"]["rust_transport"] == "local_fake_proven"
-    assert by_id["fundchannel"]["rust_adapter"] == "revops::lnplus_adapters::ClnChainAdapter"
-    assert by_id["fundchannel"]["rust_transport"] == "local_fake_proven"
     assert by_id["sendpay_waitsendpay"]["rust_transport"] == "missing"
-    assert by_id["boltzcli"]["rust_transport"] == "local_fake_proven_unreachable"
     assert by_id["setchannel"]["python_evidence"] == [
         {"source_file": "modules/data_service.py", "source_line": 275}
     ]
     assert by_id["sendpay_waitsendpay"]["python_evidence"][0] == {
         "source_file": "modules/data_service.py",
-        "source_line": 332,
+        "source_line": 306,
     }
     assert by_id["datastore"]["python_evidence"] == [
-        {"source_file": "modules/data_service.py", "source_line": 473},
-        {"source_file": "modules/rebalance_engine_v2.py", "source_line": 3186},
+        {"source_file": "modules/data_service.py", "source_line": 434},
+        {"source_file": "modules/rebalance_engine_v2.py", "source_line": 3678},
     ]
 
 
@@ -174,60 +146,46 @@ def test_external_evidence_is_the_exact_pinned_production_callsite_set():
         for ref in entry["python_evidence"]
     }
     expected = {
-        ("askrene_age", "modules/data_service.py", 419),
-        ("askrene_bias_channel", "modules/data_service.py", 408),
-        ("askrene_bias_node", "modules/data_service.py", 401),
-        ("askrene_create_layer", "modules/data_service.py", 379),
-        ("askrene_create_layer", "modules/rebalance_router_v3.py", 615),
-        ("askrene_disable_node", "modules/data_service.py", 412),
-        ("askrene_inform_channel", "modules/data_service.py", 429),
-        ("askrene_remove_layer", "modules/data_service.py", 385),
-        ("askrene_remove_layer", "modules/rebalance_engine_v2.py", 319),
-        ("askrene_remove_layer", "modules/rebalance_router_v3.py", 668),
-        ("askrene_reserve", "modules/data_service.py", 433),
-        ("askrene_unreserve", "modules/data_service.py", 437),
-        ("askrene_update_channel", "modules/data_service.py", 394),
-        ("askrene_update_channel", "modules/rebalance_router_v3.py", 631),
-        ("askrene_update_channel", "modules/rebalance_router_v3.py", 649),
-        ("boltzcli", "cl-revenue-ops.py", 2801),
-        ("boltzcli", "modules/boltz_manager.py", 449),
-        ("close", "modules/capacity_planner.py", 3977),
-        ("close", "modules/data_service.py", 288),
-        ("connect", "modules/data_service.py", 296),
-        ("connect", "modules/lnplus_swaps.py", 1604),
-        ("datastore", "modules/data_service.py", 473),
-        ("datastore", "modules/rebalance_engine_v2.py", 3186),
-        ("delinvoice", "modules/data_service.py", 344),
-        ("delinvoice", "modules/rebalance_native_executor_v2.py", 391),
-        ("delpay", "modules/data_service.py", 340),
-        ("delpay", "modules/rebalance_engine_v2.py", 3109),
-        ("delpay", "modules/rebalance_native_executor_v2.py", 386),
-        ("dynamic_config", "cl-revenue-ops.py", 6723),
-        ("fundchannel", "modules/capacity_planner.py", 3060),
-        ("fundchannel", "modules/data_service.py", 281),
-        ("fundchannel", "modules/lnplus_swaps.py", 1672),
-        ("invoice", "modules/data_service.py", 328),
-        ("invoice", "modules/rebalance_native_executor_v2.py", 431),
-        ("lnplus_https", "modules/lnplus_swaps.py", 93),
-        ("pay", "modules/boltz_manager.py", 844),
-        ("pay", "modules/data_service.py", 349),
-        ("sendpay_waitsendpay", "modules/data_service.py", 332),
-        ("sendpay_waitsendpay", "modules/data_service.py", 336),
-        ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 461),
-        ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 462),
+        ("askrene_age", "modules/data_service.py", 380),
+        ("askrene_bias_channel", "modules/data_service.py", 369),
+        ("askrene_bias_node", "modules/data_service.py", 362),
+        ("askrene_create_layer", "modules/data_service.py", 340),
+        ("askrene_create_layer", "modules/rebalance_router_v3.py", 643),
+        ("askrene_disable_node", "modules/data_service.py", 373),
+        ("askrene_inform_channel", "modules/data_service.py", 390),
+        ("askrene_remove_layer", "modules/data_service.py", 346),
+        ("askrene_remove_layer", "modules/rebalance_engine_v2.py", 355),
+        ("askrene_remove_layer", "modules/rebalance_router_v3.py", 696),
+        ("askrene_reserve", "modules/data_service.py", 394),
+        ("askrene_unreserve", "modules/data_service.py", 398),
+        ("askrene_update_channel", "modules/data_service.py", 355),
+        ("askrene_update_channel", "modules/rebalance_router_v3.py", 659),
+        ("askrene_update_channel", "modules/rebalance_router_v3.py", 677),
+        ("datastore", "modules/data_service.py", 434),
+        ("datastore", "modules/rebalance_engine_v2.py", 3678),
+        ("delinvoice", "modules/data_service.py", 318),
+        ("delinvoice", "modules/rebalance_native_executor_v2.py", 411),
+        ("delpay", "modules/data_service.py", 314),
+        ("delpay", "modules/rebalance_engine_v2.py", 3601),
+        ("delpay", "modules/rebalance_native_executor_v2.py", 406),
+        ("dynamic_config", "cl-revenue-ops.py", 5560),
+        ("invoice", "modules/data_service.py", 302),
+        ("invoice", "modules/rebalance_native_executor_v2.py", 451),
+        ("sendpay_waitsendpay", "modules/data_service.py", 306),
+        ("sendpay_waitsendpay", "modules/data_service.py", 310),
+        ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 481),
+        ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 482),
         ("setchannel", "modules/data_service.py", 275),
-        ("signmessage", "modules/data_service.py", 303),
-        ("signmessage", "modules/lnplus_swaps.py", 130),
     }
     assert actual == expected
-    assert ("boltzcli", "modules/fee_cycle_capture.py", 418) not in actual
+    assert not {"boltzcli", "close", "connect", "fundchannel", "lnplus_https", "pay", "signmessage"} & {entry["id"] for entry in inventory["external_boundaries"]}
 
 
 def test_production_scan_provenance_hashes_every_inspected_python_file():
     module = load_generator()
     production_files = module.production_python_files(PYTHON_REPO, PYTHON_COMMIT)
     inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
-    assert len(production_files) == 51
+    assert len(production_files) == 46
     assert set(inventory["provenance"]["source_sha256"]) == set(production_files)
 
 
@@ -237,7 +195,7 @@ def test_new_direct_production_bypass_fails_closed():
     sources = {
         path: module.git_show(PYTHON_REPO, PYTHON_COMMIT, path) for path in files
     }
-    sources["modules/__init__.py"] += b'\nplugin.rpc.call("pay", {})\n'
+    sources["modules/__init__.py"] += b'\nplugin.rpc.call("invoice", {})\n'
     with pytest.raises(ValueError, match="unexpected=.*modules/__init__.py"):
         module.scan_external_calls(sources)
 
@@ -248,16 +206,11 @@ def test_observational_git_subprocess_exclusion_is_exact_and_documented():
         ("modules/fee_cycle_capture.py", 418): "git rev-parse source identity"
     }
     inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
-    boltz_refs = next(
-        entry["python_evidence"]
-        for entry in inventory["external_boundaries"]
-        if entry["id"] == "boltzcli"
-    )
-    assert {
-        (ref["source_file"], ref["source_line"]) for ref in boltz_refs
-    } == {
-        ("cl-revenue-ops.py", 2801),
-        ("modules/boltz_manager.py", 449),
+    assert "subprocess_exec" not in {
+        entry["id"] for entry in inventory["external_boundaries"]
+    }
+    assert "boltzcli" not in {
+        entry["id"] for entry in inventory["external_boundaries"]
     }
 
 
@@ -266,7 +219,6 @@ def test_reachability_never_implies_independent_review():
     by_name = {entry["name"]: entry for entry in inventory["python_rpcs"]}
     for name in (
         "revenue-analyze",
-        "revenue-capacity-report",
         "revenue-config",
         "revenue-dashboard",
         "revenue-fee-debug",
@@ -278,49 +230,30 @@ def test_reachability_never_implies_independent_review():
         assert by_name[name]["state"]["review_evidence"] is None
     for name in (
         "revenue-history",
-        "revenue-lnplus-abandon",
-        "revenue-lnplus-backfill",
-        "revenue-lnplus-breaker-clear",
-        "revenue-lnplus-status",
         "revenue-list-banned",
         "revenue-list-ignored",
-        "revenue-planner-candidate-sources",
-        "revenue-planner-candidates",
-        "revenue-planner-history",
-        "revenue-planner-status",
         "revenue-spend-ledger",
     ):
         assert by_name[name]["state"]["review"] == "passed"
         assert by_name[name]["state"]["review_evidence"]
-    assert (
-        by_name["revenue-lnplus-status"]["state"]["review_evidence"]
-        == "hexmem-task-61@9c99d7c"
-    )
 
 
-def test_rust_only_methods_are_separate_and_placeholders_are_not_effective():
+def test_rust_only_methods_are_separate_and_retained_python_rpcs_are_reachable():
     inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
     assert set(inventory["rust_only_methods"]) == {
-        "revenue-fee-wake",
         "revenue-ping",
         "revenue-rebalance-plan",
         "revops-fee-runway-status",
     }
     by_name = {entry["name"]: entry for entry in inventory["python_rpcs"]}
-    # Task 61 4E raised this from 20: the four LN+ operator RPCs are now
-    # genuinely registered and reachable.
-    assert sum(entry["state"]["reachable"] for entry in by_name.values()) == 24
-    for name in (
-        "revenue-analyze",
-        "revenue-capacity-report",
-        "revenue-econ-snapshot",
-        "revenue-profitability",
-    ):
-        assert by_name[name]["state"]["effective"] == "placeholder"
-        assert by_name[name]["state"]["effective"] != "full"
+    assert sum(entry["state"]["reachable"] for entry in by_name.values()) == 39
+    assert not [
+        entry for entry in by_name.values()
+        if entry["state"]["effective"] == "placeholder"
+    ]
 
 
-def test_reviewed_reads_and_lnplus_rpcs_are_full_and_false_successes_stay_partial():
+def test_reviewed_reads_and_retained_status_rpcs_are_full_and_false_successes_stay_partial():
     inventory = generated_inventory()["fixtures/port/plugin_inventory.json"]
     by_name = {entry["name"]: entry for entry in inventory["python_rpcs"]}
     assert {
@@ -328,25 +261,14 @@ def test_reviewed_reads_and_lnplus_rpcs_are_full_and_false_successes_stay_partia
         for name, entry in by_name.items()
         if entry["state"]["effective"] == "full"
     } == {
+        "revenue-capex-status",
+        "revenue-econ-reconcile",
         "revenue-history",
-        "revenue-lnplus-abandon",
-        "revenue-lnplus-backfill",
-        "revenue-lnplus-breaker-clear",
-        "revenue-lnplus-status",
         "revenue-list-banned",
         "revenue-list-ignored",
-        "revenue-planner-candidate-sources",
-        "revenue-planner-candidates",
-        "revenue-planner-history",
-        "revenue-planner-status",
         "revenue-spend-ledger",
+        "revenue-total-cost-budget",
     }
-    for name in (
-        "revenue-lnplus-abandon",
-        "revenue-lnplus-backfill",
-        "revenue-lnplus-breaker-clear",
-    ):
-        assert by_name[name]["state"]["transport_proven"] == "local_fake_proven"
     for name in ("revenue-config", "revenue-fee-debug", "revenue-status"):
         assert by_name[name]["state"]["effective"] == "partial"
 
@@ -357,7 +279,7 @@ def test_parameter_schema_has_one_entry_per_exact_python_rpc():
     contract = generated["fixtures/port/rpc_params.json"]
     assert contract["schema_version"] == 1
     assert contract["python_source_commit"] == PYTHON_COMMIT
-    assert len(contract["methods"]) == 69
+    assert len(contract["methods"]) == 39
     assert {method["name"] for method in contract["methods"]} == {
         rpc["name"] for rpc in inventory["python_rpcs"]
     }
@@ -405,7 +327,7 @@ def test_provenance_hashes_are_exact_and_generator_is_byte_deterministic():
     inventory = first["fixtures/port/plugin_inventory.json"]
     assert inventory["provenance"]["python_source_commit"] == PYTHON_COMMIT
     assert inventory["provenance"]["generator"] == "tools/port/gen_plugin_inventory.py"
-    assert inventory["provenance"]["generator_version"] == 3
+    assert inventory["provenance"]["generator_version"] == 5
     assert "rust_audit_base_commit" not in inventory["provenance"]
     source_commit = subprocess.run(
         [

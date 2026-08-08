@@ -1,45 +1,11 @@
-//! Rust port of the capital-allocation subsystem of `cl_revenue_ops`
-//! (`modules/capex_budget.py` — `CapexBudgetEngine`, and a pure-kernel
-//! subset of `modules/capacity_planner.py` — `CapacityPlanner`), ported per
-//! `docs/port/port-map.json` lens "Capital allocation subsystem".
+//! Reporting-only capital-allocation subsystem for `cl_revenue_ops`.
 //!
-//! # Scope
-//!
-//! [`capex`] ports `CapexBudgetEngine` (py `modules/capex_budget.py`,
-//! 789 LOC) close to completely: it is documented in the port map as a
-//! "pure-calculation" engine (no CLN RPC calls) that reads from a
-//! profitability cache and spend history and computes budgets. The Rust
-//! port keeps that purity contract literally: [`capex::compute_allocations`]
-//! takes typed, already-fetched evidence and a config snapshot, and returns
-//! [`capex::CapexAllocations`] — no trait objects doing I/O inside the
-//! decision path. [`boltz_reservation`] wraps the Boltz swap-budget
-//! reservation lifecycle (reserve -> settle -> release, P4-019 ordering)
-//! over the EXISTING, already-audited `revops_db::budget::BudgetDb` rail
-//! rather than reinventing money-safety code.
-//!
-//! [`planner`] ports a curated, pure subset of `CapacityPlanner`
-//! (py `modules/capacity_planner.py`, ~4,200 LOC) — the decision gates,
-//! EV/ROI math, candidate-discovery strategies, winner/loser
-//! classification, candidate scoring, and the `execute_cycle`
-//! orchestration itself (as [`planner::cycle::plan_cycle`]), all as pure
-//! functions of already-fetched evidence. It does **not** port any of the
-//! `_execute_*` methods that perform CLN RPC calls (fundchannel/close/
-//! rebalance) — those remain Python-owned, and this crate is structurally
-//! incapable of calling them (no RPC client type anywhere in the crate).
-//! See `crates/revops-capital/ENTRYPOINTS.md` for the complete list of
-//! what is and is not wired, what a caller integrating this crate must
-//! supply, and the honestly-declared gaps (the capital-efficiency-aware
-//! branch of neighbor discovery, `_arbitrate_close_list`'s conflict
-//! arming, LN+ swap evaluation).
-//!
-//! Not ported at all in this pass: `BoltzCliManager` (py
-//! `modules/boltz_manager.py`, ~2,670 LOC), `BoltzAutoCycle` (py
-//! `cl-revenue-ops.py`, ~1,400 LOC), `LNPlusSwapAutomation` (py
-//! `modules/lnplus_swaps.py`, ~2,099 LOC). These are named as separate
-//! components in the port-map lens and are large enough to be their own
-//! porting projects; see ENTRYPOINTS.md.
+//! [`capex`] ports the pure `CapexBudgetEngine` calculation from
+//! `modules/capex_budget.py`: it consumes already-fetched profitability and
+//! spend evidence and returns typed budget allocations. Channel lifecycle
+//! planning and swap authority were intentionally retired in v3, so this
+//! crate contains no executor, scheduler, subprocess, HTTP client, or CLN RPC
+//! adapter.
 #![forbid(unsafe_code)]
 
-pub mod boltz_reservation;
 pub mod capex;
-pub mod planner;

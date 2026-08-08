@@ -314,7 +314,7 @@ async fn a_float_persisted_override_out_of_range_is_skipped_not_clamped() {
 // =====================================================================
 
 /// The scope ruling on task 74: Python's `_INIT_NUMERIC_RANGES` is
-/// `dict(CONFIG_FIELD_RANGES)`, deliberately covering all 96 numeric
+/// `dict(CONFIG_FIELD_RANGES)`, deliberately covering all retained numeric
 /// fields "so startup cannot silently omit a newly governed field". A
 /// clamp that only reached the ~18 fee-cycle resolver sites would leave
 /// the other numeric fields exposed on the operator-facing config surface.
@@ -326,7 +326,7 @@ fn the_startup_clamp_covers_numeric_fields_beyond_the_fee_pair() {
     let mut opts = HashMap::new();
     // int, not a fee bound, and not a FeeCfgSnapshot field
     opts.insert(
-        "revenue-ops-planner-max-closes-per-cycle".to_string(),
+        "revenue-ops-rpc-timeout-seconds".to_string(),
         OptValue::Integer(1_000_000),
     );
     // float, not a fee bound
@@ -336,18 +336,18 @@ fn the_startup_clamp_covers_numeric_fields_beyond_the_fee_pair() {
     );
     let snap = cached(opts);
 
-    let planner = snap
-        .get("revenue-ops-planner-max-closes-per-cycle")
+    let timeout = snap
+        .get("revenue-ops-rpc-timeout-seconds")
         .expect("present");
     let fraction = snap
         .get("revenue-ops-growth-budget-earned-fraction")
         .expect("present");
 
-    let (_, planner_hi) = revops::config_types::field_range("planner_max_closes_per_cycle")
-        .expect("planner_max_closes_per_cycle declares a range");
+    let (_, timeout_hi) = revops::config_types::field_range("rpc_timeout_seconds")
+        .expect("rpc_timeout_seconds declares a range");
     assert_eq!(
-        revops::config_resolve::option_value_to_string(planner).and_then(|s| s.parse::<i64>().ok()),
-        Some(planner_hi as i64),
+        revops::config_resolve::option_value_to_string(timeout).and_then(|s| s.parse::<i64>().ok()),
+        Some(timeout_hi as i64),
         "an out-of-range non-fee int must be clamped at the cache gate"
     );
     assert_eq!(
@@ -567,23 +567,21 @@ fn the_production_parse_helper_survives_a_clamped_integer() {
 // EXHAUSTIVE: every declared numeric range, through the real gate
 // =====================================================================
 
-/// The 19 ranged `Config` fields that are NOT operator startup options.
+/// The 17 ranged `Config` fields that are NOT operator startup options.
 ///
-/// Python's `_validate_numeric_config_options` iterates all 96 of
+/// Python's `_validate_numeric_config_options` iterates all 68 retained
 /// `CONFIG_FIELD_RANGES` but only clamps keys PRESENT in `kwargs`, so these
 /// are never reached at startup -- they are reachable only as persisted
 /// overrides, where the contract is SKIP, not clamp. Pinned as an exact set
 /// so a field silently gaining or losing a startup option is caught.
-const RANGED_WITHOUT_STARTUP_OPTION: [&str; 19] = [
+const RANGED_WITHOUT_STARTUP_OPTION: [&str; 17] = [
     "base_fee_msat",
     "capex_bootstrap_bps",
     "capex_bootstrap_max_sats",
-    "capex_exploration_rate",
     "capex_global_envelope_sats",
     "capex_grace_days",
     "capex_probability_budget_bonus",
     "capex_reinvestment_rate",
-    "capex_tactical_rate",
     "estimated_open_cost_sats",
     "high_liquidity_threshold",
     "inbound_fee_estimate_ppm",
@@ -610,16 +608,11 @@ fn registered_option_names() -> std::collections::BTreeSet<String> {
 }
 
 /// The canonical Python option name for a `Config` field -- the inverse of
-/// `config_resolve::db_override_key`, including its four irregular remaps.
+/// `config_resolve::db_override_key`, including its retained irregular remaps.
 fn canonical_option_name(field: &str) -> String {
-    const IRREGULAR: [(&str, &str); 4] = [
+    const IRREGULAR: [(&str, &str); 2] = [
         ("enable_vegas_reflex", "vegas-reflex"),
         ("vegas_decay_rate", "vegas-decay"),
-        ("planner_max_fee_rate_sat_vb", "planner-max-fee-rate"),
-        (
-            "boltz_structural_budget_sats_per_day",
-            "boltz-structural-budget-sats",
-        ),
     ];
     for (f, suffix) in IRREGULAR {
         if field == f {
@@ -631,7 +624,7 @@ fn canonical_option_name(field: &str) -> String {
 
 /// Item 215's reachability gate, corrected by item 216's fixture audit.
 ///
-/// Sampling two fields would let the other 94 range entries be deleted, or
+/// Sampling two fields would let the other 66 range entries be deleted, or
 /// an irregular name remap be broken, without any test noticing. So this
 /// walks EVERY numeric ranged field, synthesizes a below-floor and an
 /// above-ceiling value, and pushes each through the real
@@ -641,7 +634,7 @@ fn canonical_option_name(field: &str) -> String {
 /// Crucially it checks each name against the REGISTERED option set rather
 /// than against a name transform: an earlier version of this test round-
 /// tripped the transform only, which meant it invented option names for the
-/// 19 fields that have none and "proved" they clamp. Those 19 are asserted
+/// 17 fields that have none and "proved" they clamp. Those 17 are asserted
 /// as an exact set instead.
 #[test]
 fn every_declared_numeric_range_is_clamped_at_the_startup_gate() {
@@ -664,8 +657,8 @@ fn every_declared_numeric_range_is_clamped_at_the_startup_gate() {
 
     assert_eq!(
         ranged.len(),
-        96,
-        "expected 96 numeric ranged fields; the fixture changed"
+        68,
+        "expected 68 retained numeric ranged fields; the fixture changed"
     );
 
     let mut without_option = Vec::new();
@@ -716,8 +709,11 @@ fn every_declared_numeric_range_is_clamped_at_the_startup_gate() {
     );
     assert_eq!(
         proven,
-        96 - RANGED_WITHOUT_STARTUP_OPTION.len(),
+        68 - RANGED_WITHOUT_STARTUP_OPTION.len(),
         "every ranged field with a real startup option must be proven clamped"
     );
-    assert_eq!(proven, 77, "77 real startup options carry a declared range");
+    assert_eq!(
+        proven, 51,
+        "51 retained startup options carry a declared range"
+    );
 }

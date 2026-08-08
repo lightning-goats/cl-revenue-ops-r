@@ -15,9 +15,6 @@ pub enum AuthorityRuntime {
 pub struct ObserverRuntime {
     fee: Option<LoopHandle>,
     rebalance: Option<LoopHandle>,
-    planner: Option<LoopHandle>,
-    lnplus: Option<LoopHandle>,
-    boltz: Option<LoopHandle>,
     // Task 67: the three analytics/startup loops.
     flow_analysis: Option<LoopHandle>,
     startup_snapshot: Option<LoopHandle>,
@@ -38,7 +35,6 @@ pub struct ObserverRuntime {
 /// ```
 pub struct ObserverPassSet {
     fee: Option<Arc<crate::fee_scheduler::FeeObserverPass>>,
-    lnplus: Option<Arc<crate::lnplus_runtime::LnPlusObserverPass>>,
     // Task 71 / F71-R16: the three analytics owners. Each is its OWN
     // concrete type (F71-R17) -- deliberately NOT `Arc<dyn ObserverPass>`,
     // which would let any external crate hand the observer runtime an
@@ -52,7 +48,6 @@ impl ObserverPassSet {
     pub fn empty() -> Self {
         Self {
             fee: None,
-            lnplus: None,
             flow_analysis: None,
             startup_snapshot: None,
             financial_snapshot: None,
@@ -93,13 +88,6 @@ impl ObserverPassSet {
         self.fee = Some(pass);
         self
     }
-
-    /// Task 61 4D: the REAL LN+ observer pass (watcher-only; observer
-    /// adapter types with pure action refusals — see `lnplus_runtime`).
-    pub fn with_lnplus(mut self, pass: Arc<crate::lnplus_runtime::LnPlusObserverPass>) -> Self {
-        self.lnplus = Some(pass);
-        self
-    }
 }
 
 pub async fn register_unwired_loops(store: Arc<dyn LoopHealthPersistence>) -> Result<()> {
@@ -116,9 +104,6 @@ impl ObserverRuntime {
         Self {
             fee: None,
             rebalance: None,
-            planner: None,
-            lnplus: None,
-            boltz: None,
             flow_analysis: None,
             startup_snapshot: None,
             financial_snapshot: None,
@@ -132,15 +117,9 @@ impl ObserverRuntime {
         if passes.fee.is_some() && !mode.autonomous_shadow() {
             anyhow::bail!("passive observer cannot start the autonomous fee pass");
         }
-        if passes.lnplus.is_some() && !mode.autonomous_shadow() {
-            anyhow::bail!("passive observer cannot start the LN+ observer pass");
-        }
         let mut generic: BTreeMap<LoopId, Arc<dyn ObserverPass>> = BTreeMap::new();
         if let Some(fee) = passes.fee {
             generic.insert(LoopId::Fee, fee);
-        }
-        if let Some(lnplus) = passes.lnplus {
-            generic.insert(LoopId::LnPlus, lnplus);
         }
         if let Some(flow) = passes.flow_analysis {
             generic.insert(LoopId::FlowAnalysis, flow);
@@ -176,9 +155,6 @@ impl ObserverRuntime {
         Ok(Self {
             fee: take(LoopId::Fee),
             rebalance: take(LoopId::Rebalance),
-            planner: take(LoopId::Planner),
-            lnplus: take(LoopId::LnPlus),
-            boltz: take(LoopId::Boltz),
             flow_analysis: take(LoopId::FlowAnalysis),
             startup_snapshot: take(LoopId::StartupSnapshot),
             financial_snapshot: take(LoopId::FinancialSnapshot),
@@ -196,9 +172,7 @@ impl ObserverRuntime {
         match id {
             LoopId::Fee => self.fee.clone(),
             LoopId::Rebalance => self.rebalance.clone(),
-            LoopId::Planner => self.planner.clone(),
-            LoopId::LnPlus => self.lnplus.clone(),
-            LoopId::Boltz => self.boltz.clone(),
+            LoopId::Planner | LoopId::LnPlus | LoopId::Boltz => None,
             LoopId::FlowAnalysis => self.flow_analysis.clone(),
             LoopId::StartupSnapshot => self.startup_snapshot.clone(),
             LoopId::FinancialSnapshot => self.financial_snapshot.clone(),

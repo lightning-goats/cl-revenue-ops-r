@@ -376,7 +376,7 @@ fn profile_preview_matches_python_sorted_diff_and_never_mutates_inputs() {
     let conservative = preview_profile(&current, &json!("conservative"), &BTreeSet::new());
     assert_eq!(conservative["would_change"], json!([]));
     assert_eq!(conservative["blocked_by_explicit_override"], json!([]));
-    assert_eq!(conservative["already_equal"].as_array().unwrap().len(), 11);
+    assert_eq!(conservative["already_equal"].as_array().unwrap().len(), 7);
 
     let growth = preview_profile(&current, &json!("growth"), &BTreeSet::new());
     let daily = growth["would_change"]

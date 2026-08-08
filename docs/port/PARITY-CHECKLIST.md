@@ -19,6 +19,16 @@ Status key for "Tripwire": does a test RED if the wiring is removed?
 
 ## Scope note
 
+**Canonical boundary since 2026-08-03.** The operator-approved
+[liquidity authority decommission design](../superpowers/specs/2026-08-03-rust-liquidity-authority-decommission-design.md)
+supersedes the former whole-plugin cutover scope. Rust retains revenue and
+profitability reporting, fees, policy, capex/budget accounting, and governed
+ordinary circular rebalancing. Boltz, LN+, CapacityPlanner, automatic channel
+open/close, and planner defibrillation are retired authority and must not be
+reintroduced. Older sections below remain historical implementation evidence;
+their RPC/option/loop counts and executor instructions are not current targets.
+
+
 **Superseded 2026-07-27.** The former "fee subsystem is the only cutover scope"
 note below is implementation evidence, not the current programme boundary. The
 operator-approved design in

@@ -22,9 +22,7 @@
 //! `queries::total_routing_revenue_msat`, `queries::opening_costs_since`,
 //! `queries::closure_costs_since`, `queries::rebalance_spend_component`
 //! (backing `_rebalance_liquidity_cost_components` via
-//! [`rebalance_component_value`]), `rpc_boltz_ops::
-//! total_cost_boltz_component` (backing `_boltz_liquidity_cost_
-//! components`), `queries::spend_ledger_aggregates` +
+//! [`rebalance_component_value`]), `queries::spend_ledger_aggregates` +
 //! `active_spend_reservations` (backing `get_spend_ledger_summary`), and
 //! `queries::cost_evidence_coverage`. [`total_cost_budget_response`] wires
 //! all of them, so in production every input is `Some` and `_phase1b_gaps`
@@ -55,14 +53,14 @@ fn as_i64_or_zero(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-const CANONICAL_LEDGER_CATEGORIES: [&str; 2] = ["channel_open", "channel_close"];
+const CANONICAL_LEDGER_CATEGORIES: [&str; 4] =
+    ["channel_open", "channel_close", "rebalance", "boltz"];
 
 /// Port of `_normalize_generic_ledger_for_total_cost_budget`
-/// (cl-revenue-ops.py:8177-8195): excludes canonical open/close spend
-/// events from the generic ledger's budget-relevant `spent_24h_sats` (they
-/// are separately, and already, counted via `open_cost_sats`/
-/// `closure_cost_sats`), keeping the excluded amounts visible for
-/// [`open_close_cost_visibility`].
+/// Excludes canonical open/close, rebalance, and historical Boltz spend
+/// events from the generic ledger bucket. Those categories are surfaced
+/// separately so retained historical accounting is preserved without
+/// retaining an executable Boltz component.
 pub fn normalize_generic_ledger(raw: &Value) -> Value {
     let mut normalized = raw.as_object().cloned().unwrap_or_default();
 
@@ -231,8 +229,6 @@ pub struct TotalCostBudgetInputs<'a> {
     /// Raw `_rebalance_liquidity_cost_components` shape: must contain
     /// `spent_24h_sats`/`reserved_24h_sats` to be usable.
     pub rebalance_component: Option<&'a Value>,
-    /// Raw `_boltz_liquidity_cost_components` shape.
-    pub boltz_component: Option<&'a Value>,
     /// Raw (pre-[`normalize_generic_ledger`]) `get_spend_ledger_summary` shape.
     pub generic_ledger_raw: Option<&'a Value>,
     /// Raw `get_cost_evidence_coverage` shape.
@@ -251,12 +247,10 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     let rebalance_reserved = i
         .rebalance_component
         .map(|v| as_i64_or_zero(v, "reserved_24h_sats"));
-    let boltz_spent = i
-        .boltz_component
-        .map(|v| as_i64_or_zero(v, "spent_24h_sats"));
-    let boltz_reserved = i
-        .boltz_component
-        .map(|v| as_i64_or_zero(v, "reserved_24h_sats"));
+    let historical_spent = generic_ledger
+        .as_ref()
+        .and_then(|v| v.get("excluded_spent_categories"));
+    let boltz_spent = historical_spent.map(|v| as_i64_or_zero(v, "boltz"));
     let ledger_spent = generic_ledger
         .as_ref()
         .map(|v| as_i64_or_zero(v, "spent_24h_sats"));
@@ -266,6 +260,11 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     let ledger_rebalance_reserved = generic_ledger.as_ref().map(|v| {
         v.get("reserved_by_category")
             .map(|r| as_i64_or_zero(r, "rebalance"))
+            .unwrap_or(0)
+    });
+    let ledger_boltz_reserved = generic_ledger.as_ref().map(|v| {
+        v.get("reserved_by_category")
+            .map(|r| as_i64_or_zero(r, "boltz"))
             .unwrap_or(0)
     });
 
@@ -278,12 +277,11 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     let all_categories_known = i.open_cost_sats.is_some()
         && i.closure_cost_sats.is_some()
         && rebalance_spent.is_some()
-        && boltz_spent.is_some()
         && ledger_spent.is_some();
     let all_reserved_known = rebalance_reserved.is_some()
-        && boltz_reserved.is_some()
         && ledger_reserved.is_some()
-        && ledger_rebalance_reserved.is_some();
+        && ledger_rebalance_reserved.is_some()
+        && ledger_boltz_reserved.is_some();
 
     let actual_by_category = all_categories_known.then(|| {
         json!({
@@ -303,10 +301,13 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     });
 
     let reserved_by_category = all_reserved_known.then(|| {
-        let ledger_only = (ledger_reserved.unwrap() - ledger_rebalance_reserved.unwrap()).max(0);
+        let ledger_only = (ledger_reserved.unwrap()
+            - ledger_rebalance_reserved.unwrap()
+            - ledger_boltz_reserved.unwrap())
+        .max(0);
         json!({
             "rebalance": rebalance_reserved.unwrap(),
-            "boltz": boltz_reserved.unwrap(),
+            "boltz": ledger_boltz_reserved.unwrap(),
             "ledger": ledger_only,
         })
     });
@@ -392,9 +393,6 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     if i.rebalance_component.is_none() {
         gaps.push("components.rebalance");
     }
-    if i.boltz_component.is_none() {
-        gaps.push("components.boltz");
-    }
     if generic_ledger.is_none() {
         gaps.push("components.generic_ledger");
     }
@@ -438,7 +436,6 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
         "open_close_cost_visibility": open_close_visibility,
         "components": {
             "rebalance": i.rebalance_component,
-            "boltz": i.boltz_component,
             "generic_ledger": generic_ledger,
             "open_cost_sats": i.open_cost_sats,
             "closure_cost_sats": i.closure_cost_sats,
@@ -447,14 +444,10 @@ pub fn build_total_cost_budget(window_hours: i64, i: &TotalCostBudgetInputs) -> 
     })
 }
 
-/// Everything the assembled response needs beyond the DB itself. The
-/// Boltz component arrives pre-computed (`rpc_boltz_ops::
-/// total_cost_boltz_component` needs the Boltz deps, which live in
-/// `main.rs`); the config scalars arrive pre-resolved for the same reason.
-/// Python's equivalents come off the in-memory `config.snapshot()`.
+/// Everything the assembled response needs beyond the DB itself. Config
+/// scalars arrive pre-resolved from the in-memory snapshot.
 pub struct TotalCostBudgetSources<'a> {
     pub db: Option<&'a DbHandle>,
-    pub boltz_component: Value,
     pub daily_budget_sats: i64,
     pub growth_enabled: bool,
     pub growth_earned_fraction: f64,
@@ -553,7 +546,6 @@ pub async fn total_cost_budget_response(window_hours: i64, s: TotalCostBudgetSou
             open_cost_sats: Some(open_cost_sats),
             closure_cost_sats: Some(closure_cost_sats),
             rebalance_component: Some(&rebalance_component),
-            boltz_component: Some(&s.boltz_component),
             generic_ledger_raw: Some(&generic_ledger_raw),
             coverage_raw: Some(&coverage_raw),
         },
@@ -595,14 +587,15 @@ mod tests {
     #[test]
     fn normalize_generic_ledger_excludes_canonical_categories_from_spent_total() {
         let raw = json!({
-            "spent_24h_sats": 500,
-            "spent_by_category": {"channel_open": 300, "rebalance": 200},
+            "spent_24h_sats": 550,
+            "spent_by_category": {"channel_open": 300, "rebalance": 200, "misc": 50},
         });
         let n = normalize_generic_ledger(&raw);
-        assert_eq!(n["raw_spent_24h_sats"], 500);
-        assert_eq!(n["spent_24h_sats"], 200, "channel_open must be excluded");
+        assert_eq!(n["raw_spent_24h_sats"], 550);
+        assert_eq!(n["spent_24h_sats"], 50, "canonical spend must be excluded");
         assert_eq!(n["excluded_spent_categories"]["channel_open"], 300);
-        assert_eq!(n["counted_spent_categories"]["rebalance"], 200);
+        assert_eq!(n["excluded_spent_categories"]["rebalance"], 200);
+        assert_eq!(n["counted_spent_categories"]["misc"], 50);
     }
 
     #[test]
@@ -742,28 +735,25 @@ mod tests {
     #[test]
     fn full_components_compute_a_real_total_not_a_gap() {
         let rebalance = json!({"spent_24h_sats": 1000, "reserved_24h_sats": 100});
-        let boltz = json!({"spent_24h_sats": 2000, "reserved_24h_sats": 200});
         let ledger_raw = json!({
-            "spent_24h_sats": 500,
-            "reserved_24h_sats": 150,
-            "spent_by_category": {"rebalance": 500},
-            "reserved_by_category": {"rebalance": 100},
+            "spent_24h_sats": 3000,
+            "reserved_24h_sats": 350,
+            "spent_by_category": {"rebalance": 500, "boltz": 2000, "misc": 500},
+            "reserved_by_category": {"rebalance": 100, "boltz": 200, "misc": 50},
         });
         let mut inputs = base_inputs();
         inputs.revenue_sats = Some(10_000);
         inputs.open_cost_sats = Some(0);
         inputs.closure_cost_sats = Some(0);
         inputs.rebalance_component = Some(&rebalance);
-        inputs.boltz_component = Some(&boltz);
         inputs.generic_ledger_raw = Some(&ledger_raw);
 
         let v = build_total_cost_budget(24, &inputs);
-        // rebalance(1000) + boltz(2000) + open(0) + close(0) + ledger(500,
-        // category "rebalance" is not canonical open/close so it is NOT
-        // excluded by normalize -> fully counted).
+        // Rebalance and historical Boltz remain separate accounting
+        // categories; only misc spend remains in the generic bucket.
         assert_eq!(v["actual_spent_sats"], 3500);
-        // reserved: rebalance(100) + boltz(200) + ledger(150 total minus its
-        // own 100 already counted under "rebalance" = 50) = 350.
+        assert_eq!(v["actual_spent_by_category"]["boltz"], 2000);
+        // reserved: rebalance(100) + historical boltz(200) + misc(50).
         assert_eq!(v["reserved_sats"], 350);
         assert_eq!(v["net_profit_sats_after_costs"], 6500);
         assert_ne!(v["growth_budget"], Value::Null);

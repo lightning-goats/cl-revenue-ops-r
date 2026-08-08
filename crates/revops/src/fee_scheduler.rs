@@ -1405,8 +1405,9 @@ fn finalize_initial_fee(
     // fee is ALWAYS read from the live CLN-announced policy
     // (`channel_info["fee_proportional_millionths"]`), never from
     // Rust-owned Thompson/posterior state. A brand-new channel is not at 0
-    // ppm -- it carries CLN's default policy (or whatever `fundchannel`
-    // set) -- and that is what the governor request and the post-decision
+    // ppm -- it carries CLN's default policy (or whatever the original
+    // channel-open flow set), and that is what the governor request and the
+    // post-decision
     // bookkeeping must see. Persisted state is Thompson/posterior evidence
     // only, never a fee-delta source.
     let old_fee_ppm = prepared.channel.fee_proportional_millionths;

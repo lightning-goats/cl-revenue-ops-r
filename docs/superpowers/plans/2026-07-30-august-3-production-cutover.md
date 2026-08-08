@@ -1,5 +1,12 @@
 # August 3 Production Cutover Implementation Plan
 
+> **ARCHIVED — DO NOT EXECUTE.** This whole-plugin cutover plan was superseded
+> on 2026-08-03 by the operator-approved
+> [liquidity authority decommission design](../specs/2026-08-03-rust-liquidity-authority-decommission-design.md)
+> and [implementation plan](2026-08-03-rust-liquidity-authority-decommission.md).
+> Its Python SHA, surface counts, and Boltz/LN+/planner instructions are historical
+> evidence only and must not be used to restore retired authority.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver Python-contract parity and transfer whole-plugin production authority to the Rust plugin by 2026-08-03 without split authority or weakened fail-closed gates.

@@ -12,13 +12,11 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 revops-analytics = { path = "../revops-analytics" }
-revops-boltz = { path = "../revops-boltz" }
 revops-capital = { path = "../revops-capital" }
 revops-core = { path = "../revops-core" }
 revops-db = { path = "../revops-db" }
 revops-econ = { path = "../revops-econ" }
 revops-fees = { path = "../revops-fees" }
-revops-lnplus = { path = "../revops-lnplus" }
 revops-rebalance = { path = "../revops-rebalance" }
 revops-rpc = { path = "../revops-rpc" }
 rusqlite.workspace = true

@@ -16,21 +16,9 @@ fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/fixture.db")
 }
 
-/// Python's `boltz_manager is None` component (the assembled runtime passes
-/// the live component; this test exercises the DB-backed evidence).
-fn boltz_unavailable() -> Value {
-    json!({
-        "source": "boltz",
-        "spent_24h_sats": 0,
-        "reserved_24h_sats": 0,
-        "available": false,
-    })
-}
-
 fn sources(db: Option<&revops_db::actor::DbHandle>) -> TotalCostBudgetSources<'_> {
     TotalCostBudgetSources {
         db,
-        boltz_component: boltz_unavailable(),
         daily_budget_sats: 5_000,
         growth_enabled: false,
         growth_earned_fraction: 0.25,
@@ -58,13 +46,13 @@ async fn without_db_returns_pythons_plugin_not_initialized() {
 ///   24h window but IS total-cost coverage evidence -> "complete").
 /// close: 300. rebalance spent: 200; reserved 100 legacy + 40 unified=140;
 ///   history 2 success + 1 failed -> job 3 / success 2.
-/// ledger: spend_events rebalance 60 + channel_open 500 (excluded by
-///   normalize as canonically counted) -> counted 60, raw 560; active
+/// ledger: spend_events rebalance 60 + channel_open 500 (both excluded as
+///   canonically counted) -> counted 0, raw 560; active
 ///   spend_reservations 40+70=110 total, rebalance 40 -> ledger-only
 ///   reserved 70.
-/// actual: 200+0+250+300+60 = 810. reserved: 140+0+70 = 210.
-/// net: 3-810 = -807. growth disabled -> fixed / effective 5000 /
-///   remaining max(0, 5000-810-210) = 3980.
+/// actual: 200+0+250+300+0 = 750. reserved: 140+0+70 = 210.
+/// net: 3-750 = -747. growth disabled -> fixed / effective 5000 /
+///   remaining max(0, 5000-750-210) = 4040.
 #[tokio::test]
 async fn seeded_db_produces_hand_derived_budget() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,20 +108,20 @@ async fn seeded_db_produces_hand_derived_budget() {
     assert_eq!(v["revenue_sats"], 3, "3499 msat // 1000");
     assert_eq!(
         v["actual_spent_by_category"],
-        json!({"rebalance": 200, "boltz": 0, "open": 250, "close": 300, "ledger": 60})
+        json!({"rebalance": 200, "boltz": 0, "open": 250, "close": 300, "ledger": 0})
     );
-    assert_eq!(v["actual_spent_sats"], 810);
+    assert_eq!(v["actual_spent_sats"], 750);
     assert_eq!(
         v["reserved_by_category"],
         json!({"rebalance": 140, "boltz": 0, "ledger": 70})
     );
     assert_eq!(v["reserved_sats"], 210);
-    assert_eq!(v["net_profit_sats_after_costs"], -807);
+    assert_eq!(v["net_profit_sats_after_costs"], -747);
 
     assert_eq!(v["mode"], "fixed");
     assert_eq!(v["daily_budget_sats"], 5_000);
     assert_eq!(v["effective_budget_sats"], 5_000);
-    assert_eq!(v["remaining_sats"], 3_980);
+    assert_eq!(v["remaining_sats"], 4_040);
     assert!(!v["growth_budget"].is_null());
 
     // Total-cost coverage reads the 90-day-old channel_costs row ->
@@ -147,10 +135,10 @@ async fn seeded_db_produces_hand_derived_budget() {
     assert_eq!(ledger["coverage_status"], "partial");
 
     assert_eq!(ledger["raw_spent_24h_sats"], 560);
-    assert_eq!(ledger["spent_24h_sats"], 60, "channel_open excluded");
+    assert_eq!(ledger["spent_24h_sats"], 0, "canonical spend excluded");
     assert_eq!(
         ledger["excluded_spent_categories"],
-        json!({"channel_open": 500})
+        json!({"channel_open": 500, "rebalance": 60})
     );
     assert_eq!(ledger["reserved_24h_sats"], 110);
     // include_reservations=True parity: the embedded ledger carries the
@@ -163,7 +151,7 @@ async fn seeded_db_produces_hand_derived_budget() {
     assert_eq!(rebalance["reserved_24h_sats"], 140);
     assert_eq!(rebalance["job_count"], 3);
     assert_eq!(rebalance["success_count"], 2);
-    assert_eq!(v["components"]["boltz"], boltz_unavailable());
+    assert!(v["components"].get("boltz").is_none());
     assert_eq!(v["components"]["open_cost_sats"], 250);
     assert_eq!(v["components"]["closure_cost_sats"], 300);
 

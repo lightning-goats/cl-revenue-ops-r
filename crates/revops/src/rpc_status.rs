@@ -88,11 +88,9 @@ pub fn build_config_response(
         "key": key,
         "value": typed_value,
         "version": version,
-        // Classify via the REAL Python field name (audit low #8): the
-        // FIELD_NAME_OVERRIDES suffixes (e.g. boltz-structural-budget-sats
-        // -> boltz_structural_budget_sats_per_day) don't underscore to
-        // their field, and that field's PUBLIC_RUNTIME_KEYS membership is
-        // what Python classifies on.
+        // Classify via the real Python field name: irregular option suffixes
+        // do not necessarily underscore to their field, and that field's
+        // PUBLIC_RUNTIME_KEYS membership is what Python classifies on.
         "classification":
             config_types::classify_runtime_key(&crate::config_resolve::db_override_key(key)),
         "_phase1b_gaps": [],

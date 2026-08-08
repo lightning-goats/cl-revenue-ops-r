@@ -17,8 +17,8 @@ fn schema_registration_cas_history_and_restart_reconciliation_are_durable() {
         };
         loop_health::register_loop(&conn, id, wiring, 10).unwrap();
     }
-    // Task 67: the registry is the eight Python business/startup loops.
-    assert_eq!(loop_health::list_loop_health(&conn).unwrap().len(), 8);
+    // Task 67: the registry is the five retained business/startup loops.
+    assert_eq!(loop_health::list_loop_health(&conn).unwrap().len(), 5);
     assert!(loop_health::begin_loop_pass(&conn, LoopId::Planner, "boot-test", 11).is_err());
 
     let first = loop_health::begin_loop_pass(&conn, LoopId::Fee, "boot-test", 20).unwrap();
@@ -230,7 +230,7 @@ async fn actor_round_trips_every_health_write_and_current_boot_can_mark_not_wire
     );
 }
 
-// -- Task 67: current-boot health binding + the eight-loop registry --
+// -- Task 67: current-boot health binding + the retained-loop registry --
 
 /// THE AUDIT DEFECT: a pass that completed cleanly in a PRIOR boot must
 /// never read as `passed` on a fresh process that has run nothing. The
@@ -308,10 +308,10 @@ fn prior_boot_failure_is_also_not_inherited() {
     );
 }
 
-/// The registry is exactly Python's eight business/startup loops, in
-/// Python's own label vocabulary (cl-revenue-ops.py:3588-3600).
+/// The registry is exactly the five retained business/startup loops in the
+/// Python label vocabulary after liquidity-authority decommission.
 #[test]
-fn registry_is_exactly_the_eight_python_loops() {
+fn registry_is_exactly_the_five_retained_loops() {
     let names: Vec<&str> = REQUIRED_LOOPS.iter().map(|id| id.as_str()).collect();
     assert_eq!(
         names,
@@ -321,11 +321,8 @@ fn registry_is_exactly_the_eight_python_loops() {
             "rebalance-check",
             "startup-snapshot",
             "financial-snapshot",
-            "boltz-auto-cycle",
-            "capacity-planner",
-            "lnplus-watcher",
         ],
-        "the eight loops must match Python's thread labels exactly"
+        "the five retained loops must exclude retired executor threads"
     );
     // Every name round-trips through the parser.
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -334,7 +331,7 @@ fn registry_is_exactly_the_eight_python_loops() {
         loop_health::register_loop(&conn, id, WiringStatus::Ready, 1).unwrap();
     }
     let rows = loop_health::list_loop_health(&conn).unwrap();
-    assert_eq!(rows.len(), 8);
+    assert_eq!(rows.len(), 5);
 }
 
 /// One boot-identity record per process, shared by every loop, so fee

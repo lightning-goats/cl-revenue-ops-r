@@ -113,19 +113,6 @@ struct State {
     rebalance_owner: Option<revops::rebalance_owner::RebalanceOwnerHandle>,
     rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter,
     rebalance_hard_cap_sats: i64,
-    /// Task 62: the serialized capital owner (adapters/governor
-    /// unassembled until Task 69's authority assembly -- planner-execute
-    /// sits on the Python-parity uninitialized arm); restart
-    /// reconciliation of orphan capital intents still runs.
-    capital_owner: Option<revops::capital_owner::CapitalOwnerHandle>,
-    /// Task 63: the serialized Boltz owner (action capability
-    /// unassembled until Task 69 -- every fund-moving Boltz RPC sits on
-    /// the Python-parity uninitialized arm) plus the read-only QUERY
-    /// transport its read RPCs use.
-    boltz_owner: Option<revops::boltz_owner::BoltzOwnerHandle>,
-    boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync>,
-    /// The resolved Boltz config the transport above was built from.
-    boltz_cfg: revops::boltz_config::BoltzCfgSnapshot,
     /// Task 67: THIS process's boot identity. Loop health is judged
     /// against it so a prior boot's pass is never inherited.
     boot_id: String,
@@ -140,11 +127,6 @@ struct State {
     /// async preparation half's out-of-cycle policy read. `None` under
     /// the exact same conditions the scheduler itself would not start.
     production_db_path: Option<PathBuf>,
-    /// Task 61 4E: the LN+ observer owner, when this process spawned one
-    /// (autonomous shadow with an observer DB). The four operator RPCs go
-    /// through its serialization lock for completion acknowledgements;
-    /// `None` yields the Python-equivalent "not initialized" responses.
-    lnplus: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>>,
 }
 
 /// `cln-plugin` clones the state per request; keep it cheap to clone by
@@ -164,17 +146,6 @@ type SharedState = Arc<State>;
 /// to introspect the observer's own ingestion-db path was reading
 /// lightningd's config/CLI args directly. Same registration pattern as
 /// `observer`/`db-path` above.
-/// Task 63: the Boltz RPC handlers' dependency bundle, read out of the
-/// shared state per call.
-fn boltz_rpc_deps(p: &Plugin<SharedState>) -> revops::rpc_boltz_ops::BoltzRpcDeps {
-    revops::rpc_boltz_ops::BoltzRpcDeps {
-        owner: p.state().boltz_owner.clone(),
-        query: p.state().boltz_query.clone(),
-        now: now_unix(),
-        cfg: p.state().boltz_cfg.clone(),
-    }
-}
-
 fn config_name_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     map.insert("observer".to_string(), opt_name("observer"));
@@ -621,19 +592,273 @@ fn register_fee_cycle(
                 ) {
                     return Ok(serde_json::json!({"error": error.to_string()}));
                 }
-                let state = p.state();
-                if let Some(denial) = state.fee_authority_status.fee_cycle_denial_response() {
-                    return Ok(denial);
-                }
-                let Some(pass) = state.fee_pass.as_ref() else {
-                    return Ok(serde_json::json!({"error": "Plugin not fully initialized"}));
+                Ok(fee_cycle_response(&p).await)
+            }
+        },
+    )
+}
+
+async fn fee_cycle_response(p: &Plugin<SharedState>) -> serde_json::Value {
+    let state = p.state();
+    if let Some(denial) = state.fee_authority_status.fee_cycle_denial_response() {
+        return denial;
+    }
+    let Some(pass) = state.fee_pass.as_ref() else {
+        return serde_json::json!({"error": "Plugin not fully initialized"});
+    };
+    match pass.run_with_completion().await {
+        Ok(completed) => revops::fee_scheduler::build_fee_cycle_response(&completed),
+        Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+    }
+}
+
+async fn wake_all_response(p: &Plugin<SharedState>) -> serde_json::Value {
+    let state = p.state();
+    let Some(handle) = state.scheduler.get() else {
+        return serde_json::json!({
+            "error": "fee-cycle scheduler not running (revops-r-fee-stateful-shadow=false, \
+                      or it failed to start -- see plugin log)"
+        });
+    };
+    match handle.wake_all().await {
+        Ok(completed) => revops::fee_scheduler::build_wake_all_response(&completed),
+        Err(error) => serde_json::json!({"error": error}),
+    }
+}
+
+async fn analyze_response(
+    p: &Plugin<SharedState>,
+    params: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let channel_id = params.get("channel_id");
+    let fleet = match channel_id {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(value)) if value.is_empty() => true,
+        _ => false,
+    };
+    if fleet {
+        let state = p.state();
+        return match state.flow_trigger.get() {
+            Some(handle) => revops::rpc_analyze::fleet_trigger_response(
+                handle
+                    .request(revops::loop_health::RequestKey::from("fixed_interval"))
+                    .await
+                    .map_err(|error| format!("{error:#}")),
+            ),
+            None => revops::rpc_analyze::build_analyze(
+                channel_id,
+                revops::rpc_analyze::MetricsLookup::Ready(None),
+            ),
+        };
+    }
+    let state = p.state();
+    let Some(scid) = revops::rpc_analyze::analyze_target_scid(channel_id) else {
+        return revops::rpc_analyze::build_analyze(
+            channel_id,
+            revops::rpc_analyze::MetricsLookup::Ready(None),
+        );
+    };
+    let evidence = revops::flow_evidence::current_boot_flow_evidence(
+        state.observer_db.as_ref(),
+        &scid,
+        &state.boot_id,
+    )
+    .await;
+    revops::rpc_analyze::build_analyze_from_evidence(channel_id, evidence.as_ref())
+}
+
+fn python_dispatch_key(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(value)) => value.trim().to_ascii_lowercase(),
+        Some(value) => value.to_string().trim().to_ascii_lowercase(),
+    }
+}
+
+fn dispatch_error(
+    rpc_name: &str,
+    label: &str,
+    raw: Option<&serde_json::Value>,
+    valid: &[&str],
+) -> serde_json::Value {
+    let shown = match raw {
+        None | Some(serde_json::Value::Null) => "None".to_string(),
+        Some(serde_json::Value::String(value)) => value.clone(),
+        Some(value) => value.to_string(),
+    };
+    serde_json::json!({
+        "error": format!(
+            "Unknown {label} '{shown}' for {rpc_name}. Valid {label}s: {}",
+            valid.join(", ")
+        ),
+        format!("valid_{label}s"): valid,
+    })
+}
+
+fn register_cycle(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "run one retained subsystem cycle: fees, rebalance, flow, or all",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let mut decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
                 };
-                match pass.run_with_completion().await {
-                    Ok(completed) => {
-                        Ok(revops::fee_scheduler::build_fee_cycle_response(&completed))
+                let subsystem = decoded.remove("subsystem");
+                let key = python_dispatch_key(subsystem.as_ref());
+                let unexpected =
+                    |allowed: &[&str]| decoded.keys().find(|key| !allowed.contains(&key.as_str()));
+                let response = match key.as_str() {
+                    "fees" if unexpected(&[]).is_none() => fee_cycle_response(&p).await,
+                    "rebalance" if unexpected(&["max_candidates"]).is_none() => {
+                        revops::rpc_rebalance_ops::handle_rebalance_cycle(
+                            p.state().rebalance_owner.as_ref(),
+                        )
+                        .await
                     }
-                    Err(error) => Ok(serde_json::json!({"error": format!("{error:#}")})),
-                }
+                    "flow" if unexpected(&["channel_id"]).is_none() => {
+                        analyze_response(&p, decoded).await
+                    }
+                    "all" if unexpected(&[]).is_none() => wake_all_response(&p).await,
+                    "fees" | "rebalance" | "flow" | "all" => serde_json::json!({
+                        "error": format!(
+                            "Invalid arguments for 'revenue-cycle {key}': unexpected argument"
+                        )
+                    }),
+                    _ => dispatch_error(
+                        "revenue-cycle",
+                        "subsystem",
+                        subsystem.as_ref(),
+                        &["all", "fees", "flow", "rebalance"],
+                    ),
+                };
+                Ok(response)
+            }
+        },
+    )
+}
+
+async fn spend_ledger_response(
+    p: &Plugin<SharedState>,
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let state = p.state();
+    let Some(db) = &state.db else {
+        return serde_json::json!({"error": "Database not initialized"});
+    };
+    let window_hours =
+        match revops::rpc_spend_ledger::parse_window_hours(params.get("window_hours")) {
+            Ok(value) => value,
+            Err(message) => return serde_json::json!({"error": message}),
+        };
+    let include_reservations =
+        revops::rpc_spend_ledger::parse_include_reservations(params.get("include_reservations"));
+    let reservation_limit =
+        match revops::rpc_spend_ledger::parse_reservation_limit(params.get("reservation_limit")) {
+            Ok(value) => value,
+            Err(message) => return serde_json::json!({"error": message}),
+        };
+    let now = now_unix();
+    let result: anyhow::Result<serde_json::Value> = async {
+        let aggregates = queries::spend_ledger_aggregates(db, window_hours, now).await?;
+        let reservations = if include_reservations {
+            Some(
+                queries::active_spend_reservations(db, window_hours, reservation_limit, now)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        Ok(revops::rpc_spend_ledger::build_spend_ledger(
+            window_hours,
+            now,
+            &aggregates,
+            reservations.as_deref(),
+        ))
+    }
+    .await;
+    result.unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}))
+}
+
+fn register_budget(
+    builder: Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout>,
+    name: &str,
+    spec: revops::rpc_params::RpcMethodSpec,
+) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
+    builder.rpcmethod(
+        name,
+        "unified retained budget reporting: total cost, capex, or ledger",
+        move |p: Plugin<SharedState>, raw: serde_json::Value| {
+            let spec = spec.clone();
+            async move {
+                let mut decoded = match revops::rpc_params::decode_params(
+                    &spec,
+                    &raw,
+                    revops::rpc_params::ParamBinding::PositionalOrNamed,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(serde_json::json!({"error": error.to_string()})),
+                };
+                let section = decoded.remove("section");
+                let key = python_dispatch_key(section.as_ref());
+                let response = match key.as_str() {
+                    "" | "all" => {
+                        let window_hours = match decoded.get("window_hours") {
+                            Some(value) if !value.is_null() => {
+                                match revops::rpc_total_cost_budget::parse_window_hours(Some(value)) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        return Ok(serde_json::json!({
+                                            "total_cost": error,
+                                            "capex": capex_status_response(&p).await,
+                                        }))
+                                    }
+                                }
+                            }
+                            _ => 24,
+                        };
+                        let total_cost = if p.state().db.is_none() {
+                            serde_json::json!({"error": "Plugin not initialized"})
+                        } else {
+                            total_cost_budget_status(&p, window_hours).await
+                        };
+                        serde_json::json!({
+                            "total_cost": total_cost,
+                            "capex": capex_status_response(&p).await,
+                        })
+                    }
+                    "ledger" => {
+                        let allowed = [
+                            "window_hours",
+                            "include_reservations",
+                            "reservation_limit",
+                        ];
+                        if decoded.keys().any(|key| !allowed.contains(&key.as_str())) {
+                            serde_json::json!({
+                                "error": "Invalid arguments for 'revenue-budget ledger': unexpected argument"
+                            })
+                        } else {
+                            spend_ledger_response(&p, &decoded).await
+                        }
+                    }
+                    _ => dispatch_error(
+                        "revenue-budget",
+                        "section",
+                        section.as_ref(),
+                        &["ledger"],
+                    ),
+                };
+                Ok(response)
             }
         },
     )
@@ -646,7 +871,7 @@ fn register_total_cost_budget(
 ) -> Builder<SharedState, tokio::io::Stdin, tokio::io::Stdout> {
     builder.rpcmethod(
         name,
-        "unified budget status across rebalances, Boltz, and on-chain liquidity costs",
+        "unified budget status across rebalances and historical on-chain liquidity costs",
         move |p: Plugin<SharedState>, raw: serde_json::Value| {
             let spec = spec.clone();
             async move {
@@ -699,21 +924,11 @@ async fn total_cost_budget_status(p: &Plugin<SharedState>, window_hours: i64) ->
     let growth_max_extra_sats = cfg_value!("growth-budget-max-extra-sats", as_i64, 0);
     let growth_hard_ceiling_sats =
         cfg_value!("growth-budget-hard-ceiling-sats", as_i64, daily_budget_sats);
-    // Python passes the unified daily budget as the explicit global cap
-    // so the Boltz side never recurses into the budget provider
-    // (cl-revenue-ops.py:8147-8158).
-    let boltz_component = revops::rpc_boltz_ops::total_cost_boltz_component(
-        &boltz_rpc_deps(p),
-        window_hours,
-        Some(daily_budget_sats.max(0)),
-    )
-    .await;
     let state = p.state();
     revops::rpc_total_cost_budget::total_cost_budget_response(
         window_hours,
         revops::rpc_total_cost_budget::TotalCostBudgetSources {
             db: state.db.as_ref(),
-            boltz_component,
             daily_budget_sats,
             growth_enabled,
             growth_earned_fraction,
@@ -825,6 +1040,111 @@ fn register_set_fee(
             }
         },
     )
+}
+
+async fn capex_status_response(p: &Plugin<SharedState>) -> serde_json::Value {
+    let state = p.state();
+    let Some(db) = state.db.as_ref() else {
+        return serde_json::json!({"error": "Capex engine not initialized"});
+    };
+    let now = now_unix();
+    let channels =
+        revops::profitability_assembler::fetch_channel_snapshot(&state.socket_path).await;
+    let (profitability, active_scids) = match &channels {
+        Ok(list) => {
+            let active = list
+                .iter()
+                .filter(|channel| {
+                    channel.get("state").and_then(serde_json::Value::as_str)
+                        == Some("CHANNELD_NORMAL")
+                })
+                .filter_map(|channel| {
+                    channel
+                        .get("short_channel_id")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .filter(|scid| !scid.is_empty())
+                .map(|scid| scid.replace(':', "x"))
+                .collect::<Vec<_>>();
+            let profitability = match state.observer_db.as_ref() {
+                Some(observer) => revops::profitability_assembler::gather_profitability(
+                    revops::profitability_assembler::ProfitabilitySources {
+                        production_db: db,
+                        observer,
+                        channels: list,
+                        now,
+                    },
+                )
+                .await
+                .map(|fleet| fleet.profitability)
+                .map_err(|refusal| refusal.detail().to_string()),
+                None => Err("observer store not configured".to_string()),
+            };
+            (profitability, active)
+        }
+        Err(error) => (Err(error.clone()), Vec::new()),
+    };
+    let flow_states = match state.observer_db.as_ref() {
+        Some(observer) => observer
+            .channel_flow_states()
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.scid.clone(), row))
+                    .collect::<HashMap<_, _>>()
+            })
+            .map_err(|error| error.to_string()),
+        None => Err("observer store not configured".to_string()),
+    };
+    let cfg =
+        revops::capex_evidence::resolve_capex_config(Some(db), &state.python_options.snapshot())
+            .await;
+    let (cached_bleeder, prev_bleeder, needs_write_back) = {
+        let cache = state.bleeder_cache.lock().expect("bleeder cache lock");
+        revops::capex_evidence::bleeder_cache_decision(cache.as_ref(), now)
+    };
+    let day30 = now - 30 * 86400;
+    let day7 = now - 7 * 86400;
+    let (response, verdicts) =
+        revops::capex_evidence::capex_status_response(revops::capex_evidence::CapexStatusSources {
+            profitability,
+            active_scids,
+            revenue_30d: queries::per_channel_revenue(db, day30)
+                .await
+                .map_err(|error| error.to_string()),
+            costs_30d: queries::per_channel_costs(db, day30)
+                .await
+                .map_err(|error| error.to_string()),
+            revenue_7d: queries::per_channel_revenue(db, day7)
+                .await
+                .map_err(|error| error.to_string()),
+            costs_7d: queries::per_channel_costs(db, day7)
+                .await
+                .map_err(|error| error.to_string()),
+            success_rates: queries::rebalance_success_rates(db, 30, now)
+                .await
+                .map_err(|error| error.to_string()),
+            capex_by_channel: queries::total_capex_by_channel(db, 30, now)
+                .await
+                .map_err(|error| error.to_string()),
+            spend_aggregates: queries::spend_ledger_aggregates(db, 30 * 24, now)
+                .await
+                .map_err(|error| error.to_string()),
+            listfunds: revops::profitability_assembler::fetch_read_rpc(
+                &state.socket_path,
+                "listfunds",
+            )
+            .await,
+            flow_states,
+            cached_bleeder,
+            prev_bleeder,
+            cfg,
+            now,
+        });
+    if needs_write_back {
+        *state.bleeder_cache.lock().expect("bleeder cache lock") = Some((now, verdicts));
+    }
+    response
 }
 
 fn register_capex_status(
@@ -1661,6 +1981,12 @@ async fn main() -> Result<()> {
         &revops::rpc_params::load_rpc_contract(),
         "revenue-fee-cycle",
     );
+    let cycle_name = rpc_name("cycle");
+    let cycle_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-cycle");
+    let budget_name = rpc_name("budget");
+    let budget_spec =
+        revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-budget");
     let ignore_name = rpc_name("ignore");
     let ignore_spec =
         revops::rpc_params::method_spec(&revops::rpc_params::load_rpc_contract(), "revenue-ignore");
@@ -1766,7 +2092,6 @@ async fn main() -> Result<()> {
     let list_banned_name = rpc_name("list-banned");
     let list_ignored_name = rpc_name("list-ignored");
     let hot_channel_protection_peers_name = rpc_name("hot-channel-protection-peers");
-    let capacity_report_name = rpc_name("capacity-report");
     let econ_snapshot_name = rpc_name("econ-snapshot");
     let spend_ledger_name = rpc_name("spend-ledger");
     // Task 66 slice 1: the unified total-cost budget read.
@@ -1775,52 +2100,6 @@ async fn main() -> Result<()> {
         &revops::rpc_params::load_rpc_contract(),
         "revenue-total-cost-budget",
     );
-
-    // Task 56: the read-only planner quartet. These builders were already
-    // ported, but were unreachable until their production DB/config seams
-    // were wired here.
-    let planner_candidate_sources_name = rpc_name("planner-candidate-sources");
-    let planner_candidates_name = rpc_name("planner-candidates");
-    let planner_history_name = rpc_name("planner-history");
-    let planner_status_name = rpc_name("planner-status");
-    // Task 62: the write-shaped planner cycle RPC (Python-parity
-    // uninitialized arm until Task 69 assembles the capital adapters).
-    let planner_execute_name = rpc_name("planner-execute");
-
-    // Task 63: the exact 22 Python-equivalent Boltz RPCs (owner-backed;
-    // Python-parity uninitialized arm until Task 69 assembles the action
-    // capability).
-    let boltz_quote_name = rpc_name("boltz-quote");
-    let boltz_loop_out_name = rpc_name("boltz-loop-out");
-    let boltz_loop_in_name = rpc_name("boltz-loop-in");
-    let boltz_status_name = rpc_name("boltz-status");
-    let boltz_history_name = rpc_name("boltz-history");
-    let boltz_external_pay_ignores_name = rpc_name("boltz-external-pay-ignores");
-    let boltz_budget_name = rpc_name("boltz-budget");
-    let boltz_wallet_name = rpc_name("boltz-wallet");
-    let boltz_refund_name = rpc_name("boltz-refund");
-    let boltz_claim_name = rpc_name("boltz-claim");
-    let boltz_chainswap_name = rpc_name("boltz-chainswap");
-    let boltz_withdraw_name = rpc_name("boltz-withdraw");
-    let boltz_deposit_name = rpc_name("boltz-deposit");
-    let boltz_backup_name = rpc_name("boltz-backup");
-    let boltz_backup_verify_name = rpc_name("boltz-backup-verify");
-    let boltz_balance_recommendations_name = rpc_name("boltz-balance-recommendations");
-    let boltz_auto_cycle_status_name = rpc_name("boltz-auto-cycle-status");
-    let boltz_auto_cycle_run_now_name = rpc_name("boltz-auto-cycle-run-now");
-    let boltz_balance_cycle_name = rpc_name("boltz-balance-cycle");
-    let boltz_expansion_treasury_status_name = rpc_name("boltz-expansion-treasury-status");
-    let boltz_expansion_treasury_recommendations_name =
-        rpc_name("boltz-expansion-treasury-recommendations");
-    let boltz_expansion_treasury_cycle_name = rpc_name("boltz-expansion-treasury-cycle");
-
-    // Task 61 4E: the exact four Python-equivalent LN+ operator RPCs
-    // (cl-revenue-ops.py:4604-4676), each a completion acknowledgement
-    // through the LN+ owner's serialization lock.
-    let lnplus_status_name = rpc_name("lnplus-status");
-    let lnplus_breaker_clear_name = rpc_name("lnplus-breaker-clear");
-    let lnplus_abandon_name = rpc_name("lnplus-abandon");
-    let lnplus_backfill_name = rpc_name("lnplus-backfill");
 
     let builder = Builder::new(tokio::io::stdin(), tokio::io::stdout())
         // Whole-plugin dynamic flag (distinct from per-option `dynamic`):
@@ -2536,22 +2815,7 @@ async fn main() -> Result<()> {
              shadow mode uses the same completed owner path); requires the \
              fee-cycle scheduler running (autonomous shadow: \
              revops-r-fee-stateful-shadow=true)",
-            |p: Plugin<SharedState>, _v| async move {
-                let s = p.state();
-                let Some(handle) = s.scheduler.get() else {
-                    return Ok(serde_json::json!({
-                        "error": "fee-cycle scheduler not running \
-                                  (revops-r-fee-stateful-shadow=false, or it failed to start \
-                                  -- see plugin log)"
-                    }));
-                };
-                match handle.wake_all().await {
-                    Ok(completed) => Ok(revops::fee_scheduler::build_wake_all_response(
-                        &completed,
-                    )),
-                    Err(error) => Ok(serde_json::json!({"error": error})),
-                }
-            },
+            |p: Plugin<SharedState>, _v| async move { Ok(wake_all_response(&p).await) },
         )
         .rpcmethod(
             fee_runway_status_name,
@@ -2698,485 +2962,8 @@ async fn main() -> Result<()> {
             },
         )
         .rpcmethod(
-            &planner_candidate_sources_name,
-            "planner candidate pool grouped by source (read-only DB evidence)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let Some(handle) = &p.state().db else {
-                    return Ok(serde_json::json!({"error": "Database not initialized"}));
-                };
-                match queries::planner_candidates(handle, -999.0, None, 100).await {
-                    Ok(rows) => {
-                        let candidates: Vec<_> = rows
-                            .into_iter()
-                            .map(|row| revops::rpc_planner_candidate_sources::CandidateRow {
-                                peer_id: row.peer_id,
-                                score: row.score,
-                                source: row.source,
-                            })
-                            .collect();
-                        Ok(
-                            revops::rpc_planner_candidate_sources::build_planner_candidate_sources(
-                                &candidates,
-                            ),
-                        )
-                    }
-                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
-                }
-            },
-        )
-        .rpcmethod(
-            &planner_candidates_name,
-            "ranked planner candidates (read-only DB evidence)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let limit = match revops::rpc_planner_candidates::parse_query_limit(
-                    v.get("limit"),
-                    20,
-                    1,
-                    1000,
-                ) {
-                    Ok(limit) => limit,
-                    Err(err) => return Ok(err),
-                };
-                let Some(handle) = &p.state().db else {
-                    return Ok(serde_json::json!({"error": "Database not initialized"}));
-                };
-                match queries::planner_candidates(handle, -999.0, None, limit).await {
-                    Ok(rows) => Ok(revops::rpc_planner_candidates::build_planner_candidates(
-                        rows.into_iter().map(|row| row.to_json()).collect(),
-                    )),
-                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
-                }
-            },
-        )
-        .rpcmethod(
-            &boltz_quote_name,
-            "quote a Boltz swap (read-only through the query transport)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_quote(&deps, v.get("amount_sats"), v.get("swap_type"), v.get("currency")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_loop_out_name,
-            "submit a Boltz loop-out through the serialized owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_loop_out(&deps, v.get("amount_sats"), v.get("address"), v.get("channel_id"), v.get("peer_id"), v.get("currency"), v.get("routing_fee_limit_ppm")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_loop_in_name,
-            "submit a Boltz loop-in through the serialized owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_loop_in(&deps, v.get("amount_sats"), v.get("channel_id"), v.get("peer_id"), v.get("currency")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_status_name,
-            "per-swap Boltz status",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_status(&deps, v.get("swap_id")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_history_name,
-            "recent Boltz swaps with a cost summary",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_history(&deps, v.get("limit")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_external_pay_ignores_name,
-            "operator-ignored external swaps",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_external_pay_ignores(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_budget_name,
-            "Boltz fee budget status",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_budget(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_wallet_name,
-            "Boltz wallet list",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_wallet(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_refund_name,
-            "refund a Boltz swap through the serialized owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_refund(&deps, v.get("swap_id"), v.get("destination")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_claim_name,
-            "claim Boltz swaps through the serialized owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_claim(&deps, v.get("swap_ids"), v.get("destination")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_chainswap_name,
-            "submit a Boltz chain swap through the serialized owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_chainswap(&deps, v.get("amount_sats"), v.get("from_currency"), v.get("to_currency"), v.get("to_address"), v.get("to_wallet_name")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_withdraw_name,
-            "withdraw from a Boltz wallet through the serialized owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_withdraw(&deps, v.get("wallet_name"), v.get("destination"), v.get("currency"), v.get("amount_sats"), v.get("sat_per_vbyte"), v.get("sweep").and_then(serde_json::Value::as_bool).unwrap_or(false), v.get("confirm_sweep").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_deposit_name,
-            "Boltz wallet deposit address",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_deposit(&deps, v.get("wallet_name")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_backup_name,
-            "Boltz wallet backup (mnemonic omitted by default)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_backup(&deps, v.get("include_mnemonic").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_backup_verify_name,
-            "verify a Boltz backup mnemonic",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_backup_verify(&deps, v.get("swap_mnemonic")).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_balance_recommendations_name,
-            "Boltz balance-cycle recommendations",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_balance_recommendations(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_auto_cycle_status_name,
-            "Boltz auto-cycle state",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_auto_cycle_status(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_auto_cycle_run_now_name,
-            "run one Boltz auto-cycle pass",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_auto_cycle_run_now(&deps, v.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false), v.get("dry_run").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_balance_cycle_name,
-            "run one Boltz balance cycle",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_balance_cycle(&deps, v.get("dry_run").and_then(serde_json::Value::as_bool).unwrap_or(false)).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_expansion_treasury_status_name,
-            "Boltz expansion treasury status",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_expansion_treasury_status(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_expansion_treasury_recommendations_name,
-            "Boltz expansion treasury recommendations",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_expansion_treasury_recommendations(&deps).await)
-            },
-        )
-        .rpcmethod(
-            &boltz_expansion_treasury_cycle_name,
-            "run one Boltz expansion treasury cycle",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let deps = boltz_rpc_deps(&p);
-                Ok(revops::rpc_boltz_ops::handle_expansion_treasury_cycle(&deps, v.get("dry_run").and_then(serde_json::Value::as_bool).unwrap_or(true)).await)
-            },
-        )
-        .rpcmethod(
-            &planner_execute_name,
-            "run one capacity-planner cycle through the capital owner",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                Ok(revops::rpc_planner_execute::handle_planner_execute(
-                    p.state().capital_owner.as_ref(),
-                    // Pre-cutover the adapters gate above always fires
-                    // first; this closure is unreachable until Task 69
-                    // assembles real evidence deps.
-                    || {
-                        Err(
-                            revops::capital_evidence::EvidenceRefusal::PeerChannelsUnavailable(
-                                "capital evidence not assembled (pre-cutover)".to_string(),
-                            ),
-                        )
-                    },
-                )
-                .await)
-            },
-        )
-        .rpcmethod(
-            &planner_history_name,
-            "recent planner actions (read-only DB evidence)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let limit = match revops::rpc_planner_candidates::parse_query_limit(
-                    v.get("limit"),
-                    20,
-                    1,
-                    1000,
-                ) {
-                    Ok(limit) => limit,
-                    Err(err) => return Ok(err),
-                };
-                let Some(handle) = &p.state().db else {
-                    return Ok(serde_json::json!({"error": "Database not initialized"}));
-                };
-                match queries::planner_actions(handle, None, limit).await {
-                    Ok(rows) => Ok(revops::rpc_planner_history::build_planner_history(
-                        rows.into_iter().map(|row| row.to_json()).collect(),
-                    )),
-                    Err(e) => Ok(serde_json::json!({"error": e.to_string()})),
-                }
-            },
-        )
-        .rpcmethod(
-            &planner_status_name,
-            "planner configuration and recent read-only DB evidence",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let Some(handle) = &p.state().db else {
-                    return Ok(serde_json::json!({"error": "Database not initialized"}));
-                };
-                let candidates = match queries::planner_candidates(handle, -999.0, None, 32).await {
-                    Ok(rows) => rows,
-                    Err(e) => return Ok(serde_json::json!({"error": e.to_string()})),
-                };
-                let actions = match queries::planner_actions(handle, None, 5).await {
-                    Ok(rows) => rows,
-                    Err(e) => return Ok(serde_json::json!({"error": e.to_string()})),
-                };
-                let enabled = resolved_config_json(&p, "planner-enabled")
-                    .await?
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let dry_run = resolved_config_json(&p, "planner-dry-run")
-                    .await?
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let execute_closes = resolved_config_json(&p, "planner-execute-closes")
-                    .await?
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let max_closes_per_cycle =
-                    resolved_config_json(&p, "planner-max-closes-per-cycle")
-                        .await?
-                        .and_then(|value| value.as_i64())
-                        .unwrap_or(0)
-                        .max(0);
-                Ok(revops::rpc_planner_status::build_planner_status(
-                    &revops::rpc_planner_status::PlannerStatusInputs {
-                        enabled,
-                        dry_run,
-                        execute_closes,
-                        max_closes_per_cycle,
-                        candidate_pool_size: candidates.len() as i64,
-                        recent_actions: actions
-                            .into_iter()
-                            .map(|row| row.to_json())
-                            .collect(),
-                    },
-                ))
-            },
-        )
-        .rpcmethod(
-            &lnplus_status_name,
-            "LN+ swap automation status: breaker, in-flight, active contracts",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let Some(pass) = p.state().lnplus.clone() else {
-                    // py 4607-4608: automation never initialized.
-                    return Ok(serde_json::json!({"enabled": false}));
-                };
-                match tokio::task::spawn_blocking(move || pass.operator_status()).await {
-                    Ok(value) => Ok(value),
-                    Err(join) => Ok(serde_json::json!({"error": format!("status task failed: {join}")})),
-                }
-            },
-        )
-        .rpcmethod(
-            &lnplus_breaker_clear_name,
-            "clear the LN+ circuit breaker (operator acknowledgment of the failure)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let Some(pass) = p.state().lnplus.clone() else {
-                    return Ok(serde_json::json!({"error": "LN+ automation not initialized"}));
-                };
-                match tokio::task::spawn_blocking(move || pass.operator_breaker_clear()).await {
-                    Ok(value) => Ok(value),
-                    Err(join) => Ok(serde_json::json!({"error": format!("breaker-clear task failed: {join}")})),
-                }
-            },
-        )
-        .rpcmethod(
-            &lnplus_abandon_name,
-            "EMERGENCY: abandon an in-flight LN+ swap obligation (defects on a commitment)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let swap_id = match v.get("swap_id").and_then(serde_json::Value::as_str) {
-                    Some(swap_id) if !swap_id.is_empty() => swap_id.to_string(),
-                    // py 4636-4637: exact usage error for a missing or
-                    // non-string swap_id.
-                    _ => {
-                        return Ok(serde_json::json!({
-                            "error": "Usage: revenue-lnplus-abandon <swap_id>"
-                        }))
-                    }
-                };
-                let Some(pass) = p.state().lnplus.clone() else {
-                    return Ok(serde_json::json!({"error": "LN+ automation not initialized"}));
-                };
-                match tokio::task::spawn_blocking(move || pass.operator_abandon(&swap_id)).await {
-                    Ok(value) => Ok(value),
-                    Err(join) => Ok(serde_json::json!({"error": format!("abandon task failed: {join}")})),
-                }
-            },
-        )
-        .rpcmethod(
-            &lnplus_backfill_name,
-            "adopt pre-existing LN+ swaps into the local ledger (safe to repeat)",
-            |p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                let Some(pass) = p.state().lnplus.clone() else {
-                    return Ok(serde_json::json!({"error": "LN+ automation not initialized"}));
-                };
-                match tokio::task::spawn_blocking(move || pass.operator_backfill()).await {
-                    Ok(value) => Ok(value),
-                    Err(join) => Ok(serde_json::json!({"error": format!("backfill task failed: {join}")})),
-                }
-            },
-        )
-        .rpcmethod(
             &health_name,
-            "consolidated operator health check: financials/roc/channels/fees/budget/\
-             top_routes/boltz/loops served from real evidence (Task 66 slice 8d); \
-             rebalancer/planner stay gap-marked until Task 69's engine assembly",
+            "consolidated operator health check: financials, channels, fees, budget, routes, and retained loops",
             |p: Plugin<SharedState>, v: serde_json::Value| async move {
                 if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
                     return Ok(err);
@@ -3199,8 +2986,7 @@ async fn main() -> Result<()> {
                 // collapsed a PARTIAL evidence-loss condition (no DB, but
                 // every other section's honest gap/computed shape is still
                 // knowable) into a whole-call failure, discarding
-                // generated_at, the honest boltz={"enabled": false}
-                // answer, and every gap-section shape a caller could
+                // generated_at and every gap-section shape a caller could
                 // otherwise rely on. `build_health(now, None, None, None)`
                 // is exactly what a live `pnl_summary` failure already
                 // falls back to below (F11) -- reusing it here for the
@@ -3298,22 +3084,11 @@ async fn main() -> Result<()> {
                         .await
                         .unwrap_or_default(),
                 );
-                // py 6301-6315: the boltz section reports the live
-                // auto-cycle state when a manager exists AND is enabled;
-                // otherwise `{"enabled": false}`. This port has a Boltz
-                // runtime since Task 63, so the section must reflect ITS
-                // config rather than a hardcoded false (self-review
-                // 2026-07-31). The action capability stays unassembled,
-                // but `enabled` is a real config answer.
-                let boltz = Some(serde_json::json!({
-                    "enabled": s.boltz_owner.is_some() && s.boltz_cfg.enabled,
-                }));
                 let extras = revops::rpc_health::HealthExtras {
                     channels: channels_section,
                     fees: fees_section,
                     budget: budget_section,
                     top_routes,
-                    boltz,
                 };
                 let mut out = match pnl {
                     Ok((pnl_1d, pnl_7d)) => revops::rpc_health::build_health_with_loops(
@@ -3796,24 +3571,6 @@ async fn main() -> Result<()> {
             },
         )
         .rpcmethod(
-            &capacity_report_name,
-            "strategic capital redeployment report (Phase: no capacity planner exists \
-             yet -- returns Python's own exact \"not initialized\" error, cl-revenue-ops.py:4586-4587)",
-            |_p: Plugin<SharedState>, v: serde_json::Value| async move {
-                if let Some(err) = revops::rpc_params::reject_positional_params(&v) {
-                    return Ok(err);
-                }
-                // Task 50 correction round, F2: no capacity planner exists
-                // in this port. The OLD wiring called
-                // `build_capacity_report(now_unix())` unconditionally --
-                // a success-shaped 6-key object that hides the
-                // "if error in resp" guard every real caller uses. Python's
-                // own answer for this exact condition is the 1-key error
-                // below (no `timestamp`), so return that instead.
-                Ok(revops::rpc_capacity_report::capacity_planner_not_initialized_error())
-            },
-        )
-        .rpcmethod(
             &econ_snapshot_name,
             "READ-ONLY preview of the canonical EconomicSnapshot, assembled from one \
              fresh bounded listpeerchannels snapshot, the profitability evidence \
@@ -3944,6 +3701,8 @@ async fn main() -> Result<()> {
         fee_authority_status_spec,
     );
     let builder = register_fee_cycle(builder, &fee_cycle_name, fee_cycle_spec);
+    let builder = register_cycle(builder, &cycle_name, cycle_spec);
+    let builder = register_budget(builder, &budget_name, budget_spec);
     let builder = register_core_mutator(
         builder,
         &ignore_name,
@@ -4352,15 +4111,12 @@ async fn main() -> Result<()> {
     });
     let mut fee_cadence = None;
     let mut fee_rpc_pass: Option<std::sync::Arc<revops::fee_scheduler::FeeObserverPass>> = None;
-    let mut lnplus_cadence = None;
     // Task 71 / R26: the three analytics cadences. Built during
     // composition, started only after `configured.start()` returns.
     let mut flow_cadence = None;
     let flow_trigger_cell = std::sync::OnceLock::new();
     let mut startup_snapshot_cadence = None;
     let mut financial_cadence = None;
-    let mut lnplus_rpc_pass: Option<std::sync::Arc<revops::lnplus_runtime::LnPlusObserverPass>> =
-        None;
     // Task 67: ONE boot identity per process, minted before any loop can
     // record a pass. Loop health is judged against this id, so a prior
     // boot's terminal evidence can never be inherited by this process.
@@ -4414,7 +4170,6 @@ async fn main() -> Result<()> {
                         ));
                     let mut passes = revops::runtime::ObserverPassSet::empty();
                     let mut fee_pass = None;
-                    let mut lnplus_pass = None;
                     // Task 71 / R26: the three analytics owners. Unlike the
                     // fee and LN+ passes these are NOT gated on
                     // autonomous-shadow authority: they issue read-only
@@ -4448,40 +4203,6 @@ async fn main() -> Result<()> {
                             db.clone(),
                         ),
                     ));
-                    if autonomous_shadow {
-                        // Task 61 4D: the REAL LN+ observer pass, against
-                        // the Rust observer parallel-state DB (collision
-                        // with production already vetoed upstream).
-                        // Watcher-only + DryRun + read-side observer
-                        // adapter types; disabled-by-default via the LN+
-                        // store's own config until an operator enables it.
-                        match observer_db_path_expanded.as_ref() {
-                            Some(lnplus_store_path) => {
-                                match revops::lnplus_runtime::LnPlusObserverPass::observer(
-                                    revops::lnplus_runtime::LnPlusRuntimeConfig {
-                                        store_path: lnplus_store_path.clone(),
-                                        socket_path: init_socket_path.clone(),
-                                        base_url: revops_lnplus::http::BASE_URL.to_string(),
-                                        http_timeout: std::time::Duration::from_secs(20),
-                                        rpc_timeout: revops::lnplus_adapters::DEFAULT_RPC_TIMEOUT,
-                                    },
-                                ) {
-                                    Ok(pass) => {
-                                        passes = passes.with_lnplus(pass.clone());
-                                        lnplus_rpc_pass = Some(pass.clone());
-                                        lnplus_pass = Some(pass);
-                                    }
-                                    Err(error) => eprintln!(
-                                        "revops: LN+ observer pass FAILED to build: {error:#}; \
-                                         LN+ loop remains not_wired"
-                                    ),
-                                }
-                            }
-                            None => eprintln!(
-                                "revops: LN+ loop not wired: observer DB path unavailable"
-                            ),
-                        }
-                    }
                     if autonomous_shadow {
                         match (production_db_path_expanded.as_ref(), journal_dir.as_ref()) {
                             (Some(prod_db_path), Some(journal_dir)) => {
@@ -4535,14 +4256,6 @@ async fn main() -> Result<()> {
                             pass,
                             revops::fee_scheduler::TICK_PHASE_OFFSET_SECS,
                         ));
-                    }
-                    if let (Some(pass), Some(handle)) = (
-                        lnplus_pass,
-                        runtime.handle(revops_db::loop_health::LoopId::LnPlus),
-                    ) {
-                        lnplus_cadence = Some(
-                            revops::lnplus_runtime::LnPlusCadenceActivation::new(handle, pass),
-                        );
                     }
                     // Task 71 / R26. Every one of these is INERT until
                     // `activate()` below, which runs only after
@@ -4619,95 +4332,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Task 62: the capital owner exists whenever the Rust-owned store
-    // does. Adapters/governor stay UNASSEMBLED until Task 69's authority
-    // assembly (planner-execute refuses on the Python-parity
-    // uninitialized arm); restart reconciliation of orphan capital
-    // intents still runs -- store plus read-only
-    // listfunds/listclosedchannels lookups.
-    let capital_owner = observer_db.clone().map(|store| {
-        revops::capital_owner::spawn_capital_owner(revops::capital_owner::CapitalOwnerDeps {
-            adapters: None,
-            governor: None,
-            budget: std::sync::Arc::new(revops::capital_owner::UnassembledCapitalBudget),
-            evidence: std::sync::Arc::new(revops::capital_owner::UnassembledCapitalEvidence),
-            store,
-            reconcile: std::sync::Arc::new(revops::capital_adapters::ClnCapitalReconcileRpc::new(
-                init_socket_path.clone(),
-                30,
-            )),
-            clock: Box::new(now_unix),
-        })
-    });
-    if let Some(owner) = capital_owner.clone() {
-        tokio::spawn(async move {
-            match owner.reconcile_on_start().await {
-                Ok(summary) => {
-                    if summary.settled_success + summary.quarantined > 0 {
-                        eprintln!(
-                            "revops: capital restart reconciliation: {} settled, {} quarantined",
-                            summary.settled_success, summary.quarantined
-                        );
-                    }
-                }
-                Err(e) => eprintln!("revops: capital restart reconciliation failed: {e:?}"),
-            }
-        });
-    }
-
-    // Task 63: the Boltz owner exists whenever the Rust-owned store does.
-    // The ACTION CAPABILITY stays unassembled until Task 69's authority
-    // assembly (every fund-moving Boltz RPC refuses on the Python-parity
-    // uninitialized arm); the read-only QUERY transport is
-    // production-constructible but ships DISABLED (py cfg.enabled
-    // default false), so it too refuses until an operator turns it on.
-    // Parity fix (parity_matrix finding 4): resolve the Boltz config from
-    // the SAME three layers every other subsystem uses -- DB override,
-    // the operator's live Python value, then the documented default.
-    // Building the transport from `BoltzCliProcessConfig::default()` made
-    // eight Boltz RPCs answer "integration disabled" while Python
-    // returned real data.
-    let boltz_cfg =
-        revops::boltz_config::resolve_boltz_cfg(db.as_ref(), &python_options.snapshot()).await;
-    let boltz_query: std::sync::Arc<dyn revops_boltz::cli::BoltzCli + Send + Sync> =
-        std::sync::Arc::new(revops_boltz::process::ProcessBoltzCli::new(
-            boltz_cfg.to_process_config(),
-        ));
-    let boltz_owner = observer_db.clone().map(|store| {
-        revops::boltz_owner::spawn_boltz_owner(revops::boltz_owner::BoltzOwnerDeps {
-            capability: None,
-            governor: None,
-            query: boltz_query.clone(),
-            structural: std::sync::Arc::new(revops::boltz_owner::UnassembledStructuralSpend),
-            store,
-            config: revops::boltz_owner::BoltzOwnerConfig {
-                daily_budget_sats: boltz_cfg.daily_budget_sats,
-                budget_window_hours: 24,
-                structural_envelope_sats: boltz_cfg.structural_budget_sats,
-                allow_concurrent_swaps: false,
-                default_cooldown_seconds: 3_600,
-                auto_cycle_enabled: boltz_cfg.auto_cycle_enabled,
-                create_timeout_secs: revops::boltz_owner::CREATE_TIMEOUT_FLOOR_SECS,
-            },
-            clock: Box::new(now_unix),
-        })
-    });
-    if let Some(owner) = boltz_owner.clone() {
-        tokio::spawn(async move {
-            match owner.reconcile_on_start().await {
-                Ok(summary) => {
-                    if summary.quarantined > 0 {
-                        eprintln!(
-                            "revops: boltz restart reconciliation: {} quarantined",
-                            summary.quarantined
-                        );
-                    }
-                }
-                Err(e) => eprintln!("revops: boltz restart reconciliation failed: {e:?}"),
-            }
-        });
-    }
-
     let active_profile = match db.as_ref() {
         Some(handle) => revops::rpc_profile_preview::startup_active_profile(
             queries::config_override(handle, "risk_profile")
@@ -4744,14 +4368,9 @@ async fn main() -> Result<()> {
         authority_runtime,
         socket_path: init_socket_path.clone(),
         production_db_path: production_db_path_expanded.clone(),
-        lnplus: lnplus_rpc_pass,
         rebalance_owner,
         rebalance_rate_limiter: revops::rpc_rebalance_ops::ForceRateLimiter::production(),
         rebalance_hard_cap_sats,
-        capital_owner,
-        boltz_owner,
-        boltz_query,
-        boltz_cfg,
         boot_id: boot_id.clone(),
     });
 
@@ -4759,9 +4378,6 @@ async fn main() -> Result<()> {
 
     if let Some(fee_cadence) = fee_cadence {
         fee_cadence.activate();
-    }
-    if let Some(lnplus_cadence) = lnplus_cadence {
-        lnplus_cadence.activate();
     }
     // Task 71 / R26: py starts its analytics threads at the very end of
     // `init`, after the plugin is serving (cl-revenue-ops.py:3588-3600).
