@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_PYTHON_COMMIT = "9ea7e85ed21c4001a686daf193dcf639a7076732"
+DEFAULT_PYTHON_COMMIT = "a5c2e2f65019df5cefe4e1261b7de2823a03e448"
 GENERATOR_VERSION = 5
 
 RPC_BOUNDARY_BY_METHOD = {
@@ -35,17 +35,12 @@ RPC_BOUNDARY_BY_METHOD = {
     "askrene-reserve": "askrene_reserve",
     "askrene-unreserve": "askrene_unreserve",
     "askrene-update-channel": "askrene_update_channel",
-    "close": "close",
-    "connect": "connect",
     "datastore": "datastore",
     "delinvoice": "delinvoice",
     "delpay": "delpay",
-    "fundchannel": "fundchannel",
     "invoice": "invoice",
-    "pay": "pay",
     "sendpay": "sendpay_waitsendpay",
     "setchannel": "setchannel",
-    "signmessage": "signmessage",
     "waitsendpay": "sendpay_waitsendpay",
 }
 
@@ -90,41 +85,36 @@ DYNAMIC_RPC_PROXY_EXCLUSIONS = {
 }
 
 EXPECTED_EXTERNAL_CALLS = {
-    ("askrene_age", "modules/data_service.py", 419),
-    ("askrene_bias_channel", "modules/data_service.py", 408),
-    ("askrene_bias_node", "modules/data_service.py", 401),
-    ("askrene_create_layer", "modules/data_service.py", 379),
-    ("askrene_create_layer", "modules/rebalance_router_v3.py", 615),
-    ("askrene_disable_node", "modules/data_service.py", 412),
-    ("askrene_inform_channel", "modules/data_service.py", 429),
-    ("askrene_remove_layer", "modules/data_service.py", 385),
-    ("askrene_remove_layer", "modules/rebalance_engine_v2.py", 319),
-    ("askrene_remove_layer", "modules/rebalance_router_v3.py", 668),
-    ("askrene_reserve", "modules/data_service.py", 433),
-    ("askrene_unreserve", "modules/data_service.py", 437),
-    ("askrene_update_channel", "modules/data_service.py", 394),
-    ("askrene_update_channel", "modules/rebalance_router_v3.py", 631),
-    ("askrene_update_channel", "modules/rebalance_router_v3.py", 649),
-    ("close", "modules/data_service.py", 288),
-    ("connect", "modules/data_service.py", 296),
-    ("datastore", "modules/data_service.py", 473),
-    ("datastore", "modules/rebalance_engine_v2.py", 3186),
-    ("delinvoice", "modules/data_service.py", 344),
-    ("delinvoice", "modules/rebalance_native_executor_v2.py", 391),
-    ("delpay", "modules/data_service.py", 340),
-    ("delpay", "modules/rebalance_engine_v2.py", 3109),
-    ("delpay", "modules/rebalance_native_executor_v2.py", 386),
-    ("dynamic_config", "cl-revenue-ops.py", 6723),
-    ("fundchannel", "modules/data_service.py", 281),
-    ("invoice", "modules/data_service.py", 328),
-    ("invoice", "modules/rebalance_native_executor_v2.py", 431),
-    ("pay", "modules/data_service.py", 349),
-    ("sendpay_waitsendpay", "modules/data_service.py", 332),
-    ("sendpay_waitsendpay", "modules/data_service.py", 336),
-    ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 461),
-    ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 462),
+    ("askrene_age", "modules/data_service.py", 380),
+    ("askrene_bias_channel", "modules/data_service.py", 369),
+    ("askrene_bias_node", "modules/data_service.py", 362),
+    ("askrene_create_layer", "modules/data_service.py", 340),
+    ("askrene_create_layer", "modules/rebalance_router_v3.py", 643),
+    ("askrene_disable_node", "modules/data_service.py", 373),
+    ("askrene_inform_channel", "modules/data_service.py", 390),
+    ("askrene_remove_layer", "modules/data_service.py", 346),
+    ("askrene_remove_layer", "modules/rebalance_engine_v2.py", 355),
+    ("askrene_remove_layer", "modules/rebalance_router_v3.py", 696),
+    ("askrene_reserve", "modules/data_service.py", 394),
+    ("askrene_unreserve", "modules/data_service.py", 398),
+    ("askrene_update_channel", "modules/data_service.py", 355),
+    ("askrene_update_channel", "modules/rebalance_router_v3.py", 659),
+    ("askrene_update_channel", "modules/rebalance_router_v3.py", 677),
+    ("datastore", "modules/data_service.py", 434),
+    ("datastore", "modules/rebalance_engine_v2.py", 3678),
+    ("delinvoice", "modules/data_service.py", 318),
+    ("delinvoice", "modules/rebalance_native_executor_v2.py", 411),
+    ("delpay", "modules/data_service.py", 314),
+    ("delpay", "modules/rebalance_engine_v2.py", 3601),
+    ("delpay", "modules/rebalance_native_executor_v2.py", 406),
+    ("dynamic_config", "cl-revenue-ops.py", 5560),
+    ("invoice", "modules/data_service.py", 302),
+    ("invoice", "modules/rebalance_native_executor_v2.py", 451),
+    ("sendpay_waitsendpay", "modules/data_service.py", 306),
+    ("sendpay_waitsendpay", "modules/data_service.py", 310),
+    ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 481),
+    ("sendpay_waitsendpay", "modules/rebalance_native_executor_v2.py", 482),
     ("setchannel", "modules/data_service.py", 275),
-    ("signmessage", "modules/data_service.py", 303),
 }
 
 
@@ -753,8 +743,8 @@ def external_boundaries(sources: dict[str, bytes]) -> list[dict[str, Any]]:
         rows.append(
             boundary(boundary_id, grouped[boundary_id], owner, adapter, transport)
         )
-    if len(rows) != 24:
-        raise ValueError(f"expected 24 exact external boundary classes, got {len(rows)}")
+    if len(rows) != 17:
+        raise ValueError(f"expected 17 exact external boundary classes, got {len(rows)}")
     return rows
 
 

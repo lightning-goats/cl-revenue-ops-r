@@ -17,21 +17,6 @@
     },
     {
       "allow_extra_named": true,
-      "name": "revenue-budget",
-      "params": [
-        {
-          "coercion": "handler_defined",
-          "default": null,
-          "has_default": true,
-          "name": "section",
-          "python_kind": "positional",
-          "required": false
-        }
-      ],
-      "python_binding": "positional_or_named"
-    },
-    {
-      "allow_extra_named": true,
       "name": "revenue-ban",
       "params": [
         {
@@ -47,6 +32,21 @@
           "default": "operator",
           "has_default": true,
           "name": "reason",
+          "python_kind": "positional",
+          "required": false
+        }
+      ],
+      "python_binding": "positional_or_named"
+    },
+    {
+      "allow_extra_named": true,
+      "name": "revenue-budget",
+      "params": [
+        {
+          "coercion": "handler_defined",
+          "default": null,
+          "has_default": true,
+          "name": "section",
           "python_kind": "positional",
           "required": false
         }
@@ -788,7 +788,7 @@
       "python_binding": "positional_or_named"
     }
   ],
-  "python_source_commit": "9ea7e85ed21c4001a686daf193dcf639a7076732",
-  "python_source_sha256": "ec4abe1cd1887767f1d9680abb9065474f387ad9b1fa0b784dd3c01314f949e1",
+  "python_source_commit": "a5c2e2f65019df5cefe4e1261b7de2823a03e448",
+  "python_source_sha256": "bc6d572f6dbc4b4c0417f27bbb459e3dd6bd1e938086e194e98dba481cc33945",
   "schema_version": 1
 }

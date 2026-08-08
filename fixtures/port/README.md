@@ -22,7 +22,7 @@ Regenerate from the pinned git object without reading a Python working tree:
 ```bash
 python3 tools/port/gen_plugin_inventory.py \
   --python-repo /path/to/cl_revenue_ops \
-  --python-commit e579de8df523f174283fc2aa21f395c8ef006ac6 \
+  --python-commit a5c2e2f65019df5cefe4e1261b7de2823a03e448 \
   --repo-root .
 ```
 
