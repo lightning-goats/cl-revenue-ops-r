@@ -1,7 +1,7 @@
 # Retained-v3 Python-to-Rust Whole-Plugin Cutover Design
 
 **Date:** 2026-08-08
-**Status:** Operator-approved direction; written design pending operator review
+**Status:** Operator-approved written specification; implementation requires separately reviewed plans
 **Supersedes for future implementation:** the retired-authority portions of
 `2026-07-27-whole-plugin-rust-cutover-design.md`,
 `2026-07-30-whole-plugin-cutover.md`, and
