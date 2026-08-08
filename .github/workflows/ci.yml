@@ -25,7 +25,9 @@ jobs:
             --python-commit a5c2e2f65019df5cefe4e1261b7de2823a03e448 \
             --repo-root . --check
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: "rustfmt, clippy" }
+        with:
+          toolchain: "1.97"
+          components: "rustfmt, clippy"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # `corpus_is_byte_identical_to_source` (crates/revops-econ/tests/
