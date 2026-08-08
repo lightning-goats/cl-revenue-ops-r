@@ -1,7 +1,7 @@
 # Rust Liquidity Authority Decommission Design
 
-**Date:** 2026-08-03  
-**Task:** Hexmem 88  
+**Date:** 2026-08-03
+**Task:** Hexmem 88
 **Status:** Operator-approved boundary; implementation local-only
 
 ## Goal
