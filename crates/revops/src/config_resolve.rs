@@ -84,6 +84,7 @@ pub fn python_option_name(key: &str) -> Option<String> {
 /// `cl-revenue-ops.py`:
 ///   - `vegas-reflex` -> `enable_vegas_reflex` (line 2545)
 ///   - `vegas-decay` -> `vegas_decay_rate` (line 2546)
+///
 /// `fixtures/config_types.json` (AST-extracted straight from the `Config`
 /// dataclass) carries only field-name -> type, not this suffix -> field-name
 /// mapping, so it can't be derived from the fixture; this is the "small
