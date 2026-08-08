@@ -38,7 +38,7 @@ fn checked_in_contract_has_exactly_39_unique_methods() {
     assert_eq!(names.len(), 39);
     assert_eq!(
         contract.python_source_commit,
-        "9ea7e85ed21c4001a686daf193dcf639a7076732"
+        "a5c2e2f65019df5cefe4e1261b7de2823a03e448"
     );
 }
 
